@@ -14,7 +14,11 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 6;
+const SCHEMA_VERSION: usize = 3;
+
+const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
+const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
+const METRICS_UPLOAD_QUEUE_STATE_ID: i64 = 1;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -32,23 +36,26 @@ const MIGRATIONS: &[&str] = &[
         last_sent_ts INTEGER NOT NULL
     );
     "#,
-    // Migration 2 -> 3: Reserved for a removed local_events design.
+    // Migration 2 -> 3: Keep delivered metrics and add notes/CAS-style retry queue state.
     r#"
-    "#,
-    // Migration 3 -> 4: Reserved for a removed local_events repo_url migration.
-    r#"
-    "#,
-    // Migration 4 -> 5: Keep delivered metrics in the authoritative metrics table.
-    r#"
-    CREATE TABLE IF NOT EXISTS metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_json TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS metrics_upload_queue_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_sync_error TEXT,
+        last_sync_at INTEGER,
+        next_retry_at INTEGER NOT NULL DEFAULT 0
     );
-    ALTER TABLE metrics ADD COLUMN delivered_ts INTEGER;
-    "#,
-    // Migration 5 -> 6: Speed pending queue scans.
-    r#"
-    CREATE INDEX IF NOT EXISTS metrics_delivered_ts_id ON metrics (delivered_ts, id);
+
+    INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts, next_retry_at)
+    VALUES (1, 0, 0);
+
+    CREATE INDEX IF NOT EXISTS metrics_pending_retry
+        ON metrics (delivered_ts, next_retry_at, id)
+        WHERE delivered_ts IS NULL;
+
+    CREATE INDEX IF NOT EXISTS metrics_processing_started_at
+        ON metrics (processing_started_at)
+        WHERE delivered_ts IS NULL AND processing_started_at IS NOT NULL;
     "#,
 ];
 
@@ -60,6 +67,8 @@ static METRICS_DB: OnceLock<Mutex<MetricsDatabase>> = OnceLock::new();
 pub struct MetricRecord {
     pub id: i64,
     pub event_json: String,
+    pub attempts: u32,
+    pub next_retry_at: u64,
 }
 
 /// Record returned for local usage aggregation from the metrics table.
@@ -237,6 +246,10 @@ impl MetricsDatabase {
             )));
         }
 
+        if from_version == 2 {
+            return self.apply_metrics_retry_queue_migration();
+        }
+
         let migration_sql = MIGRATIONS[from_version];
         let tx = self.conn.transaction()?;
         match tx.execute_batch(migration_sql) {
@@ -247,6 +260,59 @@ impl MetricsDatabase {
             Err(e) => return Err(e.into()),
         }
         tx.commit()?;
+
+        Ok(())
+    }
+
+    fn apply_metrics_retry_queue_migration(&mut self) -> Result<(), GitAiError> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json TEXT NOT NULL
+            );
+            "#,
+        )?;
+        self.add_column_if_missing("metrics", "delivered_ts", "delivered_ts INTEGER")?;
+        self.add_column_if_missing("metrics", "attempts", "attempts INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("metrics", "last_sync_error", "last_sync_error TEXT")?;
+        self.add_column_if_missing("metrics", "last_sync_at", "last_sync_at INTEGER")?;
+        self.add_column_if_missing(
+            "metrics",
+            "next_retry_at",
+            "next_retry_at INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.add_column_if_missing(
+            "metrics",
+            "processing_started_at",
+            "processing_started_at INTEGER",
+        )?;
+
+        self.conn.execute_batch(MIGRATIONS[2])?;
+        Ok(())
+    }
+
+    fn add_column_if_missing(
+        &mut self,
+        table: &str,
+        column: &str,
+        column_definition: &str,
+    ) -> Result<(), GitAiError> {
+        let column_exists: bool = self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1)",
+                table.replace('\'', "''")
+            ),
+            params![column],
+            |row| row.get(0),
+        )?;
+
+        if !column_exists {
+            self.conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column_definition}"),
+                [],
+            )?;
+        }
 
         Ok(())
     }
@@ -292,7 +358,7 @@ impl MetricsDatabase {
     /// Get a batch of undelivered events (oldest first).
     pub fn get_batch(&self, limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_json FROM metrics \
+            "SELECT id, event_json, attempts, next_retry_at FROM metrics \
              WHERE delivered_ts IS NULL \
              ORDER BY id ASC LIMIT ?1",
         )?;
@@ -301,6 +367,8 @@ impl MetricsDatabase {
             Ok(MetricRecord {
                 id: row.get(0)?,
                 event_json: row.get(1)?,
+                attempts: row.get::<_, i64>(2)?.max(0) as u32,
+                next_retry_at: row.get::<_, i64>(3)?.max(0) as u64,
             })
         })?;
 
@@ -309,6 +377,83 @@ impl MetricsDatabase {
             records.push(row?);
         }
 
+        Ok(records)
+    }
+
+    /// Atomically claim a due batch of pending metrics for upload.
+    pub fn dequeue_pending_batch(&mut self, limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let now = current_unix_ts();
+        self.release_stale_processing_locks(now)?;
+
+        if self.queue_next_retry_at()? > now {
+            return Ok(Vec::new());
+        }
+
+        let tx = self.conn.transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM metrics \
+                 WHERE delivered_ts IS NULL \
+                   AND processing_started_at IS NULL \
+                   AND next_retry_at <= ?1 \
+                   AND attempts < ?2 \
+                 ORDER BY next_retry_at ASC, id ASC \
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                params![now as i64, MAX_METRIC_UPLOAD_ATTEMPTS as i64, limit as i64],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        };
+
+        if ids.is_empty() {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+
+        let mut locked_ids = Vec::with_capacity(ids.len());
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE metrics \
+                 SET processing_started_at = ?1 \
+                 WHERE id = ?2 \
+                   AND delivered_ts IS NULL \
+                   AND processing_started_at IS NULL",
+            )?;
+            for id in ids {
+                if stmt.execute(params![now as i64, id])? > 0 {
+                    locked_ids.push(id);
+                }
+            }
+        }
+
+        let mut records = Vec::with_capacity(locked_ids.len());
+        {
+            let mut stmt = tx.prepare_cached(
+                "SELECT id, event_json, attempts, next_retry_at FROM metrics WHERE id = ?1",
+            )?;
+            for id in locked_ids {
+                records.push(stmt.query_row(params![id], |row| {
+                    Ok(MetricRecord {
+                        id: row.get(0)?,
+                        event_json: row.get(1)?,
+                        attempts: row.get::<_, i64>(2)?.max(0) as u32,
+                        next_retry_at: row.get::<_, i64>(3)?.max(0) as u64,
+                    })
+                })?);
+            }
+        }
+
+        tx.commit()?;
         Ok(records)
     }
 
@@ -326,7 +471,9 @@ impl MetricsDatabase {
 
         {
             let mut stmt = tx.prepare_cached(
-                "UPDATE metrics SET delivered_ts = ?1 WHERE id = ?2 AND delivered_ts IS NULL",
+                "UPDATE metrics \
+                 SET delivered_ts = ?1, processing_started_at = NULL \
+                 WHERE id = ?2 AND delivered_ts IS NULL",
             )?;
 
             for id in ids {
@@ -337,6 +484,137 @@ impl MetricsDatabase {
         tx.commit()?;
         self.prune_old_metrics_if_due()?;
         Ok(())
+    }
+
+    /// Mark records as failed and schedule their next row-level retry.
+    pub fn mark_records_failed(
+        &mut self,
+        ids: &[i64],
+        error: &str,
+        failed_at: u64,
+    ) -> Result<(), GitAiError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                r#"
+                UPDATE metrics
+                SET processing_started_at = NULL,
+                    attempts = attempts + 1,
+                    last_sync_error = ?1,
+                    last_sync_at = ?2,
+                    next_retry_at = ?2 + CASE
+                        WHEN attempts + 1 <= 1 THEN 300
+                        WHEN attempts + 1 = 2 THEN 1800
+                        WHEN attempts + 1 = 3 THEN 7200
+                        WHEN attempts + 1 = 4 THEN 21600
+                        WHEN attempts + 1 = 5 THEN 43200
+                        ELSE 86400
+                    END
+                WHERE id = ?3 AND delivered_ts IS NULL
+                "#,
+            )?;
+
+            for id in ids {
+                stmt.execute(params![error, failed_at as i64, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Mark the whole metrics upload queue as temporarily unavailable.
+    pub fn mark_upload_queue_failed(
+        &mut self,
+        error: &str,
+        failed_at: u64,
+    ) -> Result<(), GitAiError> {
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts, next_retry_at)
+            VALUES (?1, 0, 0)
+            "#,
+            params![METRICS_UPLOAD_QUEUE_STATE_ID],
+        )?;
+        self.conn.execute(
+            r#"
+            UPDATE metrics_upload_queue_state
+            SET attempts = attempts + 1,
+                last_sync_error = ?1,
+                last_sync_at = ?2,
+                next_retry_at = ?2 + CASE
+                    WHEN attempts + 1 <= 1 THEN 300
+                    WHEN attempts + 1 = 2 THEN 1800
+                    WHEN attempts + 1 = 3 THEN 7200
+                    WHEN attempts + 1 = 4 THEN 21600
+                    WHEN attempts + 1 = 5 THEN 43200
+                    ELSE 86400
+                END
+            WHERE id = ?3
+            "#,
+            params![error, failed_at as i64, METRICS_UPLOAD_QUEUE_STATE_ID],
+        )?;
+        Ok(())
+    }
+
+    /// Reset transport-level backoff after a successful upload.
+    pub fn reset_upload_queue_failure(&mut self) -> Result<(), GitAiError> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO metrics_upload_queue_state
+                (id, attempts, last_sync_error, last_sync_at, next_retry_at)
+            VALUES (?1, 0, NULL, NULL, 0)
+            "#,
+            params![METRICS_UPLOAD_QUEUE_STATE_ID],
+        )?;
+        Ok(())
+    }
+
+    /// Get count of pending metrics that are currently eligible for upload.
+    pub fn count_retryable(&self) -> Result<usize, GitAiError> {
+        let now = current_unix_ts();
+        if self.queue_next_retry_at()? > now {
+            return Ok(0);
+        }
+
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM metrics \
+             WHERE delivered_ts IS NULL \
+               AND processing_started_at IS NULL \
+               AND next_retry_at <= ?1 \
+               AND attempts < ?2",
+            params![now as i64, MAX_METRIC_UPLOAD_ATTEMPTS as i64],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    fn release_stale_processing_locks(&mut self, now: u64) -> Result<(), GitAiError> {
+        let stale_before = now.saturating_sub(METRIC_PROCESSING_LOCK_TIMEOUT_SECS);
+        self.conn.execute(
+            "UPDATE metrics \
+             SET processing_started_at = NULL \
+             WHERE delivered_ts IS NULL \
+               AND processing_started_at IS NOT NULL \
+               AND processing_started_at < ?1",
+            params![stale_before as i64],
+        )?;
+        Ok(())
+    }
+
+    fn queue_next_retry_at(&self) -> Result<u64, GitAiError> {
+        let next_retry_at: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT next_retry_at FROM metrics_upload_queue_state WHERE id = ?1",
+                params![METRICS_UPLOAD_QUEUE_STATE_ID],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(next_retry_at.unwrap_or(0).max(0) as u64)
     }
 
     /// Delete metric rows outside the local retention window.
@@ -507,6 +785,13 @@ impl MetricsDatabase {
     }
 }
 
+fn current_unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn metric_row_is_older_than_cutoff(
     event_json: &str,
     delivered_ts: Option<i64>,
@@ -588,18 +873,36 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "3");
 
-        // Verify delivered_ts exists on the authoritative metrics table.
-        let delivered_ts_columns: i64 = db
+        for column in [
+            "delivered_ts",
+            "attempts",
+            "last_sync_error",
+            "last_sync_at",
+            "next_retry_at",
+            "processing_started_at",
+        ] {
+            let column_count: i64 = db
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('metrics') WHERE name = ?1",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(column_count, 1, "missing column {column}");
+        }
+
+        let queue_state_tables: i64 = db
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('metrics') WHERE name = 'delivered_ts'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='metrics_upload_queue_state'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(delivered_ts_columns, 1);
+        assert_eq!(queue_state_tables, 1);
     }
 
     #[test]
@@ -637,7 +940,58 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "3");
+    }
+
+    #[test]
+    fn test_migrates_version_2_to_retry_queue_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v2.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json TEXT NOT NULL
+            );
+            INSERT INTO metrics (event_json) VALUES ('{"t":1,"e":1,"v":{},"a":{}}');
+            CREATE TABLE agent_usage_throttle (
+                prompt_id TEXT PRIMARY KEY,
+                last_sent_ts INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "3");
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.count_retryable().unwrap(), 1);
+
+        let queue_state_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM metrics_upload_queue_state",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_state_count, 1);
     }
 
     #[test]
@@ -655,6 +1009,7 @@ mod tests {
 
         let count = db.count().unwrap();
         assert_eq!(count, 2);
+        assert_eq!(db.count_retryable().unwrap(), 2);
         assert_eq!(ids.len(), 2);
     }
 
@@ -677,6 +1032,103 @@ mod tests {
         assert!(batch[0].id < batch[1].id);
         assert!(batch[0].event_json.contains(&format!("\"t\":{ts1}")));
         assert!(batch[1].event_json.contains(&format!("\"t\":{ts2}")));
+        assert_eq!(batch[0].attempts, 0);
+        assert_eq!(batch[0].next_retry_at, 0);
+    }
+
+    #[test]
+    fn test_dequeue_pending_batch_locks_rows() {
+        let (mut db, _temp_dir) = create_test_db();
+        let events = vec![event_json(days_ago(2)), event_json(days_ago(1))];
+        db.insert_events(&events).unwrap();
+
+        let batch = db.dequeue_pending_batch(1).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(db.count().unwrap(), 2);
+        assert_eq!(db.count_retryable().unwrap(), 1);
+
+        db.mark_records_delivered(&[batch[0].id], unix_now())
+            .unwrap();
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.count_retryable().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_failed_records_and_queue_backoff_are_not_retryable() {
+        let (mut db, _temp_dir) = create_test_db();
+        db.insert_events(&[event_json(days_ago(1)), event_json(days_ago(1))])
+            .unwrap();
+
+        let batch = db.dequeue_pending_batch(1).unwrap();
+        let failed_at = unix_now();
+        db.mark_records_failed(&[batch[0].id], "upload failed", failed_at)
+            .unwrap();
+        db.mark_upload_queue_failed("upload failed", failed_at)
+            .unwrap();
+
+        assert_eq!(db.count().unwrap(), 2);
+        assert_eq!(db.count_retryable().unwrap(), 0);
+        assert!(db.dequeue_pending_batch(10).unwrap().is_empty());
+
+        let failed_record = db
+            .get_batch(10)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.id == batch[0].id)
+            .unwrap();
+        assert_eq!(failed_record.attempts, 1);
+        assert!(failed_record.next_retry_at > failed_at);
+    }
+
+    #[test]
+    fn test_reset_upload_queue_failure_makes_unfailed_rows_retryable() {
+        let (mut db, _temp_dir) = create_test_db();
+        db.insert_events(&[event_json(days_ago(1))]).unwrap();
+
+        db.mark_upload_queue_failed("upload failed", unix_now())
+            .unwrap();
+        assert_eq!(db.count_retryable().unwrap(), 0);
+
+        db.reset_upload_queue_failure().unwrap();
+        assert_eq!(db.count_retryable().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_dequeue_releases_stale_processing_locks() {
+        let (mut db, _temp_dir) = create_test_db();
+        db.insert_events(&[event_json(days_ago(1))]).unwrap();
+
+        let first_batch = db.dequeue_pending_batch(1).unwrap();
+        assert_eq!(first_batch.len(), 1);
+        assert_eq!(db.count_retryable().unwrap(), 0);
+
+        let stale_started_at = unix_now().saturating_sub(METRIC_PROCESSING_LOCK_TIMEOUT_SECS + 1);
+        db.conn
+            .execute(
+                "UPDATE metrics SET processing_started_at = ?1 WHERE id = ?2",
+                params![stale_started_at as i64, first_batch[0].id],
+            )
+            .unwrap();
+
+        let second_batch = db.dequeue_pending_batch(1).unwrap();
+        assert_eq!(second_batch.len(), 1);
+        assert_eq!(second_batch[0].id, first_batch[0].id);
+    }
+
+    #[test]
+    fn test_max_attempts_are_not_retryable() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ids = db.insert_events(&[event_json(days_ago(1))]).unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET attempts = ?1 WHERE id = ?2",
+                params![MAX_METRIC_UPLOAD_ATTEMPTS as i64, ids[0]],
+            )
+            .unwrap();
+
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.count_retryable().unwrap(), 0);
+        assert!(db.dequeue_pending_batch(1).unwrap().is_empty());
     }
 
     #[test]
