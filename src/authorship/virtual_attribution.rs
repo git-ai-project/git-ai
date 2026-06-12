@@ -1085,73 +1085,97 @@ impl VirtualAttributions {
         authorship_log.metadata.humans = self.humans.clone();
         authorship_log.metadata.sessions = self.sessions.clone();
 
-        // Process each file
-        for (file_path, (_, line_attrs)) in &self.attributions {
-            if line_attrs.is_empty() {
-                continue;
-            }
-
-            // Group line attributions by author as intervals.
-            // This avoids expanding every range to individual line numbers.
-            let mut author_ranges: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
-            for line_attr in line_attrs {
-                // Skip the legacy "human" sentinel (CheckpointKind::Human checkpoints that were
-                // never attested). KnownHuman lines use h_-prefixed author IDs and pass through.
-                if line_attr.author_id == CheckpointKind::Human.to_str() {
-                    continue;
-                }
-
-                author_ranges
-                    .entry(line_attr.author_id.clone())
-                    .or_default()
-                    .push((line_attr.start_line, line_attr.end_line));
-            }
-
-            // Create attestation entries for each author
-            for (author_id, mut ranges) in author_ranges {
-                if ranges.is_empty() {
-                    continue;
-                }
-                ranges.sort_by_key(|(start, end)| (*start, *end));
-
-                let mut merged: Vec<(u32, u32)> = Vec::new();
-                for (start, end) in ranges {
-                    match merged.last_mut() {
-                        Some((_, last_end)) if start <= last_end.saturating_add(1) => {
-                            *last_end = (*last_end).max(end);
-                        }
-                        _ => merged.push((start, end)),
-                    }
-                }
-
-                let line_ranges = merged
-                    .into_iter()
-                    .map(|(start, end)| {
-                        if start == end {
-                            crate::authorship::authorship_log::LineRange::Single(start)
-                        } else {
-                            crate::authorship::authorship_log::LineRange::Range(start, end)
-                        }
-                    })
-                    .collect();
-
-                // Create attestation entry
-                let entry = crate::authorship::authorship_log_serialization::AttestationEntry::new(
-                    author_id,
-                    line_ranges,
-                );
-
-                // Add to authorship log.
-                // NFC-normalise the path so that attestation file_path is
-                // consistent with NFC paths emitted by git diff parsing.
-                let nfc_fp: String = file_path.nfc().collect();
-                let file_attestation = authorship_log.get_or_create_file(&nfc_fp);
-                file_attestation.add_entry(entry);
-            }
-        }
+        authorship_log.attestations = build_attestations_from_attributions(&self.attributions);
 
         Ok(authorship_log)
     }
+}
+
+/// Build the deterministically-ordered attestation list for an authorship log
+/// from the per-file (char, line) attribution map.
+///
+/// `self.attributions` is a `HashMap`, and entries within a file are grouped by
+/// a `HashMap<author_id, ranges>`; iterating either directly yields a
+/// process-randomised order, which would make byte-identical commits produce
+/// different note bytes (breaking idempotent note sync / dedup). We therefore
+/// sort files by path and entries by hash so the output is stable. Ranges
+/// within an entry are already sorted+merged.
+fn build_attestations_from_attributions(
+    attributions: &HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)>,
+) -> Vec<crate::authorship::authorship_log_serialization::FileAttestation> {
+    use crate::authorship::authorship_log_serialization::{AttestationEntry, FileAttestation};
+
+    let mut files: Vec<FileAttestation> = Vec::new();
+
+    for (file_path, (_, line_attrs)) in attributions {
+        if line_attrs.is_empty() {
+            continue;
+        }
+
+        // Group line attributions by author as intervals.
+        // This avoids expanding every range to individual line numbers.
+        let mut author_ranges: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+        for line_attr in line_attrs {
+            // Skip the legacy "human" sentinel (CheckpointKind::Human checkpoints that were
+            // never attested). KnownHuman lines use h_-prefixed author IDs and pass through.
+            if line_attr.author_id == CheckpointKind::Human.to_str() {
+                continue;
+            }
+
+            author_ranges
+                .entry(line_attr.author_id.clone())
+                .or_default()
+                .push((line_attr.start_line, line_attr.end_line));
+        }
+
+        // NFC-normalise the path so that attestation file_path is consistent
+        // with NFC paths emitted by git diff parsing.
+        let nfc_fp: String = file_path.nfc().collect();
+        let mut file_attestation = FileAttestation::new(nfc_fp);
+
+        // Create attestation entries for each author.
+        for (author_id, mut ranges) in author_ranges {
+            if ranges.is_empty() {
+                continue;
+            }
+            ranges.sort_by_key(|(start, end)| (*start, *end));
+
+            let mut merged: Vec<(u32, u32)> = Vec::new();
+            for (start, end) in ranges {
+                match merged.last_mut() {
+                    Some((_, last_end)) if start <= last_end.saturating_add(1) => {
+                        *last_end = (*last_end).max(end);
+                    }
+                    _ => merged.push((start, end)),
+                }
+            }
+
+            let line_ranges = merged
+                .into_iter()
+                .map(|(start, end)| {
+                    if start == end {
+                        LineRange::Single(start)
+                    } else {
+                        LineRange::Range(start, end)
+                    }
+                })
+                .collect();
+
+            file_attestation.add_entry(AttestationEntry::new(author_id, line_ranges));
+        }
+
+        if file_attestation.entries.is_empty() {
+            continue;
+        }
+
+        // Deterministic entry order within the file: sort by hash (author_id).
+        file_attestation.entries.sort_by(|a, b| a.hash.cmp(&b.hash));
+        files.push(file_attestation);
+    }
+
+    // Deterministic file order: sort by NFC-normalised path.
+    files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    files
 }
 
 /// Helper function to collect committed line ranges from git diff
@@ -3315,5 +3339,59 @@ mod tests {
             checkout_merge_rebased_content("shared\n", "THEIRS\n", "AI_CONTENT\n"),
             "AI_CONTENT\n"
         );
+    }
+
+    /// Regression (#11): the attestation emit order must be deterministic.
+    /// `attributions` is a HashMap and per-file entries are grouped in a
+    /// HashMap<author_id, ...>, so naive iteration emits files and entries in a
+    /// process-randomised order, making byte-identical commits produce
+    /// different note bytes. build_attestations_from_attributions must sort
+    /// files by path and entries by hash.
+    #[test]
+    fn test_build_attestations_is_deterministically_sorted() {
+        // Many files + many authors per file so that, were the order taken from
+        // HashMap iteration, it would be astronomically unlikely to already be
+        // sorted at both levels.
+        let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
+        let files = [
+            "zeta.rs", "mid.rs", "alpha.rs", "beta.rs", "yarn.rs", "delta.rs", "gamma.rs",
+            "omega.rs",
+        ];
+        let authors = [
+            "s_zzz", "h_aaa", "s_mmm", "h_qqq", "s_bbb", "h_ttt", "s_ddd",
+        ];
+        for (fi, file) in files.iter().enumerate() {
+            let mut line_attrs = Vec::new();
+            for (ai, author) in authors.iter().enumerate() {
+                let line = (fi * authors.len() + ai + 1) as u32;
+                line_attrs.push(LineAttribution::new(line, line, author.to_string(), None));
+            }
+            attributions.insert(file.to_string(), (Vec::new(), line_attrs));
+        }
+
+        let result = build_attestations_from_attributions(&attributions);
+
+        // Files are sorted by path.
+        let got_files: Vec<&str> = result.iter().map(|f| f.file_path.as_str()).collect();
+        let mut want_files = got_files.clone();
+        want_files.sort_unstable();
+        assert_eq!(got_files, want_files, "files must be sorted by path");
+
+        // Entries within each file are sorted by hash.
+        for fa in &result {
+            let got: Vec<&str> = fa.entries.iter().map(|e| e.hash.as_str()).collect();
+            let mut want = got.clone();
+            want.sort_unstable();
+            assert_eq!(
+                got, want,
+                "entries in {} must be sorted by hash",
+                fa.file_path
+            );
+        }
+
+        // And the whole thing is stable across repeated builds.
+        let again = build_attestations_from_attributions(&attributions);
+        assert_eq!(result, again, "output must be stable across builds");
     }
 }
