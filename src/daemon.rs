@@ -18,7 +18,8 @@ use crate::git::repo_state::{
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
-    RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
+    RebaseCompleteEvent, RebaseSkippedEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent,
+    StashOperation,
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
@@ -953,6 +954,7 @@ fn stable_carryover_heads_for_command(
             input.worktree,
             input.argv,
             rebase_start_target_hint.as_deref(),
+            None,
         )?
         .map(|(old_head, new_head, _onto_head)| (old_head, new_head))
         .or_else(|| {
@@ -3046,8 +3048,14 @@ type RebaseCommitMappings = (Vec<String>, Vec<String>);
 fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>, GitAiError> {
     let mut out = HashSet::new();
     for event in repository.storage.read_rewrite_events()? {
-        if let RewriteLogEvent::RebaseComplete { rebase_complete } = event {
-            out.insert(rebase_complete.new_head);
+        match event {
+            RewriteLogEvent::RebaseComplete { rebase_complete } => {
+                out.insert(rebase_complete.new_head);
+            }
+            RewriteLogEvent::RebaseSkipped { rebase_skipped } => {
+                out.insert(rebase_skipped.new_head);
+            }
+            _ => {}
         }
     }
     Ok(out)
@@ -6420,10 +6428,15 @@ impl ActorDaemonCoordinator {
         worktree: &Path,
         argv: &[String],
         start_target_hint: Option<&str>,
+        semantic_heads: Option<(&str, &str)>,
     ) -> Result<Option<(String, String, String)>, GitAiError> {
         let processed_new_heads = processed_rebase_new_heads(repository)?;
-        let mut segment =
-            resolve_rebase_segment_for_worktree(worktree, start_target_hint, &processed_new_heads)?;
+        let mut segment = resolve_rebase_segment_for_worktree(
+            worktree,
+            start_target_hint,
+            &processed_new_heads,
+            semantic_heads,
+        )?;
         let Some(mut segment) = segment.take() else {
             return Ok(None);
         };
@@ -6662,12 +6675,25 @@ impl ActorDaemonCoordinator {
                     })?;
                     let repository = repository_for_rewrite_context(cmd, "rebase_complete")?;
                     let start_target_hint = rebase_start_target_hint_from_command(cmd);
+                    let semantic_heads = if !old_head.is_empty()
+                        && !new_head.is_empty()
+                        && old_head != new_head
+                        && is_valid_oid(old_head)
+                        && !is_zero_oid(old_head)
+                        && is_valid_oid(new_head)
+                        && !is_zero_oid(new_head)
+                    {
+                        Some((old_head.as_str(), new_head.as_str()))
+                    } else {
+                        None
+                    };
                     let (mapping_old_head, stable_new_head, onto_head) = if let Some(heads) =
                         Self::stable_rebase_heads_from_worktree(
                             &repository,
                             worktree,
                             &cmd.raw_argv,
                             start_target_hint.as_deref(),
+                            semantic_heads,
                         )? {
                         heads
                     } else if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
@@ -6734,6 +6760,12 @@ impl ActorDaemonCoordinator {
                             sid = %cmd.root_sid,
                             "rebase complete: commit mapping produced no commits; authorship notes will NOT be rewritten for this rebase"
                         );
+                        out.push(RewriteLogEvent::rebase_skipped(RebaseSkippedEvent::new(
+                            mapping_old_head,
+                            stable_new_head,
+                            *interactive,
+                            "empty_commit_mapping".to_string(),
+                        )));
                     }
                     if let Some(worktree) = cmd.worktree.as_ref() {
                         self.clear_pending_rebase_original_head_for_worktree(worktree)?;
@@ -6916,6 +6948,7 @@ impl ActorDaemonCoordinator {
                                 worktree,
                                 &cmd.raw_argv,
                                 None,
+                                None,
                             )?
                         else {
                             tracing::debug!(
@@ -6942,6 +6975,13 @@ impl ActorDaemonCoordinator {
                                 false,
                                 original_commits,
                                 new_commits,
+                            )));
+                        } else {
+                            out.push(RewriteLogEvent::rebase_skipped(RebaseSkippedEvent::new(
+                                mapping_old_head,
+                                new_head,
+                                false,
+                                "empty_commit_mapping".to_string(),
                             )));
                         }
                         if let Some(worktree) = cmd.worktree.as_ref() {

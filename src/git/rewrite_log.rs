@@ -18,6 +18,9 @@ pub enum RewriteLogEvent {
     RebaseComplete {
         rebase_complete: RebaseCompleteEvent,
     },
+    RebaseSkipped {
+        rebase_skipped: RebaseSkippedEvent,
+    },
     RebaseAbort {
         rebase_abort: RebaseAbortEvent,
     },
@@ -85,6 +88,12 @@ impl RewriteLogEvent {
     pub fn rebase_complete(event: RebaseCompleteEvent) -> Self {
         Self::RebaseComplete {
             rebase_complete: event,
+        }
+    }
+
+    pub fn rebase_skipped(event: RebaseSkippedEvent) -> Self {
+        Self::RebaseSkipped {
+            rebase_skipped: event,
         }
     }
 
@@ -260,6 +269,30 @@ impl RebaseCompleteEvent {
             is_interactive,
             original_commits,
             new_commits,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebaseSkippedEvent {
+    pub original_head: String,
+    pub new_head: String,
+    pub is_interactive: bool,
+    pub reason: String,
+}
+
+impl RebaseSkippedEvent {
+    pub fn new(
+        original_head: String,
+        new_head: String,
+        is_interactive: bool,
+        reason: String,
+    ) -> Self {
+        Self {
+            original_head,
+            new_head,
+            is_interactive,
+            reason,
         }
     }
 }

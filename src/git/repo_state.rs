@@ -462,11 +462,39 @@ pub fn resolve_rebase_segment_for_worktree(
     worktree: &Path,
     start_target_hint: Option<&str>,
     already_processed_new_heads: &std::collections::HashSet<String>,
+    semantic_heads: Option<(&str, &str)>,
 ) -> Result<Option<RebaseReflogSegment>, GitAiError> {
     let candidates = read_complete_rebase_segments_for_worktree(worktree)?
         .into_iter()
         .filter(|segment| !already_processed_new_heads.contains(&segment.new_head))
         .collect::<Vec<_>>();
+
+    if let Some((semantic_old, semantic_new)) = semantic_heads {
+        if is_valid_git_oid(semantic_old)
+            && is_valid_git_oid(semantic_new)
+            && let Some(segment) = candidates.iter().find(|segment| {
+                segment.original_head == semantic_old && segment.new_head == semantic_new
+            })
+        {
+            return Ok(Some(segment.clone()));
+        }
+
+        if is_valid_git_oid(semantic_new)
+            && let Some(segment) = candidates
+                .iter()
+                .find(|segment| segment.new_head == semantic_new)
+        {
+            return Ok(Some(segment.clone()));
+        }
+
+        if is_valid_git_oid(semantic_old)
+            && let Some(segment) = candidates
+                .iter()
+                .find(|segment| segment.original_head == semantic_old)
+        {
+            return Ok(Some(segment.clone()));
+        }
+    }
 
     if let Some(start_target_hint) = start_target_hint
         && let Some(segment) = candidates
