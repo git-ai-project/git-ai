@@ -23,4 +23,5 @@ pub mod show_prompt;
 pub mod squash_authorship;
 pub mod status;
 pub mod upgrade;
+pub mod usage;
 pub mod whoami;
