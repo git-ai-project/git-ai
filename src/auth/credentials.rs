@@ -128,14 +128,7 @@ impl CredentialStore {
         self.backend.clear()
     }
 
-    /// Check if credentials are stored
-    #[allow(dead_code)]
-    pub fn has_credentials(&self) -> bool {
-        self.load().map(|c| c.is_some()).unwrap_or(false)
-    }
-
     /// Get the backend name (for logging/debugging)
-    #[allow(dead_code)]
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
     }
@@ -172,12 +165,10 @@ mod tests {
         let creds = make_test_credentials();
 
         // Initially empty
-        assert!(!store.has_credentials());
         assert!(store.load().unwrap().is_none());
 
         // Store
         store.store(&creds).unwrap();
-        assert!(store.has_credentials());
 
         // Load and verify
         let loaded = store.load().unwrap().unwrap();
@@ -194,7 +185,6 @@ mod tests {
 
         // Clear
         store.clear().unwrap();
-        assert!(!store.has_credentials());
         assert!(store.load().unwrap().is_none());
     }
 
@@ -220,19 +210,6 @@ mod tests {
         // Load when nothing stored should return None
         let result = store.load().unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_has_credentials_with_mock() {
-        let store = CredentialStore::with_backend(Box::new(MockBackend::new()));
-
-        assert!(!store.has_credentials());
-
-        store.store(&make_test_credentials()).unwrap();
-        assert!(store.has_credentials());
-
-        store.clear().unwrap();
-        assert!(!store.has_credentials());
     }
 
     // ============= Error Handling Tests with Mock =============
@@ -265,15 +242,6 @@ mod tests {
         let result = store.clear();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Permission denied"));
-    }
-
-    #[test]
-    fn test_has_credentials_returns_false_on_load_error() {
-        let mock = MockBackend::new().fail_load("Backend unavailable");
-        let store = CredentialStore::with_backend(Box::new(mock));
-
-        // has_credentials should return false when load errors
-        assert!(!store.has_credentials());
     }
 
     // ============= Serialization Tests =============

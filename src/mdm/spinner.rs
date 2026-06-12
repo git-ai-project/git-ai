@@ -24,16 +24,6 @@ impl Spinner {
         // Spinner starts automatically when created
     }
 
-    #[allow(dead_code)]
-    pub fn update_message(&self, message: &str) {
-        self.pb.set_message(message.to_string());
-    }
-
-    #[allow(dead_code)]
-    pub async fn wait_for(&self, duration_ms: u64) {
-        smol::Timer::after(std::time::Duration::from_millis(duration_ms)).await;
-    }
-
     pub fn success(&self, message: &str) {
         // Clear spinner and show success with green checkmark and bold green text
         self.pb.finish_and_clear();
@@ -50,13 +40,6 @@ impl Spinner {
         // Clear spinner and show error with red X and bold red text
         self.pb.finish_and_clear();
         println!("\x1b[1;31m✗ {}\x1b[0m", message);
-    }
-
-    #[allow(dead_code)]
-    pub fn skipped(&self, message: &str) {
-        // Clear spinner and show skipped with gray circle and gray text
-        self.pb.finish_and_clear();
-        println!("\x1b[90m○ {}\x1b[0m", message);
     }
 }
 
@@ -112,19 +95,6 @@ mod tests {
     fn test_spinner_error_output() {
         let spinner = Spinner::new("Processing");
         spinner.error("An error occurred");
-    }
-
-    #[test]
-    fn test_spinner_skipped_output() {
-        let spinner = Spinner::new("Processing");
-        spinner.skipped("Operation skipped");
-    }
-
-    #[test]
-    fn test_spinner_update_message() {
-        let spinner = Spinner::new("Initial message");
-        spinner.update_message("Updated message");
-        spinner.success("Done");
     }
 
     #[test]

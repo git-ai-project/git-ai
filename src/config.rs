@@ -230,13 +230,6 @@ pub struct ConfigPatch {
 }
 
 impl Config {
-    /// Initialize the global configuration exactly once.
-    /// Safe to call multiple times; subsequent calls are no-ops.
-    #[allow(dead_code)]
-    pub fn init() {
-        let _ = CONFIG.get_or_init(build_config);
-    }
-
     /// Access the global configuration. Lazily initializes if not already initialized.
     pub fn get() -> &'static Config {
         CONFIG.get_or_init(build_config)
@@ -507,7 +500,6 @@ impl Config {
     /// Only available when the `test-support` feature is enabled or in test mode.
     /// Must be `pub` to work with integration tests in the `tests/` directory.
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
     pub fn set_test_feature_flags(flags: FeatureFlags) {
         let mut override_flags = TEST_FEATURE_FLAGS_OVERRIDE
             .write()
@@ -519,7 +511,6 @@ impl Config {
     /// Only available when the `test-support` feature is enabled or in test mode.
     /// This should be called in test cleanup to reset to default behavior.
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
     pub fn clear_test_feature_flags() {
         let mut override_flags = TEST_FEATURE_FLAGS_OVERRIDE
             .write()
@@ -1173,7 +1164,6 @@ fn config_file_path() -> Option<PathBuf> {
 }
 
 /// Public accessor for config file path
-#[allow(dead_code)]
 pub fn config_file_path_public() -> Option<PathBuf> {
     config_file_path()
 }

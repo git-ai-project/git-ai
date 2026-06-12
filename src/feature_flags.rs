@@ -86,21 +86,6 @@ define_feature_flags!(
 );
 
 impl FeatureFlags {
-    /// Build FeatureFlags from deserializable config
-    fn from_deserializable(flags: DeserializableFeatureFlags) -> Self {
-        Self::merge_with(FeatureFlags::default(), flags)
-    }
-
-    /// Build FeatureFlags from environment variables
-    /// Reads from GIT_AI_* prefixed environment variables
-    /// Example: GIT_AI_REWRITE_STASH=true, GIT_AI_AUTH_KEYRING=false
-    /// Falls back to defaults for any invalid or missing values
-    #[allow(dead_code)]
-    pub fn from_env() -> Self {
-        let env_flags = DeserializableFeatureFlags::from_env("GIT_AI_");
-        Self::from_deserializable(env_flags)
-    }
-
     /// Build FeatureFlags from both file and environment variables
     /// Precedence: Environment > File > Default
     /// - Starts with defaults
@@ -147,19 +132,6 @@ mod tests {
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
         }
-    }
-
-    #[test]
-    fn test_from_deserializable() {
-        let deserializable = DeserializableFeatureFlags {
-            rewrite_stash: Some(false),
-            auth_keyring: Some(true),
-            ..Default::default()
-        };
-
-        let flags = FeatureFlags::from_deserializable(deserializable);
-        assert!(!flags.rewrite_stash);
-        assert!(flags.auth_keyring);
     }
 
     #[test]
