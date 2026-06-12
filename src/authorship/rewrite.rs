@@ -857,7 +857,16 @@ pub(crate) fn compute_diff_trees_batch(
         tree_pair_keys.push((src_tree, dst_tree));
     }
 
-    // Single git diff-tree --stdin call
+    // Single git diff-tree --stdin call.
+    //
+    // We intentionally use the General profile (no PatchParse prefix forcing)
+    // here: `diff-tree` is plumbing and -- unlike the `git diff` porcelain --
+    // ignores the user's diff.{noprefix,mnemonicPrefix,srcPrefix,dstPrefix},
+    // diff.external, and per-path textconv attributes. It always emits raw
+    // content with default `a/`..`b/` prefixes, which is exactly what
+    // extract_b_path / parse_diff_tree_output expect. (Contrast diff_added_lines
+    // in repository.rs, which DOES run `git diff` and therefore must force
+    // InternalGitProfile::PatchParse.)
     let mut args = repo.global_args_for_exec();
     args.extend([
         "diff-tree".to_string(),
