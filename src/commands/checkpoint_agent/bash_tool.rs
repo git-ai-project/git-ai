@@ -362,6 +362,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Kiro => match tool_name {
+            "fs_write" | "write" => ToolClass::FileEdit,
+            "execute_bash" | "shell" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -379,6 +384,7 @@ pub enum Agent {
     Pi,
     Windsurf,
     Cursor,
+    Kiro,
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,6 +1298,18 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+
+        // Kiro (kiro-cli: snake_case lowercase, with `write`/`shell` aliases)
+        assert_eq!(classify_tool(Agent::Kiro, "fs_write"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Kiro, "write"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Kiro, "execute_bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Kiro, "shell"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Kiro, "fs_read"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Kiro, "read"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Kiro, "use_aws"), ToolClass::Skip);
+        // PascalCase Claude-style names must NOT match.
+        assert_eq!(classify_tool(Agent::Kiro, "Write"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Kiro, "Bash"), ToolClass::Skip);
     }
 
     #[test]
