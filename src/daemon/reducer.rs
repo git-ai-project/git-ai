@@ -107,6 +107,15 @@ fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
         .rfind(|change| change.reference == "HEAD");
 
     let (head, branch, detached) = if let Some(head_change) = head_change {
+        // DEFERRED (code-review #12): `detached` is inferred as "no unique
+        // branch ref moved with HEAD". When a checkout/switch to an EXISTING
+        // branch produces an ambiguous ref-change pairing (e.g. multiple
+        // refs/heads/* share the same old->new as HEAD, so
+        // unique_branch_for_head_change returns None), the worktree is
+        // misclassified as detached. Harmless for attribution today (the head
+        // OID is still correct); a precise fix would consult the actual
+        // post-command symbolic-ref/branch name rather than inferring from
+        // ref-change pairing.
         let branch = unique_branch_for_head_change(cmd, head_change);
         (
             Some(head_change.new.clone()),

@@ -4522,6 +4522,20 @@ impl ActorDaemonCoordinator {
                     }
                     crate::daemon::domain::SemanticEvent::CommitCreated { base, new_head } => {
                         let mut handled_as_squash_merge = false;
+                        // DEFERRED (code-review #4): a pending `merge --squash` is
+                        // matched to the next commit by `base == pending.onto`
+                        // alone. If the user ABORTS the squash (e.g. `git reset
+                        // --hard` / `git checkout -- .`) and later makes an
+                        // unrelated commit on the same base, that commit is
+                        // mistaken for the squash and the source ref's session
+                        // metadata leaks into its note (inflating `git-ai stats`;
+                        // line-level blame stays correct). A robust fix is
+                        // non-trivial: the abandon commands (reset/checkout) are
+                        // not currently sequenced into this side-effect layer, so
+                        // we cannot clear the pending state on abort here, and a
+                        // metadata-prune alternative collides with the intentional
+                        // prompt-only-note feature. Left as-is pending one of
+                        // those two mechanisms.
                         if !new_head.is_empty()
                             && cmd.primary_command.as_deref() == Some("commit")
                             && let Some(pending) =

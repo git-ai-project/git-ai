@@ -677,6 +677,13 @@ fn find_next_sha(s: &str) -> Option<(String, &str)> {
     None
 }
 
+// DEFERRED (code-review #15): old->new merge commits are paired greedily by
+// first parent-set match (the inner loop `break`s on the first new_merge whose
+// parents all map). When two sibling merges in the same range share an
+// identical parent mapping, the first-match pairing can attach old_merge A's
+// note to new_merge B and vice versa. Harmless in the common single-merge case;
+// a precise fix would disambiguate ties (e.g. by tree identity or commit order)
+// instead of taking the first structural match.
 fn derive_merge_commit_mappings(
     repo: &Repository,
     base: &str,

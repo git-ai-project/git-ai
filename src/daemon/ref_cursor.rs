@@ -341,6 +341,14 @@ impl RefCursor {
         let is_no_commit = args.iter().any(|arg| arg == "--no-commit" || arg == "-n");
         let is_continue = args.iter().any(|arg| arg == "--continue");
         let is_skip = args.iter().any(|arg| arg == "--skip");
+        // DEFERRED (code-review #13): on `revert --continue` (resuming after a
+        // conflict) the original source OIDs are not on the command line and we
+        // carry no `pending_revert_source_oids` from the interrupted revert, so
+        // revert_source_oids ends up empty. handle_revert_commit then falls back
+        // to first-parent, which is only exact for `git revert HEAD`; a
+        // multi-commit `revert A B` resumed via --continue can reconstruct the
+        // wrong source base. A precise fix needs the daemon to persist the
+        // pending source OIDs across the conflict pause and replay them here.
         let source_args = if is_continue || is_skip {
             Vec::new()
         } else {
@@ -780,6 +788,15 @@ impl RefCursor {
         Ok(())
     }
 
+    // DEFERRED (code-review #14): this finder scans the reflog from
+    // reflog_start_offset and takes the first unconsumed entry matching the
+    // message/transition; it does not use the command's ingress hint (the
+    // reflog position at which THIS command began) to bound the search. In
+    // pathological histories with repeated identical rebase-start messages and
+    // transitions, it could match an earlier same-shaped entry than the one
+    // this command produced. Bounding by the per-command ingress offset would
+    // make the match exact; deferred as it needs the ingress offset threaded
+    // through to the finder.
     fn find_rebase_start_entry(
         &mut self,
         cmd: &NormalizedCommand,
@@ -1028,6 +1045,13 @@ impl RefCursor {
         }))
     }
 
+    // DEFERRED (code-review #14): like find_rebase_start_entry, this scans the
+    // reflog from reflog_start_offset for a contiguous span matching the
+    // message prefixes and returns the first that satisfies `expected`; it does
+    // not bound the search by the command's ingress hint. With repeated
+    // identical spans this could pick an earlier same-shaped span than the one
+    // this command produced. Threading the per-command ingress offset would
+    // make it exact.
     fn find_head_span_start_entry(
         &mut self,
         worktree: Option<&Path>,
