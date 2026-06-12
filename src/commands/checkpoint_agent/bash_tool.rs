@@ -362,6 +362,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Cline => match tool_name {
+            "write_to_file" | "replace_in_file" => ToolClass::FileEdit,
+            "execute_command" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -379,6 +384,7 @@ pub enum Agent {
     Pi,
     Windsurf,
     Cursor,
+    Cline,
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,6 +1298,29 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+
+        // Cline (cline.bot VS Code extension: snake_case lowercase tool names)
+        assert_eq!(
+            classify_tool(Agent::Cline, "write_to_file"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Cline, "replace_in_file"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Cline, "execute_command"),
+            ToolClass::Bash
+        );
+        assert_eq!(classify_tool(Agent::Cline, "read_file"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Cline, "search_files"), ToolClass::Skip);
+        assert_eq!(
+            classify_tool(Agent::Cline, "browser_action"),
+            ToolClass::Skip
+        );
+        // Claude-shaped names must NOT match.
+        assert_eq!(classify_tool(Agent::Cline, "Write"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Cline, "Bash"), ToolClass::Skip);
     }
 
     #[test]

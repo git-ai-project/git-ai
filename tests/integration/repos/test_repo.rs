@@ -823,6 +823,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
     matches!(
         arg,
         "claude"
+            | "cline"
             | "codex"
             | "continue-cli"
             | "cursor"
