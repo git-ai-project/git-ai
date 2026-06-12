@@ -84,6 +84,7 @@ fn get_unmerged_paths_via_git(repo_work_dir: &Path) -> std::collections::HashSet
         .lines()
         .filter(|l| !l.is_empty())
         .filter_map(|l| l.split('\t').nth(1))
+        .map(crate::utils::unescape_git_path)
         .map(|path| repo_work_dir.join(path))
         .collect()
 }

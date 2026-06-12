@@ -2560,6 +2560,82 @@ fn parse_range_spec(spec: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// Extract the new (b-side) file path from a `diff --git` header.
+///
+/// Handles both unquoted and C-quoted paths:
+///   diff --git a/file.txt b/file.txt
+///   diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
+///
+/// Returns the unescaped, prefix-stripped path (e.g. `café.txt`).
+fn parse_diff_git_new_path(raw: &str) -> Option<String> {
+    let (_, new_token) = parse_two_path_tokens(raw)?;
+    let unescaped = crate::utils::unescape_git_path(&new_token);
+    // Strip the b/ prefix (or other standard prefixes git may use).
+    let stripped = unescaped.strip_prefix("b/").unwrap_or(&unescaped);
+    Some(stripped.to_string())
+}
+
+/// Parse two (possibly C-quoted) path tokens from a `diff --git` header payload.
+///
+/// Input is the part after `diff --git `, e.g.:
+///   `a/file.txt b/file.txt`
+///   `"a/caf\303\251.txt" "b/caf\303\251.txt"`
+fn parse_two_path_tokens(raw: &str) -> Option<(String, String)> {
+    let mut chars = raw.chars().peekable();
+    let mut tokens: Vec<String> = Vec::new();
+
+    while tokens.len() < 2 {
+        // Skip whitespace between tokens
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        let mut token = String::new();
+        if chars.peek() == Some(&'"') {
+            // Quoted token: consume until closing unescaped quote
+            token.push(chars.next().unwrap_or('"'));
+            let mut escaped = false;
+            for ch in chars.by_ref() {
+                token.push(ch);
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == '"' {
+                    break;
+                }
+            }
+        } else {
+            // Unquoted token: consume until whitespace
+            while let Some(&ch) = chars.peek() {
+                if ch.is_whitespace() {
+                    break;
+                }
+                token.push(ch);
+                chars.next();
+            }
+        }
+
+        if token.is_empty() {
+            return None;
+        }
+        tokens.push(token);
+    }
+
+    if tokens.len() == 2 {
+        Some((tokens[0].clone(), tokens[1].clone()))
+    } else {
+        None
+    }
+}
+
 /// Apply hunk-based line offset adjustments to existing line attributions.
 ///
 /// Instead of re-diffing file contents, this uses pre-computed hunk information from
@@ -2726,13 +2802,14 @@ fn run_diff_tree_with_hunks(
                     // For renames/copies, raw format has "old_path\tnew_path";
                     // use the new (destination) path.
                     let file_path = if matches!(status_char, 'R' | 'C') {
-                        raw_path
-                            .rsplit_once('\t')
-                            .map(|(_, new)| new)
-                            .unwrap_or(raw_path)
-                            .to_string()
+                        crate::utils::unescape_git_path(
+                            raw_path
+                                .rsplit_once('\t')
+                                .map(|(_, new)| new)
+                                .unwrap_or(raw_path),
+                        )
                     } else {
-                        raw_path.to_string()
+                        crate::utils::unescape_git_path(raw_path)
                     };
 
                     if pathspecs_lookup.contains(file_path.as_str()) {
@@ -2755,9 +2832,13 @@ fn run_diff_tree_with_hunks(
         }
 
         // diff --git a/path b/path
+        // With LC_ALL=C, non-ASCII paths are C-quoted:
+        //   diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
+        // A naive split(" b/") won't find the separator in quoted headers,
+        // so we parse the two path tokens properly (handling quotes).
         if line.starts_with("diff --git ") {
-            if let Some(b_path) = line.split(" b/").last() {
-                current_diff_file = Some(b_path.to_string());
+            if let Some(raw) = line.strip_prefix("diff --git ") {
+                current_diff_file = parse_diff_git_new_path(raw);
             }
             continue;
         }

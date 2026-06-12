@@ -2679,3 +2679,56 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "}".unattributed_human(),
     ]);
 }
+
+/// Regression test: rebase with non-ASCII filenames (C-quoted by LC_ALL=C).
+///
+/// `run_diff_tree_with_hunks` parses raw metadata lines and diff --git headers
+/// from `git diff-tree --stdin --raw -p`. With LC_ALL=C, non-ASCII filenames are
+/// C-quoted (e.g. `"caf\303\251.txt"`). Without unescaping, the path won't match
+/// the pathspecs_lookup set, and attribution is silently lost during rebase.
+///
+/// Uses multiple commits modifying the same non-ASCII file to exercise the
+/// hunk-based transfer path in `run_diff_tree_with_hunks`, not just the
+/// first-appearance content-diff path.
+#[test]
+fn test_rebase_preserves_authorship_with_utf8_filename() {
+    let repo = TestRepo::new();
+
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: Create a file with non-ASCII filename (café.txt — 'é' = 0xC3 0xA9)
+    let mut utf8_file = repo.filename("café.txt");
+    utf8_file.set_contents(crate::lines!["première ligne".ai(), "deuxième ligne".ai(),]);
+    repo.stage_all_and_commit("Add café file").unwrap();
+
+    // Commit 2: Modify the same non-ASCII file (forces hunk-based transfer on rebase)
+    utf8_file.set_contents(crate::lines![
+        "première ligne".ai(),
+        "deuxième ligne".ai(),
+        "troisième ligne".ai(),
+    ]);
+    repo.stage_all_and_commit("Extend café file").unwrap();
+
+    // Advance default branch so rebase has something to replay onto
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(crate::lines!["main advance"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Rebase — exercises run_diff_tree_with_hunks with C-quoted filename
+    // in both raw metadata lines and diff --git headers
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify authorship survived the rebase despite C-quoted path in diff-tree output
+    utf8_file.assert_lines_and_blame(crate::lines![
+        "première ligne".ai(),
+        "deuxième ligne".ai(),
+        "troisième ligne".ai(),
+    ]);
+}
