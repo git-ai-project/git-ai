@@ -129,6 +129,17 @@ Conflict resolution during rebase:
   reports the final exact transition; resolution checkpoints recorded during
   the stopped rebase supply the new-content evidence.
 
+> **Note (intentional, not a regression).** When a conflict region's *content
+> changes* during resolution and no resolution checkpoint covers it, those
+> lines are left **unattributed** — even if a pre-conflict source note had AI
+> attestation for the old content. This is the fail-closed reading of I1/I4:
+> changed content needs fresh evidence. It is a deliberate tightening over the
+> legacy `#1079` behavior, which remapped the old source attestation onto the
+> rewritten lines by position; that remap violated I1 (similarity/position
+> inference) and I2 (git's diff says the region changed), so it was removed.
+> Surfacing an attribution gap here is correct; resurrecting stale attribution
+> would be misattribution.
+
 ### Cherry-pick
 
 Input: exact source commit list, exact created commit list.
