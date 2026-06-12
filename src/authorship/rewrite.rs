@@ -4,6 +4,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::hunk_shift::{DiffHunk, parse_hunk_header};
 use crate::error::GitAiError;
 use crate::git::notes_api;
+use crate::git::repo_state::is_valid_git_oid;
 use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
 
 #[derive(Debug)]
@@ -643,21 +644,37 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
     mappings
 }
 
+/// Find the first maximal ASCII-hex run in `s` whose length is a valid git OID
+/// length (40 for SHA-1, 64 for SHA-256) and return it with the remainder of
+/// the string after the run.
+///
+/// Scans over bytes rather than chars so a multibyte commit subject (e.g. a
+/// range-diff `-s` line like `Café …`) never makes a window boundary land
+/// inside a char and panic. Only a matched, all-ASCII window is converted to a
+/// `String`. Taking the maximal run (delimited by non-hex on both sides) means
+/// a 64-char SHA-256 OID is returned in full instead of truncated to 40.
 fn find_next_sha(s: &str) -> Option<(String, &str)> {
     let bytes = s.as_bytes();
     let mut i = 0;
-    while i + 40 <= bytes.len() {
-        let candidate = &s[i..i + 40];
-        if is_hex_sha(candidate) {
-            return Some((candidate.to_string(), &s[i + 40..]));
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
         }
-        i += 1;
+        let start = i;
+        let mut end = i;
+        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        let run_len = end - start;
+        if run_len == 40 || run_len == 64 {
+            // The run is all ASCII hex, so slicing here is always char-safe.
+            return Some((s[start..end].to_string(), &s[end..]));
+        }
+        // Not an OID-length run; skip past it entirely and keep scanning.
+        i = end;
     }
     None
-}
-
-fn is_hex_sha(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn derive_merge_commit_mappings(
@@ -901,11 +918,14 @@ fn parse_batched_diff_tree_output(
 }
 
 fn is_tree_pair_separator(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    bytes.len() == 81
-        && bytes[40] == b' '
-        && line[..40].bytes().all(|b| b.is_ascii_hexdigit())
-        && line[41..].bytes().all(|b| b.is_ascii_hexdigit())
+    // "tree1 tree2" — two git OIDs separated by a single space. Validate both
+    // halves structurally via is_valid_git_oid so this accepts both the 81-byte
+    // SHA-1 separator and the 129-byte SHA-256 separator (rather than a
+    // hard-coded length).
+    let Some((old, new)) = line.split_once(' ') else {
+        return false;
+    };
+    is_valid_git_oid(old) && is_valid_git_oid(new)
 }
 
 fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
@@ -1075,19 +1095,14 @@ Binary files a/image.png and b/image.png differ
     }
 
     #[test]
-    fn test_is_hex_sha_valid() {
-        assert!(is_hex_sha("a".repeat(40).as_str()));
-        assert!(is_hex_sha("0123456789abcdef0123456789abcdef01234567"));
-        assert!(is_hex_sha("ABCDEF0123456789abcdef0123456789abcdef01"));
-    }
-
-    #[test]
-    fn test_is_hex_sha_invalid() {
-        assert!(!is_hex_sha("short"));
-        assert!(!is_hex_sha("g123456789abcdef0123456789abcdef01234567"));
-        assert!(!is_hex_sha("0123456789abcdef0123456789abcdef0123456")); // 39 chars
-        assert!(!is_hex_sha("0123456789abcdef0123456789abcdef012345678")); // 41 chars
-        assert!(!is_hex_sha(""));
+    fn test_find_next_sha_rejects_non_oid_length_runs() {
+        // A hex run that is neither 40 nor 64 chars is not an OID and must be
+        // skipped (e.g. a short abbreviated hash or an index blob fragment).
+        assert!(find_next_sha("deadbeef not a full oid").is_none());
+        // 39 and 41 chars (off-by-one around SHA-1) are rejected.
+        assert!(find_next_sha(&"a".repeat(39)).is_none());
+        let nearly = format!("{} x", "a".repeat(41));
+        assert!(find_next_sha(&nearly).is_none());
     }
 
     #[test]
@@ -1229,6 +1244,56 @@ Binary files a/image.png and b/image.png differ
         assert!(!is_tree_pair_separator(
             "1778ed95466977076f4e5908e6500789be732d2e471b7bbf5998ffa15a81b17ee9f6854a357a2a6a"
         ));
+    }
+
+    #[test]
+    fn test_find_next_sha_does_not_panic_on_multibyte_subject() {
+        // Regression (#1): find_next_sha sliced `&s[i..i+40]` by byte index. A
+        // commit subject with a multibyte char ('é' at bytes 3..5) makes a
+        // byte-window boundary land inside the char and panics
+        // ("byte index 4 is not a char boundary; inside 'é'"). It must scan
+        // safely and still find the trailing SHA.
+        let sha = "a".repeat(40);
+        let input = format!("Café commit subject {}", sha);
+        let (found, rest) = find_next_sha(&input).expect("should find the trailing SHA");
+        assert_eq!(found, sha);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_find_next_sha_returns_full_sha256_oid() {
+        // Regression (#10): a 64-char SHA-256 OID must be returned in full, not
+        // truncated to the first 40 chars.
+        let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(sha256.len(), 64);
+        let input = format!("{} trailing", sha256);
+        let (found, rest) = find_next_sha(&input).expect("should find the 64-char OID");
+        assert_eq!(found, sha256);
+        assert_eq!(rest, " trailing");
+    }
+
+    #[test]
+    fn test_is_tree_pair_separator_accepts_sha256_pair() {
+        // Regression (#10): a SHA-256 tree-pair separator is "64hex 64hex"
+        // (129 bytes), not the hard-coded 81-byte SHA-1 shape.
+        let a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let line = format!("{} {}", a, b);
+        assert_eq!(line.len(), 129);
+        assert!(is_tree_pair_separator(&line));
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_sha256() {
+        // Regression (#10): range-diff with 64-char OIDs must map the full OIDs,
+        // not 40-char truncations.
+        let old = "1111111111111111111111111111111111111111111111111111111111111111";
+        let new = "2222222222222222222222222222222222222222222222222222222222222222";
+        let output = format!(" 1:  {} = 1:  {} Some subject\n", old, new);
+        let mappings = parse_range_diff_output(&output);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].0, old);
+        assert_eq!(mappings[0].1, new);
     }
 
     #[test]
