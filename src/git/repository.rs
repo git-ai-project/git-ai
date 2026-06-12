@@ -1594,7 +1594,7 @@ impl Repository {
         const MAX_CONCURRENT: usize = 30;
 
         let repo_global_args = self.global_args_for_exec();
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
         let futures: Vec<_> = file_paths
             .iter()
@@ -1606,17 +1606,23 @@ impl Repository {
                 let semaphore = semaphore.clone();
 
                 async move {
-                    let _permit = semaphore.acquire().await;
-                    let result = exec_git(&args).and_then(|output| {
-                        String::from_utf8(output.stdout)
-                            .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
-                    });
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("staged file semaphore was closed");
+                    let result = crate::tokio_runtime::spawn_blocking_result(move || {
+                        exec_git(&args).and_then(|output| {
+                            String::from_utf8(output.stdout)
+                                .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
+                        })
+                    })
+                    .await;
                     (file_path, result)
                 }
             })
             .collect();
 
-        let results = smol::block_on(async { join_all(futures).await });
+        let results = crate::tokio_runtime::block_on(async { join_all(futures).await });
 
         let mut staged_files = HashMap::new();
         for (file_path, result) in results {

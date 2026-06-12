@@ -323,8 +323,8 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     persist_install_config(&binary_path, options.dry_run)?;
     let params = HookInstallerParams { binary_path };
 
-    // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_install(&params, &options))?;
+    // Run async operations and convert result.
+    let statuses = crate::tokio_runtime::block_on(async_run_install(&params, &options))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
@@ -452,8 +452,8 @@ pub fn run_uninstall(args: &[String]) -> Result<HashMap<String, String>, GitAiEr
     let binary_path = get_current_binary_path()?;
     let params = HookInstallerParams { binary_path };
 
-    // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_uninstall(&params, dry_run, verbose))?;
+    // Run async operations and convert result.
+    let statuses = crate::tokio_runtime::block_on(async_run_uninstall(&params, dry_run, verbose))?;
     Ok(to_hashmap(statuses))
 }
 

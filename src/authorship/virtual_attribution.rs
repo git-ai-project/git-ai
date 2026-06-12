@@ -127,7 +127,7 @@ impl VirtualAttributions {
     ) -> Result<Vec<(String, String, PromptRecord)>, GitAiError> {
         const MAX_CONCURRENT: usize = 30;
 
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
 
         for missing_id in missing_ids {
@@ -135,17 +135,18 @@ impl VirtualAttributions {
             let repo = self.repo.clone();
             let semaphore = Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                // Acquire semaphore permit to limit concurrency
-                let _permit = semaphore.acquire().await;
+            let task = async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("prompt lookup semaphore was closed");
 
-                // Wrap blocking git operations in smol::unblock
-                smol::unblock(move || {
+                crate::tokio_runtime::spawn_blocking_result(move || {
                     Self::find_prompt_in_history_static(&repo, &missing_id)
-                        .map(|(commit_sha, prompt)| (missing_id.clone(), commit_sha, prompt))
+                        .map(|(commit_sha, prompt)| (missing_id, commit_sha, prompt))
                 })
                 .await
-            });
+            };
 
             tasks.push(task);
         }
@@ -198,7 +199,7 @@ impl VirtualAttributions {
     ) -> Result<Vec<(String, SessionRecord)>, GitAiError> {
         const MAX_CONCURRENT: usize = 30;
 
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
 
         for missing_id in missing_ids {
@@ -206,14 +207,17 @@ impl VirtualAttributions {
             let repo = self.repo.clone();
             let semaphore = Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                let _permit = semaphore.acquire().await;
-                smol::unblock(move || {
+            let task = async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("session lookup semaphore was closed");
+                crate::tokio_runtime::spawn_blocking_result(move || {
                     Self::find_session_in_history_static(&repo, &missing_id)
                         .map(|record| (missing_id, record))
                 })
                 .await
-            });
+            };
 
             tasks.push(task);
         }
@@ -253,7 +257,7 @@ impl VirtualAttributions {
     async fn add_pathspecs_concurrent(&mut self, pathspecs: &[String]) -> Result<(), GitAiError> {
         const MAX_CONCURRENT: usize = 30;
 
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
 
         for pathspec in pathspecs {
@@ -264,12 +268,13 @@ impl VirtualAttributions {
             let blame_start_commit = self.blame_start_commit.clone();
             let semaphore = Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                // Acquire semaphore permit to limit concurrency
-                let _permit = semaphore.acquire().await;
+            let task = async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("virtual attribution semaphore was closed");
 
-                // Wrap blocking git operations in smol::unblock
-                smol::unblock(move || {
+                crate::tokio_runtime::spawn_blocking_result(move || {
                     compute_attributions_for_file(
                         &repo,
                         &base_commit,
@@ -279,7 +284,7 @@ impl VirtualAttributions {
                     )
                 })
                 .await
-            });
+            };
 
             tasks.push(task);
         }
