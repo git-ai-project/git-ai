@@ -185,30 +185,43 @@ fn extract_attributions_from_log_shifted(
             existing.retain(|old| {
                 !(old.start_line >= new_attr.start_line && old.end_line <= new_attr.end_line)
             });
-            // For partial overlaps, trim existing attributions
+            // For partial overlaps, trim existing attributions. The head and
+            // tail trims are INDEPENDENT: when `old` strictly encloses
+            // `new_attr` (old.start < new.start AND old.end > new.end) both
+            // fragments must survive, so we must not `return false` after the
+            // head trim alone -- that would drop the tail [new.end+1, old.end].
             let mut trimmed: Vec<LineAttribution> = Vec::new();
             existing.retain(|old| {
-                if old.start_line < new_attr.start_line && old.end_line >= new_attr.start_line {
-                    // Overlap at the end of old — trim old to end before new
+                let head_overlap =
+                    old.start_line < new_attr.start_line && old.end_line >= new_attr.start_line;
+                let tail_overlap =
+                    old.end_line > new_attr.end_line && old.start_line <= new_attr.end_line;
+
+                if !head_overlap && !tail_overlap {
+                    // No partial overlap with this `old`; keep it untouched.
+                    return true;
+                }
+
+                if head_overlap {
+                    // Overlap at the end of old — keep old's head before new.
                     trimmed.push(LineAttribution::new(
                         old.start_line,
                         new_attr.start_line - 1,
                         old.author_id.clone(),
                         old.overrode.clone(),
                     ));
-                    return false;
                 }
-                if old.end_line > new_attr.end_line && old.start_line <= new_attr.end_line {
-                    // Overlap at the start of old — trim old to start after new
+                if tail_overlap {
+                    // Overlap at the start of old — keep old's tail after new.
                     trimmed.push(LineAttribution::new(
                         new_attr.end_line + 1,
                         old.end_line,
                         old.author_id.clone(),
                         old.overrode.clone(),
                     ));
-                    return false;
                 }
-                true
+                // The original `old` is replaced by the fragment(s) above.
+                false
             });
             existing.extend(trimmed);
             existing.push(new_attr);
@@ -230,4 +243,74 @@ fn extract_attributions_from_log_shifted(
 
 fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) -> Vec<String> {
     crate::authorship::rewrite::list_commits_in_range(repo, base, tip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authorship::authorship_log_serialization::{AttestationEntry, FileAttestation};
+
+    fn log_with_single_entry(file: &str, hash: &str, start: u32, end: u32) -> AuthorshipLog {
+        let mut log = AuthorshipLog::new();
+        let mut fa = FileAttestation::new(file.to_string());
+        fa.add_entry(AttestationEntry::new(
+            hash.to_string(),
+            vec![LineRange::Range(start, end)],
+        ));
+        log.attestations.push(fa);
+        log
+    }
+
+    /// Regression (#2): when a later commit's range is strictly enclosed by an
+    /// earlier commit's range for the same file, BOTH the head fragment
+    /// [old.start, new.start-1] and the tail fragment [new.end+1, old.end] must
+    /// survive. The old code's two trim branches were mutually exclusive (the
+    /// head branch `return false`d before the tail branch could run), so the
+    /// tail was silently dropped.
+    #[test]
+    fn test_enclosed_range_preserves_head_and_tail() {
+        let mut file_attributions: HashMap<String, Vec<LineAttribution>> = HashMap::new();
+        let mut prompts = HashMap::new();
+        let mut sessions = std::collections::BTreeMap::new();
+        let mut humans = std::collections::BTreeMap::new();
+
+        // Oldest commit first: human owns lines 1..=10 of f.txt.
+        let old_log = log_with_single_entry("f.txt", "h_old", 1, 10);
+        extract_attributions_from_log_shifted(
+            &old_log,
+            None,
+            &mut file_attributions,
+            &mut prompts,
+            &mut sessions,
+            &mut humans,
+        );
+
+        // Later commit: AI owns lines 4..=6 (strictly inside the human range).
+        let new_log = log_with_single_entry("f.txt", "ai_new", 4, 6);
+        extract_attributions_from_log_shifted(
+            &new_log,
+            None,
+            &mut file_attributions,
+            &mut prompts,
+            &mut sessions,
+            &mut humans,
+        );
+
+        let mut attrs = file_attributions.remove("f.txt").expect("f.txt present");
+        attrs.sort_by_key(|a| a.start_line);
+
+        // Expect three segments: human head [1,3], AI [4,6], human tail [7,10].
+        assert_eq!(
+            attrs.len(),
+            3,
+            "enclosed AI range must split the human range into head + tail, got: {:?}",
+            attrs
+        );
+        assert_eq!((attrs[0].start_line, attrs[0].end_line), (1, 3));
+        assert_eq!(attrs[0].author_id, "h_old");
+        assert_eq!((attrs[1].start_line, attrs[1].end_line), (4, 6));
+        assert_eq!(attrs[1].author_id, "ai_new");
+        assert_eq!((attrs[2].start_line, attrs[2].end_line), (7, 10));
+        assert_eq!(attrs[2].author_id, "h_old");
+    }
 }
