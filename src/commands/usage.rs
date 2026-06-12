@@ -3,8 +3,16 @@
 use crate::metrics::local_stats::{
     BucketGranularity, LocalActivityStats, RepoActivitySummary, compute_all,
 };
+use serde::Serialize;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Serialize)]
+struct UsageJsonOutput<'a> {
+    #[serde(flatten)]
+    stats: &'a LocalActivityStats,
+    repos: &'a [RepoActivitySummary],
+}
 
 pub fn handle_usage(args: &[String]) {
     let mut json = false;
@@ -108,7 +116,11 @@ pub fn handle_usage(args: &[String]) {
     }
 
     if json {
-        match serde_json::to_string_pretty(&stats) {
+        let output = UsageJsonOutput {
+            stats: &stats,
+            repos: &repos,
+        };
+        match serde_json::to_string_pretty(&output) {
             Ok(s) => println!("{}", s),
             Err(e) => {
                 eprintln!("error serializing JSON: {}", e);
