@@ -15,6 +15,11 @@ export class Config {
     return !!this.getRoot().get<boolean>("experiments.aiTabTracking");
   }
 
+  static getBinaryPath(): string | null {
+    const binaryPath = this.getRoot().get<string>("binaryPath")?.trim();
+    return binaryPath || null;
+  }
+
   static getBlameMode(): BlameMode {
     const mode = this.getRoot().get<string>("blameMode");
     if (mode === 'off' || mode === 'line' || mode === 'all') {
@@ -27,5 +32,4 @@ export class Config {
     await this.getRoot().update("blameMode", mode, vscode.ConfigurationTarget.Global);
   }
 }
-
 

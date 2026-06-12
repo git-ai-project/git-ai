@@ -207,6 +207,12 @@ export class BlameService {
   public clearCache(): void {
     this.contentCache.clear();
   }
+
+  public resetGitAiAvailability(): void {
+    this.gitAiAvailable = null;
+    this.hasShownInstallMessage = false;
+    this.clearCache();
+  }
   
   /**
    * Cancel all pending operations and clear cache.
@@ -472,5 +478,4 @@ export class BlameService {
     return undefined;
   }
 }
-
 
