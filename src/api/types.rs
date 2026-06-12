@@ -1,4 +1,4 @@
-use crate::authorship::authorship_log::{LineRange, PromptRecord};
+use crate::authorship::authorship_log::LineRange;
 use crate::commands::diff::FileDiffJson;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,34 +44,6 @@ impl From<&FileDiffJson> for ApiFileRecord {
     }
 }
 
-/// Bundle data containing prompts and optional files
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BundleData {
-    /// REQUIRED: At least one prompt
-    pub prompts: HashMap<String, PromptRecord>,
-    /// OPTIONAL: File diffs and annotations
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub files: HashMap<String, ApiFileRecord>,
-}
-
-/// Request body for creating a bundle
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CreateBundleRequest {
-    /// Bundle title (min 1 character)
-    pub title: String,
-    /// Bundle data containing prompts and optional files
-    pub data: BundleData,
-    // TODO PR Metadata if linked to PR
-}
-
-/// Success response from bundle creation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreateBundleResponse {
-    pub success: bool,
-    pub id: String,
-    pub url: String,
-}
-
 /// Error response from API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiErrorResponse {
@@ -112,12 +84,6 @@ pub struct CasUploadResponse {
     pub failure_count: usize,
 }
 
-/// Wrapper for messages stored in CAS
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CasMessagesObject {
-    pub messages: Vec<crate::authorship::transcript::Message>,
-}
-
 /// A single authorship note entry (commit SHA + content).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NoteEntry {
@@ -142,25 +108,6 @@ pub struct NotesUploadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotesReadResponse {
     pub notes: std::collections::HashMap<String, String>,
-}
-
-/// Single result from CA prompt store batch read
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CAPromptStoreReadResult {
-    pub hash: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Response from CA prompt store batch read
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CAPromptStoreReadResponse {
-    pub results: Vec<CAPromptStoreReadResult>,
-    pub success_count: usize,
-    pub failure_count: usize,
 }
 
 #[cfg(test)]
@@ -278,20 +225,6 @@ mod tests {
         }
 
         assert_eq!(ranges[2], serde_json::Value::Number(20.into()));
-    }
-
-    #[test]
-    fn test_create_bundle_response_deserialization() {
-        let json = r#"{
-            "success": true,
-            "id": "bundle123",
-            "url": "https://example.com/bundle123"
-        }"#;
-
-        let response: CreateBundleResponse = serde_json::from_str(json).unwrap();
-        assert!(response.success);
-        assert_eq!(response.id, "bundle123");
-        assert_eq!(response.url, "https://example.com/bundle123");
     }
 
     #[test]
@@ -427,22 +360,5 @@ mod tests {
 
         let cloned = record.clone();
         assert_eq!(record, cloned);
-    }
-
-    #[test]
-    fn test_cas_messages_object() {
-        use crate::authorship::transcript::Message;
-
-        let messages = vec![Message::user("test".to_string(), None)];
-
-        let cas_msg = CasMessagesObject {
-            messages: messages.clone(),
-        };
-
-        let json = serde_json::to_string(&cas_msg).unwrap();
-        assert!(json.contains("test"));
-
-        let deserialized: CasMessagesObject = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.messages.len(), 1);
     }
 }
