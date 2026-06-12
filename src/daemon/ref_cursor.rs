@@ -1,0 +1,4485 @@
+use crate::daemon::analyzers::{command_args, normalized_args};
+use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
+use crate::error::GitAiError;
+use crate::git::cli_parser::{
+    explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
+};
+use crate::git::find_repository_in_path;
+use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
+use crate::git::repository::exec_git_stdin;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug)]
+pub struct RefCursor {
+    family: FamilyKey,
+    offsets: HashMap<String, u64>,
+    anchors: HashMap<String, ReflogAnchor>,
+    consumed_offsets: HashMap<String, HashSet<u64>>,
+    consumed_anchors: HashMap<String, HashMap<u64, ReflogAnchor>>,
+    stash_stack: Vec<String>,
+    pending_cherry_pick_source_oids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CursorEntry {
+    key: String,
+    path: PathBuf,
+    reference: String,
+    old: String,
+    new: String,
+    message: String,
+    timestamp_secs: Option<i64>,
+    end_offset: u64,
+}
+
+#[derive(Debug, Clone)]
+struct UpdateRefSpec {
+    reference: String,
+    new_oid: String,
+    old_oid: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum BranchCommandSpec {
+    CreateOrReset {
+        reference: String,
+    },
+    Delete {
+        references: Vec<String>,
+    },
+    Rename {
+        old_reference: Option<String>,
+        new_reference: String,
+    },
+    Copy {
+        old_reference: Option<String>,
+        new_reference: String,
+    },
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchLifecycleKind {
+    Rename,
+    Copy,
+}
+
+#[derive(Debug, Clone)]
+struct BranchLifecycleRecord {
+    old_reference: String,
+    oid: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReflogRecord {
+    old: String,
+    new: String,
+    message: String,
+    timestamp_secs: Option<i64>,
+    end_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReflogAnchor {
+    old: String,
+    new: String,
+    message: String,
+    end_offset: u64,
+}
+
+impl RefCursor {
+    pub fn new(family: FamilyKey) -> Self {
+        Self {
+            family,
+            offsets: HashMap::new(),
+            anchors: HashMap::new(),
+            consumed_offsets: HashMap::new(),
+            consumed_anchors: HashMap::new(),
+            stash_stack: Vec::new(),
+            pending_cherry_pick_source_oids: Vec::new(),
+        }
+    }
+
+    pub fn enrich_command(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<HashMap<String, String>, GitAiError> {
+        cmd.ref_changes.clear();
+        self.initialize_from_command_reflog_start_offsets(cmd)?;
+        let command_start_refs =
+            refs_at_reflog_start_offsets(&self.family, &cmd.reflog_start_offsets)?;
+
+        if cmd.exit_code != 0 && !command_can_move_refs_on_nonzero(cmd.primary_command.as_deref()) {
+            return Ok(command_start_refs);
+        }
+
+        let Some(primary) = cmd.primary_command.as_deref() else {
+            return Ok(command_start_refs);
+        };
+        if !command_uses_ref_cursor(primary) {
+            return Ok(command_start_refs);
+        }
+
+        match primary {
+            "commit" => self.enrich_commit(cmd, state),
+            "revert" => self.enrich_revert(cmd, state),
+            "reset" => {
+                let args = command_args(cmd);
+                let mut expected = self.head_expected_transition(cmd, state);
+                let reset_messages = reset_reflog_messages(&args);
+                if !reset_messages.is_empty() {
+                    expected = expected
+                        .without_old_oid_constraint()
+                        .with_reflog_messages(reset_messages);
+                }
+                self.consume_head_transition_for_command(cmd, state, &["reset:"], expected)
+            }
+            "checkout" => {
+                if checkout_is_path_checkout(cmd) {
+                    Ok(())
+                } else {
+                    self.consume_head_transition_for_command(
+                        cmd,
+                        state,
+                        &["checkout:"],
+                        self.head_expected_transition(cmd, state),
+                    )
+                }
+            }
+            "switch" => self.consume_head_transition_for_command(
+                cmd,
+                state,
+                &["checkout:", "switch:"],
+                self.head_expected_transition(cmd, state),
+            ),
+            "merge" => self.consume_head_transition_for_command(
+                cmd,
+                state,
+                &["merge"],
+                self.head_expected_transition(cmd, state),
+            ),
+            "cherry-pick" => self.enrich_cherry_pick(cmd, state),
+            "rebase" => self.consume_rebase_transition(cmd, state),
+            "pull" => self.consume_pull_transition(cmd, state),
+            "branch" => self.enrich_branch(cmd, state),
+            "stash" => self.enrich_stash(cmd, state),
+            "update-ref" => self.enrich_update_ref(cmd, state),
+            _ => Ok(()),
+        }?;
+
+        if !cmd.ref_changes.is_empty() {
+            cmd.confidence = Confidence::High;
+        }
+        Ok(command_start_refs)
+    }
+
+    fn initialize_from_command_reflog_start_offsets(
+        &mut self,
+        cmd: &NormalizedCommand,
+    ) -> Result<(), GitAiError> {
+        if cmd.reflog_start_offsets.is_empty() {
+            return Ok(());
+        }
+
+        let offsets = cmd
+            .reflog_start_offsets
+            .iter()
+            .map(|(key, offset)| (key.clone(), *offset))
+            .collect::<Vec<_>>();
+        for (key, offset) in offsets {
+            if self.command_start_offset_is_authoritative(&key, offset)? {
+                self.initialize_reflog_cursor(&key, offset)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn enrich_commit(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        let amend = args.iter().any(|arg| arg == "--amend");
+        let prefixes = if amend {
+            &["commit (amend):"] as &[&str]
+        } else {
+            &["commit", "commit (initial):"]
+        };
+        let expected = self
+            .head_expected_transition(cmd, state)
+            .without_old_oid_constraint()
+            .with_reflog_messages(commit_reflog_messages(&args, amend));
+        self.consume_head_transition_for_command(cmd, state, prefixes, expected)
+    }
+
+    fn enrich_cherry_pick(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--abort" | "--quit"))
+        {
+            self.pending_cherry_pick_source_oids.clear();
+            return Ok(());
+        }
+
+        let is_no_commit = args.iter().any(|arg| arg == "--no-commit" || arg == "-n");
+        let is_continue = args.iter().any(|arg| arg == "--continue");
+        let is_skip = args.iter().any(|arg| arg == "--skip");
+
+        if is_skip && !self.pending_cherry_pick_source_oids.is_empty() {
+            self.pending_cherry_pick_source_oids.remove(0);
+        }
+
+        let source_args = if is_continue || is_skip {
+            Vec::new()
+        } else {
+            cherry_pick_source_args(&args)
+        };
+        let explicit_sources = if is_continue || is_skip {
+            Vec::new()
+        } else {
+            resolve_cherry_pick_source_oids_from_sources(cmd, state, &source_args)?
+        };
+        let unresolved_explicit_sources = !source_args.is_empty() && explicit_sources.is_empty();
+        cmd.cherry_pick_source_oids = if explicit_sources.is_empty() && !unresolved_explicit_sources
+        {
+            self.pending_cherry_pick_source_oids.clone()
+        } else {
+            explicit_sources
+        };
+
+        if cmd.exit_code != 0 && unresolved_explicit_sources {
+            return Ok(());
+        }
+
+        if is_no_commit {
+            return Ok(());
+        }
+
+        let source_limit = cmd.cherry_pick_source_oids.len().max(1);
+        self.consume_head_span_for_command_limited(
+            cmd,
+            state,
+            &["cherry-pick:", "commit:", "commit (cherry-pick):"],
+            self.head_expected_transition(cmd, state),
+            source_limit,
+        )?;
+
+        let applied_count = cmd
+            .ref_changes
+            .iter()
+            .filter(|change| change.reference == "HEAD")
+            .count();
+        if cmd.exit_code != 0 {
+            self.pending_cherry_pick_source_oids = cmd
+                .cherry_pick_source_oids
+                .iter()
+                .skip(applied_count.min(cmd.cherry_pick_source_oids.len()))
+                .cloned()
+                .collect();
+        } else if is_continue
+            || is_skip
+            || !cmd.cherry_pick_source_oids.is_empty()
+            || applied_count > 0
+        {
+            self.pending_cherry_pick_source_oids.clear();
+        }
+
+        Ok(())
+    }
+
+    fn enrich_revert(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--abort" | "--quit"))
+        {
+            return Ok(());
+        }
+
+        let is_no_commit = args.iter().any(|arg| arg == "--no-commit" || arg == "-n");
+        let is_continue = args.iter().any(|arg| arg == "--continue");
+        let is_skip = args.iter().any(|arg| arg == "--skip");
+        let source_args = if is_continue || is_skip {
+            Vec::new()
+        } else {
+            revert_source_args(&args)
+        };
+        let explicit_sources = if source_args.is_empty() {
+            Vec::new()
+        } else {
+            resolve_cherry_pick_source_oids_from_sources(cmd, state, &source_args)?
+        };
+        cmd.revert_source_oids = explicit_sources;
+
+        if is_no_commit {
+            return Ok(());
+        }
+
+        let source_limit = cmd.revert_source_oids.len().max(1);
+        self.consume_head_span_for_command_limited(
+            cmd,
+            state,
+            &["revert:"],
+            self.head_expected_transition(cmd, state),
+            source_limit,
+        )
+    }
+
+    fn enrich_branch(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        let spec = parse_branch_command_spec(&args);
+        let mut changes = Vec::new();
+
+        match spec {
+            BranchCommandSpec::CreateOrReset { reference } => {
+                if let Some(entry) = self.find_common_ref_entry(
+                    &reference,
+                    ExpectedTransition::default(),
+                    &["branch:"],
+                )? {
+                    self.consume_entry(&entry)?;
+                    changes.push(entry_to_ref_change(&entry));
+                }
+            }
+            BranchCommandSpec::Delete { references } => {
+                let zero = zero_oid();
+                for reference in references {
+                    self.clear_ref_cursor(&common_key(&reference));
+                    if let Some(old) = state
+                        .refs
+                        .get(&reference)
+                        .filter(|oid| valid_non_zero_oid(oid))
+                    {
+                        changes.push(RefChange {
+                            reference,
+                            old: old.clone(),
+                            new: zero.clone(),
+                        });
+                    }
+                }
+            }
+            BranchCommandSpec::Rename {
+                old_reference,
+                new_reference,
+            } => {
+                self.enrich_branch_relocation(
+                    state,
+                    BranchLifecycleKind::Rename,
+                    old_reference,
+                    new_reference,
+                    &mut changes,
+                )?;
+            }
+            BranchCommandSpec::Copy {
+                old_reference,
+                new_reference,
+            } => {
+                self.enrich_branch_relocation(
+                    state,
+                    BranchLifecycleKind::Copy,
+                    old_reference,
+                    new_reference,
+                    &mut changes,
+                )?;
+            }
+            BranchCommandSpec::None => {}
+        }
+
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn enrich_branch_relocation(
+        &mut self,
+        state: &FamilyState,
+        kind: BranchLifecycleKind,
+        old_reference: Option<String>,
+        new_reference: String,
+        changes: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        let lifecycle = self.consume_branch_lifecycle_record(&new_reference, kind)?;
+        let source_reference = old_reference.or_else(|| {
+            lifecycle
+                .as_ref()
+                .map(|record| record.old_reference.clone())
+        });
+        let source_oid = source_reference
+            .as_ref()
+            .and_then(|reference| state.refs.get(reference).cloned())
+            .or_else(|| lifecycle.as_ref().map(|record| record.oid.clone()));
+        let Some(source_oid) = source_oid.filter(|oid| valid_non_zero_oid(oid)) else {
+            return Ok(());
+        };
+
+        if kind == BranchLifecycleKind::Rename
+            && let Some(source_reference) = source_reference.as_ref()
+            && source_reference != &new_reference
+        {
+            self.clear_ref_cursor(&common_key(source_reference));
+            changes.push(RefChange {
+                reference: source_reference.clone(),
+                old: source_oid.clone(),
+                new: zero_oid(),
+            });
+        }
+
+        let new_old = state
+            .refs
+            .get(&new_reference)
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned()
+            .unwrap_or_else(zero_oid);
+        if new_old != source_oid {
+            changes.push(RefChange {
+                reference: new_reference.clone(),
+                old: new_old,
+                new: source_oid,
+            });
+        }
+        Ok(())
+    }
+
+    fn enrich_update_ref(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        let spec = parse_update_ref_spec(&args)?;
+        let Some(spec) = spec else {
+            let mut changes = Vec::new();
+            if let Some(worktree) = cmd.worktree.as_deref() {
+                while let Some(entry) =
+                    self.find_head_entry(Some(worktree), &[], ExpectedTransition::default())?
+                {
+                    self.consume_entry(&entry)?;
+                    changes.push(entry_to_ref_change(&entry));
+                }
+            }
+            for reference in self.discover_common_refs()? {
+                if reference == "HEAD" || reference == "ORIG_HEAD" {
+                    continue;
+                }
+                while let Some(entry) =
+                    self.find_common_ref_entry(&reference, ExpectedTransition::default(), &[])?
+                {
+                    self.consume_entry(&entry)?;
+                    changes.push(entry_to_ref_change(&entry));
+                }
+            }
+            dedup_ref_changes(&mut changes);
+            cmd.ref_changes = changes;
+            return Ok(());
+        };
+
+        let mut changes = Vec::new();
+        if spec.reference == "HEAD" {
+            if let Some(change) = direct_update_ref_change_from_argv(&spec) {
+                changes.push(change.clone());
+                if let Some(head) =
+                    self.find_direct_ref_transition_entry(cmd, "HEAD", &change.old, &change.new)?
+                {
+                    let head_timestamp = head.timestamp_secs;
+                    self.consume_entry(&head)?;
+                    if let Some(timestamp) = head_timestamp {
+                        if let Some(branch) = current_worktree_branch_ref(cmd, state) {
+                            if let Some(entry) = self
+                                .direct_ref_transition_entries(
+                                    cmd,
+                                    branch,
+                                    &change.old,
+                                    &change.new,
+                                )?
+                                .into_iter()
+                                .find(|entry| entry.timestamp_secs == Some(timestamp))
+                            {
+                                self.consume_entry(&entry)?;
+                                changes.push(entry_to_ref_change(&entry));
+                            }
+                        } else {
+                            self.consume_unique_direct_common_ref_matching_timestamp(
+                                cmd,
+                                &change.old,
+                                &change.new,
+                                timestamp,
+                                &mut changes,
+                            )?;
+                        }
+                    }
+                } else {
+                    self.consume_common_refs_matching_transition(
+                        &change.old,
+                        &change.new,
+                        &mut changes,
+                    )?;
+                }
+            } else if let Some(entry) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                &[],
+                ExpectedTransition {
+                    old_oids: spec.old_oid.iter().cloned().collect(),
+                    new_oid: Some(spec.new_oid.clone()),
+                    messages: HashSet::new(),
+                },
+            )? {
+                self.consume_entry(&entry)?;
+                changes.push(entry_to_ref_change(&entry));
+                self.consume_common_refs_matching_transition(&entry.old, &entry.new, &mut changes)?;
+            }
+        } else if let Some(change) = direct_update_ref_change_from_argv(&spec) {
+            let old = change.old.clone();
+            let new = change.new.clone();
+            changes.push(change);
+            if let Some(branch) =
+                self.find_direct_ref_transition_entry(cmd, &spec.reference, &old, &new)?
+            {
+                let branch_timestamp = branch.timestamp_secs;
+                self.consume_entry(&branch)?;
+                let branch_can_affect_head = current_worktree_branch_ref(cmd, state)
+                    .is_none_or(|current_branch| current_branch == spec.reference);
+                if branch_can_affect_head
+                    && let Some(timestamp) = branch_timestamp
+                    && let Some(head) = self
+                        .direct_ref_transition_entries(cmd, "HEAD", &old, &new)?
+                        .into_iter()
+                        .find(|entry| entry.timestamp_secs == Some(timestamp))
+                {
+                    self.consume_entry(&head)?;
+                    changes.push(entry_to_ref_change(&head));
+                }
+            }
+        } else if let Some(entry) = self.find_common_ref_entry(
+            &spec.reference,
+            ExpectedTransition {
+                old_oids: spec.old_oid.iter().cloned().collect(),
+                new_oid: Some(spec.new_oid.clone()),
+                messages: HashSet::new(),
+            },
+            &[],
+        )? {
+            self.consume_entry(&entry)?;
+            let old = entry.old.clone();
+            let new = entry.new.clone();
+            changes.push(entry_to_ref_change(&entry));
+            if let Some(head) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                &[],
+                ExpectedTransition {
+                    old_oids: [old.clone()].into_iter().collect(),
+                    new_oid: Some(new.clone()),
+                    messages: HashSet::new(),
+                },
+            )? {
+                self.consume_entry(&head)?;
+                changes.push(entry_to_ref_change(&head));
+            }
+        }
+
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn enrich_stash(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        let stash_args = stash_command_args(&args);
+        let kind = stash_args.first().map(String::as_str).unwrap_or("push");
+
+        if matches!(kind, "apply" | "pop" | "drop" | "branch") {
+            let target = if kind == "branch" {
+                stash_args.get(2)
+            } else {
+                stash_args.get(1)
+            };
+            cmd.stash_target_oid = self.resolve_stash_target_at_cursor(target)?;
+        }
+
+        if matches!(kind, "push" | "save") {
+            if let Some(entry) = self.find_stash_push_entry(stash_args, kind)? {
+                self.consume_entry(&entry)?;
+                self.apply_stash_ref_entry(kind, &entry);
+                cmd.ref_changes.push(entry_to_ref_change(&entry));
+            }
+        } else if matches!(kind, "pop" | "drop") {
+            self.consume_destructive_stash_operation(stash_args.get(1), cmd)?;
+        }
+
+        if matches!(kind, "apply" | "pop" | "branch")
+            && (kind == "branch" || !state.refs.contains_key("HEAD"))
+        {
+            let expected = if kind == "branch" {
+                self.head_expected_transition(cmd, state)
+            } else {
+                ExpectedTransition::default()
+            };
+            if let Some(head) = self.find_head_entry(cmd.worktree.as_deref(), &[], expected)?
+                && message_matches(&head.message, &["reset:", "checkout:"])
+            {
+                self.consume_entry(&head)?;
+                cmd.ref_changes.push(entry_to_ref_change(&head));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn consume_destructive_stash_operation(
+        &mut self,
+        target: Option<&String>,
+        cmd: &mut NormalizedCommand,
+    ) -> Result<(), GitAiError> {
+        let key = common_key("refs/stash");
+        let old_cursor = self.offsets.get(&key).copied();
+        let log_len_after = self.common_ref_log_len("refs/stash")?;
+        let log_was_rewritten = match (old_cursor, log_len_after) {
+            (Some(cursor), Some(len)) => len < cursor,
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+        if !log_was_rewritten {
+            return Ok(());
+        }
+
+        let target_oid = cmd
+            .stash_target_oid
+            .clone()
+            .or_else(|| self.resolve_stash_target_at_cursor(target).ok().flatten());
+        let Some(target_oid) = target_oid else {
+            self.sync_common_ref_cursor_to_log_end_after_rewrite("refs/stash")?;
+            return Ok(());
+        };
+
+        let target_index = stash_target_index(target);
+        let old_top = self.stash_stack.first().cloned();
+        self.remove_stash_from_stack(target_index, &target_oid);
+        let new_top = self.stash_stack.first().cloned().unwrap_or_else(zero_oid);
+
+        if old_top.as_deref() == Some(target_oid.as_str()) {
+            cmd.ref_changes.push(RefChange {
+                reference: "refs/stash".to_string(),
+                old: target_oid.clone(),
+                new: new_top,
+            });
+        }
+        if cmd.stash_target_oid.is_none() {
+            cmd.stash_target_oid = Some(target_oid);
+        }
+
+        self.sync_common_ref_cursor_to_log_end_after_rewrite("refs/stash")?;
+        Ok(())
+    }
+
+    fn consume_rebase_transition(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        if cmd.exit_code != 0 && self.consume_failed_explicit_branch_rebase_start(cmd)? {
+            return Ok(());
+        }
+
+        let expected = self.head_expected_transition(cmd, state);
+        let first = match self.find_rebase_start_entry(cmd, expected.clone())? {
+            Some(entry) => Some(entry),
+            None => self.find_head_entry(cmd.worktree.as_deref(), &["rebase"], expected)?,
+        };
+        let Some(first) = first else {
+            return Ok(());
+        };
+
+        let mut changes = vec![entry_to_ref_change(&first)];
+        let old = first.old.clone();
+        let mut new = first.new.clone();
+        self.consume_entry(&first)?;
+
+        let failed = cmd.exit_code != 0;
+        if failed {
+            cmd.ref_changes = changes;
+            return Ok(());
+        }
+
+        let mut consumed_finish = rebase_reflog_action_is(&first.message, "finish");
+        while !consumed_finish {
+            let Some(next) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                &["rebase"],
+                ExpectedTransition {
+                    old_oids: [new.clone()].into_iter().collect(),
+                    new_oid: None,
+                    messages: HashSet::new(),
+                },
+            )?
+            else {
+                break;
+            };
+            if rebase_reflog_action_is(&next.message, "start") {
+                break;
+            }
+            new = next.new.clone();
+            consumed_finish = rebase_reflog_action_is(&next.message, "finish");
+            self.consume_entry(&next)?;
+            changes.push(entry_to_ref_change(&next));
+        }
+
+        self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
+        self.consume_rebase_finish_branch_ref(cmd.worktree.as_deref(), &new, state, &mut changes)?;
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn find_rebase_start_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        expected: ExpectedTransition,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let args = rebase_command_args(cmd);
+        let target = rebase_start_checkout_target_from_args(&args);
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "HEAD", start)?;
+
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && rebase_reflog_action_is(&entry.message, "start")
+                && expected.matches_span_boundary(entry)
+                && target
+                    .as_deref()
+                    .is_none_or(|target| rebase_start_message_targets(&entry.message, target))
+        }))
+    }
+
+    fn consume_failed_explicit_branch_rebase_start(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+    ) -> Result<bool, GitAiError> {
+        let args = rebase_command_args(cmd);
+        let Some(branch_arg) = explicit_rebase_branch_arg(&args) else {
+            return Ok(false);
+        };
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(false);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(false);
+        };
+
+        let branch_ref = branch_arg_to_ref(&branch_arg);
+        let head_key = head_key(&git_dir);
+        let head_path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&head_key, &head_path)?;
+        let head_entries =
+            read_reflog_entries_including_noops(head_key, &head_path, "HEAD", start)?;
+        let Some(start_marker) =
+            rebase_start_marker_for_explicit_branch(&head_entries, &branch_ref)
+        else {
+            return Ok(false);
+        };
+
+        let finish_new = latest_rebase_finish_for_branch(&head_entries, &branch_ref)
+            .filter(|finish| finish.end_offset > start_marker.end_offset)
+            .map(|finish| finish.new.as_str());
+        let original_head =
+            self.original_head_for_explicit_rebase_branch(&branch_ref, finish_new)?;
+
+        let mut changes = vec![entry_to_ref_change(start_marker)];
+        if let Some(original_head) = original_head {
+            changes.push(RefChange {
+                reference: branch_ref,
+                old: original_head.clone(),
+                new: original_head,
+            });
+        }
+
+        self.advance_cursor_to_entry(start_marker);
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(true)
+    }
+
+    fn consume_pull_transition(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let action = pull_reflog_action(cmd);
+        let prefixes = pull_reflog_message_prefixes(&action);
+        let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
+        let expected = self.head_expected_transition(cmd, state);
+        self.consume_pull_head_span_for_action(cmd, state, &prefix_refs, expected, &action)
+    }
+
+    fn consume_head_entry_for_command(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        entry: CursorEntry,
+    ) -> Result<(), GitAiError> {
+        self.consume_entry(&entry)?;
+        let old = entry.old.clone();
+        let new = entry.new.clone();
+        let mut changes = vec![entry_to_ref_change(&entry)];
+        self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn consume_head_transition_for_command(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        _state: &FamilyState,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+    ) -> Result<(), GitAiError> {
+        let Some(entry) =
+            self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?
+        else {
+            return Ok(());
+        };
+
+        self.consume_head_entry_for_command(cmd, entry)
+    }
+
+    fn consume_head_span_for_command_limited(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        _state: &FamilyState,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+        limit: usize,
+    ) -> Result<(), GitAiError> {
+        if limit == 0 {
+            return Ok(());
+        }
+        let Some(first) = self.find_head_span_start_entry(
+            cmd.worktree.as_deref(),
+            message_prefixes,
+            expected,
+            limit,
+        )?
+        else {
+            return Ok(());
+        };
+
+        let old = first.old.clone();
+        let mut new = first.new.clone();
+        let mut changes = vec![entry_to_ref_change(&first)];
+        self.consume_entry(&first)?;
+
+        while changes.len() < limit
+            && let Some(next) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                message_prefixes,
+                ExpectedTransition {
+                    old_oids: [new.clone()].into_iter().collect(),
+                    new_oid: None,
+                    messages: HashSet::new(),
+                },
+            )?
+        {
+            new = next.new.clone();
+            self.consume_entry(&next)?;
+            changes.push(entry_to_ref_change(&next));
+        }
+
+        self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn consume_pull_head_span_for_action(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+        action: &str,
+    ) -> Result<(), GitAiError> {
+        let first = match self.find_pull_start_entry(cmd, expected.clone(), action)? {
+            Some(entry) => Some(entry),
+            None => self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?,
+        };
+        let Some(first) = first else {
+            return Ok(());
+        };
+
+        let old = first.old.clone();
+        let mut new = first.new.clone();
+        let mut changes = vec![entry_to_ref_change(&first)];
+        let mut consumed_finish = pull_reflog_action_state(&first.message, action).is_none()
+            || pull_reflog_action_is(&first.message, action, "finish");
+        self.consume_entry(&first)?;
+
+        while !consumed_finish
+            && let Some(next) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                message_prefixes,
+                ExpectedTransition {
+                    old_oids: [new.clone()].into_iter().collect(),
+                    new_oid: None,
+                    messages: HashSet::new(),
+                },
+            )?
+        {
+            if pull_reflog_action_starts_new_command(&next.message, action) {
+                break;
+            }
+            new = next.new.clone();
+            consumed_finish = pull_reflog_action_is(&next.message, action, "finish");
+            self.consume_entry(&next)?;
+            changes.push(entry_to_ref_change(&next));
+        }
+
+        self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
+        self.consume_pull_finish_branch_ref(
+            cmd.worktree.as_deref(),
+            &new,
+            state,
+            action,
+            message_prefixes,
+            &mut changes,
+        )?;
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn find_pull_start_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        expected: ExpectedTransition,
+        action: &str,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "HEAD", start)?;
+
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && pull_reflog_action_is(&entry.message, action, "start")
+                && expected.matches_span_boundary(entry)
+        }))
+    }
+
+    fn find_head_span_start_entry(
+        &mut self,
+        worktree: Option<&Path>,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+        limit: usize,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = worktree else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let path = git_dir.join("logs").join("HEAD");
+        let key = head_key(&git_dir);
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "HEAD", start)?;
+        let mut contiguous = VecDeque::<CursorEntry>::new();
+
+        for entry in entries {
+            if self.entry_consumed(&entry) || !message_matches(&entry.message, message_prefixes) {
+                contiguous.clear();
+                continue;
+            }
+            if contiguous
+                .back()
+                .is_some_and(|previous| previous.new != entry.old)
+            {
+                contiguous.clear();
+            }
+            let matches = expected.matches(&entry);
+            contiguous.push_back(entry);
+            while contiguous.len() > limit {
+                contiguous.pop_front();
+            }
+            if matches {
+                return Ok(contiguous.front().cloned());
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn find_head_entry(
+        &mut self,
+        worktree: Option<&Path>,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = worktree else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let path = git_dir.join("logs").join("HEAD");
+        self.find_entry_in_log(
+            head_key(&git_dir),
+            &path,
+            "HEAD",
+            expected,
+            message_prefixes,
+        )
+    }
+
+    fn consume_unique_direct_common_ref_matching_timestamp(
+        &mut self,
+        cmd: &NormalizedCommand,
+        old: &str,
+        new: &str,
+        timestamp: i64,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        let mut matches = Vec::new();
+        for reference in self.discover_common_refs()? {
+            if reference == "ORIG_HEAD" || reference == "refs/stash" {
+                continue;
+            }
+            matches.extend(
+                self.direct_ref_transition_entries(cmd, &reference, old, new)?
+                    .into_iter()
+                    .filter(|entry| entry.timestamp_secs == Some(timestamp)),
+            );
+        }
+        if matches.len() == 1 {
+            let entry = matches.remove(0);
+            self.consume_entry(&entry)?;
+            out.push(entry_to_ref_change(&entry));
+        }
+        Ok(())
+    }
+
+    fn find_direct_ref_transition_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        reference: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        Ok(self
+            .direct_ref_transition_entries(cmd, reference, old, new)?
+            .into_iter()
+            .next())
+    }
+
+    fn direct_ref_transition_entries(
+        &mut self,
+        cmd: &NormalizedCommand,
+        reference: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<Vec<CursorEntry>, GitAiError> {
+        let (key, path) = if reference == "HEAD" {
+            let Some(worktree) = cmd.worktree.as_deref() else {
+                return Ok(Vec::new());
+            };
+            let Some(git_dir) = git_dir_for_worktree(worktree) else {
+                return Ok(Vec::new());
+            };
+            (head_key(&git_dir), git_dir.join("logs").join("HEAD"))
+        } else {
+            (
+                common_key(reference),
+                self.common_dir().join("logs").join(reference),
+            )
+        };
+
+        let command_window = reflog_timestamp_window(cmd);
+        let matches_command = |entry: &CursorEntry, this: &Self| {
+            !this.entry_consumed(entry)
+                && entry.old == old
+                && entry.new == new
+                && entry
+                    .timestamp_secs
+                    .is_some_and(|timestamp| command_window.contains(timestamp))
+        };
+
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key.clone(), &path, reference, start)?;
+        let matches = entries
+            .into_iter()
+            .filter(|entry| matches_command(entry, self))
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return Ok(matches);
+        }
+
+        Ok(read_reflog_entries(key, &path, reference, None)?
+            .into_iter()
+            .filter(|entry| matches_command(entry, self))
+            .collect())
+    }
+
+    fn find_common_ref_entry(
+        &mut self,
+        reference: &str,
+        expected: ExpectedTransition,
+        message_prefixes: &[&str],
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let path = self.common_dir().join("logs").join(reference);
+        self.find_entry_in_log(
+            common_key(reference),
+            &path,
+            reference,
+            expected,
+            message_prefixes,
+        )
+    }
+
+    fn find_stash_push_entry(
+        &mut self,
+        stash_args: &[String],
+        kind: &str,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let expected_message = stash_push_message_from_args(stash_args, kind);
+        let path = self.common_dir().join("logs").join("refs/stash");
+        let key = common_key("refs/stash");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "refs/stash", start)?;
+
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && expected_message
+                    .as_deref()
+                    .is_none_or(|message| stash_reflog_message_matches(&entry.message, message))
+        }))
+    }
+
+    fn find_entry_in_log(
+        &mut self,
+        key: String,
+        path: &Path,
+        reference: &str,
+        expected: ExpectedTransition,
+        message_prefixes: &[&str],
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let start = self.reflog_start_offset(&key, path)?;
+        let entries = read_reflog_entries(key.clone(), path, reference, start)?;
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && expected.matches(entry)
+                && message_matches(&entry.message, message_prefixes)
+        }))
+    }
+
+    fn consume_common_refs_matching_transition(
+        &mut self,
+        old: &str,
+        new: &str,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        let refs = self.discover_common_refs()?;
+        for reference in refs {
+            if reference == "HEAD" || reference == "ORIG_HEAD" || reference == "refs/stash" {
+                continue;
+            }
+            let expected = ExpectedTransition {
+                old_oids: [old.to_string()].into_iter().collect(),
+                new_oid: Some(new.to_string()),
+                messages: HashSet::new(),
+            };
+            if let Some(entry) = self.find_common_ref_entry(&reference, expected, &[])? {
+                self.consume_entry(&entry)?;
+                out.push(entry_to_ref_change(&entry));
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_rebase_finish_branch_ref(
+        &mut self,
+        worktree: Option<&Path>,
+        new: &str,
+        state: &FamilyState,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        self.consume_finish_branch_ref(
+            worktree,
+            new,
+            state,
+            &["rebase"],
+            |message| rebase_finish_returned_branch(message).map(ToOwned::to_owned),
+            out,
+        )
+    }
+
+    fn consume_pull_finish_branch_ref(
+        &mut self,
+        worktree: Option<&Path>,
+        new: &str,
+        state: &FamilyState,
+        action: &str,
+        message_prefixes: &[&str],
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        self.consume_finish_branch_ref(
+            worktree,
+            new,
+            state,
+            message_prefixes,
+            |message| pull_finish_returned_branch(message, action),
+            out,
+        )
+    }
+
+    fn consume_finish_branch_ref<F>(
+        &mut self,
+        worktree: Option<&Path>,
+        new: &str,
+        state: &FamilyState,
+        message_prefixes: &[&str],
+        branch_from_message: F,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let Some(worktree) = worktree else {
+            return Ok(());
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(());
+        };
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries_including_noops(key, &path, "HEAD", start)?;
+        let Some(finish) = entries
+            .into_iter()
+            .find(|entry| entry.new == new && branch_from_message(&entry.message).is_some())
+        else {
+            return Ok(());
+        };
+        let Some(branch_ref) = branch_from_message(&finish.message) else {
+            return Ok(());
+        };
+
+        self.advance_cursor_to_entry(&finish);
+        let old_oids = state
+            .refs
+            .get(&branch_ref)
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned()
+            .into_iter()
+            .collect();
+        if let Some(entry) = self.find_common_ref_entry(
+            &branch_ref,
+            ExpectedTransition {
+                old_oids,
+                new_oid: Some(new.to_string()),
+                messages: HashSet::new(),
+            },
+            message_prefixes,
+        )? {
+            self.consume_entry(&entry)?;
+            out.push(entry_to_ref_change(&entry));
+        }
+        Ok(())
+    }
+
+    fn resolve_stash_target_at_cursor(
+        &self,
+        target: Option<&String>,
+    ) -> Result<Option<String>, GitAiError> {
+        let target = target.map(String::as_str).unwrap_or("stash@{0}");
+        if is_valid_git_oid(target) {
+            return Ok(Some(target.to_string()));
+        }
+        if matches!(target, "stash" | "refs/stash") {
+            return self.resolve_stash_target_at_cursor(Some(&"stash@{0}".to_string()));
+        }
+        let Some(index) = target
+            .strip_prefix("stash@{")
+            .and_then(|value| value.strip_suffix('}'))
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            return Ok(None);
+        };
+        if let Some(oid) = self.stash_stack.get(index) {
+            return Ok(Some(oid.clone()));
+        }
+        let path = self.common_dir().join("logs").join("refs/stash");
+        let key = common_key("refs/stash");
+        let entries = read_reflog_entries(key.clone(), &path, "refs/stash", Some(0))?;
+        let cursor = self.offsets.get(&key).copied().unwrap_or(u64::MAX);
+        let mut stack = entries
+            .into_iter()
+            .filter(|entry| entry.end_offset <= cursor)
+            .filter(|entry| valid_non_zero_oid(&entry.new))
+            .map(|entry| entry.new)
+            .collect::<Vec<_>>();
+        stack.reverse();
+        Ok(stack.get(index).cloned())
+    }
+
+    fn apply_stash_ref_entry(&mut self, kind: &str, entry: &CursorEntry) {
+        match kind {
+            "push" | "save" => {
+                if valid_non_zero_oid(&entry.new)
+                    && !self.stash_stack.iter().any(|oid| oid == &entry.new)
+                {
+                    self.stash_stack.insert(0, entry.new.clone());
+                }
+            }
+            "pop" | "drop" | "branch" => {
+                if let Some(position) = self.stash_stack.iter().position(|oid| oid == &entry.old) {
+                    self.stash_stack.remove(position);
+                }
+                if valid_non_zero_oid(&entry.new)
+                    && !self.stash_stack.iter().any(|oid| oid == &entry.new)
+                {
+                    self.stash_stack.insert(0, entry.new.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn discover_common_refs(&self) -> Result<Vec<String>, GitAiError> {
+        let logs = self.common_dir().join("logs");
+        let mut refs = Vec::new();
+        discover_reflog_refs(&logs, &logs, &mut refs)?;
+        refs.sort();
+        refs.dedup();
+        Ok(refs)
+    }
+
+    fn entry_consumed(&self, entry: &CursorEntry) -> bool {
+        self.consumed_offsets
+            .get(&entry.key)
+            .is_some_and(|offsets| offsets.contains(&entry.end_offset))
+            && self
+                .consumed_anchors
+                .get(&entry.key)
+                .and_then(|anchors| anchors.get(&entry.end_offset))
+                .is_some_and(|anchor| anchor == &ReflogAnchor::from(entry))
+    }
+
+    fn reflog_start_offset(&mut self, key: &str, path: &Path) -> Result<Option<u64>, GitAiError> {
+        let Some(offset) = self.offsets.get(key).copied() else {
+            return Ok(None);
+        };
+        if offset == 0 {
+            return Ok(Some(0));
+        }
+
+        let len = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.clear_ref_cursor(key);
+                return Ok(None);
+            }
+            Err(error) => return Err(GitAiError::IoError(error)),
+        };
+        if offset > len {
+            self.clear_ref_cursor(key);
+            return Ok(None);
+        }
+
+        if let Some(anchor) = self.anchors.get(key) {
+            let record = read_reflog_record_ending_at(path, offset)?;
+            if record.as_ref().map(ReflogAnchor::from) != Some(anchor.clone()) {
+                self.clear_ref_cursor(key);
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(offset))
+    }
+
+    fn initialize_reflog_cursor(&mut self, key: &str, offset: u64) -> Result<(), GitAiError> {
+        self.offsets.insert(key.to_string(), offset);
+        self.consumed_offsets.remove(key);
+        self.consumed_anchors.remove(key);
+        if offset == 0 {
+            self.anchors.remove(key);
+            return Ok(());
+        }
+        let Some(path) = self.reflog_path_for_key(key) else {
+            self.anchors.remove(key);
+            return Ok(());
+        };
+        if let Some(record) = read_reflog_record_ending_at(&path, offset)? {
+            self.anchors
+                .insert(key.to_string(), ReflogAnchor::from(&record));
+        } else {
+            self.anchors.remove(key);
+        }
+        Ok(())
+    }
+
+    fn command_start_offset_is_authoritative(
+        &self,
+        key: &str,
+        offset: u64,
+    ) -> Result<bool, GitAiError> {
+        let Some(existing) = self.offsets.get(key).copied() else {
+            if key.starts_with("common:") {
+                return Ok(true);
+            }
+            return self.reflog_has_records_after_offset(key, offset);
+        };
+        if existing >= offset {
+            return Ok(false);
+        }
+        self.reflog_has_records_after_offset(key, offset)
+    }
+
+    fn reflog_has_records_after_offset(&self, key: &str, offset: u64) -> Result<bool, GitAiError> {
+        let Some(path) = self.reflog_path_for_key(key) else {
+            return Ok(false);
+        };
+        let len = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(GitAiError::IoError(error)),
+        };
+        if offset >= len {
+            return Ok(false);
+        }
+        Ok(!read_reflog_records(&path, Some(offset))?.is_empty())
+    }
+
+    fn reflog_path_for_key(&self, key: &str) -> Option<PathBuf> {
+        if let Some(reference) = key.strip_prefix("common:") {
+            return Some(self.common_dir().join("logs").join(reference));
+        }
+        let git_dir = key
+            .strip_prefix("worktree:")
+            .and_then(|value| value.strip_suffix(":HEAD"))?;
+        Some(PathBuf::from(git_dir).join("logs").join("HEAD"))
+    }
+
+    fn ref_tip_at_cursor_start(&self, key: &str) -> Option<String> {
+        self.anchors
+            .get(key)
+            .map(|anchor| anchor.new.clone())
+            .filter(|oid| valid_non_zero_oid(oid))
+    }
+
+    fn consume_entry(&mut self, entry: &CursorEntry) -> Result<(), GitAiError> {
+        self.consumed_offsets
+            .entry(entry.key.clone())
+            .or_default()
+            .insert(entry.end_offset);
+        self.consumed_anchors
+            .entry(entry.key.clone())
+            .or_default()
+            .insert(entry.end_offset, ReflogAnchor::from(entry));
+        self.compact_consumed_entries(&entry.key, &entry.path, &entry.reference)
+    }
+
+    fn advance_cursor_to_entry(&mut self, entry: &CursorEntry) {
+        self.offsets.insert(entry.key.clone(), entry.end_offset);
+        self.anchors
+            .insert(entry.key.clone(), ReflogAnchor::from(entry));
+        self.consumed_offsets.remove(&entry.key);
+        self.consumed_anchors.remove(&entry.key);
+    }
+
+    fn compact_consumed_entries(
+        &mut self,
+        key: &str,
+        path: &Path,
+        reference: &str,
+    ) -> Result<(), GitAiError> {
+        let start = self.offsets.get(key).copied();
+        let entries = read_reflog_entries(key.to_string(), path, reference, start)?;
+        let mut advanced_to = start.unwrap_or(0);
+        let mut anchor = None;
+        for entry in entries {
+            if self.entry_consumed(&entry) {
+                advanced_to = entry.end_offset;
+                anchor = Some(ReflogAnchor::from(&entry));
+            } else {
+                break;
+            }
+        }
+
+        if advanced_to > start.unwrap_or(0) {
+            self.offsets.insert(key.to_string(), advanced_to);
+            if let Some(anchor) = anchor {
+                self.anchors.insert(key.to_string(), anchor);
+            }
+            if let Some(consumed) = self.consumed_offsets.get_mut(key) {
+                consumed.retain(|offset| *offset > advanced_to);
+                if consumed.is_empty() {
+                    self.consumed_offsets.remove(key);
+                }
+            }
+            if let Some(anchors) = self.consumed_anchors.get_mut(key) {
+                anchors.retain(|offset, _| *offset > advanced_to);
+                if anchors.is_empty() {
+                    self.consumed_anchors.remove(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_branch_lifecycle_record(
+        &mut self,
+        reference: &str,
+        kind: BranchLifecycleKind,
+    ) -> Result<Option<BranchLifecycleRecord>, GitAiError> {
+        let path = self.common_dir().join("logs").join(reference);
+        let key = common_key(reference);
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key.clone(), &path, reference, start)?;
+        for entry in entries {
+            let Some((old_reference, new_reference)) =
+                parse_branch_lifecycle_message(kind, &entry.message)
+            else {
+                continue;
+            };
+            if new_reference != reference {
+                continue;
+            }
+            self.consume_entry(&entry)?;
+            return Ok(Some(BranchLifecycleRecord {
+                old_reference,
+                oid: entry.new,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn sync_common_ref_cursor_to_log_end_after_rewrite(
+        &mut self,
+        reference: &str,
+    ) -> Result<(), GitAiError> {
+        let key = common_key(reference);
+        let path = self.common_dir().join("logs").join(reference);
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                let len = metadata.len();
+                self.offsets.insert(key.clone(), len);
+                self.consumed_offsets.remove(&key);
+                self.consumed_anchors.remove(&key);
+                if let Some(record) = read_reflog_record_ending_at(&path, len)? {
+                    self.anchors.insert(key, ReflogAnchor::from(&record));
+                } else {
+                    self.anchors.remove(&key);
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.clear_ref_cursor(&key);
+                Ok(())
+            }
+            Err(error) => Err(GitAiError::IoError(error)),
+        }
+    }
+
+    fn common_ref_log_len(&self, reference: &str) -> Result<Option<u64>, GitAiError> {
+        let path = self.common_dir().join("logs").join(reference);
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(GitAiError::IoError(error)),
+        }
+    }
+
+    fn original_head_for_explicit_rebase_branch(
+        &mut self,
+        branch_ref: &str,
+        finished_new: Option<&str>,
+    ) -> Result<Option<String>, GitAiError> {
+        let path = self.common_dir().join("logs").join(branch_ref);
+        let key = common_key(branch_ref);
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key.clone(), &path, branch_ref, start)?;
+
+        if let Some(finished_new) = finished_new
+            && let Some(entry) = entries.iter().rev().find(|entry| {
+                entry.new == finished_new
+                    && rebase_branch_finish_message_is(&entry.message, branch_ref)
+                    && valid_non_zero_oid(&entry.old)
+            })
+        {
+            return Ok(Some(entry.old.clone()));
+        }
+
+        let latest_entry_tip = entries
+            .iter()
+            .rev()
+            .find(|entry| valid_non_zero_oid(&entry.new))
+            .map(|entry| entry.new.clone());
+        Ok(latest_entry_tip.or_else(|| self.ref_tip_at_cursor_start(&key)))
+    }
+
+    fn remove_stash_from_stack(&mut self, target_index: Option<usize>, target_oid: &str) {
+        if let Some(index) = target_index
+            && self
+                .stash_stack
+                .get(index)
+                .is_some_and(|oid| oid == target_oid)
+        {
+            self.stash_stack.remove(index);
+            return;
+        }
+        if let Some(position) = self.stash_stack.iter().position(|oid| oid == target_oid) {
+            self.stash_stack.remove(position);
+        }
+    }
+
+    fn common_dir(&self) -> PathBuf {
+        PathBuf::from(&self.family.0)
+    }
+
+    fn head_expected_transition(
+        &self,
+        cmd: &NormalizedCommand,
+        state: &FamilyState,
+    ) -> ExpectedTransition {
+        let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
+        if self.head_cursor_initialized(cmd.worktree.as_deref()) {
+            expected.without_old_oid_constraint()
+        } else {
+            expected
+        }
+    }
+
+    fn head_cursor_initialized(&self, worktree: Option<&Path>) -> bool {
+        let Some(worktree) = worktree else {
+            return false;
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return false;
+        };
+        self.offsets.contains_key(&head_key(&git_dir))
+    }
+
+    fn clear_ref_cursor(&mut self, key: &str) {
+        self.offsets.remove(key);
+        self.anchors.remove(key);
+        self.consumed_offsets.remove(key);
+        self.consumed_anchors.remove(key);
+    }
+}
+
+pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> HashMap<String, u64> {
+    let mut offsets = HashMap::new();
+
+    if let Some(git_dir) = git_dir_for_worktree(worktree) {
+        let path = git_dir.join("logs").join("HEAD");
+        if let Ok(metadata) = fs::metadata(&path) {
+            offsets.insert(head_key(&git_dir), metadata.len());
+        }
+    }
+
+    let Some(common_dir) = common_dir_for_worktree(worktree) else {
+        return offsets;
+    };
+    let logs = common_dir.join("logs");
+    let mut refs = Vec::new();
+    if discover_reflog_refs(&logs, &logs, &mut refs).is_ok() {
+        for reference in refs {
+            if reference == "HEAD" {
+                continue;
+            }
+            let path = logs.join(&reference);
+            if let Ok(metadata) = fs::metadata(&path) {
+                offsets.insert(common_key(&reference), metadata.len());
+            }
+        }
+    }
+    offsets
+}
+
+pub(crate) fn refs_at_reflog_start_offsets(
+    family: &FamilyKey,
+    offsets: &HashMap<String, u64>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    let common_dir = PathBuf::from(&family.0);
+    let mut refs = HashMap::new();
+
+    for (key, offset) in offsets {
+        if *offset == 0 {
+            continue;
+        }
+        let Some((reference, path)) = reflog_reference_and_path_for_key(&common_dir, key) else {
+            continue;
+        };
+        let Some(record) = read_reflog_record_ending_at(&path, *offset)? else {
+            continue;
+        };
+        if valid_non_zero_oid(&record.new) {
+            refs.insert(reference, record.new);
+        }
+    }
+
+    Ok(refs)
+}
+
+fn reflog_reference_and_path_for_key(common_dir: &Path, key: &str) -> Option<(String, PathBuf)> {
+    if let Some(reference) = key.strip_prefix("common:") {
+        return Some((
+            reference.to_string(),
+            common_dir.join("logs").join(reference),
+        ));
+    }
+    let git_dir = key
+        .strip_prefix("worktree:")
+        .and_then(|value| value.strip_suffix(":HEAD"))?;
+    Some((
+        "HEAD".to_string(),
+        PathBuf::from(git_dir).join("logs").join("HEAD"),
+    ))
+}
+
+impl From<&CursorEntry> for ReflogAnchor {
+    fn from(entry: &CursorEntry) -> Self {
+        Self {
+            old: entry.old.clone(),
+            new: entry.new.clone(),
+            message: entry.message.clone(),
+            end_offset: entry.end_offset,
+        }
+    }
+}
+
+impl From<&ReflogRecord> for ReflogAnchor {
+    fn from(record: &ReflogRecord) -> Self {
+        Self {
+            old: record.old.clone(),
+            new: record.new.clone(),
+            message: record.message.clone(),
+            end_offset: record.end_offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExpectedTransition {
+    old_oids: HashSet<String>,
+    new_oid: Option<String>,
+    messages: HashSet<String>,
+}
+
+fn current_worktree_branch_ref<'a>(
+    cmd: &NormalizedCommand,
+    state: &'a FamilyState,
+) -> Option<&'a str> {
+    let worktree = cmd.worktree.as_ref()?;
+    let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
+    state
+        .worktrees
+        .get(&canonical)
+        .or_else(|| state.worktrees.get(worktree))
+        .and_then(|worktree| worktree.branch.as_deref())
+}
+
+impl ExpectedTransition {
+    fn with_reflog_messages(mut self, messages: HashSet<String>) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    fn without_old_oid_constraint(mut self) -> Self {
+        self.old_oids.clear();
+        self
+    }
+
+    fn from_state_and_working_logs(cmd: &NormalizedCommand, state: &FamilyState) -> Self {
+        let mut old_oids = HashSet::new();
+        if let Some(head) = state
+            .refs
+            .get("HEAD")
+            .filter(|head| valid_non_zero_oid(head))
+        {
+            old_oids.insert(head.clone());
+        }
+        for (reference, oid) in &state.refs {
+            if reference.starts_with("refs/heads/") && valid_non_zero_oid(oid) {
+                old_oids.insert(oid.clone());
+            }
+        }
+        if let Some(worktree) = cmd.worktree.as_ref() {
+            old_oids.extend(working_log_base_oids(worktree));
+        }
+        Self {
+            old_oids,
+            new_oid: None,
+            messages: HashSet::new(),
+        }
+    }
+
+    fn matches(&self, entry: &CursorEntry) -> bool {
+        if !valid_ref_transition(&entry.old, &entry.new) {
+            return false;
+        }
+        if !self.messages.is_empty() && !self.messages.contains(&entry.message) {
+            return false;
+        }
+        if !self.old_oids.is_empty() && !self.old_oids.contains(&entry.old) {
+            return false;
+        }
+        if let Some(new_oid) = self.new_oid.as_ref()
+            && &entry.new != new_oid
+        {
+            return false;
+        }
+        true
+    }
+
+    fn matches_span_boundary(&self, entry: &CursorEntry) -> bool {
+        if !valid_ref_transition(&entry.old, &entry.new) {
+            return false;
+        }
+        if !self.messages.is_empty() && !self.messages.contains(&entry.message) {
+            return false;
+        }
+        if !self.old_oids.is_empty()
+            && !self.old_oids.contains(&entry.old)
+            && !self.old_oids.contains(&entry.new)
+        {
+            return false;
+        }
+        if let Some(new_oid) = self.new_oid.as_ref()
+            && &entry.new != new_oid
+        {
+            return false;
+        }
+        true
+    }
+}
+
+fn commit_reflog_messages(args: &[String], amend: bool) -> HashSet<String> {
+    let Some(subject) = commit_subject_from_args(args) else {
+        return HashSet::new();
+    };
+    let modes = if amend {
+        ["commit (amend):"].as_slice()
+    } else {
+        [
+            "commit:",
+            "commit (initial):",
+            "commit (merge):",
+            "commit (cherry-pick):",
+            "commit (revert):",
+        ]
+        .as_slice()
+    };
+    modes
+        .iter()
+        .map(|mode| format!("{} {}", mode, subject))
+        .collect()
+}
+
+fn reset_reflog_messages(args: &[String]) -> HashSet<String> {
+    let Some(target) = reset_target_arg(args) else {
+        return HashSet::new();
+    };
+    [format!("reset: moving to {target}")].into_iter().collect()
+}
+
+fn reset_target_arg(args: &[String]) -> Option<String> {
+    let mut idx = if args.first().is_some_and(|arg| arg == "reset") {
+        1
+    } else {
+        0
+    };
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--" => return None,
+            "--pathspec-from-file" => idx += 2,
+            value if value.starts_with("--pathspec-from-file=") => idx += 1,
+            value if value.starts_with('-') => idx += 1,
+            value => return Some(value.to_string()),
+        }
+    }
+    None
+}
+
+fn commit_subject_from_args(args: &[String]) -> Option<String> {
+    let mut idx = if args.first().is_some_and(|arg| arg == "commit") {
+        1
+    } else {
+        0
+    };
+    while idx < args.len() {
+        let arg = &args[idx];
+        match arg.as_str() {
+            "-m" | "--message" => {
+                return args.get(idx + 1).and_then(|value| commit_subject(value));
+            }
+            value if value.starts_with("--message=") => {
+                return value.strip_prefix("--message=").and_then(commit_subject);
+            }
+            value if value.starts_with("-m") && value.len() > 2 => {
+                return commit_subject(&value[2..]);
+            }
+            "--" => return None,
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
+fn commit_subject(message: &str) -> Option<String> {
+    message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.to_string())
+}
+
+fn resolve_cherry_pick_source_oids_from_sources(
+    cmd: &NormalizedCommand,
+    state: &FamilyState,
+    sources: &[&str],
+) -> Result<Vec<String>, GitAiError> {
+    let Some(worktree) = cmd.worktree.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    let has_range = sources
+        .iter()
+        .any(|source| cherry_pick_source_is_range(source));
+    let resolved = if has_range {
+        resolve_cherry_pick_sources_with_rev_list(&repo, sources, &state.refs)?
+    } else {
+        resolve_cherry_pick_sources_with_cat_file(&repo, sources, &state.refs)?
+    };
+
+    for oid in resolved {
+        if seen.insert(oid.clone()) {
+            out.push(oid);
+        }
+    }
+
+    Ok(out)
+}
+
+fn cherry_pick_source_args(args: &[String]) -> Vec<&str> {
+    let args = if args.first().is_some_and(|arg| arg == "cherry-pick") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut sources = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            sources.extend(args[idx + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
+            return Vec::new();
+        }
+        if matches!(
+            arg,
+            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy" | "--gpg-sign"
+        ) {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with("--mainline=")
+            || arg.starts_with("--strategy=")
+            || arg.starts_with("--strategy-option=")
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-m")
+            || arg.starts_with("-X")
+            || arg.starts_with("-S")
+        {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if !arg.is_empty() {
+            sources.push(arg);
+        }
+        idx += 1;
+    }
+    sources
+}
+
+fn revert_source_args(args: &[String]) -> Vec<&str> {
+    let args = if args.first().is_some_and(|arg| arg == "revert") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut sources = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            sources.extend(args[idx + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
+            return Vec::new();
+        }
+        if matches!(arg, "-m" | "--mainline" | "-S" | "--gpg-sign") {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with("--mainline=") || arg.starts_with("--gpg-sign=") || arg.starts_with("-S")
+        {
+            idx += 1;
+            continue;
+        }
+        if matches!(arg, "-n" | "--no-commit" | "--no-edit" | "-e" | "--edit") {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if !arg.is_empty() {
+            sources.push(arg);
+        }
+        idx += 1;
+    }
+    sources
+}
+
+fn cherry_pick_source_is_range(source: &str) -> bool {
+    source.contains("..")
+}
+
+fn resolve_cherry_pick_sources_with_rev_list(
+    repo: &crate::git::repository::Repository,
+    sources: &[&str],
+    refs: &HashMap<String, String>,
+) -> Result<Vec<String>, GitAiError> {
+    let concretized: Vec<String> = sources
+        .iter()
+        .filter_map(|source| {
+            if cherry_pick_source_is_range(source) {
+                concretize_revision_range(source, refs)
+            } else {
+                concretize_revision_expr(source, refs)
+            }
+        })
+        .collect();
+    if concretized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        "--reverse".to_string(),
+        "--stdin".to_string(),
+    ]);
+    let stdin_data = concretized.join("\n") + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_valid_git_oid(line))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn resolve_cherry_pick_sources_with_cat_file(
+    repo: &crate::git::repository::Repository,
+    sources: &[&str],
+    refs: &HashMap<String, String>,
+) -> Result<Vec<String>, GitAiError> {
+    let specs: Vec<String> = sources
+        .iter()
+        .filter_map(|source| concretize_revision_expr(source, refs))
+        .map(|expr| format!("{expr}^{{commit}}"))
+        .collect();
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "cat-file".to_string(),
+        "--batch-check=%(objectname) %(objecttype)".to_string(),
+    ]);
+    let stdin_data = specs.join("\n") + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let oid = parts.next()?;
+            (parts.next() == Some("commit") && is_valid_git_oid(oid)).then(|| oid.to_string())
+        })
+        .collect())
+}
+
+fn concretize_revision_range(source: &str, refs: &HashMap<String, String>) -> Option<String> {
+    let (left, sep, right) = if let Some((left, right)) = source.split_once("...") {
+        (left, "...", right)
+    } else {
+        let (left, right) = source.split_once("..")?;
+        (left, "..", right)
+    };
+    let left = if left.is_empty() {
+        refs.get("HEAD").cloned()
+    } else {
+        concretize_revision_expr(left, refs)
+    }?;
+    let right = if right.is_empty() {
+        refs.get("HEAD").cloned()
+    } else {
+        concretize_revision_expr(right, refs)
+    }?;
+    Some(format!("{left}{sep}{right}"))
+}
+
+fn concretize_revision_expr(expr: &str, refs: &HashMap<String, String>) -> Option<String> {
+    if expr.is_empty() {
+        return refs.get("HEAD").cloned();
+    }
+    if is_valid_git_oid(expr) || is_hex_oid_prefix(expr) {
+        return Some(expr.to_string());
+    }
+    if let Some(oid) = resolve_ref_from_state(expr, refs) {
+        return Some(oid);
+    }
+    let (base, suffix) = split_revision_suffix(expr);
+    if suffix.is_empty() {
+        return None;
+    }
+    let base_oid = if base.is_empty() {
+        refs.get("HEAD").cloned()
+    } else if is_valid_git_oid(base) || is_hex_oid_prefix(base) {
+        Some(base.to_string())
+    } else {
+        resolve_ref_from_state(base, refs)
+    }?;
+    Some(format!("{base_oid}{suffix}"))
+}
+
+fn split_revision_suffix(expr: &str) -> (&str, &str) {
+    let idx = expr
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '~' | '^').then_some(idx))
+        .unwrap_or(expr.len());
+    expr.split_at(idx)
+}
+
+fn resolve_ref_from_state(name: &str, refs: &HashMap<String, String>) -> Option<String> {
+    if name == "HEAD" || name == "@" {
+        return refs
+            .get("HEAD")
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned();
+    }
+    if let Some(value) = refs.get(name).filter(|oid| valid_non_zero_oid(oid)) {
+        return Some(value.clone());
+    }
+    for candidate in [
+        format!("refs/heads/{name}"),
+        format!("refs/remotes/{name}"),
+        format!("refs/tags/{name}"),
+    ] {
+        if let Some(value) = refs.get(&candidate).filter(|oid| valid_non_zero_oid(oid)) {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
+fn is_hex_oid_prefix(value: &str) -> bool {
+    (4..=64).contains(&value.len()) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn pull_reflog_action(cmd: &NormalizedCommand) -> String {
+    let raw_args = normalized_args(&cmd.raw_argv);
+    let parsed = parse_git_cli_args(&raw_args);
+    let args = if parsed.command.as_deref() == Some("pull") {
+        parsed.command_args
+    } else {
+        command_args(cmd)
+    };
+    let args = pull_command_args(&args);
+    if args.is_empty() {
+        "pull".to_string()
+    } else {
+        std::iter::once("pull")
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn pull_command_args(args: &[String]) -> &[String] {
+    if args.first().is_some_and(|arg| arg == "pull") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
+fn pull_reflog_message_prefixes(action: &str) -> Vec<String> {
+    if action == "pull" {
+        return vec!["pull:".to_string(), "pull (".to_string()];
+    }
+    vec![format!("{}:", action), format!("{} ", action)]
+}
+
+fn pull_reflog_action_state<'a>(message: &'a str, action: &str) -> Option<&'a str> {
+    let rest = message.strip_prefix(action)?;
+    let open = rest.find('(')?;
+    let after_open = &rest[open + 1..];
+    let close = after_open.find("):")?;
+    Some(&after_open[..close])
+}
+
+fn pull_reflog_action_is(message: &str, action: &str, expected: &str) -> bool {
+    pull_reflog_action_state(message, action).is_some_and(|state| state == expected)
+}
+
+fn pull_reflog_action_starts_new_command(message: &str, action: &str) -> bool {
+    matches!(
+        pull_reflog_action_state(message, action),
+        Some("start" | "continue" | "skip" | "abort" | "quit" | "finish")
+    )
+}
+
+fn rebase_reflog_action(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix("rebase")?;
+    let open = rest.find('(')?;
+    let after_open = &rest[open + 1..];
+    let close = after_open.find("):")?;
+    Some(&after_open[..close])
+}
+
+fn rebase_reflog_action_is(message: &str, expected: &str) -> bool {
+    rebase_reflog_action(message).is_some_and(|action| action == expected)
+}
+
+fn rebase_start_checkout_target_from_args(args: &[String]) -> Option<String> {
+    let summary = summarize_rebase_args(args);
+    if summary.is_control_mode {
+        return None;
+    }
+    summary
+        .onto_spec
+        .or_else(|| summary.positionals.first().cloned())
+}
+
+fn rebase_start_message_targets(message: &str, target: &str) -> bool {
+    message
+        .strip_prefix("rebase (start): checkout ")
+        .is_some_and(|message_target| message_target == target)
+}
+
+fn rebase_finish_returns_to_branch(message: &str, branch_ref: &str) -> bool {
+    message == format!("rebase (finish): returning to {}", branch_ref)
+}
+
+fn rebase_finish_returned_branch(message: &str) -> Option<&str> {
+    message.strip_prefix("rebase (finish): returning to ")
+}
+
+fn rebase_branch_finish_message_is(message: &str, branch_ref: &str) -> bool {
+    message.starts_with(&format!("rebase (finish): {}", branch_ref))
+}
+
+fn pull_finish_returned_branch(message: &str, action: &str) -> Option<String> {
+    message
+        .strip_prefix(&format!("{action} (finish): returning to "))
+        .map(ToOwned::to_owned)
+}
+
+fn latest_rebase_finish_for_branch<'a>(
+    entries: &'a [CursorEntry],
+    branch_ref: &str,
+) -> Option<&'a CursorEntry> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| rebase_finish_returns_to_branch(&entry.message, branch_ref))
+}
+
+fn rebase_start_marker_for_explicit_branch<'a>(
+    entries: &'a [CursorEntry],
+    branch_ref: &str,
+) -> Option<&'a CursorEntry> {
+    if let Some(finish) = latest_rebase_finish_for_branch(entries, branch_ref)
+        && let Some(start) = entries.iter().rev().find(|entry| {
+            entry.end_offset < finish.end_offset && rebase_reflog_action_is(&entry.message, "start")
+        })
+    {
+        return Some(start);
+    }
+
+    entries
+        .iter()
+        .rev()
+        .find(|entry| rebase_reflog_action_is(&entry.message, "start"))
+}
+
+fn read_reflog_entries(
+    key: String,
+    path: &Path,
+    reference: &str,
+    start_offset: Option<u64>,
+) -> Result<Vec<CursorEntry>, GitAiError> {
+    let records = read_reflog_records(path, start_offset)?;
+    Ok(records
+        .into_iter()
+        .filter(|record| record.old != record.new)
+        .map(|record| CursorEntry {
+            key: key.clone(),
+            path: path.to_path_buf(),
+            reference: reference.to_string(),
+            old: record.old,
+            new: record.new,
+            message: record.message,
+            timestamp_secs: record.timestamp_secs,
+            end_offset: record.end_offset,
+        })
+        .collect())
+}
+
+fn read_reflog_entries_including_noops(
+    key: String,
+    path: &Path,
+    reference: &str,
+    start_offset: Option<u64>,
+) -> Result<Vec<CursorEntry>, GitAiError> {
+    let records = read_reflog_records(path, start_offset)?;
+    Ok(records
+        .into_iter()
+        .map(|record| CursorEntry {
+            key: key.clone(),
+            path: path.to_path_buf(),
+            reference: reference.to_string(),
+            old: record.old,
+            new: record.new,
+            message: record.message,
+            timestamp_secs: record.timestamp_secs,
+            end_offset: record.end_offset,
+        })
+        .collect())
+}
+
+fn read_reflog_records(
+    path: &Path,
+    start_offset: Option<u64>,
+) -> Result<Vec<ReflogRecord>, GitAiError> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(GitAiError::IoError(error)),
+    };
+    let byte_len = file.metadata().map_err(GitAiError::IoError)?.len();
+    let start = match start_offset {
+        Some(offset) if offset > byte_len => 0,
+        Some(offset) => offset,
+        None => 0,
+    };
+    file.seek(SeekFrom::Start(start))
+        .map_err(GitAiError::IoError)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(GitAiError::IoError)?;
+
+    let mut entries = Vec::new();
+    let mut offset = start;
+    for raw_line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let line_start = offset;
+        offset = offset.saturating_add(raw_line.len() as u64);
+        if !raw_line.ends_with(b"\n") {
+            continue;
+        }
+        let line = String::from_utf8_lossy(raw_line);
+        let line = line.trim_end_matches(['\r', '\n']);
+        let Some(entry) = parse_reflog_line(line, offset) else {
+            continue;
+        };
+        if entry.end_offset > line_start {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+fn read_reflog_record_ending_at(
+    path: &Path,
+    end_offset: u64,
+) -> Result<Option<ReflogRecord>, GitAiError> {
+    if end_offset == 0 {
+        return Ok(None);
+    }
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GitAiError::IoError(error)),
+    };
+    let byte_len = file.metadata().map_err(GitAiError::IoError)?.len();
+    if end_offset > byte_len {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(end_offset.saturating_sub(1)))
+        .map_err(GitAiError::IoError)?;
+    let mut terminator = [0; 1];
+    file.read_exact(&mut terminator)
+        .map_err(GitAiError::IoError)?;
+    if terminator[0] != b'\n' {
+        return Ok(None);
+    }
+
+    let mut cursor = end_offset;
+    let mut suffix = Vec::new();
+    loop {
+        let chunk_start = cursor.saturating_sub(8192);
+        let chunk_len = (cursor - chunk_start) as usize;
+        let mut chunk = vec![0; chunk_len];
+        file.seek(SeekFrom::Start(chunk_start))
+            .map_err(GitAiError::IoError)?;
+        file.read_exact(&mut chunk).map_err(GitAiError::IoError)?;
+
+        let search_end = if cursor == end_offset && chunk.last().is_some_and(|byte| *byte == b'\n')
+        {
+            chunk.len().saturating_sub(1)
+        } else {
+            chunk.len()
+        };
+        if let Some(index) = chunk[..search_end].iter().rposition(|byte| *byte == b'\n') {
+            let line_start = chunk_start + index as u64 + 1;
+            let mut line = chunk[index + 1..].to_vec();
+            line.extend_from_slice(&suffix);
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim_end_matches(['\r', '\n']);
+            return Ok(
+                parse_reflog_line(line, end_offset).filter(|record| record.end_offset > line_start)
+            );
+        }
+
+        let mut line = chunk;
+        line.extend_from_slice(&suffix);
+        suffix = line;
+        if chunk_start == 0 {
+            let line = String::from_utf8_lossy(&suffix);
+            let line = line.trim_end_matches(['\r', '\n']);
+            return Ok(parse_reflog_line(line, end_offset).filter(|record| record.end_offset > 0));
+        }
+        cursor = chunk_start;
+    }
+}
+
+fn parse_reflog_line(line: &str, end_offset: u64) -> Option<ReflogRecord> {
+    let (head, message) = line.split_once('\t').unwrap_or((line, ""));
+    let mut parts = head.split_whitespace();
+    let old = parts.next()?.trim();
+    let new = parts.next()?.trim();
+    if !is_valid_git_oid(old) || !is_valid_git_oid(new) {
+        return None;
+    }
+    Some(ReflogRecord {
+        old: old.to_string(),
+        new: new.to_string(),
+        message: message.to_string(),
+        timestamp_secs: parse_reflog_timestamp_secs(head),
+        end_offset,
+    })
+}
+
+fn parse_reflog_timestamp_secs(head: &str) -> Option<i64> {
+    let mut parts = head.split_whitespace().rev();
+    let _timezone = parts.next()?;
+    parts.next()?.parse().ok()
+}
+
+fn discover_reflog_refs(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<String>,
+) -> Result<(), GitAiError> {
+    if !current.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            discover_reflog_refs(root, &path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let reference = relative.to_string_lossy().replace('\\', "/");
+        if reference == "ORIG_HEAD" || reference.starts_with("refs/") {
+            out.push(reference);
+        }
+    }
+    Ok(())
+}
+
+fn parse_update_ref_spec(args: &[String]) -> Result<Option<UpdateRefSpec>, GitAiError> {
+    let mut positionals = Vec::new();
+    let mut delete = false;
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "update-ref" => {
+                idx += 1;
+            }
+            "--stdin" | "--batch-updates" => {
+                return Ok(None);
+            }
+            "-d" | "--delete" => {
+                delete = true;
+                idx += 1;
+            }
+            "-m" | "--message" => {
+                if idx + 1 >= args.len() {
+                    return Err(GitAiError::Generic(
+                        "update-ref -m requires a message argument".to_string(),
+                    ));
+                }
+                idx += 2;
+            }
+            "--create-reflog" | "--no-deref" => {
+                idx += 1;
+            }
+            value if value.starts_with("--message=") => {
+                idx += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(GitAiError::Generic(format!(
+                    "trace2 cursor does not support update-ref option '{}'",
+                    value
+                )));
+            }
+            value => {
+                positionals.push(value.to_string());
+                idx += 1;
+            }
+        }
+    }
+
+    if delete {
+        return match positionals.as_slice() {
+            [reference] => Ok(Some(UpdateRefSpec {
+                reference: reference.to_string(),
+                new_oid: zero_oid(),
+                old_oid: None,
+            })),
+            [reference, old_oid] => Ok(Some(UpdateRefSpec {
+                reference: reference.to_string(),
+                new_oid: zero_oid(),
+                old_oid: Some(old_oid.to_string()),
+            })),
+            _ => Err(GitAiError::Generic(
+                "update-ref delete requires <ref> [<old-oid>]".to_string(),
+            )),
+        };
+    }
+
+    match positionals.as_slice() {
+        [reference, new_oid] => Ok(Some(UpdateRefSpec {
+            reference: reference.to_string(),
+            new_oid: new_oid.to_string(),
+            old_oid: None,
+        })),
+        [reference, new_oid, old_oid] => Ok(Some(UpdateRefSpec {
+            reference: reference.to_string(),
+            new_oid: new_oid.to_string(),
+            old_oid: Some(old_oid.to_string()),
+        })),
+        _ => Err(GitAiError::Generic(
+            "update-ref requires <ref> <new-oid> [<old-oid>]".to_string(),
+        )),
+    }
+}
+
+fn parse_branch_command_spec(args: &[String]) -> BranchCommandSpec {
+    let args = branch_command_args(args);
+    let mut delete = false;
+    let mut remote_delete = false;
+    let mut rename = false;
+    let mut copy = false;
+    let mut list_only = false;
+    let mut config_only = false;
+    let mut positionals = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < args.len() {
+        let arg = &args[idx];
+        if arg == "--" {
+            positionals.extend(args[idx + 1..].iter().cloned());
+            break;
+        }
+
+        match arg.as_str() {
+            "-d" | "-D" | "--delete" => {
+                delete = true;
+                idx += 1;
+            }
+            "-m" | "-M" | "--move" => {
+                rename = true;
+                idx += 1;
+            }
+            "-c" | "-C" | "--copy" => {
+                copy = true;
+                idx += 1;
+            }
+            "-r" | "--remotes" => {
+                remote_delete = true;
+                list_only = true;
+                idx += 1;
+            }
+            "-a" | "--all" | "--list" | "--show-current" | "--contains" | "--no-contains"
+            | "--merged" | "--no-merged" => {
+                list_only = true;
+                idx += 1;
+            }
+            "--unset-upstream" | "--edit-description" | "--set-upstream" => {
+                config_only = true;
+                idx += 1;
+            }
+            "-u" | "--set-upstream-to" => {
+                config_only = true;
+                idx = idx.saturating_add(2);
+            }
+            "--points-at" | "--sort" | "--format" => {
+                list_only = true;
+                idx = idx.saturating_add(2);
+            }
+            "--color" | "--column" | "--abbrev" => {
+                idx = idx.saturating_add(2);
+            }
+            "--track"
+            | "--no-track"
+            | "--create-reflog"
+            | "--no-create-reflog"
+            | "--recurse-submodules"
+            | "--no-color"
+            | "--no-column"
+            | "--no-abbrev"
+            | "--quiet"
+            | "-q"
+            | "--verbose"
+            | "-v"
+            | "-vv"
+            | "-f"
+            | "--force"
+            | "-l" => {
+                idx += 1;
+            }
+            value if value.starts_with("--set-upstream-to=") => {
+                config_only = true;
+                idx += 1;
+            }
+            value
+                if value.starts_with("--points-at=")
+                    || value.starts_with("--sort=")
+                    || value.starts_with("--format=")
+                    || value.starts_with("--contains=")
+                    || value.starts_with("--no-contains=")
+                    || value.starts_with("--merged=")
+                    || value.starts_with("--no-merged=") =>
+            {
+                list_only = true;
+                idx += 1;
+            }
+            value
+                if value.starts_with("--track=")
+                    || value.starts_with("--color=")
+                    || value.starts_with("--column=")
+                    || value.starts_with("--abbrev=") =>
+            {
+                idx += 1;
+            }
+            value if value.starts_with("--") => {
+                idx += 1;
+            }
+            value if value.starts_with('-') => {
+                apply_branch_short_options(
+                    value,
+                    &mut delete,
+                    &mut remote_delete,
+                    &mut rename,
+                    &mut copy,
+                    &mut list_only,
+                );
+                idx += branch_short_option_value_width(value);
+            }
+            value => {
+                positionals.push(value.to_string());
+                idx += 1;
+            }
+        }
+    }
+
+    if delete {
+        let references = positionals
+            .into_iter()
+            .filter_map(|name| branch_ref_name(&name, remote_delete))
+            .collect::<Vec<_>>();
+        return if references.is_empty() {
+            BranchCommandSpec::None
+        } else {
+            BranchCommandSpec::Delete { references }
+        };
+    }
+
+    if rename {
+        return match positionals.as_slice() {
+            [new_name] => branch_ref_name(new_name, false)
+                .map(|new_reference| BranchCommandSpec::Rename {
+                    old_reference: None,
+                    new_reference,
+                })
+                .unwrap_or(BranchCommandSpec::None),
+            [old_name, new_name] => {
+                match (
+                    branch_ref_name(old_name, false),
+                    branch_ref_name(new_name, false),
+                ) {
+                    (Some(old_reference), Some(new_reference)) => BranchCommandSpec::Rename {
+                        old_reference: Some(old_reference),
+                        new_reference,
+                    },
+                    _ => BranchCommandSpec::None,
+                }
+            }
+            _ => BranchCommandSpec::None,
+        };
+    }
+
+    if copy {
+        return match positionals.as_slice() {
+            [new_name] => branch_ref_name(new_name, false)
+                .map(|new_reference| BranchCommandSpec::Copy {
+                    old_reference: None,
+                    new_reference,
+                })
+                .unwrap_or(BranchCommandSpec::None),
+            [old_name, new_name] => {
+                match (
+                    branch_ref_name(old_name, false),
+                    branch_ref_name(new_name, false),
+                ) {
+                    (Some(old_reference), Some(new_reference)) => BranchCommandSpec::Copy {
+                        old_reference: Some(old_reference),
+                        new_reference,
+                    },
+                    _ => BranchCommandSpec::None,
+                }
+            }
+            _ => BranchCommandSpec::None,
+        };
+    }
+
+    if config_only || list_only {
+        return BranchCommandSpec::None;
+    }
+
+    positionals
+        .first()
+        .and_then(|name| branch_ref_name(name, false))
+        .map(|reference| BranchCommandSpec::CreateOrReset { reference })
+        .unwrap_or(BranchCommandSpec::None)
+}
+
+fn branch_command_args(args: &[String]) -> &[String] {
+    if args.first().is_some_and(|arg| arg == "branch") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
+fn apply_branch_short_options(
+    value: &str,
+    delete: &mut bool,
+    remote_delete: &mut bool,
+    rename: &mut bool,
+    copy: &mut bool,
+    list_only: &mut bool,
+) {
+    for flag in value.trim_start_matches('-').chars() {
+        match flag {
+            'd' | 'D' => *delete = true,
+            'r' => {
+                *remote_delete = true;
+                *list_only = true;
+            }
+            'm' | 'M' => *rename = true,
+            'c' | 'C' => *copy = true,
+            'a' => *list_only = true,
+            _ => {}
+        }
+    }
+}
+
+fn branch_short_option_value_width(value: &str) -> usize {
+    if value == "-u" { 2 } else { 1 }
+}
+
+fn branch_ref_name(name: &str, remote: bool) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed == "--" || trimmed.starts_with('-') {
+        return None;
+    }
+    if trimmed.starts_with("refs/heads/") || trimmed.starts_with("refs/remotes/") {
+        return Some(trimmed.to_string());
+    }
+    if trimmed.starts_with("refs/") {
+        return None;
+    }
+    if remote {
+        Some(format!("refs/remotes/{}", trimmed))
+    } else {
+        Some(format!("refs/heads/{}", trimmed))
+    }
+}
+
+fn parse_branch_lifecycle_message(
+    kind: BranchLifecycleKind,
+    message: &str,
+) -> Option<(String, String)> {
+    let prefix = match kind {
+        BranchLifecycleKind::Rename => "Branch: renamed ",
+        BranchLifecycleKind::Copy => "Branch: copied ",
+    };
+    let rest = message.strip_prefix(prefix)?;
+    let (old_reference, new_reference) = rest.split_once(" to ")?;
+    Some((old_reference.to_string(), new_reference.to_string()))
+}
+
+fn working_log_base_oids(worktree: &Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy()) else {
+        return out;
+    };
+    let Ok(entries) = fs::read_dir(&repo.storage.working_logs) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "initial" {
+            out.insert("0000000000000000000000000000000000000000".to_string());
+        } else if valid_non_zero_oid(&name) {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+fn checkout_is_path_checkout(cmd: &NormalizedCommand) -> bool {
+    let args = command_args(cmd);
+    args.iter().any(|arg| arg == "--")
+        || args
+            .iter()
+            .any(|arg| arg.starts_with("--pathspec") || arg == "--ours" || arg == "--theirs")
+}
+
+fn stash_command_args(args: &[String]) -> &[String] {
+    if args.first().is_some_and(|arg| arg == "stash") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
+fn stash_push_message_from_args(args: &[String], kind: &str) -> Option<String> {
+    if kind == "save" {
+        let message = args
+            .iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return (!message.is_empty()).then_some(message);
+    }
+
+    let mut idx = if kind == "push" { 1 } else { 0 };
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-m" | "--message" => {
+                return args.get(idx + 1).filter(|value| !value.is_empty()).cloned();
+            }
+            value if value.starts_with("--message=") => {
+                return value
+                    .strip_prefix("--message=")
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
+            }
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
+fn stash_reflog_message_matches(reflog_message: &str, stash_message: &str) -> bool {
+    reflog_message == stash_message
+        || reflog_message
+            .strip_suffix(stash_message)
+            .is_some_and(|prefix| prefix.ends_with(": "))
+}
+
+fn stash_target_index(target: Option<&String>) -> Option<usize> {
+    let target = target.map(String::as_str).unwrap_or("stash@{0}");
+    if matches!(target, "stash" | "refs/stash") {
+        return Some(0);
+    }
+    target
+        .strip_prefix("stash@{")
+        .and_then(|value| value.strip_suffix('}'))
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn rebase_command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    let args = command_args(cmd);
+    if args.first().is_some_and(|arg| arg == "rebase") {
+        args[1..].to_vec()
+    } else {
+        args
+    }
+}
+
+fn command_uses_ref_cursor(primary: &str) -> bool {
+    matches!(
+        primary,
+        "commit"
+            | "revert"
+            | "reset"
+            | "checkout"
+            | "switch"
+            | "merge"
+            | "cherry-pick"
+            | "rebase"
+            | "pull"
+            | "branch"
+            | "stash"
+            | "update-ref"
+    )
+}
+
+fn command_can_move_refs_on_nonzero(primary: Option<&str>) -> bool {
+    matches!(
+        primary,
+        Some("checkout" | "switch" | "stash" | "rebase" | "pull" | "branch" | "cherry-pick")
+    )
+}
+
+fn message_matches(message: &str, prefixes: &[&str]) -> bool {
+    prefixes.is_empty() || prefixes.iter().any(|prefix| message.starts_with(prefix))
+}
+
+fn valid_ref_transition(old: &str, new: &str) -> bool {
+    is_valid_git_oid(old) && is_valid_git_oid(new) && old != new
+}
+
+fn valid_non_zero_oid(value: &str) -> bool {
+    is_valid_git_oid(value) && !value.chars().all(|ch| ch == '0')
+}
+
+fn zero_oid() -> String {
+    "0000000000000000000000000000000000000000".to_string()
+}
+
+fn direct_update_ref_change_from_argv(spec: &UpdateRefSpec) -> Option<RefChange> {
+    let old = spec.old_oid.as_ref()?;
+    if !is_valid_git_oid(old) || !is_valid_git_oid(&spec.new_oid) {
+        return None;
+    }
+    Some(RefChange {
+        reference: spec.reference.clone(),
+        old: old.clone(),
+        new: spec.new_oid.clone(),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReflogTimestampWindow {
+    start_secs: i64,
+    end_secs: i64,
+}
+
+impl ReflogTimestampWindow {
+    fn contains(self, timestamp_secs: i64) -> bool {
+        timestamp_secs >= self.start_secs && timestamp_secs <= self.end_secs
+    }
+}
+
+fn reflog_timestamp_window(cmd: &NormalizedCommand) -> ReflogTimestampWindow {
+    let start = unix_nanos_to_reflog_secs(cmd.started_at_ns).saturating_sub(1);
+    let end = unix_nanos_to_reflog_secs(cmd.finished_at_ns).saturating_add(1);
+    ReflogTimestampWindow {
+        start_secs: start.min(end),
+        end_secs: start.max(end),
+    }
+}
+
+fn unix_nanos_to_reflog_secs(value: u128) -> i64 {
+    i64::try_from(value / 1_000_000_000).unwrap_or(i64::MAX)
+}
+
+fn entry_to_ref_change(entry: &CursorEntry) -> RefChange {
+    RefChange {
+        reference: entry.reference.clone(),
+        old: entry.old.clone(),
+        new: entry.new.clone(),
+    }
+}
+
+fn dedup_ref_changes(changes: &mut Vec<RefChange>) {
+    let mut seen = HashSet::new();
+    changes.retain(|change| {
+        seen.insert((
+            change.reference.clone(),
+            change.old.clone(),
+            change.new.clone(),
+        ))
+    });
+}
+
+fn common_key(reference: &str) -> String {
+    format!("common:{}", reference)
+}
+
+fn branch_arg_to_ref(branch: &str) -> String {
+    if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{}", branch)
+    }
+}
+
+fn head_key(git_dir: &Path) -> String {
+    let normalized = git_dir
+        .canonicalize()
+        .unwrap_or_else(|_| git_dir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    format!("worktree:{}:HEAD", normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::domain::{
+        CommandScope, Confidence, FamilyKey, FamilyState, NormalizedCommand, WatermarkState,
+        WorktreeState,
+    };
+    use std::collections::HashMap;
+    use std::fs;
+
+    const A: &str = "1111111111111111111111111111111111111111";
+    const B: &str = "2222222222222222222222222222222222222222";
+    const C: &str = "3333333333333333333333333333333333333333";
+    const D: &str = "4444444444444444444444444444444444444444";
+    const E: &str = "5555555555555555555555555555555555555555";
+    const F: &str = "6666666666666666666666666666666666666666";
+    const G: &str = "7777777777777777777777777777777777777777";
+
+    fn family_state(family: &FamilyKey) -> FamilyState {
+        FamilyState {
+            family_key: family.clone(),
+            refs: HashMap::new(),
+            worktrees: HashMap::new(),
+            last_error: None,
+            applied_seq: 0,
+            watermarks: WatermarkState::default(),
+        }
+    }
+
+    fn command(family: &FamilyKey, args: &[&str]) -> NormalizedCommand {
+        command_with_worktree(family, None, args)
+    }
+
+    fn command_with_worktree(
+        family: &FamilyKey,
+        worktree: Option<PathBuf>,
+        args: &[&str],
+    ) -> NormalizedCommand {
+        NormalizedCommand {
+            scope: CommandScope::Family(family.clone()),
+            family_key: Some(family.clone()),
+            worktree,
+            root_sid: "sid".to_string(),
+            raw_argv: std::iter::once("git".to_string())
+                .chain(args.iter().map(|arg| arg.to_string()))
+                .collect(),
+            primary_command: args.first().map(|arg| arg.to_string()),
+            invoked_command: args.first().map(|arg| arg.to_string()),
+            invoked_args: args.iter().map(|arg| arg.to_string()).collect(),
+            observed_child_commands: Vec::new(),
+            exit_code: 0,
+            started_at_ns: 1,
+            finished_at_ns: 2,
+            reflog_start_offsets: HashMap::new(),
+            stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
+            ref_changes: Vec::new(),
+            confidence: Confidence::Low,
+        }
+    }
+
+    #[test]
+    fn amend_without_message_does_not_match_plain_commit_reflog_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (A, B, "commit: older plain commit"),
+                (B, C, "commit (amend): older plain commit"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "--amend", "--no-edit"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn commit_with_exact_reflog_message_ignores_stale_daemon_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        let initial_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\tcommit: initial\n");
+        let raw_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: raw unseen\n");
+        let traced_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcommit: traced after raw\n");
+        fs::write(&head_log, format!("{initial_line}{raw_line}{traced_line}")).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(
+            &family,
+            Some(worktree),
+            &["commit", "-m", "traced after raw"],
+        );
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn commit_reflog_boundary_skips_untraced_duplicate_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        let initial_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\tcommit: initial\n");
+        let raw_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: same message\n");
+        let traced_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcommit: same message\n");
+        let start_offset = (initial_line.len() + raw_line.len()) as u64;
+        fs::write(&head_log, format!("{initial_line}{raw_line}{traced_line}")).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "same message"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), start_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn first_observed_head_boundary_skips_prior_reset_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        let old_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\treset: moving to old\n");
+        let start_offset = old_line.len() as u64;
+        let current_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\treset: moving to {D}\n");
+        fs::write(&head_log, format!("{old_line}{current_line}")).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), A.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["reset", "--hard", D]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), start_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reset_late_reflog_offset_uses_command_message_not_stale_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        let stale_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\treset: moving to stale\n");
+        let current_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\treset: moving to {D}\n");
+        let late_offset = (stale_line.len() + current_line.len()) as u64;
+        fs::write(&head_log, format!("{stale_line}{current_line}")).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), A.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["reset", "--soft", D]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), late_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn first_observed_common_boundary_skips_prior_update_ref_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let reference = "refs/heads/main";
+        let log_path = temp.path().join("logs").join(reference);
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+
+        let old_line = format!("{A} {B} Test User <test@example.com> 0 +0000\told stdin update\n");
+        let start_offset = old_line.len() as u64;
+        let current_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcurrent stdin update\n");
+        fs::write(&log_path, format!("{old_line}{current_line}")).unwrap();
+
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["update-ref", "--stdin"]);
+        cmd.reflog_start_offsets
+            .insert(common_key(reference), start_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: reference.to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_uses_argv_transition_when_reflog_cursor_starts_too_late() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        fs::create_dir_all(git_dir.join("logs").join("refs/heads")).unwrap();
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+
+        let branch_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let head_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let branch_log = git_dir.join("logs").join(reference);
+        let head_log = git_dir.join("logs").join("HEAD");
+        fs::write(&branch_log, &branch_line).unwrap();
+        fs::write(&head_log, &head_line).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["update-ref", reference, D, C]);
+        cmd.reflog_start_offsets
+            .insert(common_key(reference), branch_line.len() as u64);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), head_line.len() as u64);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: reference.to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_does_not_treat_stale_head_reflog_match_as_current_head_move() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        fs::create_dir_all(git_dir.join("logs").join("refs/heads")).unwrap();
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+
+        let stale_branch_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let stale_head_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let branch_log = git_dir.join("logs").join(reference);
+        let head_log = git_dir.join("logs").join("HEAD");
+        fs::write(&branch_log, &stale_branch_line).unwrap();
+        fs::write(&head_log, &stale_head_line).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["update-ref", reference, D, C]);
+        cmd.started_at_ns = 2_000_000_000;
+        cmd.finished_at_ns = 2_000_000_000;
+        cmd.reflog_start_offsets
+            .insert(common_key(reference), stale_branch_line.len() as u64);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), stale_head_line.len() as u64);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: reference.to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_update_ref_consumes_matching_reflog_entry_before_later_unstructured_update_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(temp.path(), "refs/heads/main", &[(A, B, "")]);
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command(&family, &["update-ref", "refs/heads/main", B, A]);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+
+        let mut later = command(&family, &["update-ref", "--stdin"]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert!(
+            later.ref_changes.is_empty(),
+            "later unstructured update-ref must not replay reflog entry already represented by argv: {:?}",
+            later.ref_changes
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_consumes_head_mirror_before_later_unstructured_update_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        append_reflog(&git_dir, reference, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["update-ref", reference, B, A],
+        );
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![
+                RefChange {
+                    reference: reference.to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+            ]
+        );
+
+        let mut later = command_with_worktree(&family, Some(worktree), &["update-ref", "--stdin"]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert!(
+            later.ref_changes.is_empty(),
+            "later unstructured update-ref must not replay HEAD or branch reflog entries already represented by argv: {:?}",
+            later.ref_changes
+        );
+    }
+
+    #[test]
+    fn direct_head_update_ref_uses_argv_and_late_cursor_branch_mirror_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        append_reflog(&git_dir, reference, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let branch_len = fs::metadata(git_dir.join("logs").join(reference))
+            .unwrap()
+            .len();
+        let head_len = fs::metadata(git_dir.join("logs").join("HEAD"))
+            .unwrap()
+            .len();
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["update-ref", "HEAD", B, A],
+        );
+        direct
+            .reflog_start_offsets
+            .insert(common_key(reference), branch_len);
+        direct
+            .reflog_start_offsets
+            .insert(head_key(&git_dir), head_len);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: reference.to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+            ]
+        );
+
+        let mut later = command_with_worktree(&family, Some(worktree), &["update-ref", "--stdin"]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert!(
+            later.ref_changes.is_empty(),
+            "later unstructured update-ref must not replay branch mirror already represented by direct HEAD update-ref: {:?}",
+            later.ref_changes
+        );
+    }
+
+    #[test]
+    fn direct_head_update_ref_uses_known_worktree_branch_when_other_branch_matches_same_second() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let current = "refs/heads/main";
+        let other = "refs/heads/other";
+        append_reflog(&git_dir, current, &[(A, B, "")]);
+        append_reflog(&git_dir, other, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.worktrees.insert(
+            worktree.canonicalize().unwrap(),
+            WorktreeState {
+                head: Some(A.to_string()),
+                branch: Some(current.to_string()),
+                detached: false,
+                last_updated_ns: 0,
+            },
+        );
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["update-ref", "HEAD", B, A],
+        );
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: current.to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+            ]
+        );
+
+        let mut later =
+            command_with_worktree(&family, Some(worktree), &["update-ref", other, B, A]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert_eq!(
+            later.ref_changes,
+            vec![RefChange {
+                reference: other.to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_head_update_ref_without_known_branch_does_not_guess_ambiguous_branch_mirror() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        append_reflog(&git_dir, "refs/heads/main", &[(A, B, "")]);
+        append_reflog(&git_dir, "refs/heads/other", &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct =
+            command_with_worktree(&family, Some(worktree), &["update-ref", "HEAD", B, A]);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+
+        assert_eq!(
+            direct.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_does_not_attach_head_when_state_names_different_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let current = "refs/heads/main";
+        let updated = "refs/heads/feature";
+        append_reflog(&git_dir, updated, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.worktrees.insert(
+            worktree.canonicalize().unwrap(),
+            WorktreeState {
+                head: Some(A.to_string()),
+                branch: Some(current.to_string()),
+                detached: false,
+                last_updated_ns: 0,
+            },
+        );
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct =
+            command_with_worktree(&family, Some(worktree), &["update-ref", updated, B, A]);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+
+        assert_eq!(
+            direct.ref_changes,
+            vec![RefChange {
+                reference: updated.to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn common_ref_discovery_excludes_worktree_head_log() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(temp.path(), "HEAD", &[(A, B, "")]);
+        append_reflog(temp.path(), "refs/heads/main", &[(A, B, "")]);
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let cursor = RefCursor::new(family);
+
+        assert_eq!(
+            cursor.discover_common_refs().unwrap(),
+            vec!["refs/heads/main".to_string()]
+        );
+    }
+
+    fn append_reflog(common_dir: &Path, reference: &str, entries: &[(&str, &str, &str)]) {
+        let path = common_dir.join("logs").join(reference);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut text = String::new();
+        for (old, new, message) in entries {
+            text.push_str(&format!(
+                "{old} {new} Test User <test@example.com> 0 +0000\t{message}\n"
+            ));
+        }
+        fs::write(path, text).unwrap();
+    }
+
+    fn reflog_line(old: &str, new: &str, message: &str) -> String {
+        format!("{old} {new} Test User <test@example.com> 0 +0000\t{message}")
+    }
+
+    #[test]
+    fn reflog_reader_ignores_trailing_unterminated_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("HEAD");
+        let complete = format!("{}\n", reflog_line(A, B, "commit: complete"));
+        let partial = reflog_line(B, C, "commit: partial");
+        fs::write(&path, format!("{complete}{partial}")).unwrap();
+
+        let records = read_reflog_records(&path, None).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].old, A);
+        assert_eq!(records[0].new, B);
+
+        fs::write(&path, format!("{complete}{partial}\n")).unwrap();
+        let records = read_reflog_records(&path, None).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].old, B);
+        assert_eq!(records[1].new, C);
+    }
+
+    #[test]
+    fn reflog_anchor_rejects_non_newline_end_offset() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("HEAD");
+        let complete = format!("{}\n", reflog_line(A, B, "commit: complete"));
+        let partial = reflog_line(B, C, "commit: partial");
+        fs::write(&path, format!("{complete}{partial}")).unwrap();
+
+        let complete_record = read_reflog_record_ending_at(&path, complete.len() as u64)
+            .unwrap()
+            .expect("complete newline-terminated record should be readable");
+        assert_eq!(complete_record.old, A);
+        assert_eq!(complete_record.new, B);
+
+        let partial_end = (complete.len() + partial.len()) as u64;
+        assert!(
+            read_reflog_record_ending_at(&path, partial_end)
+                .unwrap()
+                .is_none(),
+            "an offset inside an unterminated reflog record must not become an anchor"
+        );
+    }
+
+    #[test]
+    fn rebase_span_stops_at_new_rebase_start_before_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout main"),
+                (C, D, "rebase (pick): First rebase commit"),
+                (D, E, "rebase (start): checkout other"),
+                (E, F, "rebase (pick): Later rebase commit"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "main"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn skipped_reflog_entry_remains_available_for_later_sequenced_command() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/heads/main",
+            &[
+                (A, B, "ordered second command"),
+                (B, C, "ordered first command"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut first = command(&family, &["update-ref", "refs/heads/main", C, B]);
+        cursor.enrich_command(&mut first, &state).unwrap();
+        assert_eq!(
+            first.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+
+        let mut second = command(&family, &["update-ref", "refs/heads/main", B, A]);
+        cursor.enrich_command(&mut second, &state).unwrap();
+        assert_eq!(
+            second.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reflog_generation_reset_with_same_byte_length_clears_sparse_consumption() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/heads/main",
+            &[
+                (A, B, "ordered second command"),
+                (B, C, "ordered first command"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut first = command(&family, &["update-ref", "refs/heads/main", C, B]);
+        cursor.enrich_command(&mut first, &state).unwrap();
+        assert_eq!(
+            first.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+
+        let old_len = fs::metadata(temp.path().join("logs/refs/heads/main"))
+            .unwrap()
+            .len();
+        append_reflog(
+            temp.path(),
+            "refs/heads/main",
+            &[
+                (A, B, "ordered second command"),
+                (B, C, "ordered third command"),
+            ],
+        );
+        assert_eq!(
+            fs::metadata(temp.path().join("logs/refs/heads/main"))
+                .unwrap()
+                .len(),
+            old_len
+        );
+
+        let mut second = command(&family, &["update-ref", "refs/heads/main", C, B]);
+        cursor.enrich_command(&mut second, &state).unwrap();
+        assert_eq!(
+            second.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn update_ref_stdin_is_reconstructed_from_reflog_delta() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(temp.path(), "refs/heads/main", &[(A, B, "stdin update")]);
+        append_reflog(temp.path(), "refs/heads/topic", &[(A, C, "stdin update")]);
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["update-ref", "--stdin"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+        cmd.ref_changes
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "refs/heads/main".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: A.to_string(),
+                    new: C.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_does_not_consume_adjacent_checkout_head_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (A, B, "checkout: moving from topic-1 to topic-2"),
+                (B, C, "rebase (start): checkout topic-1"),
+                (C, D, "rebase (pick): Topic 2"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-2",
+            &[(B, D, "rebase (finish): refs/heads/topic-2 onto topic-1")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-1"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_explicit_branch_rebase_consumes_noop_start_marker_before_continue() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (pick): stale rebase from another branch"),
+                (C, C, "rebase (finish): returning to refs/heads/stale-topic"),
+                (A, A, "rebase (start): checkout master"),
+                (A, E, "rebase (continue): Topic"),
+                (E, E, "rebase (finish): returning to refs/heads/topic"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic",
+            &[
+                (A, D, "commit: Topic"),
+                (D, E, "rebase (finish): refs/heads/topic onto main"),
+            ],
+        );
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut failed = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["rebase", "master", "topic"],
+        );
+        failed.exit_code = 1;
+
+        cursor.enrich_command(&mut failed, &state).unwrap();
+
+        assert_eq!(
+            failed.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: A.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: D.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+
+        let mut continued =
+            command_with_worktree(&family, Some(worktree), &["rebase", "--continue"]);
+
+        cursor.enrich_command(&mut continued, &state).unwrap();
+
+        assert_eq!(
+            continued.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: E.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: D.to_string(),
+                    new: E.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_span_stops_before_later_rebase_after_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout topic-1"),
+                (C, D, "rebase (pick): Topic 2"),
+                (D, E, "checkout: moving from topic-2 to topic-3"),
+                (E, F, "rebase (start): checkout topic-2"),
+                (F, G, "rebase (pick): Topic 3"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-2",
+            &[(B, D, "rebase (finish): refs/heads/topic-2 onto topic-1")],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-3",
+            &[(E, G, "rebase (finish): refs/heads/topic-3 onto topic-2")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-1"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_does_not_attach_unrelated_branch_with_same_new_tip() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout topic-1"),
+                (C, D, "rebase (pick): Topic 2"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-2",
+            &[(B, D, "rebase (finish): refs/heads/topic-2 onto topic-1")],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/unrelated",
+            &[(E, D, "rebase (finish): refs/heads/unrelated onto topic-1")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-1"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_prefers_start_entry_when_expected_state_matches_pick() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout topic-2"),
+                (C, D, "rebase (pick): Topic 3"),
+                (D, D, "rebase (finish): returning to refs/heads/topic-3"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-3",
+            &[(B, D, "rebase (finish): refs/heads/topic-3 onto topic-2")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/topic-2".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-2"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-3".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cherry_pick_span_starts_at_first_pick_when_expected_state_matches_second_pick() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "cherry-pick: Pick one"),
+                (C, D, "cherry-pick: Pick two"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/intermediate".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        cursor.pending_cherry_pick_source_oids = vec![A.to_string(), E.to_string()];
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["cherry-pick", "--continue"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn revert_span_starts_at_first_revert_when_expected_state_matches_second_revert() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[(B, C, "revert: Revert one"), (C, D, "revert: Revert two")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/intermediate".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["revert", A, E]);
+        let expected = ExpectedTransition::from_state_and_working_logs(&cmd, &state);
+
+        cursor
+            .consume_head_span_for_command_limited(&mut cmd, &state, &["revert:"], expected, 2)
+            .unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pull_rebase_span_starts_at_start_entry_when_expected_state_matches_pick() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (
+                    B,
+                    C,
+                    "pull --rebase origin main (start): checkout origin/main",
+                ),
+                (C, D, "pull --rebase origin main (pick): Local commit"),
+                (
+                    D,
+                    D,
+                    "pull --rebase origin main (finish): returning to refs/heads/main",
+                ),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/main",
+            &[(
+                B,
+                D,
+                "pull --rebase origin main (finish): refs/heads/main onto origin/main",
+            )],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/main".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(
+            &family,
+            Some(worktree),
+            &["pull", "--rebase", "origin", "main"],
+        );
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/main".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cold_stash_push_uses_message_to_skip_raw_stash_history() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/stash",
+            &[
+                (A, B, "On main: old raw stash"),
+                (B, C, "On main: current ai stash"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["stash", "push", "-m", "current ai stash"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "refs/stash".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+        assert_eq!(cursor.stash_stack, vec![C.to_string()]);
+    }
+
+    #[test]
+    fn cold_stash_push_uses_command_reflog_boundary_without_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_line = format!("{A} {B} Test User <test@example.com> 0 +0000\tWIP on main\n");
+        let old_history_len = old_line.len() as u64;
+        let current_line = format!("{B} {C} Test User <test@example.com> 0 +0000\tWIP on main\n");
+        let path = temp.path().join("logs/refs/stash");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{old_line}{current_line}")).unwrap();
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["stash", "push"]);
+        cmd.reflog_start_offsets
+            .insert(common_key("refs/stash"), old_history_len);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "refs/stash".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+        assert_eq!(cursor.stash_stack, vec![C.to_string()]);
+    }
+
+    #[test]
+    fn cold_stash_save_uses_message_to_skip_raw_stash_history() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/stash",
+            &[
+                (A, B, "On main: old raw stash"),
+                (B, C, "On main: current save stash"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["stash", "save", "current", "save", "stash"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "refs/stash".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+        assert_eq!(cursor.stash_stack, vec![C.to_string()]);
+    }
+}

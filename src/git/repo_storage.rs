@@ -3,7 +3,6 @@ use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
-use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
 use crate::utils::normalize_to_posix;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,7 +34,6 @@ pub struct RepoStorage {
     pub ai_dir: PathBuf,
     pub repo_workdir: PathBuf,
     pub working_logs: PathBuf,
-    pub rewrite_log: PathBuf,
     pub logs: PathBuf,
 }
 
@@ -53,14 +51,12 @@ impl RepoStorage {
 
     fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> Result<RepoStorage, GitAiError> {
         let working_logs_dir = ai_dir.join("working_logs");
-        let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
 
         let config = RepoStorage {
             ai_dir: ai_dir.to_path_buf(),
             repo_workdir: repo_workdir.to_path_buf(),
             working_logs: working_logs_dir,
-            rewrite_log: rewrite_log_file,
             logs: logs_dir,
         };
 
@@ -77,10 +73,6 @@ impl RepoStorage {
 
         // Create logs directory for Sentry events
         fs::create_dir_all(&self.logs)?;
-
-        if !&self.rewrite_log.exists() && !&self.rewrite_log.is_file() {
-            fs::write(&self.rewrite_log, "")?;
-        }
 
         Ok(())
     }
@@ -186,39 +178,85 @@ impl RepoStorage {
         }
     }
 
-    /// Rename a working log directory from one commit SHA to another.
-    /// Used when fast-forward pull changes HEAD but preserves working directory state.
-    /// Only renames if old directory exists and new directory doesn't exist.
+    /// Move a working log directory from one commit SHA to another.
+    /// If the destination already has checkpoints, preserve the old-base entries first and
+    /// append the destination entries after them.
     pub fn rename_working_log(&self, old_sha: &str, new_sha: &str) -> Result<(), GitAiError> {
         let old_dir = self.working_logs.join(old_sha);
         let new_dir = self.working_logs.join(new_sha);
-        if old_dir.exists() && !new_dir.exists() {
+        if !old_dir.exists() {
+            return Ok(());
+        }
+        if !new_dir.exists() {
             fs::rename(&old_dir, &new_dir)?;
             tracing::debug!("Renamed working log from {} to {}", old_sha, new_sha);
+        } else {
+            self.merge_working_log_dirs(old_sha, new_sha, &old_dir, &new_dir)?;
+            fs::remove_dir_all(&old_dir)?;
+            tracing::debug!("Merged working log from {} into {}", old_sha, new_sha);
         }
         Ok(())
     }
 
-    /* Rewrite Log Persistance */
-
-    /// Append a rewrite event to the rewrite log file and return the full log
-    pub fn append_rewrite_event(
+    fn merge_working_log_dirs(
         &self,
-        event: RewriteLogEvent,
-    ) -> Result<Vec<RewriteLogEvent>, GitAiError> {
-        append_event_to_file(&self.rewrite_log, event)?;
-        self.read_rewrite_events()
-    }
+        old_sha: &str,
+        new_sha: &str,
+        old_dir: &Path,
+        new_dir: &Path,
+    ) -> Result<(), GitAiError> {
+        copy_dir_contents(&old_dir.join("blobs"), &new_dir.join("blobs"))?;
 
-    /// Read all rewrite events from the rewrite log file
-    pub fn read_rewrite_events(&self) -> Result<Vec<RewriteLogEvent>, GitAiError> {
-        if !self.rewrite_log.exists() {
-            return Ok(Vec::new());
+        let canonical = self
+            .repo_workdir
+            .canonicalize()
+            .unwrap_or_else(|_| self.repo_workdir.clone());
+        let old_log = PersistedWorkingLog::new(
+            old_dir.to_path_buf(),
+            old_sha,
+            self.repo_workdir.clone(),
+            canonical.clone(),
+            None,
+        );
+        let new_log = PersistedWorkingLog::new(
+            new_dir.to_path_buf(),
+            new_sha,
+            self.repo_workdir.clone(),
+            canonical,
+            None,
+        );
+
+        let mut merged_initial = old_log.read_initial_attributions();
+        let new_initial = new_log.read_initial_attributions();
+        merged_initial.files.extend(new_initial.files);
+        merged_initial.prompts.extend(new_initial.prompts);
+        merged_initial.file_blobs.extend(new_initial.file_blobs);
+        merged_initial.humans.extend(new_initial.humans);
+        merged_initial.sessions.extend(new_initial.sessions);
+        new_log.write_initial(merged_initial)?;
+
+        let mut checkpoints = old_log.read_all_checkpoints()?;
+        checkpoints.extend(new_log.read_all_checkpoints()?);
+        new_log.write_all_checkpoints(&checkpoints)?;
+        Ok(())
+    }
+}
+
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<(), GitAiError> {
+    if !src.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)?.flatten() {
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_contents(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
         }
-
-        let content = fs::read_to_string(&self.rewrite_log)?;
-        crate::git::rewrite_log::deserialize_events_from_jsonl(&content)
     }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -558,6 +596,32 @@ impl PersistedWorkingLog {
         Ok(touched_files)
     }
 
+    pub fn observed_file_snapshot(&self) -> Result<HashMap<String, String>, GitAiError> {
+        let initial = self.read_initial_attributions();
+        let mut snapshot = HashMap::new();
+
+        for file_path in initial.files.keys() {
+            let content = self
+                .stored_initial_file_content_from(&initial, file_path)
+                .ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "INITIAL missing persisted file snapshot for {}",
+                        file_path
+                    ))
+                })?;
+            snapshot.insert(file_path.clone(), content);
+        }
+
+        for checkpoint in self.read_all_checkpoints()? {
+            for entry in checkpoint.entries {
+                let content = self.get_file_version(&entry.blob_sha)?;
+                snapshot.insert(entry.file, content);
+            }
+        }
+
+        Ok(snapshot)
+    }
+
     #[allow(dead_code)]
     pub fn all_ai_touched_files(&self) -> Result<HashSet<String>, GitAiError> {
         let checkpoints = self.read_all_checkpoints()?;
@@ -580,23 +644,6 @@ impl PersistedWorkingLog {
 
     /* INITIAL attributions file */
 
-    /// Write initial attributions to the INITIAL file.
-    /// This seeds the working log with known attributions from rewrite operations.
-    /// Only writes files that have non-empty attributions.
-    pub fn write_initial_attributions(
-        &self,
-        attributions: HashMap<String, Vec<LineAttribution>>,
-        prompts: HashMap<String, PromptRecord>,
-    ) -> Result<(), GitAiError> {
-        self.write_initial(InitialAttributions {
-            files: attributions,
-            prompts,
-            file_blobs: HashMap::new(),
-            humans: std::collections::BTreeMap::new(),
-            sessions: std::collections::BTreeMap::new(),
-        })
-    }
-
     /// Persist INITIAL attributions plus exact file snapshots for the target working log.
     pub fn write_initial_attributions_with_contents(
         &self,
@@ -612,10 +659,14 @@ impl PersistedWorkingLog {
             .collect();
         let mut file_blobs = HashMap::new();
         for file_path in filtered.keys() {
-            if let Some(content) = file_contents.get(file_path) {
-                let blob_sha = self.persist_file_version(content)?;
-                file_blobs.insert(file_path.clone(), blob_sha);
-            }
+            let content = file_contents.get(file_path).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "INITIAL missing file content snapshot for {}",
+                    file_path
+                ))
+            })?;
+            let blob_sha = self.persist_file_version(content)?;
+            file_blobs.insert(file_path.clone(), blob_sha);
         }
 
         self.write_initial(InitialAttributions {
@@ -668,16 +719,10 @@ impl PersistedWorkingLog {
             return Ok(Some(content));
         }
         if initial.files.contains_key(file_path) {
-            // Graceful skip for legacy INITIAL data (pre-March-2026) that lacks file_blobs.
-            // The checkpoint flow sets dirty_files to only the files being checkpointed, but
-            // this function iterates ALL files in INITIAL (including ones not in the current
-            // checkpoint). For those files, read_current_file_content will error since they're
-            // not in dirty_files — returning None is safe because it just means we can't provide
-            // supplementary context for that file's prior state.
-            match self.read_current_file_content(file_path) {
-                Ok(content) => return Ok(Some(content)),
-                Err(_) => return Ok(None),
-            }
+            return Err(GitAiError::Generic(format!(
+                "INITIAL missing persisted file snapshot for {}",
+                file_path
+            )));
         }
         Ok(None)
     }

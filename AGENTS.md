@@ -11,15 +11,12 @@ task dev
 # Build (only use this for checking that your changes compile)
 task build
 
-# Test (use these commands to run the test suite -- these calls are optimized for your system; all flags/args/modes can be combined)
-task test # Run the full test suite in daemon mode (this is the default, when the user asks to run tests, this is the command)
+# Test (use these commands to run the test suite -- these calls are optimized for your system; all flags/args can be combined)
+task test # Run the full test suite
 task test TEST_FILTER=foo # run specific test
 task test NO_CAPTURE=true # Run with Cargo's --no-capture flag
 task test EXTRA_TEST_BINARY_ARGS="--ignored" # ignored / exact / other flags
 task test CARGO_TEST_ARGS="--lib" # cargo-level flags (rare)
-
-# If the user explicitly asks for tests to be run in another mode (do not run test using these commands unless this test mode is explicitly asked for by the user)
-task test:wrapper-daemon
 
 # Lint & Format
 task lint

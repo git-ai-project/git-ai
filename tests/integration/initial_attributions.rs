@@ -4,7 +4,7 @@ use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::working_log::AgentId;
 use insta::assert_debug_snapshot;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Normalize blame output for snapshot testing by replacing non-deterministic
 /// elements (commit SHAs and timestamps) with placeholders
@@ -63,12 +63,20 @@ fn test_initial_only_no_blame_data() {
         },
     );
 
-    working_log
-        .write_initial_attributions(initial_attributions, prompts)
-        .expect("write initial attributions should succeed");
-
     // NOW create the new file in working directory (this will trigger checkpoint reading)
     let file_content = "line 1 from INITIAL\nline 2 from INITIAL\nline 3 from INITIAL\n";
+    let mut initial_contents = HashMap::new();
+    initial_contents.insert("newfile.txt".to_string(), file_content.to_string());
+    working_log
+        .write_initial_attributions_with_contents(
+            initial_attributions,
+            prompts,
+            BTreeMap::new(),
+            initial_contents,
+            BTreeMap::new(),
+        )
+        .expect("write initial attributions should succeed");
+
     std::fs::write(repo.path().join("newfile.txt"), file_content)
         .expect("write file should succeed");
 
@@ -151,12 +159,20 @@ fn test_initial_wins_overlaps() {
         },
     );
 
-    working_log
-        .write_initial_attributions(initial_attributions, prompts)
-        .expect("write initial attributions should succeed");
-
     // NOW create the file - INITIAL will seed the checkpoint
     let file_content = "line 1\nline 2\nline 3 modified\n";
+    let mut initial_contents = HashMap::new();
+    initial_contents.insert("example.txt".to_string(), file_content.to_string());
+    working_log
+        .write_initial_attributions_with_contents(
+            initial_attributions,
+            prompts,
+            BTreeMap::new(),
+            initial_contents,
+            BTreeMap::new(),
+        )
+        .expect("write initial attributions should succeed");
+
     std::fs::write(repo.path().join("example.txt"), file_content)
         .expect("write file should succeed");
 
@@ -245,13 +261,21 @@ fn test_initial_and_blame_merge() {
         },
     );
 
-    working_log
-        .write_initial_attributions(initial_attributions, prompts)
-        .expect("write initial attributions should succeed");
-
     // NOW create the file - INITIAL will seed lines 1-3, 5; blame will be used for 4, 6, 7
     // Write directly to filesystem for direct control
     let file_content = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n";
+    let mut initial_contents = HashMap::new();
+    initial_contents.insert("example.txt".to_string(), file_content.to_string());
+    working_log
+        .write_initial_attributions_with_contents(
+            initial_attributions,
+            prompts,
+            BTreeMap::new(),
+            initial_contents,
+            BTreeMap::new(),
+        )
+        .expect("write initial attributions should succeed");
+
     std::fs::write(repo.path().join("example.txt"), file_content)
         .expect("write file should succeed");
 
@@ -315,12 +339,21 @@ fn test_partial_file_coverage() {
         },
     );
 
+    // NOW create both files - fileA gets INITIAL, fileB uses blame
+    let file_a_content = "line 1 in A\nline 2 in A\n";
+    let mut initial_contents = HashMap::new();
+    initial_contents.insert("fileA.txt".to_string(), file_a_content.to_string());
     working_log
-        .write_initial_attributions(initial_attributions, prompts)
+        .write_initial_attributions_with_contents(
+            initial_attributions,
+            prompts,
+            BTreeMap::new(),
+            initial_contents,
+            BTreeMap::new(),
+        )
         .expect("write initial attributions should succeed");
 
-    // NOW create both files - fileA gets INITIAL, fileB uses blame
-    std::fs::write(repo.path().join("fileA.txt"), "line 1 in A\nline 2 in A\n")
+    std::fs::write(repo.path().join("fileA.txt"), file_a_content)
         .expect("write file should succeed");
     std::fs::write(repo.path().join("fileB.txt"), "line 1 in B\nline 2 in B\n")
         .expect("write file should succeed");
@@ -400,16 +433,22 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
         },
     );
 
+    // NOW create fileB.txt in working directory
+    let file_b_content = "line 1 from INITIAL\nline 2 from INITIAL\n";
+    let mut initial_contents = HashMap::new();
+    initial_contents.insert("fileB.txt".to_string(), file_b_content.to_string());
     working_log
-        .write_initial_attributions(initial_attributions, prompts)
+        .write_initial_attributions_with_contents(
+            initial_attributions,
+            prompts,
+            BTreeMap::new(),
+            initial_contents,
+            BTreeMap::new(),
+        )
         .expect("write initial attributions should succeed");
 
-    // NOW create fileB.txt in working directory
-    std::fs::write(
-        repo.path().join("fileB.txt"),
-        "line 1 from INITIAL\nline 2 from INITIAL\n",
-    )
-    .expect("write file should succeed");
+    std::fs::write(repo.path().join("fileB.txt"), file_b_content)
+        .expect("write file should succeed");
 
     // Make checkpoint #2 - this should use INITIAL attributions for fileB
     repo.git_ai(&["checkpoint"])

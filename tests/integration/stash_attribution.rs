@@ -1,5 +1,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use std::fs;
 
 #[test]
 fn test_stash_pop_with_ai_attribution() {
@@ -1170,6 +1171,45 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
     );
 }
 
+#[test]
+fn test_stash_apply_shift_uses_final_commit_tree_after_later_edit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("example.txt");
+
+    fs::write(&file_path, "root\nanchor\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(&file_path, "root\nAI stashed\nanchor\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
+    repo.git(&["stash", "push", "-m", "ai stash"])
+        .expect("stash should succeed");
+
+    fs::write(&file_path, "root\nanchor\ntarget human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "example.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("target head change").unwrap();
+
+    repo.git(&["stash", "apply"])
+        .expect("stash apply should succeed");
+    fs::write(
+        &file_path,
+        "root\nAI stashed\nanchor\ntarget human\nlate untracked\n",
+    )
+    .unwrap();
+    repo.git(&["add", "example.txt"]).unwrap();
+    repo.commit("commit applied stash with later edit").unwrap();
+
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(crate::lines![
+        "root".unattributed_human(),
+        "AI stashed".ai(),
+        "anchor".unattributed_human(),
+        "target human".human(),
+        "late untracked".unattributed_human(),
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_stash_pop_with_ai_attribution,
     test_stash_apply_with_ai_attribution,
@@ -1191,4 +1231,5 @@ crate::reuse_tests_in_worktree!(
     test_stash_apply_reset_apply_again,
     test_stash_branch_preserves_ai_attribution,
     test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint,
+    test_stash_apply_shift_uses_final_commit_tree_after_later_edit,
 );

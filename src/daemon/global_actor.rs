@@ -78,15 +78,12 @@ mod tests {
             exit_code: 0,
             started_at_ns: seq,
             finished_at_ns: seq + 1,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
+            reflog_start_offsets: std::collections::HashMap::new(),
             stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 

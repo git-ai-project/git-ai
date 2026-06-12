@@ -8,7 +8,7 @@ use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::notes_api::write_note as notes_add;
-use crate::git::repository::Repository;
+use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
@@ -63,24 +63,67 @@ pub fn post_commit(
     human_author: String,
     supress_output: bool,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
-    post_commit_with_final_state(
-        repo,
-        base_commit,
-        commit_sha,
-        human_author,
-        supress_output,
-        None,
-    )
+    post_commit_from_working_log(repo, base_commit, commit_sha, human_author, supress_output)
 }
 
-pub fn post_commit_with_final_state(
+pub fn post_commit_from_working_log(
     repo: &Repository,
     base_commit: Option<String>,
     commit_sha: String,
     human_author: String,
     supress_output: bool,
-    final_state_override: Option<&HashMap<String, String>>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
+    post_commit_from_working_log_with_transform(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        supress_output,
+        Ok,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PostCommitOptions {
+    pub supress_output: bool,
+    pub compute_stats: bool,
+}
+
+pub fn post_commit_from_working_log_with_transform<F>(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    supress_output: bool,
+    transform: F,
+) -> Result<(String, AuthorshipLog), GitAiError>
+where
+    F: FnOnce(AuthorshipLog) -> Result<AuthorshipLog, GitAiError>,
+{
+    post_commit_from_working_log_with_transform_and_options(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        PostCommitOptions {
+            supress_output,
+            compute_stats: true,
+        },
+        transform,
+    )
+}
+
+pub(crate) fn post_commit_from_working_log_with_transform_and_options<F>(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    options: PostCommitOptions,
+    transform: F,
+) -> Result<(String, AuthorshipLog), GitAiError>
+where
+    F: FnOnce(AuthorshipLog) -> Result<AuthorshipLog, GitAiError>,
+{
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
@@ -91,23 +134,12 @@ pub fn post_commit_with_final_state(
 
     let parent_working_log = working_log.read_all_checkpoints()?;
 
-    // Create VirtualAttributions from working log (fast path - no blame)
-    // We don't need to run blame because we only care about the working log data
-    // that was accumulated since the parent commit
-    let working_va = if let Some(snapshot) = final_state_override {
-        VirtualAttributions::from_working_log_snapshot(
-            repo.clone(),
-            parent_sha.clone(),
-            Some(human_author.clone()),
-            snapshot,
-        )?
-    } else {
-        VirtualAttributions::from_just_working_log(
-            repo.clone(),
-            parent_sha.clone(),
-            Some(human_author.clone()),
-        )?
-    };
+    let observed_snapshot = working_log.observed_file_snapshot()?;
+    let working_va = VirtualAttributions::from_persisted_working_log(
+        repo.clone(),
+        parent_sha.clone(),
+        Some(human_author.clone()),
+    )?;
 
     // Build pathspecs from AI-relevant checkpoint entries only.
     // Human-only entries with no AI attribution do not affect authorship output and should not
@@ -129,13 +161,13 @@ pub fn post_commit_with_final_state(
         pathspecs.insert(file_path.clone());
     }
 
-    let (mut authorship_log, initial_attributions) = working_va
+    let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             Some(&pathspecs),
-            final_state_override,
+            Some(&observed_snapshot),
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -175,6 +207,9 @@ pub fn post_commit_with_final_state(
         }
     }
 
+    authorship_log = transform(authorship_log)?;
+    authorship_log.metadata.base_commit_sha = commit_sha.clone();
+
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
@@ -200,65 +235,71 @@ pub fn post_commit_with_final_state(
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
     let mut stats: Option<crate::authorship::stats::CommitStats> = None;
-    let is_merge_commit = repo
-        .find_commit(commit_sha.clone())
-        .map(|commit| commit.parent_count().unwrap_or(0) > 1)
-        .unwrap_or(false);
-    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let skip_reason = if is_merge_commit {
-        Some(StatsSkipReason::MergeCommit)
-    } else {
-        estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
-            .ok()
-            .and_then(|estimate| {
-                if should_skip_expensive_post_commit_stats(&estimate) {
-                    Some(StatsSkipReason::Expensive(estimate))
-                } else {
-                    None
-                }
-            })
-    };
+    let mut skip_reason = None;
 
-    if skip_reason.is_none() {
-        let diff_base = if parent_sha == "initial" {
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    if options.compute_stats {
+        let is_merge_commit = repo
+            .find_commit(commit_sha.clone())
+            .map(|commit| commit.parent_count().unwrap_or(0) > 1)
+            .unwrap_or(false);
+        let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+        skip_reason = if is_merge_commit {
+            Some(StatsSkipReason::MergeCommit)
         } else {
-            &parent_sha
+            estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
+                .ok()
+                .and_then(|estimate| {
+                    if should_skip_expensive_post_commit_stats(&estimate) {
+                        Some(StatsSkipReason::Expensive(estimate))
+                    } else {
+                        None
+                    }
+                })
         };
 
-        let diff_hunks =
-            crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+        if skip_reason.is_none() {
+            let diff_base = if parent_sha == "initial" {
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            } else {
+                &parent_sha
+            };
 
-        let computed = stats_for_commit_stats_from_hunks(
-            repo,
-            &commit_sha,
-            &ignore_patterns,
-            &diff_hunks,
-            Some(&authorship_log),
-        )?;
+            let diff_hunks =
+                crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
 
-        let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
-            repo,
-            diff_hunks,
-            &commit_sha,
-            Some(&authorship_log),
-        )
-        .ok()
-        .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+            let computed = stats_for_commit_stats_from_hunks(
+                repo,
+                &commit_sha,
+                &ignore_patterns,
+                &diff_hunks,
+                Some(&authorship_log),
+            )?;
 
-        // Record metrics only when we have full stats.
-        record_commit_metrics(
-            repo,
-            &commit_sha,
-            &parent_sha,
-            &human_author,
-            &authorship_note_str,
-            &computed,
-            &parent_working_log,
-            hunks_json.as_deref(),
-        );
-        stats = Some(computed);
-    } else {
+            let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
+                repo,
+                diff_hunks,
+                &commit_sha,
+                Some(&authorship_log),
+            )
+            .ok()
+            .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+
+            // Record metrics only when we have full stats.
+            record_commit_metrics(
+                repo,
+                &commit_sha,
+                &parent_sha,
+                &human_author,
+                &authorship_note_str,
+                &computed,
+                &parent_working_log,
+                hunks_json.as_deref(),
+            );
+            stats = Some(computed);
+        }
+    }
+
+    if options.compute_stats && skip_reason.is_some() {
         match skip_reason.as_ref() {
             Some(StatsSkipReason::MergeCommit) => {
                 tracing::debug!("Skipping post-commit stats for merge commit {}", commit_sha);
@@ -280,8 +321,6 @@ pub fn post_commit_with_final_state(
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha)?;
-        let initial_file_contents =
-            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
         new_working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
@@ -295,7 +334,7 @@ pub fn post_commit_with_final_state(
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
     // Use Config::fresh() to support runtime config updates
-    if !supress_output && !Config::fresh().is_quiet() {
+    if !options.supress_output && !Config::fresh().is_quiet() {
         // Only print stats if we're in an interactive terminal and quiet mode is disabled
         let is_interactive = std::io::stdout().is_terminal();
         if let Some(stats) = stats.as_ref() {
@@ -323,6 +362,204 @@ pub fn post_commit_with_final_state(
         }
     }
     Ok((commit_sha.to_string(), authorship_log))
+}
+
+fn commit_tree_snapshot_for_files(
+    repo: &Repository,
+    commit_sha: &str,
+    file_paths: &HashSet<String>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    let requests = file_paths
+        .iter()
+        .map(|file_path| (commit_sha.to_string(), file_path.clone()))
+        .collect::<Vec<_>>();
+    let contents = batch_read_paths_at_treeishes(repo, &requests)?;
+    let mut snapshot = HashMap::with_capacity(file_paths.len());
+    for file_path in file_paths {
+        snapshot.insert(
+            file_path.clone(),
+            contents
+                .get(&(commit_sha.to_string(), file_path.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+
+    Ok(snapshot)
+}
+
+/// Amend-specific post-commit that merges blame-sourced attributions from the
+/// original commit with persisted working-log checkpoint data.
+pub fn post_commit_amend(
+    repo: &Repository,
+    original_commit: &str,
+    amended_commit: &str,
+    human_author: String,
+) -> Result<(String, AuthorshipLog), GitAiError> {
+    let repo_storage = &repo.storage;
+    let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
+
+    // Compute pathspecs: changed files in the amended commit + working log touched files
+    let changed_files = repo.list_commit_files(amended_commit, None)?;
+    let mut pathspecs: HashSet<String> = changed_files.into_iter().collect();
+    let touched_files = working_log.all_touched_files()?;
+    pathspecs.extend(touched_files);
+    let initial_attributions_for_pathspecs = working_log.read_initial_attributions();
+    for file_path in initial_attributions_for_pathspecs.files.keys() {
+        pathspecs.insert(file_path.clone());
+    }
+    let pathspecs_vec: Vec<String> = pathspecs.iter().cloned().collect();
+    let observed_snapshot = working_log.observed_file_snapshot()?;
+    let mut final_state_snapshot =
+        commit_tree_snapshot_for_files(repo, amended_commit, &pathspecs)?;
+    final_state_snapshot.extend(observed_snapshot);
+
+    // Check if original commit has existing authorship data
+    let has_existing_data =
+        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
+            .map(|log| {
+                !log.metadata.prompts.is_empty()
+                    || !log.metadata.humans.is_empty()
+                    || !log.metadata.sessions.is_empty()
+            })
+            .unwrap_or(false);
+
+    let working_va = smol::block_on(async {
+        VirtualAttributions::from_working_log_for_commit_snapshot(
+            repo.clone(),
+            original_commit.to_string(),
+            &pathspecs_vec,
+            if has_existing_data {
+                None
+            } else {
+                Some(human_author.clone())
+            },
+            None,
+            &final_state_snapshot,
+        )
+        .await
+    })?;
+
+    // Resolve parent of the amended commit for diff base
+    let amended_commit_obj = repo.find_commit(amended_commit.to_string())?;
+    let parent_sha = if amended_commit_obj.parent_count()? > 0 {
+        amended_commit_obj
+            .parent(0)
+            .map(|p| p.id())
+            .unwrap_or_else(|_| "initial".to_string())
+    } else {
+        "initial".to_string()
+    };
+
+    let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
+        .to_authorship_log_and_initial_working_log(
+            repo,
+            &parent_sha,
+            amended_commit,
+            Some(&pathspecs),
+            Some(&final_state_snapshot),
+        )?;
+
+    authorship_log.metadata.base_commit_sha = amended_commit.to_string();
+
+    // Fill unattributed lines for background agents
+    if !matches!(
+        crate::authorship::background_agent::detect(),
+        crate::authorship::background_agent::BackgroundAgent::None
+            | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
+    ) {
+        let diff_base = if parent_sha == "initial" {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        } else {
+            &parent_sha
+        };
+        if let Ok(added_lines) = repo.diff_added_lines(diff_base, amended_commit, None) {
+            let committed_hunks: HashMap<
+                String,
+                Vec<crate::authorship::authorship_log::LineRange>,
+            > = added_lines
+                .into_iter()
+                .filter(|(_, lines)| !lines.is_empty())
+                .map(|(path, lines)| {
+                    (
+                        path,
+                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                    )
+                })
+                .collect();
+            crate::authorship::background_agent::fill_unattributed_lines(
+                &mut authorship_log,
+                &committed_hunks,
+                &human_author,
+            );
+        }
+    }
+
+    // Preserve human/session metadata from the original commit's note
+    if let Ok(original_log) =
+        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
+    {
+        for (id, record) in original_log.metadata.humans {
+            authorship_log.metadata.humans.entry(id).or_insert(record);
+        }
+        let referenced_session_ids: HashSet<String> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|fa| fa.entries.iter())
+            .filter_map(|entry| {
+                if entry.hash.starts_with("s_") {
+                    Some(
+                        entry
+                            .hash
+                            .split("::")
+                            .next()
+                            .unwrap_or(&entry.hash)
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (id, record) in original_log.metadata.sessions {
+            if referenced_session_ids.contains(&id) {
+                authorship_log.metadata.sessions.entry(id).or_insert(record);
+            }
+        }
+    }
+
+    // Inject custom attributes
+    let custom_attrs = Config::fresh().custom_attributes().clone();
+    if !custom_attrs.is_empty() {
+        for pr in authorship_log.metadata.prompts.values_mut() {
+            pr.custom_attributes = Some(custom_attrs.clone());
+        }
+        for sr in authorship_log.metadata.sessions.values_mut() {
+            sr.custom_attributes = Some(custom_attrs.clone());
+        }
+    }
+
+    let authorship_note_str = authorship_log
+        .serialize_to_string()
+        .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
+    notes_add(repo, amended_commit, &authorship_note_str)?;
+
+    // Write INITIAL file for uncommitted attributions
+    if !initial_attributions.files.is_empty() {
+        let new_working_log = repo_storage.working_log_for_base_commit(amended_commit)?;
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_attributions.humans,
+            initial_file_contents,
+            initial_attributions.sessions,
+        )?;
+    }
+
+    // Clean up old working log
+    repo_storage.delete_working_log_for_base_commit(original_commit)?;
+
+    Ok((amended_commit.to_string(), authorship_log))
 }
 
 #[derive(Debug, Clone)]

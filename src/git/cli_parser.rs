@@ -971,4 +971,62 @@ mod tests {
         assert_eq!(summary.onto_spec.as_deref(), Some("new-base"));
         assert_eq!(summary.positionals, vec!["upstream", "feature"]);
     }
+
+    #[test]
+    fn test_rebase_summary_continue_is_control_mode() {
+        let summary = summarize_rebase_args(&["--continue".to_string()]);
+        assert!(summary.is_control_mode);
+    }
+
+    #[test]
+    fn test_rebase_summary_abort_is_control_mode() {
+        let summary = summarize_rebase_args(&["--abort".to_string()]);
+        assert!(summary.is_control_mode);
+    }
+
+    #[test]
+    fn test_rebase_summary_skip_is_control_mode() {
+        let summary = summarize_rebase_args(&["--skip".to_string()]);
+        assert!(summary.is_control_mode);
+    }
+
+    #[test]
+    fn test_rebase_summary_upstream_only() {
+        let summary = summarize_rebase_args(&["origin/main".to_string()]);
+        assert!(!summary.is_control_mode);
+        assert_eq!(summary.positionals, vec!["origin/main"]);
+    }
+
+    #[test]
+    fn test_rebase_summary_onto_equals_form() {
+        let summary =
+            summarize_rebase_args(&["--onto=abc123".to_string(), "origin/main".to_string()]);
+        assert!(!summary.is_control_mode);
+        assert_eq!(summary.onto_spec.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_rebase_summary_root_flag() {
+        let summary = summarize_rebase_args(&["--root".to_string()]);
+        assert!(!summary.is_control_mode);
+        assert!(summary.has_root);
+    }
+
+    #[test]
+    fn test_rebase_summary_interactive_with_upstream() {
+        let summary = summarize_rebase_args(&["-i".to_string(), "origin/main".to_string()]);
+        assert!(!summary.is_control_mode);
+        assert_eq!(summary.positionals, vec!["origin/main"]);
+    }
+
+    #[test]
+    fn test_rebase_summary_strategy_consumes_value() {
+        let summary = summarize_rebase_args(&[
+            "-s".to_string(),
+            "ours".to_string(),
+            "origin/main".to_string(),
+        ]);
+        assert!(!summary.is_control_mode);
+        assert_eq!(summary.positionals, vec!["origin/main"]);
+    }
 }

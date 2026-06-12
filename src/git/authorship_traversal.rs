@@ -93,7 +93,7 @@ fn get_notes_list(global_args: &[String]) -> Result<Vec<(String, String)>, GitAi
     Ok(mappings)
 }
 
-fn batch_read_blobs_with_oids(
+pub(crate) fn batch_read_blobs_with_oids(
     global_args: &[String],
     blob_oids: &[String],
 ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
@@ -108,7 +108,16 @@ fn batch_read_blobs_with_oids(
     let stdin_data = blob_oids.join("\n") + "\n";
     let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
 
-    parse_cat_file_batch_output_with_oids(&output.stdout)
+    let results = parse_cat_file_batch_output_with_oids(&output.stdout)?;
+    for oid in blob_oids {
+        if !results.contains_key(oid) {
+            return Err(GitAiError::Generic(format!(
+                "missing git blob object referenced by authorship note: {}",
+                oid
+            )));
+        }
+    }
+    Ok(results)
 }
 
 fn parse_cat_file_batch_output_with_oids(

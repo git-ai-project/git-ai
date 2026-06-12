@@ -2496,18 +2496,15 @@ sed -i.bak '3s/pick/fixup/' "$1"
         );
     }
 
-    // Verify line-level attribution: human line must still show as human
-    // Note: the closing `}` may lose AI attribution during squash-rebase
-    // content-diff reconstruction (it's a common line that gets re-attributed
-    // to the commit author). The critical assertion is that the human-authored
-    // line retains its known-human attribution.
+    // Verify line-level attribution: human line must still show as human,
+    // and AI lines (including closing `}`) retain their attribution through squash.
     handler.assert_lines_and_blame(crate::lines![
         "func handleOrder() {".ai(),
         "    validate()".ai(),
         "    log(\"order received\")".human(),
         "    process()".ai(),
         "    sendMetrics()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }
 
@@ -2676,6 +2673,134 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "    handle()".ai(),
         "    logMetrics()".ai(),
         "    shutdown()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
+    ]);
+}
+
+/// Test the full branch lifecycle pattern used by the fuzzer:
+/// create branch → multiple commits → rebase onto updated main → fast-forward merge back.
+/// This verifies attribution survives through rebase + merge.
+#[test]
+fn test_rebase_then_ff_merge_preserves_attribution() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(crate::lines!["main line 1"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with multiple AI commits on a SEPARATE file (no conflicts)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let feature_path = repo.path().join("feature.txt");
+    fs::write(&feature_path, "ai feature 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 1").unwrap();
+
+    fs::write(&feature_path, "ai feature 1\nai feature 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 2").unwrap();
+
+    fs::write(&feature_path, "ai feature 1\nai feature 2\nai feature 3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 3").unwrap();
+
+    // Advance main with a non-conflicting change (different file)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let main_path = repo.path().join("main.txt");
+    fs::write(&main_path, "main line 1\nmain advance\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("advance main").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Fast-forward merge back to main
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "feature"]).unwrap();
+
+    // Verify attribution on the feature file (should survive rebase + merge)
+    let mut result_file = repo.filename("feature.txt");
+    result_file.assert_lines_and_blame(crate::lines![
+        "ai feature 1".ai(),
+        "ai feature 2".ai(),
+        "ai feature 3".ai(),
+    ]);
+}
+
+/// Same as above but edits the SAME file on both branches (prepend on main, append on feature).
+/// This is the exact pattern the fuzzer's workflow-branch-lifecycle uses.
+#[test]
+fn test_rebase_same_file_then_ff_merge_preserves_attribution() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let file_path = repo.path().join("shared.txt");
+    fs::write(&file_path, "base line\n").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch - append AI lines
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    fs::write(&file_path, "base line\nai append 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 1").unwrap();
+
+    fs::write(&file_path, "base line\nai append 1\nai append 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 2").unwrap();
+
+    fs::write(
+        &file_path,
+        "base line\nai append 1\nai append 2\nai append 3\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 3").unwrap();
+
+    // Advance main - prepend human line (non-conflicting with appends)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    fs::write(&file_path, "human prepend\nbase line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("advance main").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Fast-forward merge
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "feature"]).unwrap();
+
+    // After rebase+merge: prepend + base + 3 appends
+    let mut result_file = repo.filename("shared.txt");
+    result_file.assert_lines_and_blame(crate::lines![
+        "human prepend".human(),
+        "base line".unattributed_human(),
+        "ai append 1".ai(),
+        "ai append 2".ai(),
+        "ai append 3".ai(),
     ]);
 }
