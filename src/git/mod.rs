@@ -3,6 +3,9 @@ pub mod command_classification;
 pub mod diff_tree_to_tree;
 pub mod fast_reader;
 pub mod notes_api;
+#[path = "refs.rs"]
+mod refs_impl;
+#[path = "refs_ext.rs"]
 pub mod refs;
 pub mod repo_state;
 pub mod repository;
