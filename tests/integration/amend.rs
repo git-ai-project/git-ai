@@ -432,14 +432,14 @@ fn test_amend_with_unstaged_middle_section() {
     let file_path = workdir.join("function.txt");
     std::fs::write(
         &file_path,
-        "// File header\n// File footer\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 3 line 1\n// AI section 3 line 2\n"
+        "// File header\n// File footer\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 3 line 1\n// AI section 3 line 2"
     ).unwrap();
     repo.git(&["add", "function.txt"]).unwrap();
 
     // Restore full content with middle section
     std::fs::write(
         &file_path,
-        "// File header\n// File footer\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 2 line 1\n// AI section 2 line 2\n// AI section 3 line 1\n// AI section 3 line 2\n"
+        "// File header\n// File footer\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 2 line 1\n// AI section 2 line 2\n// AI section 3 line 1\n// AI section 3 line 2"
     ).unwrap();
 
     // Amend

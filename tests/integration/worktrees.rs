@@ -10,7 +10,7 @@ use insta::assert_debug_snapshot;
 use rand::RngExt;
 use regex::Regex;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -374,11 +374,20 @@ crate::worktree_test_wrappers! {
             messages_url: None,
             },
         );
+        let file_content = "a\nb\n";
+        let mut initial_contents = HashMap::new();
+        initial_contents.insert("initial.txt".to_string(), file_content.to_string());
         working_log
-            .write_initial_attributions(initial_attributions, prompts)
+            .write_initial_attributions_with_contents(
+                initial_attributions,
+                prompts,
+                BTreeMap::new(),
+                initial_contents,
+                BTreeMap::new(),
+            )
             .expect("write initial attributions");
 
-        fs::write(repo.path().join("initial.txt"), "a\nb\n").expect("write file");
+        fs::write(repo.path().join("initial.txt"), file_content).expect("write file");
         repo.git_ai(&["checkpoint"]).unwrap();
         repo.stage_all_and_commit("commit initial attribution")
             .unwrap();

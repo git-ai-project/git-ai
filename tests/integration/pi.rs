@@ -104,7 +104,6 @@ fn test_pi_before_edit_checkpoint_via_cli_creates_human_checkpoint() {
 
     repo.git_ai(&["checkpoint", "pi", "--hook-input", &hook_input])
         .unwrap();
-    repo.sync_daemon_force();
 
     fs::write(&file_path, "fn main() { println!(\"human\"); }\n").unwrap();
     let commit = repo.stage_all_and_commit("Human Pi edit").unwrap();
@@ -213,7 +212,6 @@ fn test_pi_post_commit_resyncs_latest_session_transcript() {
 
     repo.git_ai(&["checkpoint", "pi", "--hook-input", &hook_input])
         .unwrap();
-    repo.sync_daemon_force();
 
     append_assistant_message(
         &session_path,

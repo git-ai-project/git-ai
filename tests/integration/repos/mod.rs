@@ -23,7 +23,7 @@ macro_rules! subdir_test_variants {
             // Variant 2: Run with -C flag from arbitrary directory
             #[test]
             fn [<test_ $test_name _with_c_flag>]() {
-                // Wrapper struct that intercepts git calls to use -C flag
+                // Adapter that intercepts git calls to use -C flag
                 struct TestRepoWithCFlag {
                     inner: $crate::repos::test_repo::TestRepo,
                 }
@@ -44,13 +44,10 @@ macro_rules! subdir_test_variants {
 
                         use std::process::Command;
                         use $crate::repos::test_repo::{
-                            get_binary_path,
                             git_command_requires_daemon_sync, git_command_routes_to_clone_target,
-                            new_daemon_test_sync_session_id, GitTestMode,
+                            new_daemon_test_sync_session_id,
                         };
 
-                        let binary_path = get_binary_path();
-                        let mode = GitTestMode::from_env();
                         let command_affects_daemon = self
                             .inner
                             .git_command_affects_daemon_for_tracking(
@@ -58,12 +55,11 @@ macro_rules! subdir_test_variants {
                                 Some(self.inner.path().as_path()),
                             );
 
-                        if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
+                        if git_command_requires_daemon_sync(args) {
                             self.inner.sync_daemon_force();
                         }
 
-                        let daemon_command_pending = mode.uses_daemon()
-                            && command_affects_daemon
+                        let daemon_command_pending = command_affects_daemon
                             && !git_command_routes_to_clone_target(args);
                         let daemon_test_sync_session =
                             daemon_command_pending.then(new_daemon_test_sync_session_id);
@@ -77,11 +73,8 @@ macro_rules! subdir_test_variants {
                         }
                         full_args.extend(args.iter().map(|arg| (*arg).to_string()));
 
-                        let mut command = if mode.uses_wrapper() {
-                            Command::new(binary_path)
-                        } else {
-                            Command::new($crate::repos::test_repo::real_git_executable())
-                        };
+                        let mut command =
+                            Command::new($crate::repos::test_repo::real_git_executable());
                         command.current_dir(&arbitrary_dir);
                         command.args(&full_args);
                         command.env("HOME", self.inner.test_home_path());
@@ -97,24 +90,16 @@ macro_rules! subdir_test_variants {
                         // Windows) that can cause CRLF modifications making files appear
                         // uncommitted after a commit.
                         command.env("GIT_CONFIG_NOSYSTEM", "1");
-                        if mode.uses_wrapper() {
-                            command.env("GIT_AI", "git");
-                        }
-                        if mode.uses_hooks() {
-                            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-                        }
-                        if mode.uses_daemon() {
-                            let trace_socket = self.inner.daemon_trace_socket_path();
-                            let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
-                                .unwrap_or_else(|_| "10".to_string());
-                            command.env(
-                                "GIT_TRACE2_EVENT",
-                                git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
-                                    &trace_socket,
-                                ),
-                                );
-                            command.env("GIT_TRACE2_EVENT_NESTING", nesting);
-                        }
+                        let trace_socket = self.inner.daemon_trace_socket_path();
+                        let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
+                            .unwrap_or_else(|_| "10".to_string());
+                        command.env(
+                            "GIT_TRACE2_EVENT",
+                            git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+                                &trace_socket,
+                            ),
+                        );
+                        command.env("GIT_TRACE2_EVENT_NESTING", nesting);
 
                         // Add config patch if present
                         if let Some(patch) = &self.inner.config_patch {
@@ -169,14 +154,11 @@ macro_rules! subdir_test_variants {
 
                             use std::process::Command;
                             use $crate::repos::test_repo::{
-                                get_binary_path,
                                 git_command_requires_daemon_sync,
                                 git_command_routes_to_clone_target,
-                                new_daemon_test_sync_session_id, GitTestMode,
+                                new_daemon_test_sync_session_id,
                             };
 
-                        let binary_path = get_binary_path();
-                        let mode = GitTestMode::from_env();
                         let command_affects_daemon = self
                             .inner
                             .git_command_affects_daemon_for_tracking(
@@ -184,12 +166,11 @@ macro_rules! subdir_test_variants {
                                 Some(self.inner.path().as_path()),
                             );
 
-                        if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
+                        if git_command_requires_daemon_sync(args) {
                             self.inner.sync_daemon_force();
                         }
 
-                        let daemon_command_pending = mode.uses_daemon()
-                            && command_affects_daemon
+                        let daemon_command_pending = command_affects_daemon
                             && !git_command_routes_to_clone_target(args);
                         let daemon_test_sync_session =
                             daemon_command_pending.then(new_daemon_test_sync_session_id);
@@ -203,11 +184,8 @@ macro_rules! subdir_test_variants {
                         }
                         full_args.extend(args.iter().map(|arg| (*arg).to_string()));
 
-                            let mut command = if mode.uses_wrapper() {
-                                Command::new(binary_path)
-                            } else {
-                                Command::new($crate::repos::test_repo::real_git_executable())
-                            };
+                            let mut command =
+                                Command::new($crate::repos::test_repo::real_git_executable());
                             command.current_dir(&arbitrary_dir);
                             command.args(&full_args);
                             command.env("HOME", self.inner.test_home_path());
@@ -223,24 +201,16 @@ macro_rules! subdir_test_variants {
                             // Windows) that can cause CRLF modifications making files appear
                             // uncommitted after a commit.
                             command.env("GIT_CONFIG_NOSYSTEM", "1");
-                            if mode.uses_wrapper() {
-                                command.env("GIT_AI", "git");
-                            }
-                            if mode.uses_hooks() {
-                                command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-                            }
-                            if mode.uses_daemon() {
-                                let trace_socket = self.inner.daemon_trace_socket_path();
-                                let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
-                                    .unwrap_or_else(|_| "10".to_string());
-                                command.env(
-                                    "GIT_TRACE2_EVENT",
-                                    git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
-                                        &trace_socket,
-                                    ),
-                                );
-                                command.env("GIT_TRACE2_EVENT_NESTING", nesting);
-                            }
+                            let trace_socket = self.inner.daemon_trace_socket_path();
+                            let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
+                                .unwrap_or_else(|_| "10".to_string());
+                            command.env(
+                                "GIT_TRACE2_EVENT",
+                                git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+                                    &trace_socket,
+                                ),
+                            );
+                            command.env("GIT_TRACE2_EVENT_NESTING", nesting);
 
                             if let Some(patch) = &self.inner.config_patch {
                                 if let Ok(patch_json) = serde_json::to_string(patch) {
@@ -330,68 +300,17 @@ macro_rules! worktree_test_wrappers {
                 impl WorktreeTestRepo {
                     fn new() -> Self {
                         Self {
-                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
-                                $crate::repos::test_repo::GitTestMode::Daemon,
-                            ),
+                            inner: $crate::repos::test_repo::TestRepo::new_worktree(),
                         }
                     }
 
                     fn new_with_remote() -> (Self, Self) {
                         let (local, upstream) =
-                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
-                                $crate::repos::test_repo::GitTestMode::Daemon,
-                            );
+                            $crate::repos::test_repo::TestRepo::new_with_remote();
                         (
                             Self { inner: local },
                             Self { inner: upstream },
                         )
-                    }
-
-                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
-                        $crate::repos::test_repo::GitTestMode::Daemon
-                    }
-                }
-
-                impl std::ops::Deref for WorktreeTestRepo {
-                    type Target = $crate::repos::test_repo::TestRepo;
-                    fn deref(&self) -> &Self::Target {
-                        &self.inner
-                    }
-                }
-
-                type TestRepo = WorktreeTestRepo;
-                $body
-            }
-
-            #[test]
-            fn [<test_ $test_name _in_worktree_wrapper_daemon_mode>]() {
-                struct WorktreeTestRepo {
-                    inner: $crate::repos::test_repo::TestRepo,
-                }
-
-                #[allow(dead_code)]
-                impl WorktreeTestRepo {
-                    fn new() -> Self {
-                        Self {
-                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
-                                $crate::repos::test_repo::GitTestMode::WrapperDaemon,
-                            ),
-                        }
-                    }
-
-                    fn new_with_remote() -> (Self, Self) {
-                        let (local, upstream) =
-                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
-                                $crate::repos::test_repo::GitTestMode::WrapperDaemon,
-                            );
-                        (
-                            Self { inner: local },
-                            Self { inner: upstream },
-                        )
-                    }
-
-                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
-                        $crate::repos::test_repo::GitTestMode::WrapperDaemon
                     }
                 }
 

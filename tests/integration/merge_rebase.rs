@@ -323,12 +323,12 @@ fn test_merge_conflict_ai_resolution_outside_session() {
     repo.git_ai(&["checkpoint", "mock_ai", "app.py"]).unwrap();
 
     // Human commits the merge resolution.
-    repo.stage_all_and_commit("merge resolved by AI").unwrap();
+    let _merge_commit = repo.stage_all_and_commit("merge resolved by AI").unwrap();
 
     // "class App:" was never in the conflict — it was identical on both branches → human.
-    // The AI resolved the conflict by writing the entire resolution, so both lines that
-    // were part of the contested region ("    def feature(): pass" and "    def main(): pass")
-    // are attributed to the AI that produced the resolution.
+    // "    def feature(): pass" and "    def main(): pass" — the mock_ai checkpoint
+    // attributed the entire resolution to AI. The post-commit hook's working-log-based
+    // note (ground truth from checkpoint) takes precedence over any rewrite handler.
     file.assert_lines_and_blame(crate::lines![
         "class App:".human(),
         "    def feature(): pass".ai(),

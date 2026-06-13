@@ -4,9 +4,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use repos::test_repo::{
-    DaemonTestScope, GitTestMode, TestRepo, get_binary_path, real_git_executable,
-};
+use repos::test_repo::{DaemonTestScope, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs::{self, OpenOptions};
@@ -328,8 +326,7 @@ fn wait_for_child_exit(repo: &TestRepo, child: &mut Child, timeout: Duration) {
 #[test]
 #[serial]
 fn windows_install_script_reinstall_stops_running_daemon() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -373,8 +370,7 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 #[test]
 #[serial]
 fn windows_daemon_creates_log_file() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -404,8 +400,7 @@ fn seed_existing_wrapper(repo: &TestRepo) {
 #[test]
 #[serial]
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     // Pre-seed wrapper state so the installer treats this as an existing-user
     // upgrade and refreshes git.exe — this test exercises wrapper behavior.
@@ -447,8 +442,7 @@ fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
 #[test]
 #[serial]
 fn windows_install_script_skips_wrapper_for_new_users() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -478,8 +472,7 @@ fn windows_install_script_skips_wrapper_for_new_users() {
 #[test]
 #[serial]
 fn windows_install_script_refreshes_wrapper_for_existing_users() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     seed_existing_wrapper(&repo);
 

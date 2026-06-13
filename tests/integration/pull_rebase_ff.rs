@@ -1,5 +1,9 @@
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use serde_json::json;
+use std::collections::BTreeSet;
 
 /// Helper struct that provides a local repo with an upstream containing seeded commits.
 /// The local repo is initially behind the upstream (no divergence — fast-forward possible).
@@ -789,6 +793,8 @@ struct RegularRebaseConflictSetup {
     repo: TestRepo,
     /// SHA of the AI commit on the feature branch
     feature_ai_commit_sha: String,
+    /// SHA of the conflicting commit on the default branch
+    main_conflict_commit_sha: String,
     /// Name of the default branch
     default_branch: String,
 }
@@ -827,6 +833,11 @@ fn setup_regular_rebase_conflict() -> RegularRebaseConflictSetup {
     main_file.set_contents(vec!["line 1".human(), "main change line 2".human()]);
     repo.stage_all_and_commit("main conflicting change")
         .expect("main commit should succeed");
+    let main_conflict_commit_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
 
     // Switch back to feature
     repo.git(&["checkout", "feature"])
@@ -835,8 +846,113 @@ fn setup_regular_rebase_conflict() -> RegularRebaseConflictSetup {
     RegularRebaseConflictSetup {
         repo,
         feature_ai_commit_sha: feature_sha,
+        main_conflict_commit_sha,
         default_branch,
     }
+}
+
+fn setup_regular_rebase_conflict_with_trailing_newlines() -> RegularRebaseConflictSetup {
+    use std::fs;
+
+    let repo = TestRepo::new();
+    let shared_path = repo.path().join("shared.txt");
+
+    fs::write(&shared_path, "line 1\nline 2\n").expect("write initial file");
+    repo.git_ai(&["checkpoint", "mock_known_human", "shared.txt"])
+        .expect("initial known-human checkpoint should succeed");
+    repo.stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout -b feature should succeed");
+
+    fs::write(&shared_path, "line 1\nAI feature line 2\n").expect("write feature file");
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .expect("feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("AI feature changes")
+        .expect("AI feature commit should succeed");
+
+    let feature_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout main should succeed");
+
+    fs::write(&shared_path, "line 1\nmain change line 2\n").expect("write main file");
+    repo.git_ai(&["checkpoint", "mock_known_human", "shared.txt"])
+        .expect("main known-human checkpoint should succeed");
+    repo.stage_all_and_commit("main conflicting change")
+        .expect("main commit should succeed");
+    let main_conflict_commit_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    repo.git(&["checkout", "feature"])
+        .expect("checkout feature should succeed");
+
+    RegularRebaseConflictSetup {
+        repo,
+        feature_ai_commit_sha: feature_sha,
+        main_conflict_commit_sha,
+        default_branch,
+    }
+}
+
+fn session_keys(log: &AuthorshipLog) -> BTreeSet<String> {
+    log.metadata.sessions.keys().cloned().collect()
+}
+
+fn checkpoint_claude_file_edit(
+    repo: &TestRepo,
+    event_name: &str,
+    file_path: &str,
+    tool_use_id: &str,
+) {
+    let transcript_path = repo.path().join(".git-ai-test-claude-session.jsonl");
+    std::fs::write(
+        &transcript_path,
+        "{\"type\":\"message\",\"message\":{\"model\":\"claude-sonnet-4-5\"}}\n",
+    )
+    .expect("write claude transcript fixture");
+    let absolute_file_path = repo.path().join(file_path);
+    let hook_input = json!({
+        "cwd": repo.path(),
+        "transcript_path": transcript_path,
+        "hook_event_name": event_name,
+        "tool_name": "Edit",
+        "session_id": "test-claude-rebase-conflict-session",
+        "tool_use_id": tool_use_id,
+        "tool_input": {
+            "file_path": absolute_file_path,
+        },
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "claude", "--hook-input", &hook_input])
+        .expect("claude checkpoint should succeed");
+}
+
+fn attestation_author_keys(log: &AuthorshipLog, path: &str) -> BTreeSet<String> {
+    log.attestations
+        .iter()
+        .filter(|attestation| attestation.file_path == path)
+        .flat_map(|attestation| attestation.entries.iter())
+        .map(|entry| {
+            entry
+                .hash
+                .split("::")
+                .next()
+                .unwrap_or(&entry.hash)
+                .to_string()
+        })
+        .collect()
 }
 
 #[test]
@@ -849,6 +965,13 @@ fn test_regular_rebase_with_conflict_preserves_ai_notes() {
     assert!(
         pre_rebase_note.is_some(),
         "Feature AI commit should have authorship notes before rebase"
+    );
+    let pre_rebase_note = pre_rebase_note.unwrap();
+    let pre_rebase_log =
+        AuthorshipLog::deserialize_from_string(&pre_rebase_note).expect("parse pre-rebase note");
+    assert!(
+        !pre_rebase_log.metadata.sessions.is_empty(),
+        "precondition: feature AI commit should have session metadata"
     );
 
     // Rebase feature onto main — should conflict on shared.txt
@@ -891,13 +1014,537 @@ fn test_regular_rebase_with_conflict_preserves_ai_notes() {
         "Rebased commit should have authorship notes (notes should follow SHA rewrite)"
     );
 
-    // Verify the note content references the AI-authored file
+    // After conflict resolution, AI-attributed lines fall inside diff hunks
+    // (git diff-tree shows the region as modified), so attribution is correctly dropped.
+    // The note exists (metadata preserved) but shared.txt has no attributed lines.
     let note_content = post_rebase_note.unwrap();
+    let post_rebase_log =
+        AuthorshipLog::deserialize_from_string(&note_content).expect("parse post-rebase note");
+    assert_eq!(
+        post_rebase_log.metadata.sessions, pre_rebase_log.metadata.sessions,
+        "session metadata should be preserved even when changed-hunk attestations are dropped"
+    );
     assert!(
-        note_content.contains("shared.txt"),
-        "Authorship note should reference shared.txt, got: {}",
+        !note_content.contains("shared.txt"),
+        "Authorship note should NOT reference shared.txt (lines inside diff hunk), got: {}",
         note_content
     );
+}
+
+#[test]
+fn test_regular_rebase_two_conflicts_ai_rewrite_after_skipped_conflict_is_attributed() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+    let jokes_path = repo.path().join("jokes-programming.csv");
+    let base = "\
+setup,punchline
+How many programmers does it take to change a light bulb?,None that's a hardware problem
+Why do Java developers wear glasses?,Because they don't C#
+Why did the programmer quit his job?,Because he didn't get arrays
+";
+
+    fs::write(&jokes_path, base).expect("write base jokes");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("base AI checkpoint should succeed");
+    repo.stage_all_and_commit("Base jokes")
+        .expect("base commit should succeed");
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "scenario-2-multi-conflict-same-file"])
+        .expect("checkout feature branch should succeed");
+    fs::write(
+        &jokes_path,
+        format!(
+            "{}Why do Python developers make bad partners?,They only speak one language\n",
+            base
+        ),
+    )
+    .expect("write first feature joke");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("first feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add Python joke")
+        .expect("first feature commit should succeed");
+
+    fs::write(
+        &jokes_path,
+        format!(
+            "{}Why do Python developers make bad partners?,They only speak one language\nHow many Rust developers does it take to change a lightbulb?,Two one to change it and one to write a song about the old one\n",
+            base
+        ),
+    )
+    .expect("write second feature joke");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("second feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add Rust joke")
+        .expect("second feature commit should succeed");
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+    let main = format!(
+        "{}Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25\nWhy did the developer go broke?,Because he used up all his cache\n",
+        base
+    );
+    fs::write(&jokes_path, &main).expect("write main jokes");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("main AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add C++ jokes")
+        .expect("main commit should succeed");
+
+    let rebase_result = repo.git(&[
+        "rebase",
+        &default_branch,
+        "scenario-2-multi-conflict-same-file",
+    ]);
+    assert!(
+        rebase_result.is_err(),
+        "first rebase stop should conflict on the Python joke"
+    );
+
+    checkpoint_claude_file_edit(
+        &repo,
+        "PreToolUse",
+        "jokes-programming.csv",
+        "resolve-first",
+    );
+    fs::write(&jokes_path, &main).expect("resolve first conflict by keeping main side");
+    checkpoint_claude_file_edit(
+        &repo,
+        "PostToolUse",
+        "jokes-programming.csv",
+        "resolve-first",
+    );
+    repo.git(&["add", "jokes-programming.csv"])
+        .expect("stage first conflict resolution");
+    let second_stop = repo.git(&["rebase", "--skip"]);
+    assert!(
+        second_stop.is_err(),
+        "skipping the first feature commit should immediately stop on the Rust conflict"
+    );
+
+    let rewritten = format!(
+        "{}Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25\nWhy did the developer go broke?,Because he used up all his cache\nWhy do Rust developers write songs?,Because they're afraid of memory leaks in the lyrics\n",
+        base
+    );
+    repo.git_ai(&["checkpoint", "human", "jokes-programming.csv"])
+        .expect("pre-resolution checkpoint should succeed");
+    fs::write(&jokes_path, rewritten).expect("rewrite second conflict resolution");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("AI resolution checkpoint should succeed");
+    repo.git(&["add", "jokes-programming.csv"])
+        .expect("stage AI conflict resolution");
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should finish");
+
+    let mut jokes = repo.filename("jokes-programming.csv");
+    jokes.assert_committed_lines(crate::lines![
+        "setup,punchline".ai(),
+        "How many programmers does it take to change a light bulb?,None that's a hardware problem"
+            .ai(),
+        "Why do Java developers wear glasses?,Because they don't C#".ai(),
+        "Why did the programmer quit his job?,Because he didn't get arrays".ai(),
+        "Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25"
+            .ai(),
+        "Why did the developer go broke?,Because he used up all his cache".ai(),
+        "Why do Rust developers write songs?,Because they're afraid of memory leaks in the lyrics"
+            .ai(),
+    ]);
+}
+
+#[test]
+fn test_regular_rebase_conflict_ai_resolution_preserves_original_and_resolution_sessions() {
+    use std::fs;
+
+    let setup = setup_regular_rebase_conflict();
+    let repo = setup.repo;
+    let original_note = repo
+        .read_authorship_note(&setup.feature_ai_commit_sha)
+        .expect("feature AI commit should have authorship note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    let original_sessions = session_keys(&original_log);
+    assert!(
+        !original_sessions.is_empty(),
+        "precondition: original feature note should contain session metadata"
+    );
+
+    let rebase_result = repo.git(&["rebase", &setup.default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict on shared.txt"
+    );
+
+    repo.git_ai(&["checkpoint", "human", "shared.txt"])
+        .expect("pre-resolution checkpoint should succeed");
+    fs::write(
+        repo.path().join("shared.txt"),
+        "line 1\nmain change line 2\nAI resolved line 2",
+    )
+    .expect("write AI conflict resolution");
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .expect("AI resolution checkpoint should succeed");
+
+    repo.git(&["add", "shared.txt"])
+        .expect("staging resolved file should succeed");
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    let rebased_head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(
+        rebased_head, setup.feature_ai_commit_sha,
+        "HEAD should have a new SHA after rebase"
+    );
+
+    let rebased_note = repo
+        .read_authorship_note(&rebased_head)
+        .expect("rebased commit should have authorship note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+    let rebased_sessions = session_keys(&rebased_log);
+    let resolution_sessions = rebased_sessions
+        .difference(&original_sessions)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        original_sessions.is_subset(&rebased_sessions),
+        "rebased note should preserve original feature session metadata; original={:?}, rebased={:?}; note={}",
+        original_sessions,
+        rebased_sessions,
+        rebased_note
+    );
+    assert!(
+        !resolution_sessions.is_empty(),
+        "rebased note should contain a new AI conflict-resolution session; original={:?}, rebased={:?}",
+        original_sessions,
+        rebased_sessions
+    );
+
+    let shared_authors = attestation_author_keys(&rebased_log, "shared.txt");
+    assert!(
+        !shared_authors.is_empty(),
+        "AI resolution should create shared.txt attribution"
+    );
+    assert!(
+        shared_authors
+            .iter()
+            .any(|author| resolution_sessions.contains(author)),
+        "shared.txt attribution should belong to resolution session; authors={:?}, resolution_sessions={:?}",
+        shared_authors,
+        resolution_sessions
+    );
+    assert!(
+        shared_authors.is_disjoint(&original_sessions),
+        "original conflict-hunk attribution should be dropped, not carried as file attribution; authors={:?}, original_sessions={:?}",
+        shared_authors,
+        original_sessions
+    );
+
+    let mut final_file = repo.filename("shared.txt");
+    final_file.assert_committed_lines(crate::lines![
+        "line 1".human(),
+        "main change line 2".human(),
+        "AI resolved line 2".ai(),
+    ]);
+}
+
+#[test]
+fn test_regular_rebase_conflict_keep_feature_side_preserves_feature_attribution() {
+    use std::fs;
+
+    let setup = setup_regular_rebase_conflict();
+    let repo = setup.repo;
+    let original_note = repo
+        .read_authorship_note(&setup.feature_ai_commit_sha)
+        .expect("feature AI commit should have authorship note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    let original_sessions = session_keys(&original_log);
+    assert!(
+        !original_sessions.is_empty(),
+        "precondition: original feature note should contain session metadata"
+    );
+
+    let rebase_result = repo.git(&["rebase", &setup.default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict on shared.txt"
+    );
+
+    fs::write(repo.path().join("shared.txt"), "line 1\nAI feature line 2")
+        .expect("write feature-side conflict resolution");
+    repo.git(&["add", "shared.txt"])
+        .expect("staging resolved file should succeed");
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    let rebased_head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_head)
+        .expect("rebased commit should have authorship note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+    let shared_authors = attestation_author_keys(&rebased_log, "shared.txt");
+    assert!(
+        shared_authors
+            .iter()
+            .any(|author| original_sessions.contains(author)),
+        "feature-side resolution should preserve feature attribution; authors={:?}, original_sessions={:?}; note={}",
+        shared_authors,
+        original_sessions,
+        rebased_note
+    );
+
+    let mut final_file = repo.filename("shared.txt");
+    final_file.assert_committed_lines(crate::lines!["line 1".human(), "AI feature line 2".ai(),]);
+}
+
+#[test]
+fn test_regular_rebase_conflict_keep_both_sides_preserves_each_original_source() {
+    use std::fs;
+
+    let setup = setup_regular_rebase_conflict_with_trailing_newlines();
+    let repo = setup.repo;
+    let original_note = repo
+        .read_authorship_note(&setup.feature_ai_commit_sha)
+        .expect("feature AI commit should have authorship note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    let original_sessions = session_keys(&original_log);
+    assert!(
+        !original_sessions.is_empty(),
+        "precondition: original feature note should contain session metadata"
+    );
+
+    let rebase_result = repo.git(&["rebase", &setup.default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict on shared.txt"
+    );
+
+    fs::write(
+        repo.path().join("shared.txt"),
+        "line 1\nmain change line 2\nAI feature line 2\n",
+    )
+    .expect("write keep-both conflict resolution");
+    repo.git(&["add", "shared.txt"])
+        .expect("staging resolved file should succeed");
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    let rebased_head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_head)
+        .expect("rebased commit should have authorship note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+    let shared_authors = attestation_author_keys(&rebased_log, "shared.txt");
+    assert!(
+        shared_authors
+            .iter()
+            .any(|author| original_sessions.contains(author)),
+        "keep-both resolution should preserve feature-side attribution; authors={:?}, original_sessions={:?}; note={}",
+        shared_authors,
+        original_sessions,
+        rebased_note
+    );
+
+    let blame = repo
+        .git(&["blame", "--line-porcelain", "-L", "2,2", "--", "shared.txt"])
+        .expect("git blame should succeed");
+    let blamed_commit = blame
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .expect("blame should include commit sha");
+    assert_eq!(
+        blamed_commit, setup.main_conflict_commit_sha,
+        "main-side kept line should blame to the original main conflict commit"
+    );
+
+    let mut final_file = repo.filename("shared.txt");
+    final_file.assert_committed_lines(crate::lines![
+        "line 1".human(),
+        "main change line 2".human(),
+        "AI feature line 2".ai(),
+    ]);
+}
+
+#[test]
+fn test_regular_rebase_conflict_keep_main_side_preserves_main_attribution() {
+    use std::fs;
+
+    let setup = setup_regular_rebase_conflict();
+    let repo = setup.repo;
+
+    let rebase_result = repo.git(&["rebase", &setup.default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict on shared.txt"
+    );
+
+    fs::write(repo.path().join("shared.txt"), "line 1\nmain change line 2")
+        .expect("write main-side conflict resolution");
+    repo.git(&["add", "shared.txt"])
+        .expect("staging resolved file should succeed");
+    repo.git(&["rebase", "--skip"])
+        .expect("main-side resolution makes the feature commit empty, so rebase should skip it");
+
+    let head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+    assert_eq!(
+        head, setup.main_conflict_commit_sha,
+        "keeping the main side should leave feature at the original main conflict commit"
+    );
+
+    let blame = repo
+        .git(&["blame", "--line-porcelain", "-L", "2,2", "--", "shared.txt"])
+        .expect("git blame should succeed");
+    let blamed_commit = blame
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .expect("blame should include commit sha");
+    assert_eq!(
+        blamed_commit, setup.main_conflict_commit_sha,
+        "main-side line should blame to the original main conflict commit"
+    );
+
+    let mut final_file = repo.filename("shared.txt");
+    final_file.assert_committed_lines(crate::lines![
+        "line 1".human(),
+        "main change line 2".human(),
+    ]);
+}
+
+#[test]
+fn test_regular_rebase_two_conflicts_ai_rewrite_after_empty_continue_is_attributed() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+    let jokes_path = repo.path().join("jokes-programming.csv");
+    let base = "\
+setup,punchline
+How many programmers does it take to change a light bulb?,None that's a hardware problem
+Why do Java developers wear glasses?,Because they don't C#
+Why did the programmer quit his job?,Because he didn't get arrays
+";
+
+    fs::write(&jokes_path, base).expect("write base jokes");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("base AI checkpoint should succeed");
+    repo.stage_all_and_commit("Base jokes")
+        .expect("base commit should succeed");
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "scenario-2-multi-conflict-same-file"])
+        .expect("checkout feature branch should succeed");
+    fs::write(
+        &jokes_path,
+        format!(
+            "{}Why do Python developers make bad partners?,They only speak one language\n",
+            base
+        ),
+    )
+    .expect("write first feature joke");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("first feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add Python joke")
+        .expect("first feature commit should succeed");
+
+    fs::write(
+        &jokes_path,
+        format!(
+            "{}Why do Python developers make bad partners?,They only speak one language\nHow many Rust developers does it take to change a lightbulb?,Two one to change it and one to write a song about the old one\n",
+            base
+        ),
+    )
+    .expect("write second feature joke");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("second feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add Rust joke")
+        .expect("second feature commit should succeed");
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+    let main = format!(
+        "{}Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25\nWhy did the developer go broke?,Because he used up all his cache\n",
+        base
+    );
+    fs::write(&jokes_path, &main).expect("write main jokes");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("main AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add C++ jokes")
+        .expect("main commit should succeed");
+
+    let rebase_result = repo.git(&[
+        "rebase",
+        &default_branch,
+        "scenario-2-multi-conflict-same-file",
+    ]);
+    assert!(
+        rebase_result.is_err(),
+        "first rebase stop should conflict on the Python joke"
+    );
+
+    fs::write(&jokes_path, &main).expect("resolve first conflict by keeping main side");
+    repo.git(&["add", "jokes-programming.csv"])
+        .expect("stage first conflict resolution");
+    let second_stop = repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None);
+    assert!(
+        second_stop.is_err(),
+        "continuing the empty first resolution should stop on the Rust conflict"
+    );
+
+    let rewritten = format!(
+        "{}Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25\nWhy did the developer go broke?,Because he used up all his cache\nWhat's a programmer's favorite hangout place?,Foo Bar\n",
+        base
+    );
+    checkpoint_claude_file_edit(
+        &repo,
+        "PreToolUse",
+        "jokes-programming.csv",
+        "resolve-second",
+    );
+    fs::write(&jokes_path, rewritten).expect("rewrite second conflict resolution");
+    checkpoint_claude_file_edit(
+        &repo,
+        "PostToolUse",
+        "jokes-programming.csv",
+        "resolve-second",
+    );
+    repo.git(&["add", "jokes-programming.csv"])
+        .expect("stage AI conflict resolution");
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should finish");
+
+    let mut jokes = repo.filename("jokes-programming.csv");
+    jokes.assert_committed_lines(crate::lines![
+        "setup,punchline".ai(),
+        "How many programmers does it take to change a light bulb?,None that's a hardware problem"
+            .ai(),
+        "Why do Java developers wear glasses?,Because they don't C#".ai(),
+        "Why did the programmer quit his job?,Because he didn't get arrays".ai(),
+        "Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25"
+            .ai(),
+        "Why did the developer go broke?,Because he used up all his cache".ai(),
+        "What's a programmer's favorite hangout place?,Foo Bar".ai(),
+    ]);
 }
 
 #[test]
@@ -956,5 +1603,11 @@ crate::reuse_tests_in_worktree!(
     test_pull_rebase_with_conflict_preserves_ai_notes,
     test_pull_rebase_with_conflict_abort_preserves_original_notes,
     test_regular_rebase_with_conflict_preserves_ai_notes,
+    test_regular_rebase_two_conflicts_ai_rewrite_after_skipped_conflict_is_attributed,
+    test_regular_rebase_two_conflicts_ai_rewrite_after_empty_continue_is_attributed,
+    test_regular_rebase_conflict_ai_resolution_preserves_original_and_resolution_sessions,
+    test_regular_rebase_conflict_keep_feature_side_preserves_feature_attribution,
+    test_regular_rebase_conflict_keep_both_sides_preserves_each_original_source,
+    test_regular_rebase_conflict_keep_main_side_preserves_main_attribution,
     test_regular_rebase_with_conflict_abort_preserves_original_notes,
 );

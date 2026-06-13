@@ -128,7 +128,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         }
     }
 
-    let (authorship_log, initial) = working_va.to_authorship_log_and_initial_working_log(
+    let (authorship_log, initial, _) = working_va.to_authorship_log_and_initial_working_log(
         &repo,
         &head_sha,
         &head_sha,

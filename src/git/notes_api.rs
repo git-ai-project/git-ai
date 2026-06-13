@@ -38,6 +38,68 @@ pub fn write_notes_batch(
     }
 }
 
+// --- Batch Reads ---
+
+/// Read note contents for multiple commits in O(1) git process calls.
+/// Returns a map of commit_sha → note_content for commits that have notes.
+pub fn read_notes_batch(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    match Config::get().notes_backend_kind() {
+        NotesBackendKind::Http => {
+            let cached = http_read_notes(commit_shas);
+            if cached.len() == commit_shas.len() {
+                return Ok(cached);
+            }
+            // Fall through to git for any misses
+            let missing: Vec<String> = commit_shas
+                .iter()
+                .filter(|sha| !cached.contains_key(sha.as_str()))
+                .cloned()
+                .collect();
+            let from_git = read_notes_batch_git(repo, &missing)?;
+            Ok(cached.into_iter().chain(from_git).collect())
+        }
+        NotesBackendKind::GitNotes => read_notes_batch_git(repo, commit_shas),
+    }
+}
+
+fn read_notes_batch_git(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Step 1: Get blob OIDs for all commits (one cat-file --batch-check)
+    let blob_oid_map = crate::git::refs::note_blob_oids_for_commits(repo, commit_shas)?;
+    if blob_oid_map.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Step 2: Read all blob contents (one cat-file --batch)
+    let unique_oids: Vec<String> = blob_oid_map.values().cloned().collect();
+    let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
+        &repo.global_args_for_exec(),
+        &unique_oids,
+    )?;
+
+    // Step 3: Map commit_sha → content
+    let mut result = HashMap::new();
+    for (commit_sha, blob_oid) in &blob_oid_map {
+        if let Some(content) = blob_contents.get(blob_oid) {
+            result.insert(commit_sha.clone(), content.clone());
+        }
+    }
+    Ok(result)
+}
+
 // --- Reads ---
 
 pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
@@ -95,13 +157,8 @@ pub fn read_authorship_v3(
 ///
 /// 1. `authorship_traversal::load_ai_touched_files_for_commits` — passes OIDs
 ///    to `batch_read_blobs_with_oids`; must be real git OIDs.
-/// 2. `rebase_authorship::build_rebase_note_cache` — passes OIDs to
-///    `batch_read_blob_contents`; must be real git OIDs.
-/// 3. `rebase_authorship::load_note_contents_for_commits` — same pattern.
-/// 4. `rebase_authorship::try_fast_path_cherry_pick_remap` — passes OIDs to
-///    `batch_read_blob_contents`; also checks `len() != source_commits.len()`
-///    and returns `false` on mismatch, which is the correct behaviour when
-///    notes are not in git refs.
+/// 2. `rewrite::shift_authorship_notes` — reads notes by OID;
+///    must be real git OIDs.
 ///
 /// **HTTP backend**: notes do not live in `refs/notes/ai`, so there are no
 /// git blob OIDs to return.  Returning an empty map causes callers to handle
@@ -770,11 +827,8 @@ mod tests {
             "Config::fresh() should reflect GIT_AI_NOTES_BACKEND_KIND=http"
         );
 
-        // The actual early-return code in run_pre_push_hook_managed was added
-        // in Phase 2.6. Verify it compiles and is reachable by referencing the
-        // function pointer. Structural verification: when kind == Http, the
-        // function returns before doing any work.
-        let _ = crate::commands::hooks::push_hooks::run_pre_push_hook_managed as fn(_, _);
+        // Structural verification: the Http backend skip is now inlined in
+        // apply_push_side_effect in daemon.rs — no separate hook function needed.
     }
 
     // --- warm_cache_for_remote tests ---
