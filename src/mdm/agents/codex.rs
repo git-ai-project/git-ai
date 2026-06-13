@@ -1,3 +1,4 @@
+use crate::config::{CodexHooksFormat, Config};
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
@@ -207,10 +208,7 @@ impl CodexInstaller {
         })
     }
 
-    fn config_with_installed_hooks(
-        config: &TomlValue,
-        binary_path: &Path,
-    ) -> Result<TomlValue, GitAiError> {
+    fn config_with_hooks_feature_enabled(config: &TomlValue) -> Result<TomlValue, GitAiError> {
         let mut merged = Self::remove_notify_if_git_ai(config)?.unwrap_or(config.clone());
         let root = merged
             .as_table_mut()
@@ -229,6 +227,18 @@ impl CodexInstaller {
                 )])),
             );
         }
+
+        Ok(merged)
+    }
+
+    fn config_with_installed_hooks(
+        config: &TomlValue,
+        binary_path: &Path,
+    ) -> Result<TomlValue, GitAiError> {
+        let mut merged = Self::config_with_hooks_feature_enabled(config)?;
+        let root = merged
+            .as_table_mut()
+            .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
 
         // Add inline hooks to config.toml under [hooks] table
         let desired_command = Self::desired_command(binary_path);
@@ -556,6 +566,62 @@ impl CodexInstaller {
         Ok((merged, changed))
     }
 
+    fn hooks_json_with_installed_hooks(
+        hooks_json: &JsonValue,
+        binary_path: &Path,
+    ) -> Result<JsonValue, GitAiError> {
+        let (mut merged, _) = Self::remove_codex_hooks_from_json(hooks_json)?;
+        let root = merged.as_object_mut().ok_or_else(|| {
+            GitAiError::Generic("Codex hooks.json root must be a JSON object".to_string())
+        })?;
+        let hooks_entry = root.entry("hooks").or_insert_with(|| json!({}));
+        if !hooks_entry.is_object() {
+            *hooks_entry = json!({});
+        }
+        let hooks_obj = hooks_entry.as_object_mut().ok_or_else(|| {
+            GitAiError::Generic("Codex hooks field must be a JSON object".to_string())
+        })?;
+
+        let desired_command = Self::desired_command(binary_path);
+        for event_name in CODEX_HOOK_EVENTS {
+            let mut blocks = hooks_obj
+                .get(event_name)
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let target_idx = blocks
+                .iter()
+                .position(|block| block.get("matcher").is_none())
+                .unwrap_or_else(|| {
+                    blocks.push(json!({ "hooks": [] }));
+                    blocks.len() - 1
+                });
+
+            if !blocks[target_idx].is_object() {
+                blocks[target_idx] = json!({ "hooks": [] });
+            }
+            let block_obj = blocks[target_idx].as_object_mut().ok_or_else(|| {
+                GitAiError::Generic("Codex hooks.json hook block must be an object".to_string())
+            })?;
+            let hooks = block_obj.entry("hooks").or_insert_with(|| json!([]));
+            if !hooks.is_array() {
+                *hooks = json!([]);
+            }
+            let hooks_array = hooks.as_array_mut().ok_or_else(|| {
+                GitAiError::Generic("Codex hooks.json hooks entry must be an array".to_string())
+            })?;
+            hooks_array.push(json!({
+                "type": "command",
+                "command": desired_command.clone(),
+            }));
+
+            hooks_obj.insert(event_name.to_string(), JsonValue::Array(blocks));
+        }
+
+        Ok(merged)
+    }
+
     fn hooks_json_has_any_entries(hooks_json: &JsonValue) -> bool {
         hooks_json
             .get("hooks")
@@ -629,13 +695,36 @@ impl HookInstaller for CodexInstaller {
         } else {
             TomlValue::Table(Map::new())
         };
+        let hooks_json_path = Self::hooks_json_path();
+        let hooks_json = if hooks_json_path.exists() {
+            Self::parse_hooks_json(&fs::read_to_string(&hooks_json_path)?)?
+        } else {
+            json!({})
+        };
+
+        if Config::fresh().codex_hooks_format() == CodexHooksFormat::HooksJson {
+            let config_without_notify =
+                Self::remove_notify_if_git_ai(&config)?.unwrap_or(config.clone());
+            let (config_without_inline_hooks, _) =
+                Self::remove_inline_hooks_from_config(&config_without_notify)?;
+            let desired_config =
+                Self::config_with_hooks_feature_enabled(&config_without_inline_hooks)?;
+            let desired_hooks_json =
+                Self::hooks_json_with_installed_hooks(&hooks_json, &params.binary_path)?;
+            let has_json_hooks = Self::hooks_json_has_git_ai_entries(&hooks_json);
+            let hooks_installed = Self::config_hooks_feature_enabled(&config) && has_json_hooks;
+            let hooks_up_to_date = config == desired_config && hooks_json == desired_hooks_json;
+
+            return Ok(HookCheckResult {
+                tool_installed: true,
+                hooks_installed,
+                hooks_up_to_date,
+            });
+        }
 
         let desired_config = Self::config_with_installed_hooks(&config, &params.binary_path)?;
         let has_inline_hooks = Self::config_has_inline_hooks(&config);
-        let has_legacy_hooks_json = Self::hooks_json_path().exists()
-            && Self::parse_hooks_json(&fs::read_to_string(Self::hooks_json_path())?)
-                .map(|json| Self::hooks_json_has_git_ai_entries(&json))
-                .unwrap_or(false);
+        let has_legacy_hooks_json = Self::hooks_json_has_git_ai_entries(&hooks_json);
         let hooks_installed = Self::config_hooks_feature_enabled(&config)
             && (has_inline_hooks || has_legacy_hooks_json);
         let hooks_up_to_date = config == desired_config && !has_legacy_hooks_json;
@@ -666,15 +755,68 @@ impl HookInstaller for CodexInstaller {
         };
 
         let existing_config = Self::parse_config_toml(&existing_config_content)?;
+
+        let existing_hooks_content = if hooks_json_path.exists() {
+            fs::read_to_string(&hooks_json_path)?
+        } else {
+            String::new()
+        };
+        let existing_hooks = Self::parse_hooks_json(&existing_hooks_content)?;
+
+        if Config::fresh().codex_hooks_format() == CodexHooksFormat::HooksJson {
+            let config_without_notify =
+                Self::remove_notify_if_git_ai(&existing_config)?.unwrap_or(existing_config.clone());
+            let (config_without_inline_hooks, _) =
+                Self::remove_inline_hooks_from_config(&config_without_notify)?;
+            let merged_config =
+                Self::config_with_hooks_feature_enabled(&config_without_inline_hooks)?;
+            let merged_hooks =
+                Self::hooks_json_with_installed_hooks(&existing_hooks, &params.binary_path)?;
+
+            let config_changed = existing_config != merged_config;
+            let hooks_json_changed = existing_hooks != merged_hooks;
+            if !config_changed && !hooks_json_changed {
+                return Ok(None);
+            }
+
+            let mut diff_output = Vec::new();
+
+            if config_changed {
+                let new_config_content = toml::to_string_pretty(&merged_config).map_err(|e| {
+                    GitAiError::Generic(format!("Failed to serialize Codex config.toml: {e}"))
+                })?;
+                diff_output.push(generate_diff(
+                    &config_path,
+                    &existing_config_content,
+                    &new_config_content,
+                ));
+                if !dry_run {
+                    write_atomic(&config_path, new_config_content.as_bytes())?;
+                }
+            }
+
+            if hooks_json_changed {
+                let new_hooks_content = serde_json::to_string_pretty(&merged_hooks)?;
+                diff_output.push(generate_diff(
+                    &hooks_json_path,
+                    &existing_hooks_content,
+                    &new_hooks_content,
+                ));
+                if !dry_run {
+                    write_atomic(&hooks_json_path, new_hooks_content.as_bytes())?;
+                }
+            }
+
+            return Ok(Some(diff_output.join("\n")));
+        }
+
         let merged_config =
             Self::config_with_installed_hooks(&existing_config, &params.binary_path)?;
 
         // Check if legacy hooks.json needs migration
         let (hooks_json_changed, existing_hooks_content) = if hooks_json_path.exists() {
-            let content = fs::read_to_string(&hooks_json_path)?;
-            let existing_hooks = Self::parse_hooks_json(&content)?;
             let (_cleaned_hooks, changed) = Self::remove_codex_hooks_from_json(&existing_hooks)?;
-            (changed, content)
+            (changed, existing_hooks_content)
         } else {
             (false, String::new())
         };
@@ -847,6 +989,19 @@ mod tests {
                 None => std::env::remove_var("USERPROFILE"),
             }
         }
+    }
+
+    fn write_git_ai_config(home: &Path, codex_hooks_format: &str) {
+        let git_ai_dir = home.join(".git-ai");
+        fs::create_dir_all(&git_ai_dir).unwrap();
+        fs::write(
+            git_ai_dir.join("config.json"),
+            serde_json::to_string_pretty(&json!({
+                "codex_hooks_format": codex_hooks_format
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1634,6 +1789,177 @@ codex_hooks = true
                 }),
                 "git-ai hooks should be removed from hooks.json"
             );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_prefers_hooks_json_when_configured() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            write_git_ai_config(home, "hooks_json");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            let hooks_json_path = codex_dir.join("hooks.json");
+            fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+            fs::write(
+                &hooks_json_path,
+                serde_json::to_string_pretty(&json!({
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    { "type": "command", "command": "echo keep" }
+                                ]
+                            }
+                        ]
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+
+            let config_content = fs::read_to_string(&config_path).unwrap();
+            let parsed = CodexInstaller::parse_config_toml(&config_content).unwrap();
+            assert_eq!(
+                parsed
+                    .get("features")
+                    .and_then(|v| v.get("hooks"))
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "install should still enable Codex hooks"
+            );
+            assert!(
+                !CodexInstaller::config_has_inline_hooks(&parsed),
+                "configured hooks_json format should not install git-ai inline hooks"
+            );
+
+            let hooks_content = fs::read_to_string(&hooks_json_path).unwrap();
+            let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
+            assert!(
+                CodexInstaller::hooks_json_has_git_ai_entries(&hooks_json),
+                "git-ai hooks should be installed into hooks.json"
+            );
+            let pre_blocks = hooks_json["hooks"]["PreToolUse"].as_array().unwrap();
+            assert!(
+                pre_blocks.iter().any(|block| {
+                    block["hooks"].as_array().is_some_and(|hooks| {
+                        hooks
+                            .iter()
+                            .any(|hook| hook["command"].as_str() == Some("echo keep"))
+                    })
+                }),
+                "existing hooks.json entries should be preserved"
+            );
+
+            let check = installer
+                .check_hooks(&params)
+                .expect("check should succeed");
+            assert!(check.tool_installed);
+            assert!(check.hooks_installed);
+            assert!(check.hooks_up_to_date);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_prefers_hooks_json_removes_existing_inline_git_ai_hooks() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            write_git_ai_config(home, "hooks_json");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            let hooks_json_path = codex_dir.join("hooks.json");
+            fs::write(
+                &config_path,
+                r#"
+model = "gpt-5"
+
+[features]
+hooks = true
+
+[[hooks.PreToolUse]]
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/git-ai checkpoint codex --hook-input stdin"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "echo keep-inline"
+
+[[hooks.PostToolUse]]
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/git-ai checkpoint codex --hook-input stdin"
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/usr/local/bin/git-ai checkpoint codex --hook-input stdin"
+"#,
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+
+            let config_content = fs::read_to_string(&config_path).unwrap();
+            let parsed = CodexInstaller::parse_config_toml(&config_content).unwrap();
+            assert!(
+                !CodexInstaller::config_has_inline_hooks(&parsed),
+                "old git-ai inline hooks should be removed in hooks_json mode"
+            );
+            let pre_blocks = parsed
+                .get("hooks")
+                .and_then(|h| h.get("PreToolUse"))
+                .and_then(|v| v.as_array())
+                .expect("custom PreToolUse block should remain");
+            assert!(
+                pre_blocks.iter().any(|block| {
+                    block
+                        .get("hooks")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command").and_then(|v| v.as_str())
+                                    == Some("echo keep-inline")
+                            })
+                        })
+                }),
+                "non-git-ai inline hooks should be preserved"
+            );
+
+            let hooks_content = fs::read_to_string(&hooks_json_path).unwrap();
+            let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
+            assert!(
+                CodexInstaller::hooks_json_has_git_ai_entries(&hooks_json),
+                "git-ai hooks should be installed into hooks.json"
+            );
+
+            let check = installer
+                .check_hooks(&params)
+                .expect("check should succeed");
+            assert!(check.hooks_installed);
+            assert!(check.hooks_up_to_date);
         });
     }
 

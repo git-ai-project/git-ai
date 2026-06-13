@@ -52,6 +52,40 @@ pub struct NotesBackendConfig {
     pub backend_url: Option<String>,
 }
 
+/// Which Codex hook file git-ai should use when installing Codex hooks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexHooksFormat {
+    /// Default: install git-ai Codex hooks inline in ~/.codex/config.toml.
+    #[default]
+    ConfigToml,
+    /// Install git-ai Codex hooks in ~/.codex/hooks.json.
+    HooksJson,
+}
+
+impl CodexHooksFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CodexHooksFormat::ConfigToml => "config_toml",
+            CodexHooksFormat::HooksJson => "hooks_json",
+        }
+    }
+
+    fn from_str(input: &str) -> Option<Self> {
+        match input.trim().to_lowercase().as_str() {
+            "config_toml" | "config-toml" => Some(CodexHooksFormat::ConfigToml),
+            "hooks_json" | "hooks-json" => Some(CodexHooksFormat::HooksJson),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CodexHooksFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Prompt storage mode enum for type-safe handling
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptStorageMode {
@@ -118,6 +152,7 @@ pub struct Config {
     allow_superuser: bool,
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
+    codex_hooks_format: CodexHooksFormat,
     notes_backend: NotesBackendConfig,
     transcript_streaming_lookback_days: Option<u32>,
 }
@@ -194,6 +229,8 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_hooks_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
@@ -223,6 +260,8 @@ pub struct ConfigPatch {
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_flags: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_hooks_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -494,6 +533,10 @@ impl Config {
     /// Returns configured shell commands for a specific hook.
     pub fn git_ai_hook_commands(&self, hook_name: &str) -> Option<&Vec<String>> {
         self.git_ai_hooks.get(hook_name)
+    }
+
+    pub fn codex_hooks_format(&self) -> CodexHooksFormat {
+        self.codex_hooks_format
     }
 
     /// Serialize the effective runtime config into pretty JSON.
@@ -905,6 +948,21 @@ fn build_config() -> Config {
         })
         .collect::<HashMap<String, Vec<String>>>();
 
+    let codex_hooks_format = file_cfg
+        .as_ref()
+        .and_then(|c| c.codex_hooks_format.as_deref())
+        .and_then(|value| {
+            let parsed = CodexHooksFormat::from_str(value);
+            if parsed.is_none() {
+                eprintln!(
+                    "Warning: Invalid codex_hooks_format value '{}', using 'config_toml'",
+                    value
+                );
+            }
+            parsed
+        })
+        .unwrap_or_default();
+
     // Resolve notes_backend config: env vars override file config, which overrides defaults.
     let file_backend = file_cfg.as_ref().and_then(|c| c.notes_backend.clone());
     let kind_from_env = env::var("GIT_AI_NOTES_BACKEND_KIND")
@@ -958,6 +1016,7 @@ fn build_config() -> Config {
             allow_superuser,
             custom_attributes: custom_attributes.clone(),
             git_ai_hooks: git_ai_hooks.clone(),
+            codex_hooks_format,
             notes_backend,
             transcript_streaming_lookback_days,
         };
@@ -986,6 +1045,7 @@ fn build_config() -> Config {
         allow_superuser,
         custom_attributes,
         git_ai_hooks,
+        codex_hooks_format,
         notes_backend,
         transcript_streaming_lookback_days,
     }
@@ -1412,6 +1472,16 @@ fn apply_test_config_patch(config: &mut Config) {
                 deserialized,
             );
         }
+        if let Some(codex_hooks_format) = patch.codex_hooks_format {
+            if let Some(format) = CodexHooksFormat::from_str(&codex_hooks_format) {
+                config.codex_hooks_format = format;
+            } else {
+                eprintln!(
+                    "Warning: Invalid test codex_hooks_format value '{}', ignoring",
+                    codex_hooks_format
+                );
+            }
+        }
         if let Some(nb) = patch.notes_backend {
             config.notes_backend.kind = nb.kind;
             if let Some(url) = nb.backend_url {
@@ -1458,6 +1528,7 @@ mod tests {
             allow_superuser: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
+            codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
         }
@@ -1660,6 +1731,7 @@ mod tests {
             allow_superuser: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
+            codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
         }
@@ -1792,6 +1864,7 @@ mod tests {
             allow_superuser: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
+            codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
         }
