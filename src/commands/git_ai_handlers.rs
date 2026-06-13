@@ -318,10 +318,8 @@ fn print_help() {
     eprintln!("    human [pathspecs...]             Untracked/legacy human checkpoint");
     eprintln!("    mock_ai [pathspecs...]           Test preset accepting optional file pathspecs");
     eprintln!("    mock_known_human [pathspecs...]  Test preset for KnownHuman checkpoints");
-    eprintln!("  log [args...]      Show commit log with AI authorship notes");
-    eprintln!(
-        "                        Proxies git log --notes=ai with all standard git log options"
-    );
+    eprintln!("  log [args...]      Show commit log with AI authorship stats");
+    eprintln!("                        Use --raw or --notes to include raw authorship note data");
     eprintln!("  blame <file>       Git blame with AI authorship overlay");
     eprintln!("  diff <commit|range>  Show diff with AI authorship annotations");
     eprintln!("    <commit>              Diff from commit's parent to commit");

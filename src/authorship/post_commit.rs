@@ -368,7 +368,16 @@ pub fn estimate_stats_cost_for_head(
     } else {
         "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
     };
-    let estimate = estimate_stats_cost(repo, &parent_sha, commit_sha, ignore_patterns)?;
+    estimate_stats_cost_for_commit_range(repo, &parent_sha, commit_sha, ignore_patterns)
+}
+
+pub fn estimate_stats_cost_for_commit_range(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<StatsSkipEstimate, GitAiError> {
+    let estimate = estimate_stats_cost(repo, parent_sha, commit_sha, ignore_patterns)?;
     Ok(StatsSkipEstimate {
         should_skip: should_skip_expensive_post_commit_stats(&estimate),
     })

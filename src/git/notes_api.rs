@@ -48,6 +48,45 @@ pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
     }
 }
 
+pub fn read_notes_batch(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    match Config::get().notes_backend_kind() {
+        NotesBackendKind::Http => {
+            let mut notes = http_read_notes(commit_shas);
+
+            let missing_after_cache: Vec<String> = commit_shas
+                .iter()
+                .filter(|sha| !notes.contains_key(*sha))
+                .cloned()
+                .collect();
+            if !missing_after_cache.is_empty() {
+                notes.extend(http_fetch_and_cache_notes(&missing_after_cache));
+            }
+
+            let missing_after_http: Vec<String> = commit_shas
+                .iter()
+                .filter(|sha| !notes.contains_key(*sha))
+                .cloned()
+                .collect();
+            if !missing_after_http.is_empty()
+                && let Ok(git_notes) =
+                    crate::git::refs::notes_for_commits(repo, &missing_after_http)
+            {
+                notes.extend(git_notes);
+            }
+
+            Ok(notes)
+        }
+        NotesBackendKind::GitNotes => crate::git::refs::notes_for_commits(repo, commit_shas),
+    }
+}
+
 pub fn read_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipLog> {
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
@@ -504,6 +543,47 @@ fn http_read_notes(commit_shas: &[String]) -> HashMap<String, String> {
     };
     let refs: Vec<&str> = commit_shas.iter().map(|s| s.as_str()).collect();
     db_lock.get_notes(&refs).unwrap_or_default()
+}
+
+fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String> {
+    if commit_shas.is_empty() {
+        return HashMap::new();
+    }
+
+    let cfg = Config::fresh();
+    let Some(backend_url) = cfg.notes_backend_url().map(str::to_string) else {
+        return HashMap::new();
+    };
+
+    let ctx = crate::api::client::ApiContext::new(Some(backend_url));
+    let client = crate::api::client::ApiClient::new(ctx);
+    if !client.is_logged_in() && !client.has_api_key() {
+        return HashMap::new();
+    }
+
+    let mut fetched = HashMap::new();
+    for chunk in commit_shas.chunks(100) {
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        match client.read_notes(&refs) {
+            Ok(response) => {
+                if response.notes.is_empty() {
+                    continue;
+                }
+                let entries: Vec<(String, String)> = response.notes.into_iter().collect();
+                if let Ok(db) = crate::notes::db::NotesDatabase::global()
+                    && let Ok(mut lock) = db.lock()
+                {
+                    let _ = lock.cache_synced_notes(&entries);
+                }
+                fetched.extend(entries);
+            }
+            Err(e) => {
+                tracing::debug!(%e, "notes batch read from HTTP backend failed");
+            }
+        }
+    }
+
+    fetched
 }
 
 fn http_check_exists(commit_shas: &[String]) -> HashSet<String> {

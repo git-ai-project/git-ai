@@ -17,7 +17,7 @@ use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(windows)]
@@ -2631,6 +2631,33 @@ pub fn exec_git_allow_nonzero_with_profile(
     }
 
     cmd.output().map_err(GitAiError::IoError)
+}
+
+/// Spawn a git command with stdout piped and stderr inherited.
+///
+/// This is used by streaming consumers that cannot call `exec_git*` without
+/// buffering all stdout in memory.
+pub fn spawn_git_stdout(args: &[String]) -> Result<Child, GitAiError> {
+    let effective_args = args_with_internal_git_profile(
+        &args_with_disabled_hooks_if_needed(args),
+        InternalGitProfile::General,
+    );
+    let mut cmd = Command::new(config::Config::get().git_cmd());
+    cmd.args(&effective_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    cmd.spawn().map_err(GitAiError::IoError)
 }
 
 /// Helper to execute a git command with an explicit internal profile.

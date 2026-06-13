@@ -149,6 +149,41 @@ pub fn note_blob_oids_for_commits(
     note_blob_oids_for_commits_from_ref(repo, AI_AUTHORSHIP_FULL_REF, commit_shas)
 }
 
+/// Read authorship note contents for a set of commits in batch.
+///
+/// Returns a map of commit SHA -> raw note content for commits that currently
+/// have notes in `refs/notes/ai`.
+pub fn notes_for_commits(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let note_blob_oids = note_blob_oids_for_commits(repo, commit_shas)?;
+    if note_blob_oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let unique_blob_oids: Vec<String> = note_blob_oids
+        .values()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
+
+    Ok(note_blob_oids
+        .into_iter()
+        .filter_map(|(commit_sha, blob_oid)| {
+            blob_contents
+                .get(&blob_oid)
+                .map(|content| (commit_sha, content.clone()))
+        })
+        .collect())
+}
+
 /// Resolve authorship note blob OIDs for a set of commits from a specific notes ref.
 ///
 /// Returns a map of commit SHA -> note blob SHA for commits that have notes on
