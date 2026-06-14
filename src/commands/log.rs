@@ -691,46 +691,70 @@ fn run_pager(renderer: LogRenderer) -> Result<(), LogError> {
     let mut stdout = io::stdout();
     let _guard = TerminalGuard::enter(&mut stdout)?;
     let mut scroll = 0usize;
+    let mut needs_redraw = true;
+    let mut last_size: Option<(u16, u16)> = None;
 
     loop {
-        let (_width, height) = terminal::size().map_err(LogError::Io)?;
+        let (width, height) = terminal::size().map_err(LogError::Io)?;
         let viewport_height = usize::from(height.saturating_sub(1)).max(1);
-        pager.ensure_line_loaded(scroll.saturating_add(viewport_height))?;
-        draw_pager(&mut stdout, &mut pager, scroll, viewport_height)?;
+        if needs_redraw {
+            if last_size.is_some_and(|size| size != (width, height)) {
+                queue!(stdout, MoveTo(0, 0), Clear(ClearType::All)).map_err(LogError::Io)?;
+            }
+            pager.ensure_line_loaded(scroll.saturating_add(viewport_height))?;
+            draw_pager(
+                &mut stdout,
+                &mut pager,
+                scroll,
+                width,
+                height,
+                viewport_height,
+            )?;
+            last_size = Some((width, height));
+            needs_redraw = false;
+        }
 
         if !event::poll(std::time::Duration::from_millis(250)).map_err(LogError::Io)? {
             continue;
         }
 
-        let Event::Key(key) = event::read().map_err(LogError::Io)? else {
-            continue;
-        };
-
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Char('j') | KeyCode::Down => {
-                pager.ensure_line_loaded(scroll.saturating_add(viewport_height + 1))?;
-                if scroll + 1 < pager.line_count() {
-                    scroll += 1;
+        match event::read().map_err(LogError::Io)? {
+            Event::Key(key) => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    pager.ensure_line_loaded(scroll.saturating_add(viewport_height + 1))?;
+                    if scroll + 1 < pager.line_count() {
+                        scroll += 1;
+                    }
+                    needs_redraw = true;
                 }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                scroll = scroll.saturating_sub(1);
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                let next = scroll.saturating_add(viewport_height);
-                pager.ensure_line_loaded(next.saturating_add(viewport_height))?;
-                scroll = next.min(pager.max_scroll(viewport_height));
-            }
-            KeyCode::PageUp => {
-                scroll = scroll.saturating_sub(viewport_height);
-            }
-            KeyCode::Home => {
-                scroll = 0;
-            }
-            KeyCode::End => {
-                pager.load_all()?;
-                scroll = pager.max_scroll(viewport_height);
+                KeyCode::Char('k') | KeyCode::Up => {
+                    scroll = scroll.saturating_sub(1);
+                    needs_redraw = true;
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    let next = scroll.saturating_add(viewport_height);
+                    pager.ensure_line_loaded(next.saturating_add(viewport_height))?;
+                    scroll = next.min(pager.max_scroll(viewport_height));
+                    needs_redraw = true;
+                }
+                KeyCode::PageUp => {
+                    scroll = scroll.saturating_sub(viewport_height);
+                    needs_redraw = true;
+                }
+                KeyCode::Home => {
+                    scroll = 0;
+                    needs_redraw = true;
+                }
+                KeyCode::End => {
+                    pager.load_all()?;
+                    scroll = pager.max_scroll(viewport_height);
+                    needs_redraw = true;
+                }
+                _ => {}
+            },
+            Event::Resize(_, _) => {
+                needs_redraw = true;
             }
             _ => {}
         }
@@ -743,24 +767,23 @@ fn draw_pager(
     stdout: &mut io::Stdout,
     pager: &mut LogPager,
     scroll: usize,
+    width: u16,
+    height: u16,
     viewport_height: usize,
 ) -> Result<(), LogError> {
-    let (width, height) = terminal::size().map_err(LogError::Io)?;
-    queue!(stdout, MoveTo(0, 0), Clear(ClearType::All)).map_err(LogError::Io)?;
-
     for row in 0..viewport_height {
-        let Some(line) = pager.read_line(scroll + row)? else {
-            break;
-        };
-        queue!(
-            stdout,
-            MoveTo(0, row as u16),
-            Print(truncate_for_width(
-                line.trim_end_matches('\n'),
-                width as usize
-            ))
-        )
-        .map_err(LogError::Io)?;
+        queue!(stdout, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))
+            .map_err(LogError::Io)?;
+        if let Some(line) = pager.read_line(scroll + row)? {
+            queue!(
+                stdout,
+                Print(truncate_for_width(
+                    line.trim_end_matches('\n'),
+                    width as usize
+                ))
+            )
+            .map_err(LogError::Io)?;
+        }
     }
 
     let status = if pager.is_eof() {
@@ -777,6 +800,7 @@ fn draw_pager(
     queue!(
         stdout,
         MoveTo(0, height.saturating_sub(1)),
+        Clear(ClearType::CurrentLine),
         SetAttribute(Attribute::Reverse),
         Print(pad_for_width(&status, width as usize)),
         SetAttribute(Attribute::Reset)
@@ -951,7 +975,7 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter(stdout: &mut io::Stdout) -> Result<Self, LogError> {
         enable_raw_mode().map_err(LogError::Io)?;
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, Clear(ClearType::All), Hide) {
             let _ = disable_raw_mode();
             return Err(LogError::Io(error));
         }
