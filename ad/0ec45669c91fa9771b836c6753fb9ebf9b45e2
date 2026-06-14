@@ -1,14 +1,12 @@
-src/authorship/virtual_attribution.rs
-  s_b3918a71142a3e::t_5b86c8d42e1a93 1308-1309,1312-1314
-  s_b3918a71142a3e::t_13f883735681e2 1443
-  s_b3918a71142a3e::t_0f9867c6d2284e 1531-1542
-  s_b3918a71142a3e::t_7cae6c4c4bf3b6 2767-2820
-  s_b3918a71142a3e::t_16234739777586 2821-2846
+tests/integration/e2e_user_scenarios.rs
+  s_b3918a71142a3e::t_9d94fd90467c60 1192-1193,1225-1226,1240-1250
+  s_b3918a71142a3e::t_e1143f558af1ec 1287-1294,1296-1297
+  s_b3918a71142a3e::t_c1ebb0b2c83217 1130-1191,1194-1224,1227-1239,1251-1286,1295,1298
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "development:1.5.7",
-  "base_commit_sha": "0c70f9484d90914937406e0174fb83014712820f",
+  "base_commit_sha": "ad0ec45669c91fa9771b836c6753fb9ebf9b45e2",
   "prompts": {},
   "sessions": {
     "s_b3918a71142a3e": {
