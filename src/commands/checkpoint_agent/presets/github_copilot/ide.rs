@@ -233,6 +233,11 @@ pub(super) fn parse_vscode_native_hooks(
                         .ok()
                         .flatten()
                         .or_else(|| {
+                            model_extraction::extract_model_from_copilot_otel_db(path)
+                                .ok()
+                                .flatten()
+                        })
+                        .or_else(|| {
                             model_extraction::extract_model_from_copilot_models_json(path)
                                 .ok()
                                 .flatten()
