@@ -15,7 +15,6 @@ src/commands/checkpoint.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 31,
       "total_deletions": 443,
       "accepted_lines": 31,

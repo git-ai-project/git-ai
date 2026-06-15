@@ -1,5 +1,5 @@
 src/daemon/control_api.rs
-  dacf127c97d5a34b 1-2,8,37-43,45-51,55-59,95-109
+  dacf127c97d5a34b 1-2,8,15,37-43,37-59,45-51,55-59,95-109
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -13,7 +13,6 @@ src/daemon/control_api.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 42,
       "total_deletions": 49,
       "accepted_lines": 37,

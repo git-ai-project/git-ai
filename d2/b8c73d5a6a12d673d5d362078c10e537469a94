@@ -1,9 +1,9 @@
 src/commands/checkpoint_agent/bash_tool.rs
-  dacf127c97d5a34b 217,281,283,842,845,847-848,854-857,860-861,863-864,869,871,874-875,877,880-884,888,896,898-900,904-905,909-910,916-917,919,921,924,926-929,932-937,975-987,989-998,1000,1002-1016,1019-1020,1074-1078,1081,1083
+  dacf127c97d5a34b 51,86-95,102-116,217,281,283,804-805,811-812,823-826,835-837,842,845,847-848,850-851,854-857,858-859,860-861,863-864,869,871,874-875,876,877,879,880-884,886-887,888,896,898-900,904-905,909-910,912-914,916-917,919,921,924,925,926-929,932-937,975-987,988,989-998,1000,1001,1002-1016,1019-1020,1074-1078,1081,1083
 src/commands/checkpoint_agent/presets/firebender.rs
   dacf127c97d5a34b 3-4,213
 src/commands/git_ai_handlers.rs
-  dacf127c97d5a34b 7,10,12,301,305,328,337,339-342,344,346,348,352-357,361-364,366,369-371,373,375,378-382,384,386-389,393-395,887-894,901,927-934,938-943,955,962-993
+  dacf127c97d5a34b 7,10,12,301,305,322-326,328,330-332,334-335,337,338,339-342,343,344,346,348,352-357,361-364,366,369-371,373,375,378-382,384,386-389,393-395,884,887-894,896-898,901,927-934,938-943,955,962-993,964-993
 tests/integration/bash_tool_conformance.rs
   dacf127c97d5a34b 11-12,44,825-826,1059-1060,1062-1064,1070-1071
 tests/integration/agent_presets_comprehensive.rs
@@ -15,7 +15,7 @@ src/commands/checkpoint_agent/presets/windsurf.rs
 src/git/repository.rs
   dacf127c97d5a34b 2144-2158
 src/commands/checkpoint_agent/orchestrator.rs
-  dacf127c97d5a34b 9,15-28,34,222,224-235,237-243,245-246,250-275,277-284
+  dacf127c97d5a34b 9,13,15-28,34,40-43,47-78,80-81,83-97,108-112,118,120-121,123-125,129-155,157-166,168-174,180,186,188-194,197,199,201-207,210,212,214-220,222,223,224-235,236,237-243,244,245-246,249,250-275,276,277-284,278-284
 tests/integration/bash_tool_timeouts.rs
   dacf127c97d5a34b 17-18,27
 src/commands/checkpoint_agent/presets/continue_cli.rs
@@ -52,6 +52,8 @@ src/commands/checkpoint_agent/presets/codex.rs
   dacf127c97d5a34b 4-5,150
 src/commands/checkpoint_agent/presets/mod.rs
   dacf127c97d5a34b 51-52
+src/commands/checkpoint_agent/presets/github_copilot/ide.rs
+  dacf127c97d5a34b 68,256-259,263,277
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -65,7 +67,6 @@ src/commands/checkpoint_agent/presets/mod.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 592,
       "total_deletions": 1278,
       "accepted_lines": 245,
