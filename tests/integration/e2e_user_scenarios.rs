@@ -1284,15 +1284,15 @@ Line 5: Initial
         "squashed blame should contain 'Test User', got:\n{blame_after}"
     );
 
-    // Squashed final state (6 lines): "H: Human Line 2" is human; "AI: AI Line
-    // 1" and "AI: AI Line 3" retain AI attribution; "AI: AI Line 4/5" and the
-    // trailing "Line 5: Initial" attribute to the committer.
+    // Squashed final state (6 lines): "H: Human Line 2" is human; all four
+    // surviving AI lines ("AI: AI Line 1/3/4/5") retain AI attribution; the
+    // trailing "Line 5: Initial" is unchanged base context (committer).
     //
-    // NOTE: the legacy `squash-authorship` engine reported ai=4/added=6 here by
-    // concatenating both commits' AI deltas. The unified content-based path
-    // attributes the squashed commit against its actual net diff, so only the
-    // AI lines whose final content matches an AI checkpoint stay AI (ai=2).
+    // `git-ai ci local merge` routes a squash merge through the SAME
+    // handle_squash_merge path the local daemon uses (union of every source
+    // commit's note), so CI attribution matches the daemon: ai=4. Of the net
+    // 5 added lines, 4 are AI and 1 is the human line.
     let squashed_stats = commit_stats(&repo, &["stats", &squashed_sha, "--json"]);
-    assert_stats(&squashed_stats, 1, 2, 2, 4, 5);
-    assert_tool_model(&squashed_stats, "mock_ai::unknown", 2, 2);
+    assert_stats(&squashed_stats, 1, 4, 4, 4, 5);
+    assert_tool_model(&squashed_stats, "mock_ai::unknown", 4, 4);
 }
