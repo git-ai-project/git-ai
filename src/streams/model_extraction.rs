@@ -248,7 +248,9 @@ pub fn extract_model_from_copilot_otel_db(
             |row| {
                 let request: Option<String> = row.get(0)?;
                 let response: Option<String> = row.get(1)?;
-                Ok(request.filter(|s| !s.is_empty()).or(response))
+                Ok(request
+                    .filter(|s| !s.is_empty())
+                    .or(response.filter(|s| !s.is_empty())))
             },
         )
         .ok()
@@ -611,6 +613,17 @@ mod tests {
 
         let result = extract_model_from_copilot_otel_db(&transcript_path).unwrap();
         assert_eq!(result, Some("gpt-4.1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_otel_ignores_empty_response_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (transcript_path, db_path) =
+            setup_copilot_otel_workspace(dir.path(), "sess-otel-empty");
+        insert_otel_span(&db_path, "span1", 1000, "sess-otel-empty", None, Some(""));
+
+        let result = extract_model_from_copilot_otel_db(&transcript_path).unwrap();
+        assert_eq!(result, None);
     }
 
     #[test]
