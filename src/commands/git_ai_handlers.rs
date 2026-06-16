@@ -108,6 +108,9 @@ pub fn handle_git_ai(args: &[String]) {
             }
             handle_stats(&args[1..]);
         }
+        "await-stats" => {
+            commands::await_stats::handle_await_stats(&args[1..]);
+        }
         "status" => {
             commands::status::handle_status(&args[1..]);
         }
@@ -333,6 +336,12 @@ fn print_help() {
     );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!("  await-stats       Wait for commit authorship note, then print stats");
+    eprintln!("    --timeout <ms>        Maximum wait time (default: 5000)");
+    eprintln!("    --interval <ms>       Poll interval (default: 100)");
+    eprintln!("    --commit <rev>        Commit to await (default: HEAD)");
+    eprintln!("    --json                Output stats as JSON");
+    eprintln!("    --quiet               Suppress timeout output");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
