@@ -1,0 +1,7 @@
+{
+  "role": "assistant",
+  "message": "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Here is a hello world function in Python:\\n\\ndef hello():\\n    print('Hello, world!')\"}]}",
+  "id": "msg002",
+  "references": [],
+  "extra": "{\"requestId\":\"req-001\",\"modelId\":\"glm-5.0-turbo\",\"traceId\":\"trace-001\"}"
+}

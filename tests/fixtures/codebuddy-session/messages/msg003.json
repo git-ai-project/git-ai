@@ -1,0 +1,7 @@
+{
+  "role": "user",
+  "message": "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Now add a docstring.\"}]}",
+  "id": "msg003",
+  "references": [],
+  "extra": "{\"requestId\":\"req-002\",\"modelId\":\"glm-5.0-turbo\",\"traceId\":\"trace-002\"}"
+}

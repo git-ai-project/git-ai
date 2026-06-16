@@ -8,6 +8,7 @@ use insta::assert_debug_snapshot;
 const AI_AUTHOR_NAMES: &[&str] = &[
     "mock_ai",
     "claude",
+    "codebuddy",
     "continue-cli",
     "gpt",
     "copilot",
