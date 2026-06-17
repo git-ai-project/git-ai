@@ -905,19 +905,39 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 pending.worktree_head_end_offset,
             )
         {
-            let head_changes = worktree_head_reflog_delta(worktree, start, end)?;
-            for change in head_changes {
-                let duplicate = ref_changes.iter().any(|existing| {
-                    existing.reference == change.reference
-                        && existing.old == change.old
-                        && existing.new == change.new
-                });
-                if !duplicate {
-                    ref_changes.push(change);
+            match worktree_head_reflog_delta(worktree, start, end) {
+                Ok(head_changes) => {
+                    for change in head_changes {
+                        let duplicate = ref_changes.iter().any(|existing| {
+                            existing.reference == change.reference
+                                && existing.old == change.old
+                                && existing.new == change.new
+                        });
+                        if !duplicate {
+                            ref_changes.push(change);
+                        }
+                    }
                 }
+                Err(error)
+                    if can_skip_rewritten_worktree_head_reflog_delta(
+                        &error,
+                        primary_command.as_deref(),
+                        &invoked_args,
+                        &ref_changes,
+                        &pending,
+                    ) =>
+                {
+                    tracing::debug!(
+                        worktree = %worktree.display(),
+                        start_offset = start,
+                        end_offset = end,
+                        error = %error,
+                        "worktree HEAD reflog was rewritten before commit trace finalization; using captured commit head state"
+                    );
+                }
+                Err(error) => return Err(error),
             }
         }
-
         let mut family_key = pending.family_key.clone();
         let mut scope = if let Some(key) = family_key.clone() {
             CommandScope::Family(key)
@@ -1055,6 +1075,60 @@ fn is_valid_oid(value: &str) -> bool {
 
 fn is_zero_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c == '0')
+}
+
+fn is_worktree_head_reflog_regression(error: &GitAiError) -> bool {
+    matches!(
+        error,
+        GitAiError::Generic(message)
+            if message.starts_with("worktree HEAD reflog cut regressed")
+    )
+}
+
+fn ref_changes_include_commit_head_change(ref_changes: &[RefChange]) -> bool {
+    ref_changes.iter().any(|change| {
+        (change.reference == "HEAD" || change.reference.starts_with("refs/heads/"))
+            && is_valid_oid(&change.new)
+            && !is_zero_oid(&change.new)
+            && change.old.trim() != change.new.trim()
+    })
+}
+
+fn pending_has_stable_commit_head_pair(pending: &PendingTraceCommand) -> bool {
+    let pre_head = pending
+        .pre_repo
+        .as_ref()
+        .and_then(|repo| repo.head.as_deref());
+    let post_head = pending
+        .post_repo
+        .as_ref()
+        .and_then(|repo| repo.head.as_deref());
+
+    matches!(
+        (pre_head, post_head),
+        (Some(pre), Some(post))
+            if is_valid_oid(pre)
+                && !is_zero_oid(pre)
+                && is_valid_oid(post)
+                && !is_zero_oid(post)
+                && pre != post
+    )
+}
+
+fn can_skip_rewritten_worktree_head_reflog_delta(
+    error: &GitAiError,
+    primary_command: Option<&str>,
+    invoked_args: &[String],
+    ref_changes: &[RefChange],
+    pending: &PendingTraceCommand,
+) -> bool {
+    let has_ref_head_change = ref_changes_include_commit_head_change(ref_changes);
+    let can_reconstruct_from_post_head = !invoked_args.iter().any(|arg| arg == "--amend")
+        && pending_has_stable_commit_head_pair(pending);
+
+    primary_command == Some("commit")
+        && is_worktree_head_reflog_regression(error)
+        && (has_ref_head_change || can_reconstruct_from_post_head)
 }
 
 fn worktree_head_reflog_delta(
@@ -2493,6 +2567,264 @@ mod tests {
                 .as_ref()
                 .and_then(|repo| repo.branch.as_deref()),
             Some("main")
+        );
+    }
+
+    #[test]
+    fn worktree_head_reflog_delta_errors_on_rewritten_reflog_offsets() {
+        let error = worktree_head_reflog_delta(Path::new("/tmp/repo"), 19738, 1889)
+            .expect_err("raw HEAD reflog regression should stay visible");
+        assert!(
+            error
+                .to_string()
+                .contains("worktree HEAD reflog cut regressed (1889 < 19738)")
+        );
+    }
+
+    #[test]
+    fn commit_normalization_skips_rewritten_worktree_head_reflog_when_head_is_known() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git/refs/heads")).expect("create git refs");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let old_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"commit-head-reflog-rewrite",
+            "ts":1,
+            "argv":["git","commit","-m","test"],
+            "worktree":repo,
+            "git_ai_worktree_head_reflog_start":19738,
+            "git_ai_family_reflog_start":{"refs/heads/main":10}
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"commit-head-reflog-rewrite",
+            "ts":2,
+            "code":0,
+            "git_ai_worktree_head_reflog_end":1889,
+            "git_ai_family_reflog_end":{"refs/heads/main":20},
+            "git_ai_family_reflog_changes":[{
+                "reference":"refs/heads/main",
+                "old":old_head,
+                "new":new_head
+            }],
+            "git_ai_post_repo":{
+                "head":new_head,
+                "branch":"main",
+                "detached":false
+            }
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let cmd = normalizer
+            .ingest_payload(&exit)
+            .expect("commit can ignore rewritten supplemental HEAD reflog")
+            .expect("exit payload should emit a normalized command");
+
+        assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
+        assert_eq!(cmd.ref_changes.len(), 1);
+        assert_eq!(cmd.ref_changes[0].reference, "refs/heads/main");
+        assert_eq!(cmd.ref_changes[0].old, old_head);
+        assert_eq!(cmd.ref_changes[0].new, new_head);
+    }
+
+    #[test]
+    fn non_commit_normalization_keeps_rewritten_worktree_head_reflog_error() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git/refs/heads")).expect("create git refs");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let old_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"reset-head-reflog-rewrite",
+            "ts":1,
+            "argv":["git","reset","--hard","HEAD~1"],
+            "worktree":repo,
+            "git_ai_worktree_head_reflog_start":19738,
+            "git_ai_family_reflog_start":{"refs/heads/main":10}
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"reset-head-reflog-rewrite",
+            "ts":2,
+            "code":0,
+            "git_ai_worktree_head_reflog_end":1889,
+            "git_ai_family_reflog_end":{"refs/heads/main":20},
+            "git_ai_family_reflog_changes":[{
+                "reference":"refs/heads/main",
+                "old":old_head,
+                "new":new_head
+            }],
+            "git_ai_post_repo":{
+                "head":new_head,
+                "branch":"main",
+                "detached":false
+            }
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let error = normalizer
+            .ingest_payload(&exit)
+            .expect_err("non-commit HEAD reflog regression should not be hidden");
+        assert!(
+            error
+                .to_string()
+                .contains("worktree HEAD reflog cut regressed (1889 < 19738)")
+        );
+    }
+
+    #[test]
+    fn commit_without_ref_change_skips_rewritten_worktree_head_reflog_with_pre_and_post_heads() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git/refs/heads")).expect("create git refs");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let old_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"commit-post-head-reflog-rewrite",
+            "ts":1,
+            "argv":["git","commit","-m","test"],
+            "worktree":repo,
+            "git_ai_worktree_head_reflog_start":19738,
+            "git_ai_family_reflog_start":{"refs/heads/main":10},
+            "git_ai_pre_repo":{
+                "head":old_head,
+                "branch":"main",
+                "detached":false
+            }
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"commit-post-head-reflog-rewrite",
+            "ts":2,
+            "code":0,
+            "git_ai_worktree_head_reflog_end":1889,
+            "git_ai_family_reflog_end":{"refs/heads/main":10},
+            "git_ai_post_repo":{
+                "head":new_head,
+                "branch":"main",
+                "detached":false
+            }
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let cmd = normalizer
+            .ingest_payload(&exit)
+            .expect("pre/post commit heads can reconstruct commit movement")
+            .expect("exit payload should emit a normalized command");
+
+        assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
+        assert!(cmd.ref_changes.is_empty());
+        assert_eq!(
+            cmd.pre_repo.as_ref().and_then(|repo| repo.head.as_deref()),
+            Some(old_head)
+        );
+        assert_eq!(
+            cmd.post_repo.as_ref().and_then(|repo| repo.head.as_deref()),
+            Some(new_head)
+        );
+    }
+
+    #[test]
+    fn commit_without_ref_change_or_pre_head_keeps_rewritten_worktree_head_reflog_error() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git/refs/heads")).expect("create git refs");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let new_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"commit-missing-pre-head-reflog-rewrite",
+            "ts":1,
+            "argv":["git","commit","-m","test"],
+            "worktree":repo,
+            "git_ai_worktree_head_reflog_start":19738,
+            "git_ai_family_reflog_start":{"refs/heads/main":10}
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"commit-missing-pre-head-reflog-rewrite",
+            "ts":2,
+            "code":0,
+            "git_ai_worktree_head_reflog_end":1889,
+            "git_ai_family_reflog_end":{"refs/heads/main":10},
+            "git_ai_post_repo":{
+                "head":new_head,
+                "branch":"main",
+                "detached":false
+            }
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let error = normalizer
+            .ingest_payload(&exit)
+            .expect_err("missing pre-head should not hide HEAD reflog regression");
+        assert!(
+            error
+                .to_string()
+                .contains("worktree HEAD reflog cut regressed (1889 < 19738)")
+        );
+    }
+
+    #[test]
+    fn amend_commit_without_ref_change_keeps_rewritten_worktree_head_reflog_error() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git/refs/heads")).expect("create git refs");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let new_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"amend-head-reflog-rewrite",
+            "ts":1,
+            "argv":["git","commit","--amend","-m","test"],
+            "worktree":repo,
+            "git_ai_worktree_head_reflog_start":19738,
+            "git_ai_family_reflog_start":{"refs/heads/main":10}
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"amend-head-reflog-rewrite",
+            "ts":2,
+            "code":0,
+            "git_ai_worktree_head_reflog_end":1889,
+            "git_ai_family_reflog_end":{"refs/heads/main":10},
+            "git_ai_post_repo":{
+                "head":new_head,
+                "branch":"main",
+                "detached":false
+            }
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let error = normalizer
+            .ingest_payload(&exit)
+            .expect_err("amend without ref change should not hide HEAD reflog regression");
+        assert!(
+            error
+                .to_string()
+                .contains("worktree HEAD reflog cut regressed (1889 < 19738)")
         );
     }
 }

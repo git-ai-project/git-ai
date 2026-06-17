@@ -1156,6 +1156,49 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
 
 #[test]
 #[serial]
+fn daemon_commit_writes_note_when_worktree_head_reflog_is_rewritten_before_finalization() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+    let file_rel = "daemon-head-reflog-rewrite.txt";
+    let file_path = repo.path().join(file_rel);
+
+    fs::write(&file_path, "base\n").expect("failed to write base file");
+    repo.git_og(&["add", file_rel])
+        .expect("base add should succeed");
+    repo.git_og(&["commit", "-m", "base commit"])
+        .expect("base commit should succeed");
+
+    fs::write(&file_path, "base\nai line\n").expect("failed to write ai edit");
+    let completion_baseline = repo.daemon_total_completion_count();
+    repo.git_ai(&["checkpoint", "mock_ai", file_rel])
+        .expect("ai checkpoint should succeed");
+    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
+
+    let hook_path = git_common_dir(&repo).join("hooks").join("post-commit");
+    fs::create_dir_all(hook_path.parent().expect("hook path should have parent"))
+        .expect("failed to create hooks directory");
+    fs::write(&hook_path, "#!/bin/sh\n: > .git/logs/HEAD\n")
+        .expect("failed to write post-commit hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&hook_path)
+            .expect("failed to stat post-commit hook")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook_path, permissions)
+            .expect("failed to mark post-commit hook executable");
+    }
+
+    repo.stage_all_and_commit("commit after HEAD reflog rewrite")
+        .expect("commit should still produce an authorship note");
+
+    let mut file = repo.filename(file_rel);
+    file.assert_committed_lines(lines!["base".human(), "ai line".ai()]);
+}
+
+#[test]
+#[serial]
 fn daemon_test_mode_human_checkpoint_with_explicit_preset_queues_via_daemon() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
