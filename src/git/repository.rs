@@ -2,7 +2,7 @@ use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
-    common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
+    common_dir_for_git_dir, git_dir_for_worktree, is_valid_git_dir, worktree_root_for_path,
 };
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
@@ -2512,8 +2512,9 @@ fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
             break;
         }
         let potential_git = workdir.join(parent).join(".git");
-        if potential_git.is_dir() {
-            // A .git directory always indicates a separate independent repo.
+        if potential_git.is_dir() && is_valid_git_dir(&potential_git) {
+            // A valid .git directory (with HEAD) indicates a separate independent repo.
+            // Empty .git directories (e.g. from docker-compose volume mounts) are skipped.
             return true;
         }
         if potential_git.is_file() {
@@ -2608,7 +2609,7 @@ pub fn find_repository_for_file(
 
         // Check for .git directory or file (file for submodules/worktrees)
         let git_path = dir.join(".git");
-        if git_path.exists() {
+        if is_valid_git_dir(&git_path) {
             // Found a .git - but we need to check if this is a submodule
             // Submodules have a .git file (not directory) that points to the parent's .git/modules
             if git_path.is_file() {

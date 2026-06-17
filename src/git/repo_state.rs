@@ -13,11 +13,31 @@ pub struct HeadState {
     pub detached: bool,
 }
 
+/// Returns `true` if `dot_git` looks like a valid `.git` entry.
+///
+/// A `.git` *file* (worktree / submodule pointer) is always considered valid —
+/// its contents will be validated later when the pointer is resolved.
+///
+/// A `.git` *directory* is only valid when it contains a `HEAD` file, which is
+/// a fundamental invariant of every git repository (standard, bare, worktree,
+/// or submodule).  An empty `.git` directory (e.g. one accidentally created by
+/// docker-compose volume mounts) is rejected so that the tree-walk continues
+/// upward to the real repository.
+pub fn is_valid_git_dir(dot_git: &Path) -> bool {
+    if dot_git.is_file() {
+        return true;
+    }
+    if dot_git.is_dir() {
+        return dot_git.join("HEAD").is_file();
+    }
+    false
+}
+
 pub fn worktree_root_for_path(path: &Path) -> Option<PathBuf> {
     let mut current = Some(path);
     while let Some(candidate) = current {
         let dot_git = candidate.join(".git");
-        if dot_git.is_dir() || dot_git.is_file() {
+        if is_valid_git_dir(&dot_git) {
             return Some(candidate.to_path_buf());
         }
         current = candidate.parent();
@@ -671,6 +691,68 @@ mod tests {
 
         let resolved = worktree_root_for_path(&nested).unwrap();
         assert_eq!(resolved, worktree);
+    }
+
+    #[test]
+    fn worktree_root_for_path_skips_empty_git_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_repo = temp.path();
+        // Real repo has a valid .git with HEAD
+        write_file(&real_repo.join(".git/HEAD"), "ref: refs/heads/main\n");
+
+        // Subdirectory with an empty .git (no HEAD) — should be skipped
+        let subdir = real_repo.join("services").join("app");
+        fs::create_dir_all(subdir.join(".git")).unwrap();
+
+        let nested = subdir.join("src");
+        fs::create_dir_all(&nested).unwrap();
+
+        let resolved = worktree_root_for_path(&nested).unwrap();
+        assert_eq!(resolved, real_repo.to_path_buf());
+    }
+
+    #[test]
+    fn worktree_root_for_path_finds_valid_git_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        write_file(&repo.join(".git/HEAD"), "ref: refs/heads/main\n");
+
+        let nested = repo.join("src");
+        fs::create_dir_all(&nested).unwrap();
+
+        let resolved = worktree_root_for_path(&nested).unwrap();
+        assert_eq!(resolved, repo.to_path_buf());
+    }
+
+    #[test]
+    fn is_valid_git_dir_rejects_empty_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let dot_git = temp.path().join(".git");
+        fs::create_dir_all(&dot_git).unwrap();
+        assert!(!is_valid_git_dir(&dot_git));
+    }
+
+    #[test]
+    fn is_valid_git_dir_accepts_directory_with_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let dot_git = temp.path().join(".git");
+        write_file(&dot_git.join("HEAD"), "ref: refs/heads/main\n");
+        assert!(is_valid_git_dir(&dot_git));
+    }
+
+    #[test]
+    fn is_valid_git_dir_accepts_git_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let dot_git = temp.path().join(".git");
+        fs::write(&dot_git, "gitdir: ../real/.git/worktrees/wt\n").unwrap();
+        assert!(is_valid_git_dir(&dot_git));
+    }
+
+    #[test]
+    fn is_valid_git_dir_rejects_nonexistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let dot_git = temp.path().join(".git");
+        assert!(!is_valid_git_dir(&dot_git));
     }
 
     #[test]
