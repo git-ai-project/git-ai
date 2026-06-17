@@ -1,6 +1,6 @@
 use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
-use crate::git::cli_parser::parse_git_cli_args;
+use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::common_dir_for_worktree;
 use crate::git::repository::discover_repository_in_path_no_git_exec;
@@ -36,6 +36,12 @@ pub trait GitBackend: Send + Sync + 'static {
         worktree: &Path,
         argv: &[String],
     ) -> Result<Option<String>, GitAiError>;
+
+    fn resolve_invocation(
+        &self,
+        worktree: &Path,
+        argv: &[String],
+    ) -> Result<Option<ParsedGitInvocation>, GitAiError>;
 
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
 
@@ -399,22 +405,32 @@ impl GitBackend for SystemGitBackend {
         worktree: &Path,
         argv: &[String],
     ) -> Result<Option<String>, GitAiError> {
+        Ok(self
+            .resolve_invocation(worktree, argv)?
+            .and_then(|invocation| invocation.command))
+    }
+
+    fn resolve_invocation(
+        &self,
+        worktree: &Path,
+        argv: &[String],
+    ) -> Result<Option<ParsedGitInvocation>, GitAiError> {
         let mut current = parse_git_cli_args(git_invocation_tokens(argv));
         let mut seen = HashSet::new();
         loop {
             let Some(command) = current.command.clone() else {
-                return Ok(None);
+                return Ok(Some(current));
             };
             if !seen.insert(command.clone()) {
                 return Ok(None);
             }
             if is_builtin_primary_command(&command) {
-                return Ok(Some(command));
+                return Ok(Some(current));
             }
 
             let alias_value = match self.resolve_alias_cached(worktree, &command)? {
                 Some(value) => value,
-                None => return Ok(Some(command)),
+                None => return Ok(Some(current)),
             };
 
             let Some(alias_tokens) = parse_alias_tokens(&alias_value) else {
