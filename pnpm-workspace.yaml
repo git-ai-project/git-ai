@@ -1,0 +1,50 @@
+packages:
+  - "agent-support/opencode"
+  - "agent-support/vscode"
+
+overrides:
+  "glob": ">=11.1.0"
+  "tar-fs": ">=2.1.4"
+  "test-exclude": ">=7.0.0"
+  "@typescript-eslint/parser": "8.60.1"
+
+minimumReleaseAge: 10080
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeExclude:
+  - "@opencode-ai/plugin@1.15.13"
+  - "@opencode-ai/sdk@1.15.13"
+  - "@posthog/core@1.30.5"
+  - "@posthog/types@1.379.2"
+  - "@typescript-eslint/eslint-plugin@8.60.1"
+  - "@typescript-eslint/parser@8.60.1"
+  - "@typescript-eslint/project-service@8.60.1"
+  - "@typescript-eslint/scope-manager@8.60.1"
+  - "@typescript-eslint/tsconfig-utils@8.60.1"
+  - "@typescript-eslint/type-utils@8.60.1"
+  - "@typescript-eslint/types@8.60.1"
+  - "@typescript-eslint/typescript-estree@8.60.1"
+  - "@typescript-eslint/utils@8.60.1"
+  - "@typescript-eslint/visitor-keys@8.60.1"
+  - "@vscode/vsce@3.9.2"
+  - "posthog-node@5.35.14"
+trustPolicy: no-downgrade
+trustPolicyIgnoreAfter: 10080
+trustLockfile: false
+blockExoticSubdeps: true
+resolutionMode: time-based
+engineStrict: true
+strictPeerDependencies: true
+pmOnFail: error
+verifyDepsBeforeRun: error
+strictDepBuilds: true
+dangerouslyAllowAllBuilds: false
+allowBuilds:
+  "@vscode/vsce-sign": true
+  keytar: true
+  msgpackr-extract: true
+strictSsl: true
+verifyStoreIntegrity: true
+strictStorePkgContentCheck: true
+preferFrozenLockfile: true
+savePrefix: ""
