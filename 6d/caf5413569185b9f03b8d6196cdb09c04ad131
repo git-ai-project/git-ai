@@ -18,5 +18,23 @@ tests/integration/sweep_e2e.rs
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.3.4",
   "base_commit_sha": "6dcaf5413569185b9f03b8d6196cdb09c04ad131",
-  "prompts": {}
+  "prompts": {
+    "acaacb0abd2332ed": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8803e77-45ab-4067-a145-5b3f347826a4",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>",
+      "total_additions": 325,
+      "total_deletions": 325,
+      "accepted_lines": 114,
+      "overriden_lines": 3
+    }
+  },
+  "humans": {
+    "h_dac2ecdcedf37f": {
+      "author": "Sasha Varlamov"
+    }
+  }
 }

@@ -1,5 +1,5 @@
 src/transcripts/agents/droid.rs
-  5656d3e616692de7 32-33,209-219,333-338,355,388,395-404
+  5656d3e616692de7 6,19-20,23-24,26-27,32-33,34-56,89-90,113-114,116,119,124-125,158-159,200-202,209-219,210-219,333-338,355,388,395-404
 src/transcripts/agents/claude.rs
   75b8b35dceb7e11d 357-360,408-410,424-428,432,440,446,453
   5656d3e616692de7 418-421
@@ -24,7 +24,6 @@ tests/integration/rebase.rs
         "model": "claude-sonnet-4-5-20250929"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 113,
       "total_deletions": 44,
       "accepted_lines": 105,

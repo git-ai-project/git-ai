@@ -11,13 +11,13 @@ tests/integration/transcripts_e2e.rs
 src/transcripts/agents/codex.rs
   75b8b35dceb7e11d 1-382
 src/transcripts/model_extraction.rs
-  75b8b35dceb7e11d 25-26,28-29
+  75b8b35dceb7e11d 23-29,25-26,28-29
 src/transcripts/sweep.rs
   75b8b35dceb7e11d 80-86
 tests/integration/amp.rs
   75b8b35dceb7e11d 1-383
 src/transcripts/agents/opencode.rs
-  75b8b35dceb7e11d 1-196,198-300,302-415
+  75b8b35dceb7e11d 1-196,1-415,198-300,302-415
 tests/integration/claude_code.rs
   75b8b35dceb7e11d 1-1001
 src/transcripts/agent.rs
@@ -26,7 +26,7 @@ src/transcripts/agent.rs
 tests/integration/github_copilot.rs
   75b8b35dceb7e11d 1-853
 src/transcripts/agents/claude.rs
-  75b8b35dceb7e11d 357-360,488-490,504-508,512,520,526,533,361-440,534-586
+  75b8b35dceb7e11d 357-360,361-440,488-490,504-508,512,520,526,533,534-586
   5656d3e616692de7 498-501
   s_5647f8cfeeb487::t_95384ea63dec1b 494-496
 tests/integration/codex.rs
@@ -40,7 +40,7 @@ src/transcripts/agents/gemini.rs
 src/transcripts/agents/windsurf.rs
   75b8b35dceb7e11d 1-287
 src/transcripts/agents/amp.rs
-  75b8b35dceb7e11d 1-241,249-439
+  75b8b35dceb7e11d 1-241,1-439,249-439
 tests/integration/droid.rs
   75b8b35dceb7e11d 1-474
 tests/integration/opencode.rs
@@ -64,7 +64,6 @@ src/transcripts/agents/pi.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 29066,
       "total_deletions": 26403,
       "accepted_lines": 10968,

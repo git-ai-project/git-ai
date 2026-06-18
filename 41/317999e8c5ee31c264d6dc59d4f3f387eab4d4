@@ -1,9 +1,9 @@
 src/transcripts/agents/amp.rs
-  75b8b35dceb7e11d 1-241,243-433
+  75b8b35dceb7e11d 1-241,242,243-433
 src/transcripts/model_extraction.rs
-  75b8b35dceb7e11d 25-26,28-29
+  75b8b35dceb7e11d 23-24,25-26,27,28-29
 src/transcripts/agents/opencode.rs
-  75b8b35dceb7e11d 1-193,197-302,304-417
+  75b8b35dceb7e11d 1-193,194-196,197-302,303,304-417
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -17,7 +17,6 @@ src/transcripts/agents/opencode.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 8,
       "total_deletions": 12,
       "accepted_lines": 8,

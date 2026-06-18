@@ -13,7 +13,6 @@ src/transcripts/agents/droid.rs
         "model": "claude-sonnet-4-5-20250929"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 113,
       "total_deletions": 44,
       "accepted_lines": 3,
