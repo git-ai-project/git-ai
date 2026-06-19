@@ -54,6 +54,35 @@ pub struct NotesBackendConfig {
     pub backend_url: Option<String>,
 }
 
+/// Configuration for exporting metrics to an OpenTelemetry (OTLP/HTTP) backend.
+///
+/// Metrics export is enabled whenever a metrics endpoint can be resolved (either an
+/// explicit `metrics_endpoint`, or a base `endpoint` to which `/v1/metrics` is appended).
+/// Field/env nomenclature follows the OpenTelemetry specification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct OtelConfig {
+    /// Base OTLP endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`). `/v1/metrics` is appended for the
+    /// metrics signal per the OTLP spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Full metrics-signal endpoint (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`). Used verbatim,
+    /// with no path appended. Takes precedence over `endpoint` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_endpoint: Option<String>,
+    /// Headers attached to every OTLP request (`OTEL_EXPORTER_OTLP_HEADERS`), e.g. auth tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    /// Value for the `service.name` resource attribute (`OTEL_SERVICE_NAME`). Defaults to `git-ai`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Additional OTLP Resource attributes (`OTEL_RESOURCE_ATTRIBUTES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_attributes: Option<HashMap<String, String>>,
+}
+
+/// Default OTLP `service.name` resource attribute when none is configured.
+pub const DEFAULT_OTEL_SERVICE_NAME: &str = "git-ai";
+
 /// Optional git-ai author override for authorship metadata.
 ///
 /// Any unset field falls back to the effective Git committer identity.
@@ -181,6 +210,8 @@ pub struct Config {
     codex_hooks_format: CodexHooksFormat,
     notes_backend: NotesBackendConfig,
     transcript_streaming_lookback_days: Option<u32>,
+    #[serde(serialize_with = "serialize_masked_otel")]
+    otel: OtelConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -262,6 +293,8 @@ pub struct FileConfig {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel: Option<OtelConfig>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -321,6 +354,8 @@ pub struct ConfigPatch {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel: Option<OtelConfig>,
 }
 
 impl Config {
@@ -627,6 +662,55 @@ impl Config {
         self.transcript_streaming_lookback_days
     }
 
+    /// Returns the OTLP exporter config.
+    pub fn otel(&self) -> &OtelConfig {
+        &self.otel
+    }
+
+    /// Resolve the full OTLP metrics-signal endpoint, or `None` when export is disabled.
+    ///
+    /// Precedence: an explicit `metrics_endpoint` is used verbatim; otherwise the base
+    /// `endpoint` has `/v1/metrics` appended (unless it already ends with that path), per
+    /// the OTLP specification.
+    pub fn otel_metrics_endpoint(&self) -> Option<String> {
+        if let Some(metrics_endpoint) = self
+            .otel
+            .metrics_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(metrics_endpoint.to_string());
+        }
+        let base = self
+            .otel
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let trimmed = base.trim_end_matches('/');
+        if trimmed.ends_with("/v1/metrics") {
+            Some(trimmed.to_string())
+        } else {
+            Some(format!("{}/v1/metrics", trimmed))
+        }
+    }
+
+    /// Returns true when an OTLP metrics endpoint is configured.
+    pub fn otel_metrics_enabled(&self) -> bool {
+        self.otel_metrics_endpoint().is_some()
+    }
+
+    /// Returns the configured OTLP `service.name`, falling back to the default.
+    pub fn otel_service_name(&self) -> &str {
+        self.otel
+            .service_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_OTEL_SERVICE_NAME)
+    }
+
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
     pub fn is_quiet(&self) -> bool {
         self.quiet
@@ -881,6 +965,57 @@ where
         }
     });
     masked.serialize(serializer)
+}
+
+/// Serialize an `OtelConfig` for display, masking header values (which may carry auth tokens).
+/// Only used for the runtime `Config` view; the on-disk `FileConfig` serializes headers verbatim.
+fn serialize_masked_otel<S>(otel: &OtelConfig, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut masked = otel.clone();
+    if let Some(headers) = masked.headers.as_mut() {
+        for value in headers.values_mut() {
+            *value = "****".to_string();
+        }
+    }
+    masked.serialize(serializer)
+}
+
+/// Parse an OTel-style comma-separated `key=value` list (used for headers and resource
+/// attributes). Whitespace around keys/values is trimmed; malformed entries are skipped.
+fn parse_otel_kv_list(raw: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = entry.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                map.insert(key.to_string(), value.trim().to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Merge a file-config `key=value` map with an env-var override (`OTEL_*` comma-separated list).
+/// Env entries win on key conflicts. Returns `None` when both sources are empty.
+fn merge_otel_kv(
+    file_map: Option<HashMap<String, String>>,
+    env_var: &str,
+) -> Option<HashMap<String, String>> {
+    let mut merged = file_map.unwrap_or_default();
+    if let Ok(raw) = env::var(env_var) {
+        merged.extend(parse_otel_kv_list(&raw));
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -1139,6 +1274,24 @@ fn build_config() -> Config {
             .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone())),
     };
 
+    // Resolve OTLP exporter config: standard OTEL_* env vars override file config.
+    let file_otel = file_cfg
+        .as_ref()
+        .and_then(|c| c.otel.clone())
+        .unwrap_or_default();
+    let otel_env_nonempty = |var: &str| env::var(var).ok().filter(|s| !s.trim().is_empty());
+    let otel = OtelConfig {
+        endpoint: otel_env_nonempty("OTEL_EXPORTER_OTLP_ENDPOINT").or(file_otel.endpoint),
+        metrics_endpoint: otel_env_nonempty("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+            .or(file_otel.metrics_endpoint),
+        headers: merge_otel_kv(file_otel.headers, "OTEL_EXPORTER_OTLP_HEADERS"),
+        service_name: otel_env_nonempty("OTEL_SERVICE_NAME").or(file_otel.service_name),
+        resource_attributes: merge_otel_kv(
+            file_otel.resource_attributes,
+            "OTEL_RESOURCE_ATTRIBUTES",
+        ),
+    };
+
     // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
     let transcript_streaming_lookback_days = env::var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS")
         .ok()
@@ -1177,6 +1330,7 @@ fn build_config() -> Config {
             codex_hooks_format,
             notes_backend,
             transcript_streaming_lookback_days,
+            otel,
         };
         apply_test_config_patch(&mut config);
         config
@@ -1207,6 +1361,7 @@ fn build_config() -> Config {
         codex_hooks_format,
         notes_backend,
         transcript_streaming_lookback_days,
+        otel,
     }
 }
 
@@ -1653,6 +1808,9 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(days) = patch.transcript_streaming_lookback_days {
             config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };
         }
+        if let Some(otel) = patch.otel {
+            config.otel = otel;
+        }
     }
 }
 
@@ -1694,7 +1852,72 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            otel: OtelConfig::default(),
         }
+    }
+
+    #[test]
+    fn test_parse_otel_kv_list_splits_and_trims() {
+        let parsed =
+            parse_otel_kv_list(" Authorization=Bearer abc , x-honeycomb-team=secret , ,bad=,=skip");
+        assert_eq!(
+            parsed.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
+        assert_eq!(
+            parsed.get("x-honeycomb-team").map(String::as_str),
+            Some("secret")
+        );
+        // Empty entries, bare `=`, and `=value` (empty key) are skipped, but `bad=` (empty value) is kept.
+        assert_eq!(parsed.get("bad").map(String::as_str), Some(""));
+        assert!(!parsed.contains_key(""));
+    }
+
+    #[test]
+    fn test_otel_metrics_endpoint_appends_v1_metrics_to_base() {
+        let mut config = create_test_config(vec![], vec![]);
+        config.otel.endpoint = Some("https://otel.example.com:4318/".to_string());
+        assert_eq!(
+            config.otel_metrics_endpoint().as_deref(),
+            Some("https://otel.example.com:4318/v1/metrics")
+        );
+    }
+
+    #[test]
+    fn test_otel_metrics_endpoint_preserves_explicit_signal_endpoint() {
+        let mut config = create_test_config(vec![], vec![]);
+        config.otel.endpoint = Some("https://base.example.com".to_string());
+        config.otel.metrics_endpoint = Some("https://metrics.example.com/custom".to_string());
+        // The signal-specific endpoint is used verbatim and wins over base + /v1/metrics.
+        assert_eq!(
+            config.otel_metrics_endpoint().as_deref(),
+            Some("https://metrics.example.com/custom")
+        );
+    }
+
+    #[test]
+    fn test_otel_metrics_disabled_by_default() {
+        let config = create_test_config(vec![], vec![]);
+        assert!(!config.otel_metrics_enabled());
+        assert!(config.otel_metrics_endpoint().is_none());
+        assert_eq!(config.otel_service_name(), DEFAULT_OTEL_SERVICE_NAME);
+    }
+
+    #[test]
+    fn test_serialize_masked_otel_redacts_header_values() {
+        let mut config = create_test_config(vec![], vec![]);
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer super-secret".to_string(),
+        );
+        config.otel.headers = Some(headers);
+        let json = config.to_printable_json_pretty().expect("serialize");
+        assert!(
+            json.contains("\"****\""),
+            "expected masked header value in: {json}"
+        );
+        assert!(!json.contains("super-secret"), "raw secret leaked: {json}");
     }
 
     #[test]
@@ -1936,6 +2159,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            otel: OtelConfig::default(),
         }
     }
 
@@ -2081,6 +2305,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            otel: OtelConfig::default(),
         }
     }
 
