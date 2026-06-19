@@ -256,6 +256,7 @@ impl Ord for Token {
 struct DiffComputation {
     diffs: Vec<ByteDiff>,
     substantive_new_ranges: Vec<(usize, usize)>,
+    line_stats: (u32, u32, u32, u32), // (additions, deletions, additions_sloc, deletions_sloc)
 }
 
 /// Configuration for the attribution tracker
@@ -323,7 +324,105 @@ impl AttributionTracker {
             capture_start.elapsed()
         );
 
-        let mut computation = DiffComputation::default();
+        // Derive line stats from the diff ops (avoids a redundant second diff pass).
+        // Use normalized text (CR-stripped) from LineMetadata to avoid CRLF↔LF inflation.
+        let old_normalized: Vec<&str> = old_lines.iter().map(|l| l.text.as_str()).collect();
+        let new_normalized: Vec<&str> = new_lines.iter().map(|l| l.text.as_str()).collect();
+
+        let mut additions: u32 = 0;
+        let mut deletions: u32 = 0;
+        let mut additions_sloc: u32 = 0;
+        let mut deletions_sloc: u32 = 0;
+        for op in &line_ops {
+            match *op {
+                DiffOp::Insert {
+                    new_index, new_len, ..
+                } => {
+                    additions += new_len as u32;
+                    for item in new_normalized.iter().skip(new_index).take(new_len) {
+                        if !item.trim().is_empty() {
+                            additions_sloc += 1;
+                        }
+                    }
+                }
+                DiffOp::Delete {
+                    old_index, old_len, ..
+                } => {
+                    deletions += old_len as u32;
+                    for item in old_normalized.iter().skip(old_index).take(old_len) {
+                        if !item.trim().is_empty() {
+                            deletions_sloc += 1;
+                        }
+                    }
+                }
+                DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
+                    // Run a sub-diff on normalized slices to correctly handle
+                    // CRLF↔LF changes co-occurring with real edits.
+                    let old_chunk = &old_normalized[old_index..old_index + old_len];
+                    let new_chunk = &new_normalized[new_index..new_index + new_len];
+                    let sub_ops = capture_diff_slices(old_chunk, new_chunk);
+                    for sub_op in &sub_ops {
+                        match *sub_op {
+                            DiffOp::Insert {
+                                new_index: si,
+                                new_len: sn,
+                                ..
+                            } => {
+                                additions += sn as u32;
+                                for item in new_chunk.iter().skip(si).take(sn) {
+                                    if !item.trim().is_empty() {
+                                        additions_sloc += 1;
+                                    }
+                                }
+                            }
+                            DiffOp::Delete {
+                                old_index: si,
+                                old_len: sn,
+                                ..
+                            } => {
+                                deletions += sn as u32;
+                                for item in old_chunk.iter().skip(si).take(sn) {
+                                    if !item.trim().is_empty() {
+                                        deletions_sloc += 1;
+                                    }
+                                }
+                            }
+                            DiffOp::Replace {
+                                old_index: soi,
+                                old_len: sol,
+                                new_index: sni,
+                                new_len: snl,
+                            } => {
+                                deletions += sol as u32;
+                                additions += snl as u32;
+                                for item in old_chunk.iter().skip(soi).take(sol) {
+                                    if !item.trim().is_empty() {
+                                        deletions_sloc += 1;
+                                    }
+                                }
+                                for item in new_chunk.iter().skip(sni).take(snl) {
+                                    if !item.trim().is_empty() {
+                                        additions_sloc += 1;
+                                    }
+                                }
+                            }
+                            DiffOp::Equal { .. } => {}
+                        }
+                    }
+                }
+                DiffOp::Equal { .. } => {}
+            }
+        }
+
+        let mut computation = DiffComputation {
+            line_stats: (additions, deletions, additions_sloc, deletions_sloc),
+            ..Default::default()
+        };
         let mut pending_changed: Vec<DiffOp> = Vec::new();
         let process_start = Instant::now();
 
@@ -545,16 +644,19 @@ impl AttributionTracker {
         current_author: &str,
         ts: u128,
     ) -> Result<Vec<Attribution>, GitAiError> {
-        self.update_attributions_for_checkpoint(
+        let (attrs, _stats) = self.update_attributions_for_checkpoint(
             old_content,
             new_content,
             old_attributions,
             current_author,
             ts,
             false,
-        )
+        )?;
+        Ok(attrs)
     }
 
+    /// Returns (attributions, (additions, deletions, additions_sloc, deletions_sloc))
+    #[allow(clippy::type_complexity)]
     pub fn update_attributions_for_checkpoint(
         &self,
         old_content: &str,
@@ -563,7 +665,7 @@ impl AttributionTracker {
         current_author: &str,
         ts: u128,
         is_ai_checkpoint: bool,
-    ) -> Result<Vec<Attribution>, GitAiError> {
+    ) -> Result<(Vec<Attribution>, (u32, u32, u32, u32)), GitAiError> {
         // Cursor-based scans in transform_attributions assume sorted ranges.
         // Normalize once at the boundary so callers can pass ranges in any order.
         let sorted_old_storage = (!is_attribution_list_sorted(old_attributions))
@@ -572,6 +674,7 @@ impl AttributionTracker {
 
         // Phase 1: Compute diff
         let diff_result = self.compute_diffs(old_content, new_content, is_ai_checkpoint)?;
+        let line_stats = diff_result.line_stats;
 
         // Phase 2: Build deletion and insertion catalogs
         let (deletions, insertions) = self.build_diff_catalog(&diff_result.diffs);
@@ -601,7 +704,7 @@ impl AttributionTracker {
         );
 
         // Phase 5: Merge and clean up
-        Ok(self.merge_attributions(new_attributions))
+        Ok((self.merge_attributions(new_attributions), line_stats))
     }
 
     fn should_skip_move_detection(
@@ -2634,7 +2737,7 @@ mod tests {
         let new = "hello\nworld\n";
         let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
 
-        let updated = tracker
+        let (updated, _stats) = tracker
             .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, false)
             .unwrap();
 
@@ -2654,7 +2757,7 @@ mod tests {
         let new = "hello\r\nworld\r\n";
         let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
 
-        let updated = tracker
+        let (updated, _stats) = tracker
             .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, false)
             .unwrap();
 
@@ -2675,7 +2778,7 @@ mod tests {
         let new = "line1\nmodified\nline3\n";
         let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
 
-        let updated = tracker
+        let (updated, _stats) = tracker
             .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, false)
             .unwrap();
 

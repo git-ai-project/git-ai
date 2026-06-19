@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Initial attributions data structure stored in the INITIAL file
@@ -284,7 +285,7 @@ pub struct PersistedWorkingLog {
     /// On Windows, this uses the \\?\ UNC prefix format
     #[allow(dead_code)]
     pub canonical_workdir: PathBuf,
-    pub dirty_files: Option<HashMap<String, String>>,
+    pub dirty_files: Option<Arc<HashMap<String, String>>>,
     pub initial_file: PathBuf,
 }
 
@@ -302,20 +303,22 @@ impl PersistedWorkingLog {
             base_commit: base_commit.to_string(),
             repo_workdir: repo_root,
             canonical_workdir,
-            dirty_files,
+            dirty_files: dirty_files.map(Arc::new),
             initial_file,
         }
     }
 
     pub fn set_dirty_files(&mut self, dirty_files: Option<HashMap<String, String>>) {
         let normalized_dirty_files = dirty_files.map(|map| {
-            map.into_iter()
-                .map(|(file_path, content)| {
-                    let relative_path = self.to_repo_relative_path(&file_path);
-                    let normalized_path = normalize_to_posix(&relative_path);
-                    (normalized_path, content)
-                })
-                .collect::<HashMap<_, _>>()
+            Arc::new(
+                map.into_iter()
+                    .map(|(file_path, content)| {
+                        let relative_path = self.to_repo_relative_path(&file_path);
+                        let normalized_path = normalize_to_posix(&relative_path);
+                        (normalized_path, content)
+                    })
+                    .collect::<HashMap<_, _>>(),
+            )
         });
 
         self.dirty_files = normalized_dirty_files;
@@ -442,21 +445,47 @@ impl PersistedWorkingLog {
 
     /* append checkpoint */
     pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
-        // Read existing checkpoints
-        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
+        let checkpoints_file = self.dir.join("checkpoints.jsonl");
 
-        // Create a copy, potentially without transcript to reduce storage size.
-        //
-        // Tools that DON'T support refetch (transcript must be kept):
-        // - "mock_ai" - test preset, transcript not stored externally
-        // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
-        checkpoints.push(checkpoint.clone());
+        // Append the new checkpoint as a single JSONL line
+        let json_line = serde_json::to_string(checkpoint)?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&checkpoints_file)?;
+        writeln!(file, "{}", json_line)?;
 
-        // Prune char-level attributions from older checkpoints for the same files
-        // Only the most recent checkpoint per file needs char-level precision
+        // Compact lazily: prune old char-level attributions when file grows large
+        self.maybe_compact_checkpoints(&checkpoints_file)?;
+
+        Ok(())
+    }
+
+    /// Prune char-level attributions when the checkpoints file exceeds a size threshold.
+    fn maybe_compact_checkpoints(
+        &self,
+        checkpoints_file: &std::path::Path,
+    ) -> Result<(), GitAiError> {
+        const COMPACT_THRESHOLD_BYTES: u64 = 200_000;
+
+        let metadata = match std::fs::metadata(checkpoints_file) {
+            Ok(m) => m,
+            Err(_) => return Ok(()),
+        };
+
+        if metadata.len() < COMPACT_THRESHOLD_BYTES {
+            return Ok(());
+        }
+
+        let mut checkpoints = match self.read_all_checkpoints() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("Skipping compaction due to read error: {}", e);
+                return Ok(());
+            }
+        };
         self.prune_old_char_attributions(&mut checkpoints);
-
-        // Write all checkpoints back
         self.write_all_checkpoints(&checkpoints)
     }
 
@@ -490,7 +519,22 @@ impl PersistedWorkingLog {
             checkpoints.push(checkpoint);
         }
 
-        // Migrate 7-char prompt hashes to 16-char hashes
+        // Migrate 7-char prompt hashes to 16-char hashes (legacy data only)
+        // Short-circuit: skip if no attributions have 7-char author_ids
+        let has_short_hashes = checkpoints.iter().any(|cp| {
+            cp.entries.iter().any(|entry| {
+                entry.attributions.iter().any(|a| a.author_id.len() == 7)
+                    || entry
+                        .line_attributions
+                        .iter()
+                        .any(|la| la.author_id.len() == 7)
+            })
+        });
+
+        if !has_short_hashes {
+            return Ok(checkpoints);
+        }
+
         // Step 1: Build mapping from old 7-char hash to new 16-char hash
         let mut old_to_new_hash: HashMap<String, String> = HashMap::new();
 
@@ -503,10 +547,8 @@ impl PersistedWorkingLog {
         }
 
         // Step 2: Replace 7-char author_ids in all checkpoints' attributions and line_attributions
-        let mut migrated_checkpoints = Vec::new();
-        for mut checkpoint in checkpoints {
+        for checkpoint in &mut checkpoints {
             for entry in &mut checkpoint.entries {
-                // Replace author_ids in attributions
                 for attr in &mut entry.attributions {
                     if attr.author_id.len() == 7
                         && let Some(new_hash) = old_to_new_hash.get(&attr.author_id)
@@ -515,14 +557,12 @@ impl PersistedWorkingLog {
                     }
                 }
 
-                // Replace author_ids in line_attributions
                 for line_attr in &mut entry.line_attributions {
                     if line_attr.author_id.len() == 7
                         && let Some(new_hash) = old_to_new_hash.get(&line_attr.author_id)
                     {
                         line_attr.author_id = new_hash.clone();
                     }
-                    // Also migrate the overrode field if it contains a 7-char hash
                     if let Some(ref overrode_id) = line_attr.overrode
                         && overrode_id.len() == 7
                         && let Some(new_hash) = old_to_new_hash.get(overrode_id)
@@ -531,10 +571,9 @@ impl PersistedWorkingLog {
                     }
                 }
             }
-            migrated_checkpoints.push(checkpoint);
         }
 
-        Ok(migrated_checkpoints)
+        Ok(checkpoints)
     }
 
     /// Remove char-level attributions from all but the most recent checkpoint per file.

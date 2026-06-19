@@ -283,14 +283,12 @@ fn execute_resolved_checkpoint(
         entries_start.elapsed()
     );
 
+    let entries_len = entries.len();
+
     if !entries.is_empty() {
         let checkpoint_create_start = Instant::now();
-        let mut checkpoint = Checkpoint::new(
-            kind,
-            combined_hash.clone(),
-            author.to_string(),
-            entries.clone(),
-        );
+        let mut checkpoint =
+            Checkpoint::new(kind, combined_hash.clone(), author.to_string(), entries);
         checkpoint.timestamp = (resolved.ts / 1000) as u64;
         checkpoint.line_stats = compute_line_stats(&file_stats)?;
         checkpoint.trace_id = Some(trace_id.clone());
@@ -338,7 +336,6 @@ fn execute_resolved_checkpoint(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
             append_start.elapsed()
         );
-        checkpoints.push(checkpoint.clone());
 
         let mut attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
@@ -349,8 +346,6 @@ fn execute_resolved_checkpoint(
         }
 
         // Extract tool_use_id from metadata if available
-        // tool_use_id tracks specific tool invocations (e.g., bash tool calls from AI agents)
-        // Allows linking checkpoint events to the exact tool use that triggered them
         let tool_use_id = checkpoint_request
             .metadata
             .get("tool_use_id")
@@ -361,7 +356,7 @@ fn execute_resolved_checkpoint(
             .get("edit_kind")
             .map(|s| s.as_str());
 
-        for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
+        for (entry, file_stat) in checkpoint.entries.iter().zip(file_stats.iter()) {
             let mut values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)
                 .kind(checkpoint.kind.to_str().to_string())
@@ -381,6 +376,8 @@ fn execute_resolved_checkpoint(
             let file_attrs = attrs.clone().author(&checkpoint.author);
             crate::metrics::record(values, file_attrs);
         }
+
+        checkpoints.push(checkpoint);
     }
 
     let agent_tool = if kind.is_ai() {
@@ -392,7 +389,7 @@ fn execute_resolved_checkpoint(
         None
     };
 
-    let label = if entries.len() > 1 {
+    let label = if entries_len > 1 {
         "checkpoint"
     } else {
         "commit"
@@ -400,7 +397,7 @@ fn execute_resolved_checkpoint(
 
     if !quiet {
         let log_author = agent_tool.unwrap_or(author);
-        let files_with_entries = entries.len();
+        let files_with_entries = entries_len;
         let total_uncommitted_files = resolved.files.len();
 
         if files_with_entries == total_uncommitted_files {
@@ -428,7 +425,7 @@ fn execute_resolved_checkpoint(
         "[BENCHMARK] Total checkpoint run took {:?}",
         checkpoint_start.elapsed()
     );
-    Ok((entries.len(), resolved.files.len(), checkpoints.len()))
+    Ok((entries_len, resolved.files.len(), checkpoints.len()))
 }
 
 fn save_current_file_states(
@@ -438,47 +435,44 @@ fn save_current_file_states(
     let _read_start = Instant::now();
 
     let blobs_dir = working_log.dir.join("blobs");
+    std::fs::create_dir_all(&blobs_dir)?;
     let dirty_files = working_log.dirty_files.clone();
 
     let file_content_hashes = smol::block_on(async {
         let semaphore = Arc::new(smol::lock::Semaphore::new(8));
         let blobs_dir = Arc::new(blobs_dir);
-        let dirty_files = Arc::new(dirty_files);
 
         let futures = files.iter().map(|file_path| {
             let file_path = file_path.clone();
             let blobs_dir = Arc::clone(&blobs_dir);
-            let dirty_files = Arc::clone(&dirty_files);
+            let dirty_files = dirty_files.clone();
             let semaphore = Arc::clone(&semaphore);
 
             async move {
                 // Acquire semaphore permit
                 let _permit = semaphore.acquire().await;
 
-                // Read file content - check dirty_files first, then filesystem
-                let content = if let Some(ref dirty_map) = *dirty_files {
-                    dirty_map.get(&file_path).cloned()
-                } else {
-                    None
-                }
-                .ok_or_else(|| {
-                    GitAiError::Generic(format!(
-                        "save_current_file_states: file '{}' not found in dirty_files snapshot (filesystem fallback is not allowed in checkpoint flow)",
-                        file_path
-                    ))
-                })?;
+                // Read file content from dirty_files snapshot
+                let content = dirty_files
+                    .as_deref()
+                    .and_then(|map| map.get(&file_path).cloned())
+                    .ok_or_else(|| {
+                        GitAiError::Generic(format!(
+                            "save_current_file_states: file '{}' not found in dirty_files snapshot (filesystem fallback is not allowed in checkpoint flow)",
+                            file_path
+                        ))
+                    })?;
 
                 // Create SHA256 hash of the content
                 let mut hasher = Sha256::new();
                 hasher.update(content.as_bytes());
                 let sha = format!("{:x}", hasher.finalize());
 
-                // Ensure blobs directory exists
-                std::fs::create_dir_all(&*blobs_dir)?;
-
-                // Write content to blob file
+                // Write content to blob file (skip if already exists — content-addressed)
                 let blob_path = blobs_dir.join(&sha);
-                std::fs::write(blob_path, content)?;
+                if !blob_path.exists() {
+                    std::fs::write(&blob_path, content)?;
+                }
 
                 Ok::<(String, String), GitAiError>((file_path, sha))
             }
@@ -546,19 +540,22 @@ fn build_previous_file_state_maps(
     let mut previous_file_state_by_file: HashMap<String, PreviousFileState> = HashMap::new();
     let mut ai_touched_files: HashSet<String> = initial_attributions.keys().cloned().collect();
 
-    // Keep only the latest entry for each file.
-    for checkpoint in previous_checkpoints {
+    // Iterate in reverse so we encounter the latest entry for each file first,
+    // avoiding redundant clones of attributions for entries that would be overwritten.
+    for checkpoint in previous_checkpoints.iter().rev() {
         for entry in &checkpoint.entries {
-            previous_file_state_by_file.insert(
-                entry.file.clone(),
-                PreviousFileState {
-                    blob_sha: entry.blob_sha.clone(),
-                    attributions: entry.attributions.clone(),
-                },
-            );
-
             if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
                 ai_touched_files.insert(entry.file.clone());
+            }
+
+            if !previous_file_state_by_file.contains_key(&entry.file) {
+                previous_file_state_by_file.insert(
+                    entry.file.clone(),
+                    PreviousFileState {
+                        blob_sha: entry.blob_sha.clone(),
+                        attributions: entry.attributions.clone(),
+                    },
+                );
             }
         }
     }
@@ -1007,22 +1004,20 @@ fn make_entry_for_file(
     );
 
     let update_start = Instant::now();
-    let new_attributions = tracker.update_attributions_for_checkpoint(
-        previous_content,
-        content,
-        &filled_in_prev_attributions,
-        author_id,
-        ts,
-        is_ai_checkpoint,
-    )?;
+    let (new_attributions, (additions, deletions, additions_sloc, deletions_sloc)) = tracker
+        .update_attributions_for_checkpoint(
+            previous_content,
+            content,
+            &filled_in_prev_attributions,
+            author_id,
+            ts,
+            is_ai_checkpoint,
+        )?;
     tracing::debug!(
         "[BENCHMARK]   update_attributions for {} took {:?}",
         file_path,
         update_start.elapsed()
     );
-
-    // TODO Consider discarding any "uncontentious" attributions for the human author. Any human attributions that do not share a line with any other author's attributions can be discarded.
-    // let filtered_attributions = crate::authorship::attribution_tracker::discard_uncontentious_attributions_for_author(&new_attributions, &CheckpointKind::Human.to_str());
 
     let line_attr_start = Instant::now();
     let line_attributions =
@@ -1037,14 +1032,12 @@ fn make_entry_for_file(
         line_attr_start.elapsed()
     );
 
-    // Compute line stats while we already have both contents in memory
-    let stats_start = Instant::now();
-    let line_stats = compute_file_line_stats(previous_content, content);
-    tracing::debug!(
-        "[BENCHMARK]   compute_file_line_stats for {} took {:?}",
-        file_path,
-        stats_start.elapsed()
-    );
+    let line_stats = FileLineStats {
+        additions,
+        deletions,
+        additions_sloc,
+        deletions_sloc,
+    };
 
     let entry = WorkingLogEntry::new(
         file_path.to_string(),

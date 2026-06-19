@@ -70,6 +70,7 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
     let capped_paths = &file_paths[..file_paths.len().min(MAX_CHECKPOINT_FILES)];
 
     let mut repo_cache: HashMap<PathBuf, RepoContext> = HashMap::new();
+    let mut discovery_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut files = Vec::new();
 
     for path in capped_paths {
@@ -82,12 +83,19 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
 
         let ctx = {
             let t_discover = std::time::Instant::now();
-            let repo_work_dir = worktree_root_for_path(path).ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "No git repository found for path: {}",
-                    path.display()
-                ))
-            })?;
+            let parent_dir = path.parent().unwrap_or(path).to_path_buf();
+            let repo_work_dir = if let Some(cached) = discovery_cache.get(&parent_dir) {
+                cached.clone()
+            } else {
+                let discovered = worktree_root_for_path(path).ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "No git repository found for path: {}",
+                        path.display()
+                    ))
+                })?;
+                discovery_cache.insert(parent_dir, discovered.clone());
+                discovered
+            };
             if !repo_cache.contains_key(&repo_work_dir) {
                 let t_head = std::time::Instant::now();
                 let base_commit = match read_head_state_for_worktree(&repo_work_dir) {
