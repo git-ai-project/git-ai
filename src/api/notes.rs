@@ -41,6 +41,13 @@ impl ApiClient {
                     });
                 Err(GitAiError::Generic(format!("Bad Request: {}", err.error)))
             }
+            // The backend rejects writes from clients below its minimum version.
+            // Surface this distinctly so the daemon can log an upgrade-required
+            // message instead of treating it as a generic retryable failure.
+            426 => Err(GitAiError::UpgradeRequired(format!(
+                "notes upload rejected: client version too old (HTTP 426): {}",
+                body
+            ))),
             _ => Err(GitAiError::Generic(format!(
                 "Notes upload failed with status {}: {}",
                 status_code, body
@@ -83,6 +90,11 @@ impl ApiClient {
             404 => Ok(NotesReadResponse {
                 notes: std::collections::HashMap::new(),
             }),
+            // See `upload_notes`: surface an upgrade-required rejection distinctly.
+            426 => Err(GitAiError::UpgradeRequired(format!(
+                "notes read rejected: client version too old (HTTP 426): {}",
+                body
+            ))),
             _ => Err(GitAiError::Generic(format!(
                 "Notes read failed with status {}: {}",
                 status_code, body
@@ -162,5 +174,53 @@ mod tests {
         let response: NotesUploadResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.success_count, 5);
         assert_eq!(response.failure_count, 1);
+    }
+
+    #[test]
+    fn test_upload_notes_426_returns_upgrade_required() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("POST", "/worker/notes/upload")
+            .with_status(426)
+            .with_body("client version too old")
+            .create();
+
+        let ctx = ApiContext::without_auth(Some(server.url()));
+        let client = ApiClient::new(ctx);
+
+        let request = NotesUploadRequest {
+            entries: vec![NoteEntry {
+                commit_sha: "abc123".to_string(),
+                content: "data".to_string(),
+            }],
+        };
+        let err = client.upload_notes(request).unwrap_err();
+        assert!(
+            matches!(err, GitAiError::UpgradeRequired(_)),
+            "expected UpgradeRequired, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_read_notes_426_returns_upgrade_required() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(426)
+            .with_body("client version too old")
+            .create();
+
+        let ctx = ApiContext::without_auth(Some(server.url()));
+        let client = ApiClient::new(ctx);
+
+        let err = client
+            .read_notes(&["abc123def456abc123def456abc123def456abc1"])
+            .unwrap_err();
+        assert!(
+            matches!(err, GitAiError::UpgradeRequired(_)),
+            "expected UpgradeRequired, got: {:?}",
+            err
+        );
     }
 }

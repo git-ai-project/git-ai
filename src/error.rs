@@ -16,6 +16,11 @@ pub enum GitAiError {
     FromUtf8Error(std::string::FromUtf8Error),
     PresetError(String),
     SqliteError(rusqlite::Error),
+    /// The server rejected the request because the client version is too old
+    /// (HTTP 426 Upgrade Required). Used by the HTTP notes backend so the daemon
+    /// can recognize an upgrade-required response and avoid treating it as a
+    /// generic retryable failure. See `docs/http-notes-backend-migration-spec.md`.
+    UpgradeRequired(String),
     Generic(String),
 }
 
@@ -38,6 +43,7 @@ impl fmt::Display for GitAiError {
             GitAiError::FromUtf8Error(e) => write!(f, "From UTF-8 error: {}", e),
             GitAiError::PresetError(e) => write!(f, "{}", e),
             GitAiError::SqliteError(e) => write!(f, "SQLite error: {}", e),
+            GitAiError::UpgradeRequired(e) => write!(f, "Upgrade required: {}", e),
             GitAiError::Generic(e) => write!(f, "Generic error: {}", e),
             GitAiError::GixError(e) => write!(f, "Gix error: {}", e),
         }
@@ -92,6 +98,7 @@ impl Clone for GitAiError {
             GitAiError::FromUtf8Error(e) => GitAiError::FromUtf8Error(e.clone()),
             GitAiError::PresetError(s) => GitAiError::PresetError(s.clone()),
             GitAiError::SqliteError(e) => GitAiError::Generic(format!("SQLite error: {}", e)),
+            GitAiError::UpgradeRequired(s) => GitAiError::UpgradeRequired(s.clone()),
             GitAiError::Generic(s) => GitAiError::Generic(s.clone()),
             GitAiError::GixError(e) => GitAiError::Generic(format!("Gix error: {}", e)),
         }
@@ -292,6 +299,24 @@ mod tests {
         assert!(matches!(cloned, GitAiError::Generic(_)));
         let display = format!("{}", cloned);
         assert!(display.contains("Gix error"));
+    }
+
+    #[test]
+    fn test_error_display_upgrade_required() {
+        let err = GitAiError::UpgradeRequired("client too old (HTTP 426)".to_string());
+        let display = format!("{}", err);
+        assert!(display.contains("Upgrade required"));
+        assert!(display.contains("client too old"));
+    }
+
+    #[test]
+    fn test_error_clone_upgrade_required() {
+        let err = GitAiError::UpgradeRequired("client too old".to_string());
+        let cloned = err.clone();
+        match cloned {
+            GitAiError::UpgradeRequired(msg) => assert_eq!(msg, "client too old"),
+            _ => panic!("Expected UpgradeRequired"),
+        }
     }
 
     #[test]
