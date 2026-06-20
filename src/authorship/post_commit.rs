@@ -875,6 +875,97 @@ pub fn count_line_ranges(lines: &[u32]) -> usize {
     ranges
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MetricToolModelBreakdown {
+    pub tool_model_pairs: Vec<String>,
+    pub ai_additions: Vec<u32>,
+    pub ai_accepted: Vec<u32>,
+}
+
+/// Build the metrics tool/model arrays and remove mock_ai test data.
+/// Returns None when the entire event would only represent mock_ai data.
+pub(crate) fn metric_tool_model_breakdown(
+    stats: &crate::authorship::stats::CommitStats,
+) -> Option<MetricToolModelBreakdown> {
+    let only_mock_ai = !stats.tool_model_breakdown.is_empty()
+        && stats
+            .tool_model_breakdown
+            .keys()
+            .all(|k| k.starts_with("mock_ai::"));
+    if only_mock_ai {
+        return None;
+    }
+
+    let mut agg_ai = stats.ai_additions;
+    let mut agg_accepted = stats.ai_accepted;
+    for (key, ts) in &stats.tool_model_breakdown {
+        if key.starts_with("mock_ai::") {
+            agg_ai = agg_ai.saturating_sub(ts.ai_additions);
+            agg_accepted = agg_accepted.saturating_sub(ts.ai_accepted);
+        }
+    }
+
+    let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
+    let mut ai_additions: Vec<u32> = vec![agg_ai];
+    let mut ai_accepted: Vec<u32> = vec![agg_accepted];
+
+    for (tool_model, tool_stats) in &stats.tool_model_breakdown {
+        if tool_model.starts_with("mock_ai::") {
+            continue;
+        }
+        tool_model_pairs.push(tool_model.clone());
+        ai_additions.push(tool_stats.ai_additions);
+        ai_accepted.push(tool_stats.ai_accepted);
+    }
+
+    Some(MetricToolModelBreakdown {
+        tool_model_pairs,
+        ai_additions,
+        ai_accepted,
+    })
+}
+
+pub(crate) fn commit_subject_and_body(
+    repo: &Repository,
+    commit_sha: &str,
+) -> (Option<String>, Option<String>) {
+    let Ok(commit) = repo.find_commit(commit_sha.to_string()) else {
+        return (None, None);
+    };
+    let subject = Some(commit.summary().unwrap_or_default());
+    let body = commit.body().unwrap_or_default();
+    let body = if body.is_empty() { None } else { Some(body) };
+    (subject, body)
+}
+
+pub(crate) fn commit_metric_attrs(
+    repo: &Repository,
+    commit_sha: &str,
+    parent_sha: &str,
+    human_author: &str,
+) -> crate::metrics::EventAttributes {
+    let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+        .author(human_author)
+        .commit_sha(commit_sha)
+        .base_commit_sha(parent_sha);
+
+    if let Ok(Some(remote_name)) = repo.get_default_remote()
+        && let Ok(remotes) = repo.remotes_with_urls()
+        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
+        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+    {
+        attrs = attrs.repo_url(normalized);
+    }
+
+    if let Ok(head_ref) = repo.head()
+        && let Ok(short_branch) = head_ref.shorthand()
+    {
+        attrs = attrs.branch(short_branch);
+    }
+
+    attrs.custom_attributes_map(Config::fresh().custom_attributes())
+}
+
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
 #[allow(clippy::too_many_arguments)]
@@ -888,53 +979,20 @@ fn record_commit_metrics(
     checkpoints: &[Checkpoint],
     hunks_json: Option<&str>,
 ) {
-    use crate::metrics::{CommittedValues, EventAttributes, record};
+    use crate::metrics::{CommittedValues, record};
 
-    // Never emit telemetry for mock_ai (test preset).  If every tool in the
-    // breakdown is mock_ai the entire committed event is test data.
-    let only_mock_ai = !stats.tool_model_breakdown.is_empty()
-        && stats
-            .tool_model_breakdown
-            .keys()
-            .all(|k| k.starts_with("mock_ai::"));
-    if only_mock_ai {
+    let Some(breakdown) = metric_tool_model_breakdown(stats) else {
         return;
-    }
-
-    // Subtract mock_ai contributions from the aggregates so the "all" entry
-    // only reflects real tools.
-    let mut agg_ai = stats.ai_additions;
-    let mut agg_accepted = stats.ai_accepted;
-    for (key, ts) in &stats.tool_model_breakdown {
-        if key.starts_with("mock_ai::") {
-            agg_ai = agg_ai.saturating_sub(ts.ai_additions);
-            agg_accepted = agg_accepted.saturating_sub(ts.ai_accepted);
-        }
-    }
-
-    // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
-    let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
-    let mut ai_additions: Vec<u32> = vec![agg_ai];
-    let mut ai_accepted: Vec<u32> = vec![agg_accepted];
-
-    // Add per-tool/model breakdown, skipping mock_ai (test preset)
-    for (tool_model, tool_stats) in &stats.tool_model_breakdown {
-        if tool_model.starts_with("mock_ai::") {
-            continue;
-        }
-        tool_model_pairs.push(tool_model.clone());
-        ai_additions.push(tool_stats.ai_additions);
-        ai_accepted.push(tool_stats.ai_accepted);
-    }
+    };
 
     // Build values with all stats
     let values = CommittedValues::new()
         .human_additions(stats.human_additions)
         .git_diff_deleted_lines(stats.git_diff_deleted_lines)
         .git_diff_added_lines(stats.git_diff_added_lines)
-        .tool_model_pairs(tool_model_pairs)
-        .ai_additions(ai_additions)
-        .ai_accepted(ai_accepted);
+        .tool_model_pairs(breakdown.tool_model_pairs)
+        .ai_additions(breakdown.ai_additions)
+        .ai_accepted(breakdown.ai_accepted);
 
     // Add first checkpoint timestamp (null if no checkpoints)
     let values = if let Some(first) = checkpoints.first() {
@@ -943,21 +1001,16 @@ fn record_commit_metrics(
         values.first_checkpoint_ts_null()
     };
 
-    // Add commit subject and body
-    let values = if let Ok(commit) = repo.find_commit(commit_sha.to_string()) {
-        let subject = commit.summary().unwrap_or_default();
-        let values = values.commit_subject(subject);
-        let body = commit.body().unwrap_or_default();
-        if body.is_empty() {
-            values.commit_body_null()
-        } else {
-            values.commit_body(body)
-        }
-    } else {
-        values.commit_subject_null().commit_body_null()
+    let (subject, body) = commit_subject_and_body(repo, commit_sha);
+    let values = match subject {
+        Some(subject) => values.commit_subject(subject),
+        None => values.commit_subject_null(),
     };
-
-    let values = values.authorship_note(authorship_note);
+    let values = match body {
+        Some(body) => values.commit_body(body),
+        None => values.commit_body_null(),
+    }
+    .authorship_note(authorship_note);
 
     let values = if let Some(hunks) = hunks_json {
         values.hunks(hunks)
@@ -965,34 +1018,7 @@ fn record_commit_metrics(
         values.hunks_null()
     };
 
-    // Build attributes - start with version and extract session_id from first AI checkpoint
-    // session_id links this commit to the AI agent conversation that produced it
-    // Note: session_id removed from committed events - commits can contain code from multiple AI sessions
-    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
-
-    attrs = attrs
-        .author(human_author)
-        .commit_sha(commit_sha)
-        .base_commit_sha(parent_sha);
-
-    // Get repo URL from default remote
-    if let Ok(Some(remote_name)) = repo.get_default_remote()
-        && let Ok(remotes) = repo.remotes_with_urls()
-        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        attrs = attrs.repo_url(normalized);
-    }
-
-    // Get current branch
-    if let Ok(head_ref) = repo.head()
-        && let Ok(short_branch) = head_ref.shorthand()
-    {
-        attrs = attrs.branch(short_branch);
-    }
-
-    // Attach custom attributes using Config::fresh() to support runtime config updates
-    attrs = attrs.custom_attributes_map(Config::fresh().custom_attributes());
+    let attrs = commit_metric_attrs(repo, commit_sha, parent_sha, human_author);
 
     // Record the metric
     record(values, attrs);
@@ -1079,6 +1105,61 @@ mod tests {
     fn test_count_line_ranges_unsorted() {
         // After sort+dedup: [1, 2, 5, 6, 10] -> ranges: [1,2], [5,6], [10]
         assert_eq!(count_line_ranges(&[10, 5, 6, 1, 2]), 3);
+    }
+
+    #[test]
+    fn test_metric_tool_model_breakdown_filters_mock_ai() {
+        use crate::authorship::stats::{CommitStats, ToolModelHeadlineStats};
+
+        let mut tool_model_breakdown = std::collections::BTreeMap::new();
+        tool_model_breakdown.insert(
+            "mock_ai::unknown".to_string(),
+            ToolModelHeadlineStats {
+                ai_additions: 4,
+                ai_accepted: 3,
+            },
+        );
+        tool_model_breakdown.insert(
+            "codex::gpt-5".to_string(),
+            ToolModelHeadlineStats {
+                ai_additions: 6,
+                ai_accepted: 5,
+            },
+        );
+        let stats = CommitStats {
+            ai_additions: 10,
+            ai_accepted: 8,
+            tool_model_breakdown,
+            ..Default::default()
+        };
+
+        let result = metric_tool_model_breakdown(&stats).unwrap();
+
+        assert_eq!(result.tool_model_pairs, vec!["all", "codex::gpt-5"]);
+        assert_eq!(result.ai_additions, vec![6, 6]);
+        assert_eq!(result.ai_accepted, vec![5, 5]);
+    }
+
+    #[test]
+    fn test_metric_tool_model_breakdown_skips_mock_only() {
+        use crate::authorship::stats::{CommitStats, ToolModelHeadlineStats};
+
+        let mut tool_model_breakdown = std::collections::BTreeMap::new();
+        tool_model_breakdown.insert(
+            "mock_ai::unknown".to_string(),
+            ToolModelHeadlineStats {
+                ai_additions: 4,
+                ai_accepted: 3,
+            },
+        );
+        let stats = CommitStats {
+            ai_additions: 4,
+            ai_accepted: 3,
+            tool_model_breakdown,
+            ..Default::default()
+        };
+
+        assert_eq!(metric_tool_model_breakdown(&stats), None);
     }
 
     #[test]

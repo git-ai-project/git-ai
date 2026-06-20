@@ -6,6 +6,7 @@ use crate::authorship::authorship_log_serialization::{
 };
 use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 use crate::authorship::rewrite::compute_diff_trees_batch;
+use crate::authorship::rewrite::{RewriteMetricCommit, RewriteMetricOperation};
 use crate::error::GitAiError;
 use crate::git::notes_api;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
@@ -23,9 +24,12 @@ pub struct RevertSpec {
 /// commits were reverted: one batched first-parent rev-parse, one batched note
 /// read, one batched diff-tree (covering every commit's two diff pairs), and one
 /// batched note write. All per-commit work below is pure in-memory.
-pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<(), GitAiError> {
+pub(crate) fn handle_revert_commits(
+    repo: &Repository,
+    specs: &[RevertSpec],
+) -> Result<Vec<RewriteMetricCommit>, GitAiError> {
     if specs.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Resolve every spec's parent_sha (only those missing need a lookup) and the
@@ -36,6 +40,7 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
         revert_commit: String,
         parent_sha: String,
         source_base_sha: String,
+        original_shas: Vec<String>,
     }
 
     // Collect the revspecs we need resolved, deduplicated.
@@ -84,6 +89,7 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
                     revert_commit: spec.revert_commit.clone(),
                     parent_sha,
                     source_base_sha,
+                    original_shas: vec![rc.to_string()],
                 });
             }
             _ => {
@@ -93,6 +99,7 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
                     parent_sha,
                     // Placeholder; filled from the second batch below.
                     source_base_sha: String::new(),
+                    original_shas: Vec::new(),
                 });
             }
         }
@@ -105,13 +112,16 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
                     .get(&format!("{}^1", r.parent_sha))
                     .cloned()
                     .unwrap_or_default();
+                if r.original_shas.is_empty() && !r.source_base_sha.is_empty() {
+                    r.original_shas.push(r.source_base_sha.clone());
+                }
             }
         }
     }
 
     resolved.retain(|r| !r.source_base_sha.is_empty());
     if resolved.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Batch-read all source notes in one call.
@@ -148,6 +158,7 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
 
     // Per-commit reconstruction is now pure in-memory.
     let mut writes: Vec<(String, String)> = Vec::new();
+    let mut metric_commits: Vec<RewriteMetricCommit> = Vec::new();
     for (i, r) in resolved.iter().enumerate() {
         let Some(shift) = shift_idx[i] else {
             continue;
@@ -199,12 +210,17 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
             continue;
         };
         writes.push((r.revert_commit.clone(), note_str));
+        metric_commits.push(RewriteMetricCommit::new(
+            r.revert_commit.clone(),
+            r.original_shas.clone(),
+            RewriteMetricOperation::Revert,
+        ));
     }
 
     if !writes.is_empty() {
         notes_api::write_notes_batch(repo, &writes)?;
     }
-    Ok(())
+    Ok(metric_commits)
 }
 
 /// Extract added line numbers per file from a diff-tree result, equivalent to

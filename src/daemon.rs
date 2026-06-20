@@ -62,6 +62,7 @@ pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
 pub mod ref_cursor;
+pub mod rewrite_metrics;
 pub mod sentry_layer;
 pub mod stream_worker;
 pub mod sweep_coordinator;
@@ -1787,7 +1788,9 @@ fn apply_revert_complete_rewrite(
             },
         )
         .collect();
-    crate::authorship::rewrite_revert::handle_revert_commits(repo, &specs)
+    let metric_commits = crate::authorship::rewrite_revert::handle_revert_commits(repo, &specs)?;
+    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(repo, metric_commits);
+    Ok(())
 }
 
 fn apply_cherry_pick_complete_rewrite(
@@ -1801,15 +1804,17 @@ fn apply_cherry_pick_complete_rewrite(
         sources,
         new_commits,
     )?;
+    let mut rewrite_metric_commits = Vec::new();
     if !pairs.is_empty() {
         let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        crate::authorship::rewrite::handle_rewrite_event(
+        let outcome = crate::authorship::rewrite::handle_rewrite_event(
             repo,
             crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
                 sources: src,
                 new_commits: dst,
             },
         )?;
+        rewrite_metric_commits.extend(outcome.metric_commits);
     }
 
     let existing_notes = crate::git::notes_api::read_notes_batch(repo, new_commits)?;
@@ -1859,6 +1864,8 @@ fn apply_cherry_pick_complete_rewrite(
         )?;
     }
 
+    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(repo, rewrite_metric_commits);
+
     Ok(())
 }
 
@@ -1875,7 +1882,16 @@ fn apply_cherry_pick_no_commit_rewrite(
         .map(|source| (source.clone(), new_head.to_string()))
         .collect::<Vec<_>>();
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, sources)?;
-    crate::authorship::rewrite::shift_authorship_notes_merging_existing(repo, &mappings)
+    crate::authorship::rewrite::shift_authorship_notes_merging_existing(repo, &mappings)?;
+    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+        repo,
+        vec![crate::authorship::rewrite::RewriteMetricCommit::new(
+            new_head.to_string(),
+            sources.to_vec(),
+            crate::authorship::rewrite::RewriteMetricOperation::CherryPickNoCommit,
+        )],
+    );
+    Ok(())
 }
 
 fn strict_rebase_original_head_from_command(
@@ -4643,12 +4659,14 @@ impl ActorDaemonCoordinator {
                             && is_ancestor_commit(&repo, onto, &new_tip)
                     })
                     .or(command_rebase_onto);
-                crate::authorship::rewrite::handle_non_fast_forward_rewrite(
-                    &repo,
-                    &original_head,
-                    &new_tip,
-                    rebase_onto.as_deref(),
-                )?;
+                let outcome =
+                    crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                        &repo,
+                        &original_head,
+                        &new_tip,
+                        rebase_onto.as_deref(),
+                        crate::authorship::rewrite::RewriteMetricOperation::Rebase,
+                    )?;
                 repo.storage.rename_working_log(&original_head, &new_tip)?;
                 let conflict_base = rebase_onto.clone();
                 process_conflict_resolution_working_logs(
@@ -4656,6 +4674,10 @@ impl ActorDaemonCoordinator {
                     &new_tip,
                     conflict_base.as_deref(),
                 )?;
+                crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                    &repo,
+                    outcome.metric_commits,
+                );
             }
             return Ok(());
         }
@@ -4675,17 +4697,31 @@ impl ActorDaemonCoordinator {
             } else {
                 onto_hint.clone()
             };
-            crate::authorship::rewrite::handle_non_fast_forward_rewrite(
-                &repo,
-                old_tip,
-                new_tip,
-                rewrite_onto.as_deref(),
-            )?;
+            let outcome = if is_rebase_cmd {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                    &repo,
+                    old_tip,
+                    new_tip,
+                    rewrite_onto.as_deref(),
+                    crate::authorship::rewrite::RewriteMetricOperation::Rebase,
+                )?
+            } else {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite(
+                    &repo,
+                    old_tip,
+                    new_tip,
+                    rewrite_onto.as_deref(),
+                )?
+            };
             repo.storage.rename_working_log(old_tip, new_tip)?;
             if is_rebase_cmd {
                 let conflict_base = rewrite_onto.clone().or_else(|| onto_hint.clone());
                 process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref())?;
             }
+            crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                &repo,
+                outcome.metric_commits,
+            );
         }
 
         Ok(())
@@ -5282,7 +5318,7 @@ impl ActorDaemonCoordinator {
                         {
                             if base.as_deref().is_some_and(|base| base == pending.onto) {
                                 let repo = find_repository_in_path(&worktree)?;
-                                crate::authorship::rewrite::handle_rewrite_event(
+                                let outcome = crate::authorship::rewrite::handle_rewrite_event(
                                     &repo,
                                     crate::authorship::rewrite::RewriteEvent::SquashMerge {
                                         source_head: pending.source_head,
@@ -5290,6 +5326,10 @@ impl ActorDaemonCoordinator {
                                         onto: pending.onto,
                                     },
                                 )?;
+                                crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                    &repo,
+                                    outcome.metric_commits,
+                                );
                                 handled_as_squash_merge = true;
                             } else {
                                 self.set_pending_squash_merge_for_worktree(
@@ -5415,32 +5455,47 @@ impl ActorDaemonCoordinator {
                                     Some(&recovery_preflight),
                                 )
                             })?;
+                            crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                &repo,
+                                vec![crate::authorship::rewrite::RewriteMetricCommit::new(
+                                    new_head.to_string(),
+                                    vec![old_head.to_string()],
+                                    crate::authorship::rewrite::RewriteMetricOperation::Amend,
+                                )],
+                            );
                         }
                     }
                     crate::daemon::domain::SemanticEvent::Reset {
                         kind,
                         old_head,
                         new_head,
-                    } if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head => {
-                        let repo = find_repository_in_path(&worktree)?;
-                        match kind {
-                            crate::daemon::domain::ResetKind::Hard => {
-                                repo.storage.delete_working_log_for_base_commit(old_head)?;
-                            }
-                            _ => {
-                                if is_ancestor_commit(&repo, new_head, old_head) {
-                                    crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
-                                        &repo, old_head, new_head,
-                                    )?;
-                                } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                    crate::authorship::rewrite::handle_rewrite_event(
-                                        &repo,
-                                        crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                            old_tip: old_head.to_string(),
-                                            new_tip: new_head.to_string(),
-                                            onto: None,
-                                        },
-                                    )?;
+                    } => {
+                        if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
+                            let repo = find_repository_in_path(&worktree)?;
+                            match kind {
+                                crate::daemon::domain::ResetKind::Hard => {
+                                    repo.storage.delete_working_log_for_base_commit(old_head)?;
+                                }
+                                _ => {
+                                    if is_ancestor_commit(&repo, new_head, old_head) {
+                                        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+                                            &repo, old_head, new_head,
+                                        )?;
+                                    } else if !is_ancestor_commit(&repo, old_head, new_head) {
+                                        let outcome =
+                                            crate::authorship::rewrite::handle_rewrite_event(
+                                            &repo,
+                                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                                old_tip: old_head.to_string(),
+                                                new_tip: new_head.to_string(),
+                                                onto: None,
+                                            },
+                                        )?;
+                                        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                            &repo,
+                                            outcome.metric_commits,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -5524,14 +5579,18 @@ impl ActorDaemonCoordinator {
                             repo.storage.rename_working_log(old, new)?;
                         }
                     } else {
-                        crate::authorship::rewrite::handle_rewrite_event(
+                        let outcome =
+                            crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
                             &repo,
-                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                old_tip: old.to_string(),
-                                new_tip: new.to_string(),
-                                onto: None,
-                            },
+                            old,
+                            new,
+                            None,
+                            crate::authorship::rewrite::RewriteMetricOperation::UpdateRef,
                         )?;
+                        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                            &repo,
+                            outcome.metric_commits,
+                        );
                     }
                 }
             }
