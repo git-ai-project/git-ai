@@ -97,7 +97,6 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                 // Validation errors are logged to Sentry and won't succeed on retry.
                 if let Ok(mut db_lock) = db.lock() {
                     let _ = db_lock.mark_records_delivered(&record_ids, current_unix_ts());
-                    let _ = db_lock.reset_upload_queue_failure();
                 }
             }
             Err(e) => {
@@ -110,7 +109,6 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                     let now = current_unix_ts();
                     let error = e.to_string();
                     let _ = db_lock.mark_records_failed(&record_ids, &error, now);
-                    let _ = db_lock.mark_upload_queue_failed(&error, now);
                 }
                 break;
             }

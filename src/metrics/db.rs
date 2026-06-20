@@ -18,7 +18,6 @@ const SCHEMA_VERSION: usize = 3;
 
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
-const METRICS_UPLOAD_QUEUE_STATE_ID: i64 = 1;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -44,16 +43,6 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE metrics ADD COLUMN last_sync_at INTEGER;
     ALTER TABLE metrics ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE metrics ADD COLUMN processing_started_at INTEGER;
-
-    CREATE TABLE IF NOT EXISTS metrics_upload_queue_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        attempts INTEGER NOT NULL DEFAULT 0,
-        last_sync_error TEXT,
-        last_sync_at INTEGER
-    );
-
-    INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts)
-    VALUES (1, 0);
 
     CREATE INDEX IF NOT EXISTS metrics_pending_retry
         ON metrics (delivered_ts, next_retry_at, id)
@@ -298,31 +287,6 @@ impl MetricsDatabase {
         Ok(ids)
     }
 
-    /// Get a batch of undelivered events (oldest first).
-    pub fn get_batch(&self, limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, event_json, attempts, next_retry_at FROM metrics \
-             WHERE delivered_ts IS NULL \
-             ORDER BY id ASC LIMIT ?1",
-        )?;
-
-        let rows = stmt.query_map(params![limit], |row| {
-            Ok(MetricRecord {
-                id: row.get(0)?,
-                event_json: row.get(1)?,
-                attempts: row.get::<_, i64>(2)?.max(0) as u32,
-                next_retry_at: row.get::<_, i64>(3)?.max(0) as u64,
-            })
-        })?;
-
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-
-        Ok(records)
-    }
-
     /// Atomically claim a due batch of pending metrics for upload.
     pub fn dequeue_pending_batch(&mut self, limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
         if limit == 0 {
@@ -462,48 +426,6 @@ impl MetricsDatabase {
             }
         }
         tx.commit()?;
-        Ok(())
-    }
-
-    /// Record a transport-level upload failure for diagnostics/manual flush state.
-    ///
-    /// Daemon dequeue eligibility is intentionally row-level only so fresh
-    /// metrics are not blocked behind an older failed upload.
-    pub fn mark_upload_queue_failed(
-        &mut self,
-        error: &str,
-        failed_at: u64,
-    ) -> Result<(), GitAiError> {
-        self.conn.execute(
-            r#"
-            INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts)
-            VALUES (?1, 0)
-            "#,
-            params![METRICS_UPLOAD_QUEUE_STATE_ID],
-        )?;
-        self.conn.execute(
-            r#"
-            UPDATE metrics_upload_queue_state
-            SET attempts = attempts + 1,
-                last_sync_error = ?1,
-                last_sync_at = ?2
-            WHERE id = ?3
-            "#,
-            params![error, failed_at as i64, METRICS_UPLOAD_QUEUE_STATE_ID],
-        )?;
-        Ok(())
-    }
-
-    /// Reset transport-level failure metadata after a successful upload.
-    pub fn reset_upload_queue_failure(&mut self) -> Result<(), GitAiError> {
-        self.conn.execute(
-            r#"
-            INSERT OR REPLACE INTO metrics_upload_queue_state
-                (id, attempts, last_sync_error, last_sync_at)
-            VALUES (?1, 0, NULL, NULL)
-            "#,
-            params![METRICS_UPLOAD_QUEUE_STATE_ID],
-        )?;
         Ok(())
     }
 
@@ -767,6 +689,15 @@ mod tests {
         format!(r#"{{"t":{ts},"e":{event_id},"v":{{}},"a":{{"1":"{repo}"}}}}"#)
     }
 
+    fn pending_event_jsons(db: &MetricsDatabase) -> Vec<String> {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT event_json FROM metrics WHERE delivered_ts IS NULL ORDER BY id DESC")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
     #[test]
     fn test_initialize_schema() {
         let (db, _temp_dir) = create_test_db();
@@ -811,26 +742,6 @@ mod tests {
                 .unwrap();
             assert_eq!(column_count, 1, "missing column {column}");
         }
-
-        let queue_state_tables: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='metrics_upload_queue_state'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(queue_state_tables, 1);
-
-        let queue_next_retry_columns: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('metrics_upload_queue_state') WHERE name = 'next_retry_at'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(queue_next_retry_columns, 0);
     }
 
     #[test]
@@ -876,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migrates_version_2_to_retry_queue_schema() {
+    fn test_migrates_version_2_to_row_level_retry_schema() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v2.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -914,26 +825,6 @@ mod tests {
         assert_eq!(version, "3");
         assert_eq!(db.count().unwrap(), 1);
         assert_eq!(db.count_retryable().unwrap(), 1);
-
-        let queue_state_count: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM metrics_upload_queue_state",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(queue_state_count, 1);
-
-        let queue_next_retry_columns: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('metrics_upload_queue_state') WHERE name = 'next_retry_at'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(queue_next_retry_columns, 0);
     }
 
     #[test]
@@ -953,29 +844,6 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(db.count_retryable().unwrap(), 2);
         assert_eq!(ids.len(), 2);
-    }
-
-    #[test]
-    fn test_get_batch() {
-        let (mut db, _temp_dir) = create_test_db();
-        let ts1 = days_ago(3);
-        let ts2 = days_ago(2);
-        let ts3 = days_ago(1);
-
-        let events = vec![event_json(ts1), event_json(ts2), event_json(ts3)];
-
-        db.insert_events(&events).unwrap();
-
-        // Get batch of 2
-        let batch = db.get_batch(2).unwrap();
-        assert_eq!(batch.len(), 2);
-
-        // Verify order (oldest first)
-        assert!(batch[0].id < batch[1].id);
-        assert!(batch[0].event_json.contains(&format!("\"t\":{ts1}")));
-        assert!(batch[1].event_json.contains(&format!("\"t\":{ts2}")));
-        assert_eq!(batch[0].attempts, 0);
-        assert_eq!(batch[0].next_retry_at, 0);
     }
 
     #[test]
@@ -1026,8 +894,6 @@ mod tests {
         let failed_at = unix_now();
         db.mark_records_failed(&[failed_id], "upload failed", failed_at)
             .unwrap();
-        db.mark_upload_queue_failed("upload failed", failed_at)
-            .unwrap();
 
         assert_eq!(db.count().unwrap(), 2);
         assert_eq!(db.count_retryable().unwrap(), 1);
@@ -1036,29 +902,16 @@ mod tests {
         assert_eq!(retryable_batch.len(), 1);
         assert_ne!(retryable_batch[0].id, failed_id);
 
-        let failed_record = db
-            .get_batch(10)
-            .unwrap()
-            .into_iter()
-            .find(|record| record.id == failed_id)
+        let (attempts, next_retry_at): (i64, i64) = db
+            .conn
+            .query_row(
+                "SELECT attempts, next_retry_at FROM metrics WHERE id = ?1",
+                params![failed_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(failed_record.attempts, 1);
-        assert!(failed_record.next_retry_at > failed_at);
-    }
-
-    #[test]
-    fn test_upload_queue_failure_state_does_not_block_retryable_rows() {
-        let (mut db, _temp_dir) = create_test_db();
-        db.insert_events(&[event_json(days_ago(1))]).unwrap();
-
-        db.mark_upload_queue_failed("upload failed", unix_now())
-            .unwrap();
-        assert_eq!(db.count_retryable().unwrap(), 1);
-
-        let batch = db.dequeue_pending_batch(10).unwrap();
-        assert_eq!(batch.len(), 1);
-
-        db.reset_upload_queue_failure().unwrap();
+        assert_eq!(attempts, 1);
+        assert!(next_retry_at > failed_at as i64);
     }
 
     #[test]
@@ -1110,8 +963,8 @@ mod tests {
 
         db.insert_events(&events).unwrap();
 
-        // Get batch and mark first two delivered.
-        let batch = db.get_batch(2).unwrap();
+        // Dequeue newest rows and mark them delivered.
+        let batch = db.dequeue_pending_batch(2).unwrap();
         let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
 
         db.mark_records_delivered(&ids, unix_now()).unwrap();
@@ -1120,10 +973,10 @@ mod tests {
         let count = db.count().unwrap();
         assert_eq!(count, 1);
 
-        // Verify remaining pending row is the third one.
-        let remaining = db.get_batch(10).unwrap();
+        // Verify remaining pending row is the oldest one.
+        let remaining = pending_event_jsons(&db);
         assert_eq!(remaining.len(), 1);
-        assert!(remaining[0].event_json.contains(&format!("\"t\":{ts3}")));
+        assert!(remaining[0].contains(&format!("\"t\":{ts1}")));
 
         // Verify delivered rows are retained.
         let total: i64 = db
@@ -1147,13 +1000,9 @@ mod tests {
             .unwrap();
         db.insert_events(&pending).unwrap();
 
-        let batch = db.get_batch(10).unwrap();
+        let batch = pending_event_jsons(&db);
         assert_eq!(batch.len(), 1);
-        assert!(
-            batch[0]
-                .event_json
-                .contains(&format!("\"t\":{pending_event_ts}"))
-        );
+        assert!(batch[0].contains(&format!("\"t\":{pending_event_ts}")));
         assert_eq!(db.count().unwrap(), 1);
 
         let total: i64 = db
@@ -1197,8 +1046,7 @@ mod tests {
         assert_eq!(records[1].ts, ts2);
 
         // Delivered rows are retained for history, but only undelivered rows flush.
-        let batch = db.get_batch(10).unwrap();
-        assert_eq!(batch.len(), 3);
+        assert_eq!(db.count().unwrap(), 3);
     }
 
     #[test]
@@ -1241,13 +1089,9 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(db.count().unwrap(), 1);
 
-        let batch = db.get_batch(10).unwrap();
+        let batch = pending_event_jsons(&db);
         assert_eq!(batch.len(), 1);
-        assert!(
-            batch[0]
-                .event_json
-                .contains(&format!("\"t\":{recent_event_ts}"))
-        );
+        assert!(batch[0].contains(&format!("\"t\":{recent_event_ts}")));
     }
 
     #[test]
@@ -1273,8 +1117,8 @@ mod tests {
         // Insert empty should succeed
         db.insert_events(&[]).unwrap();
 
-        // Get from empty should return empty
-        let batch = db.get_batch(10).unwrap();
+        // Dequeue from empty should return empty.
+        let batch = db.dequeue_pending_batch(10).unwrap();
         assert!(batch.is_empty());
 
         // Marking an empty set delivered should succeed.

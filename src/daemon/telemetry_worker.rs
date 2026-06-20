@@ -461,7 +461,6 @@ fn flush_pending_metrics_from_db(
         read_pending_metrics_batch,
         mark_metric_records_delivered,
         mark_metric_records_failed,
-        reset_metric_upload_queue_failure,
         |batch| client.upload_metrics(batch).map(|_| ()),
         deadline,
         MAX_METRICS_PER_ENVELOPE,
@@ -493,40 +492,24 @@ fn mark_metric_records_failed(ids: &[i64], error: &GitAiError) -> Result<(), Git
     db_lock.mark_records_failed(ids, &error.to_string(), now)
 }
 
-fn reset_metric_upload_queue_failure() -> Result<(), GitAiError> {
-    let db = MetricsDatabase::global()?;
-    let mut db_lock = db
-        .lock()
-        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-    db_lock.reset_upload_queue_failure()
-}
-
-fn flush_pending_metric_records_with<
-    GetBatch,
-    MarkDelivered,
-    MarkFailed,
-    MarkSuccess,
-    UploadBatch,
->(
-    mut get_batch: GetBatch,
+fn flush_pending_metric_records_with<DequeueBatch, MarkDelivered, MarkFailed, UploadBatch>(
+    mut dequeue_batch: DequeueBatch,
     mut mark_delivered: MarkDelivered,
     mut mark_failed: MarkFailed,
-    mut mark_success: MarkSuccess,
     mut upload_batch: UploadBatch,
     deadline: std::time::Instant,
     max_batch_size: usize,
 ) -> Result<PendingMetricsFlushResult, GitAiError>
 where
-    GetBatch: FnMut(usize) -> Result<Vec<MetricRecord>, GitAiError>,
+    DequeueBatch: FnMut(usize) -> Result<Vec<MetricRecord>, GitAiError>,
     MarkDelivered: FnMut(&[i64]) -> Result<(), GitAiError>,
     MarkFailed: FnMut(&[i64], &GitAiError) -> Result<(), GitAiError>,
-    MarkSuccess: FnMut() -> Result<(), GitAiError>,
     UploadBatch: FnMut(&MetricsBatch) -> Result<(), GitAiError>,
 {
     let mut result = PendingMetricsFlushResult::default();
 
     while std::time::Instant::now() < deadline {
-        let batch = get_batch(max_batch_size)?;
+        let batch = dequeue_batch(max_batch_size)?;
         if batch.is_empty() {
             break;
         }
@@ -563,7 +546,6 @@ where
             return Err(e);
         }
         mark_delivered(&record_ids)?;
-        mark_success()?;
 
         result.uploaded_events += event_count;
         result.uploaded_batches += 1;
@@ -1038,10 +1020,6 @@ mod tests {
                 }
             },
             {
-                let db = Rc::clone(&db);
-                move || db.borrow_mut().reset_upload_queue_failure()
-            },
-            {
                 let uploaded = Rc::clone(&uploaded);
                 move |batch| {
                     uploaded
@@ -1100,10 +1078,6 @@ mod tests {
                 }
             },
             {
-                let db = Rc::clone(&db);
-                move || db.borrow_mut().reset_upload_queue_failure()
-            },
-            {
                 let uploaded = Rc::clone(&uploaded);
                 move |batch| {
                     uploaded
@@ -1158,10 +1132,6 @@ mod tests {
                         .mark_records_failed(ids, &err.to_string(), now)
                 }
             },
-            {
-                let db = Rc::clone(&db);
-                move || db.borrow_mut().reset_upload_queue_failure()
-            },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
             std::time::Instant::now() + std::time::Duration::from_secs(60),
             10,
@@ -1170,7 +1140,6 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(db.borrow().count().unwrap(), 1);
         assert_eq!(db.borrow().count_retryable().unwrap(), 0);
-        assert_eq!(db.borrow().get_batch(10).unwrap().len(), 1);
     }
 
     #[test]
@@ -1199,10 +1168,6 @@ mod tests {
                     db.borrow_mut()
                         .mark_records_failed(ids, &err.to_string(), now)
                 }
-            },
-            {
-                let db = Rc::clone(&db);
-                move || db.borrow_mut().reset_upload_queue_failure()
             },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
             std::time::Instant::now() + std::time::Duration::from_secs(60),
@@ -1236,10 +1201,6 @@ mod tests {
                 }
             },
             {
-                let db = Rc::clone(&db);
-                move || db.borrow_mut().reset_upload_queue_failure()
-            },
-            {
                 let uploaded = Rc::clone(&uploaded);
                 move |batch| {
                     uploaded
@@ -1263,7 +1224,7 @@ mod tests {
         );
         assert_eq!(*uploaded.borrow(), vec![vec![new_ts]]);
         assert_eq!(db.borrow().count().unwrap(), 1);
-        let old_record = db.borrow().get_batch(10).unwrap().pop().unwrap();
-        assert!(old_record.event_json.contains(&format!("\"t\":{old_ts}")));
+        let history = db.borrow().get_metric_history(0, None, &[1]).unwrap();
+        assert!(history.iter().any(|record| record.ts == old_ts));
     }
 }
