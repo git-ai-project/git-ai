@@ -406,6 +406,41 @@ fi
 # Fix file ownership when running as root for a different user (MDM deployments)
 if [ "$(id -u)" = "0" ] && [ -n "$INSTALL_USER" ]; then
     chown -R "$INSTALL_USER" "$HOME/.git-ai" 2>/dev/null || true
+
+    # Also fix ownership of agent hook/config directories that may have been
+    # created by install-hooks while running as root. These live outside
+    # ~/.git-ai/ and would otherwise cause "permission denied" errors when
+    # the user later runs git-ai install-hooks or the agent tries to write
+    # its hook files.
+    #
+    # IMPORTANT: every agent dotfile directory referenced by the hook
+    # installers in src/mdm/agents/*.rs must appear in this list. The test
+    # `install_sh_lists_all_agent_dirs` (tests/integration/install_script_chown.rs)
+    # enforces this so the list cannot silently drift as new agents are added.
+    for agent_dir in \
+        "$HOME/.claude" \
+        "$HOME/.codex" \
+        "$HOME/.config/opencode" \
+        "$HOME/.config/amp" \
+        "$HOME/.copilot" \
+        "$HOME/.cursor" \
+        "$HOME/.codeium" \
+        "$HOME/.factory" \
+        "$HOME/.firebender" \
+        "$HOME/.gemini" \
+        "$HOME/.github" \
+        "$HOME/.pi" \
+        "$HOME/.vscode" \
+        "$HOME/.vscode-oss" \
+        "$HOME/.vscode-server" \
+        "$HOME/.windsurf" \
+        "$HOME/Library/Application Support/JetBrains" \
+        "$HOME/.local/share/JetBrains"; do
+        if [ -d "$agent_dir" ]; then
+            chown -R "$INSTALL_USER" "$agent_dir" 2>/dev/null || true
+        fi
+    done
+
     if [ -n "$CREATED_SHELL_PATHS" ]; then
         printf '%b' "$CREATED_SHELL_PATHS" | while IFS= read -r created_path; do
             [ -z "$created_path" ] && continue
