@@ -36,18 +36,24 @@ const MIGRATIONS: &[&str] = &[
         last_sent_ts INTEGER NOT NULL
     );
     "#,
-    // Migration 2 -> 3: Keep delivered metrics and add notes/CAS-style retry queue state.
+    // Migration 2 -> 3: Keep delivered metrics and add row-level retry state.
     r#"
+    ALTER TABLE metrics ADD COLUMN delivered_ts INTEGER;
+    ALTER TABLE metrics ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE metrics ADD COLUMN last_sync_error TEXT;
+    ALTER TABLE metrics ADD COLUMN last_sync_at INTEGER;
+    ALTER TABLE metrics ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE metrics ADD COLUMN processing_started_at INTEGER;
+
     CREATE TABLE IF NOT EXISTS metrics_upload_queue_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         attempts INTEGER NOT NULL DEFAULT 0,
         last_sync_error TEXT,
-        last_sync_at INTEGER,
-        next_retry_at INTEGER NOT NULL DEFAULT 0
+        last_sync_at INTEGER
     );
 
-    INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts, next_retry_at)
-    VALUES (1, 0, 0);
+    INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts)
+    VALUES (1, 0);
 
     CREATE INDEX IF NOT EXISTS metrics_pending_retry
         ON metrics (delivered_ts, next_retry_at, id)
@@ -246,73 +252,10 @@ impl MetricsDatabase {
             )));
         }
 
-        if from_version == 2 {
-            return self.apply_metrics_retry_queue_migration();
-        }
-
         let migration_sql = MIGRATIONS[from_version];
         let tx = self.conn.transaction()?;
-        match tx.execute_batch(migration_sql) {
-            Ok(()) => {}
-            Err(e) if e.to_string().contains("duplicate column name") => {
-                // Another process already applied this ALTER TABLE concurrently.
-            }
-            Err(e) => return Err(e.into()),
-        }
+        tx.execute_batch(migration_sql)?;
         tx.commit()?;
-
-        Ok(())
-    }
-
-    fn apply_metrics_retry_queue_migration(&mut self) -> Result<(), GitAiError> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_json TEXT NOT NULL
-            );
-            "#,
-        )?;
-        self.add_column_if_missing("metrics", "delivered_ts", "delivered_ts INTEGER")?;
-        self.add_column_if_missing("metrics", "attempts", "attempts INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("metrics", "last_sync_error", "last_sync_error TEXT")?;
-        self.add_column_if_missing("metrics", "last_sync_at", "last_sync_at INTEGER")?;
-        self.add_column_if_missing(
-            "metrics",
-            "next_retry_at",
-            "next_retry_at INTEGER NOT NULL DEFAULT 0",
-        )?;
-        self.add_column_if_missing(
-            "metrics",
-            "processing_started_at",
-            "processing_started_at INTEGER",
-        )?;
-
-        self.conn.execute_batch(MIGRATIONS[2])?;
-        Ok(())
-    }
-
-    fn add_column_if_missing(
-        &mut self,
-        table: &str,
-        column: &str,
-        column_definition: &str,
-    ) -> Result<(), GitAiError> {
-        let column_exists: bool = self.conn.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1)",
-                table.replace('\'', "''")
-            ),
-            params![column],
-            |row| row.get(0),
-        )?;
-
-        if !column_exists {
-            self.conn.execute(
-                &format!("ALTER TABLE {table} ADD COLUMN {column_definition}"),
-                [],
-            )?;
-        }
 
         Ok(())
     }
@@ -389,10 +332,6 @@ impl MetricsDatabase {
         let now = current_unix_ts();
         self.release_stale_processing_locks(now)?;
 
-        if self.queue_next_retry_at()? > now {
-            return Ok(Vec::new());
-        }
-
         let tx = self.conn.transaction()?;
         let ids = {
             let mut stmt = tx.prepare(
@@ -401,7 +340,7 @@ impl MetricsDatabase {
                    AND processing_started_at IS NULL \
                    AND next_retry_at <= ?1 \
                    AND attempts < ?2 \
-                 ORDER BY next_retry_at ASC, id ASC \
+                 ORDER BY next_retry_at ASC, id DESC \
                  LIMIT ?3",
             )?;
             let rows = stmt.query_map(
@@ -526,7 +465,10 @@ impl MetricsDatabase {
         Ok(())
     }
 
-    /// Mark the whole metrics upload queue as temporarily unavailable.
+    /// Record a transport-level upload failure for diagnostics/manual flush state.
+    ///
+    /// Daemon dequeue eligibility is intentionally row-level only so fresh
+    /// metrics are not blocked behind an older failed upload.
     pub fn mark_upload_queue_failed(
         &mut self,
         error: &str,
@@ -534,8 +476,8 @@ impl MetricsDatabase {
     ) -> Result<(), GitAiError> {
         self.conn.execute(
             r#"
-            INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts, next_retry_at)
-            VALUES (?1, 0, 0)
+            INSERT OR IGNORE INTO metrics_upload_queue_state (id, attempts)
+            VALUES (?1, 0)
             "#,
             params![METRICS_UPLOAD_QUEUE_STATE_ID],
         )?;
@@ -544,15 +486,7 @@ impl MetricsDatabase {
             UPDATE metrics_upload_queue_state
             SET attempts = attempts + 1,
                 last_sync_error = ?1,
-                last_sync_at = ?2,
-                next_retry_at = ?2 + CASE
-                    WHEN attempts + 1 <= 1 THEN 300
-                    WHEN attempts + 1 = 2 THEN 1800
-                    WHEN attempts + 1 = 3 THEN 7200
-                    WHEN attempts + 1 = 4 THEN 21600
-                    WHEN attempts + 1 = 5 THEN 43200
-                    ELSE 86400
-                END
+                last_sync_at = ?2
             WHERE id = ?3
             "#,
             params![error, failed_at as i64, METRICS_UPLOAD_QUEUE_STATE_ID],
@@ -560,13 +494,13 @@ impl MetricsDatabase {
         Ok(())
     }
 
-    /// Reset transport-level backoff after a successful upload.
+    /// Reset transport-level failure metadata after a successful upload.
     pub fn reset_upload_queue_failure(&mut self) -> Result<(), GitAiError> {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO metrics_upload_queue_state
-                (id, attempts, last_sync_error, last_sync_at, next_retry_at)
-            VALUES (?1, 0, NULL, NULL, 0)
+                (id, attempts, last_sync_error, last_sync_at)
+            VALUES (?1, 0, NULL, NULL)
             "#,
             params![METRICS_UPLOAD_QUEUE_STATE_ID],
         )?;
@@ -576,10 +510,6 @@ impl MetricsDatabase {
     /// Get count of pending metrics that are currently eligible for upload.
     pub fn count_retryable(&self) -> Result<usize, GitAiError> {
         let now = current_unix_ts();
-        if self.queue_next_retry_at()? > now {
-            return Ok(0);
-        }
-
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM metrics \
              WHERE delivered_ts IS NULL \
@@ -603,18 +533,6 @@ impl MetricsDatabase {
             params![stale_before as i64],
         )?;
         Ok(())
-    }
-
-    fn queue_next_retry_at(&self) -> Result<u64, GitAiError> {
-        let next_retry_at: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT next_retry_at FROM metrics_upload_queue_state WHERE id = ?1",
-                params![METRICS_UPLOAD_QUEUE_STATE_ID],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(next_retry_at.unwrap_or(0).max(0) as u64)
     }
 
     /// Delete metric rows outside the local retention window.
@@ -903,6 +821,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(queue_state_tables, 1);
+
+        let queue_next_retry_columns: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('metrics_upload_queue_state') WHERE name = 'next_retry_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_next_retry_columns, 0);
     }
 
     #[test]
@@ -920,6 +848,10 @@ mod tests {
                 value TEXT NOT NULL
             );
             INSERT INTO schema_metadata (key, value) VALUES ('version', '1');
+            CREATE TABLE metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json TEXT NOT NULL
+            );
             CREATE TABLE agent_usage_throttle (
                 tool TEXT PRIMARY KEY NOT NULL,
                 agent_last_seen_at INTEGER NOT NULL,
@@ -992,6 +924,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(queue_state_count, 1);
+
+        let queue_next_retry_columns: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('metrics_upload_queue_state') WHERE name = 'next_retry_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue_next_retry_columns, 0);
     }
 
     #[test]
@@ -1054,43 +996,69 @@ mod tests {
     }
 
     #[test]
-    fn test_failed_records_and_queue_backoff_are_not_retryable() {
+    fn test_dequeue_pending_batch_prefers_newest_retryable_rows() {
         let (mut db, _temp_dir) = create_test_db();
-        db.insert_events(&[event_json(days_ago(1)), event_json(days_ago(1))])
+        let oldest_ts = days_ago(3);
+        let middle_ts = days_ago(2);
+        let newest_ts = days_ago(1);
+        db.insert_events(&[
+            event_json(oldest_ts),
+            event_json(middle_ts),
+            event_json(newest_ts),
+        ])
+        .unwrap();
+
+        let batch = db.dequeue_pending_batch(2).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert!(batch[0].id > batch[1].id);
+        assert!(batch[0].event_json.contains(&format!("\"t\":{newest_ts}")));
+        assert!(batch[1].event_json.contains(&format!("\"t\":{middle_ts}")));
+    }
+
+    #[test]
+    fn test_failed_records_do_not_block_unfailed_retryable_rows() {
+        let (mut db, _temp_dir) = create_test_db();
+        db.insert_events(&[event_json(days_ago(2)), event_json(days_ago(1))])
             .unwrap();
 
         let batch = db.dequeue_pending_batch(1).unwrap();
+        let failed_id = batch[0].id;
         let failed_at = unix_now();
-        db.mark_records_failed(&[batch[0].id], "upload failed", failed_at)
+        db.mark_records_failed(&[failed_id], "upload failed", failed_at)
             .unwrap();
         db.mark_upload_queue_failed("upload failed", failed_at)
             .unwrap();
 
         assert_eq!(db.count().unwrap(), 2);
-        assert_eq!(db.count_retryable().unwrap(), 0);
-        assert!(db.dequeue_pending_batch(10).unwrap().is_empty());
+        assert_eq!(db.count_retryable().unwrap(), 1);
+
+        let retryable_batch = db.dequeue_pending_batch(10).unwrap();
+        assert_eq!(retryable_batch.len(), 1);
+        assert_ne!(retryable_batch[0].id, failed_id);
 
         let failed_record = db
             .get_batch(10)
             .unwrap()
             .into_iter()
-            .find(|record| record.id == batch[0].id)
+            .find(|record| record.id == failed_id)
             .unwrap();
         assert_eq!(failed_record.attempts, 1);
         assert!(failed_record.next_retry_at > failed_at);
     }
 
     #[test]
-    fn test_reset_upload_queue_failure_makes_unfailed_rows_retryable() {
+    fn test_upload_queue_failure_state_does_not_block_retryable_rows() {
         let (mut db, _temp_dir) = create_test_db();
         db.insert_events(&[event_json(days_ago(1))]).unwrap();
 
         db.mark_upload_queue_failed("upload failed", unix_now())
             .unwrap();
-        assert_eq!(db.count_retryable().unwrap(), 0);
+        assert_eq!(db.count_retryable().unwrap(), 1);
+
+        let batch = db.dequeue_pending_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
 
         db.reset_upload_queue_failure().unwrap();
-        assert_eq!(db.count_retryable().unwrap(), 1);
     }
 
     #[test]

@@ -490,8 +490,7 @@ fn mark_metric_records_failed(ids: &[i64], error: &GitAiError) -> Result<(), Git
         .lock()
         .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
     let now = current_unix_ts();
-    db_lock.mark_records_failed(ids, &error.to_string(), now)?;
-    db_lock.mark_upload_queue_failed(&error.to_string(), now)
+    db_lock.mark_records_failed(ids, &error.to_string(), now)
 }
 
 fn reset_metric_upload_queue_failure() -> Result<(), GitAiError> {
@@ -1035,9 +1034,7 @@ mod tests {
                 move |ids, err| {
                     let now = unix_now();
                     db.borrow_mut()
-                        .mark_records_failed(ids, &err.to_string(), now)?;
-                    db.borrow_mut()
-                        .mark_upload_queue_failed(&err.to_string(), now)
+                        .mark_records_failed(ids, &err.to_string(), now)
                 }
             },
             {
@@ -1066,7 +1063,7 @@ mod tests {
                 invalid_records: 0,
             }
         );
-        assert_eq!(*uploaded.borrow(), vec![vec![ts1], vec![ts2]]);
+        assert_eq!(*uploaded.borrow(), vec![vec![ts2], vec![ts1]]);
         assert_eq!(db.borrow().count().unwrap(), 0);
         assert_eq!(
             db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
@@ -1099,9 +1096,7 @@ mod tests {
                 move |ids, err| {
                     let now = unix_now();
                     db.borrow_mut()
-                        .mark_records_failed(ids, &err.to_string(), now)?;
-                    db.borrow_mut()
-                        .mark_upload_queue_failed(&err.to_string(), now)
+                        .mark_records_failed(ids, &err.to_string(), now)
                 }
             },
             {
@@ -1160,9 +1155,7 @@ mod tests {
                 move |ids, err| {
                     let now = unix_now();
                     db.borrow_mut()
-                        .mark_records_failed(ids, &err.to_string(), now)?;
-                    db.borrow_mut()
-                        .mark_upload_queue_failed(&err.to_string(), now)
+                        .mark_records_failed(ids, &err.to_string(), now)
                 }
             },
             {
@@ -1178,5 +1171,99 @@ mod tests {
         assert_eq!(db.borrow().count().unwrap(), 1);
         assert_eq!(db.borrow().count_retryable().unwrap(), 0);
         assert_eq!(db.borrow().get_batch(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn flush_pending_metric_records_uploads_new_rows_after_old_failure() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let old_ts = now_ts().saturating_sub(10);
+        db.borrow_mut()
+            .insert_events(&[event_json(old_ts)])
+            .unwrap();
+
+        let failed = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move || db.borrow_mut().reset_upload_queue_failure()
+            },
+            |_batch| Err(GitAiError::Generic("upload failed".to_string())),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            1,
+        );
+        assert!(failed.is_err());
+        assert_eq!(db.borrow().count_retryable().unwrap(), 0);
+
+        let new_ts = now_ts();
+        db.borrow_mut()
+            .insert_events(&[event_json(new_ts)])
+            .unwrap();
+        assert_eq!(db.borrow().count_retryable().unwrap(), 1);
+
+        let uploaded = Rc::new(RefCell::new(Vec::<Vec<u32>>::new()));
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move || db.borrow_mut().reset_upload_queue_failure()
+            },
+            {
+                let uploaded = Rc::clone(&uploaded);
+                move |batch| {
+                    uploaded
+                        .borrow_mut()
+                        .push(batch.events.iter().map(|event| event.timestamp).collect());
+                    Ok(())
+                }
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            PendingMetricsFlushResult {
+                uploaded_events: 1,
+                uploaded_batches: 1,
+                invalid_records: 0,
+            }
+        );
+        assert_eq!(*uploaded.borrow(), vec![vec![new_ts]]);
+        assert_eq!(db.borrow().count().unwrap(), 1);
+        let old_record = db.borrow().get_batch(10).unwrap().pop().unwrap();
+        assert!(old_record.event_json.contains(&format!("\"t\":{old_ts}")));
     }
 }
