@@ -112,8 +112,10 @@ pub(crate) fn handle_revert_commits(
                     .get(&format!("{}^1", r.parent_sha))
                     .cloned()
                     .unwrap_or_default();
-                if r.original_shas.is_empty() && !r.source_base_sha.is_empty() {
-                    r.original_shas.push(r.source_base_sha.clone());
+                if r.original_shas.is_empty()
+                    && let Some(original_sha) = legacy_revert_metric_original_sha(&r.parent_sha)
+                {
+                    r.original_shas.push(original_sha);
                 }
             }
         }
@@ -223,6 +225,14 @@ pub(crate) fn handle_revert_commits(
     Ok(metric_commits)
 }
 
+fn legacy_revert_metric_original_sha(parent_sha: &str) -> Option<String> {
+    if parent_sha.is_empty() {
+        None
+    } else {
+        Some(parent_sha.to_string())
+    }
+}
+
 /// Extract added line numbers per file from a diff-tree result, equivalent to
 /// the new-side coverage `diff_added_lines` would report for the same pair.
 fn added_lines_from_diff_result(
@@ -326,4 +336,18 @@ fn clip_file_attestation_to_lines(
         file_path: file.file_path.clone(),
         entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_revert_metric_original_sha_uses_reverted_commit() {
+        assert_eq!(
+            legacy_revert_metric_original_sha("reverted-commit"),
+            Some("reverted-commit".to_string())
+        );
+        assert_eq!(legacy_revert_metric_original_sha(""), None);
+    }
 }

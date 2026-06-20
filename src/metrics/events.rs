@@ -311,10 +311,12 @@ pub mod rewrite_committed_pos {
     pub const GIT_DIFF_DELETED_LINES: usize = 1;
     pub const GIT_DIFF_ADDED_LINES: usize = 2;
     pub const TOOL_MODEL_PAIRS: usize = 3;
-    // Position 4 intentionally unused to avoid colliding with the committed event's removed field.
+    // Keep positions 0-14 aligned with committed_pos for ingestion consistency.
+    // Position 4 mirrors committed_pos::MIXED_ADDITIONS, which is no longer emitted.
     pub const AI_ADDITIONS: usize = 5;
     pub const AI_ACCEPTED: usize = 6;
-    // Positions 7-10 intentionally unused.
+    // Positions 7-9 mirror removed committed event fields.
+    // Position 10 is intentionally omitted: rewrite events have no first checkpoint timestamp.
     pub const COMMIT_SUBJECT: usize = 11;
     pub const COMMIT_BODY: usize = 12;
     pub const AUTHORSHIP_NOTE: usize = 13;
