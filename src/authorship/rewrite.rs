@@ -30,7 +30,103 @@ pub(crate) struct DiffTreeResult {
     pub renames: Vec<(String, String)>,
 }
 
-pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RewriteMetricOperation {
+    Rebase,
+    SquashMerge,
+    CherryPick,
+    CherryPickNoCommit,
+    Amend,
+    Revert,
+    UpdateRef,
+    NonFastForward,
+}
+
+impl RewriteMetricOperation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase",
+            Self::SquashMerge => "squash_merge",
+            Self::CherryPick => "cherry_pick",
+            Self::CherryPickNoCommit => "cherry_pick_no_commit",
+            Self::Amend => "amend",
+            Self::Revert => "revert",
+            Self::UpdateRef => "update_ref",
+            Self::NonFastForward => "non_fast_forward",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RewriteMetricCommit {
+    pub new_sha: String,
+    pub original_shas: Vec<String>,
+    pub operation: RewriteMetricOperation,
+}
+
+impl RewriteMetricCommit {
+    pub(crate) fn new(
+        new_sha: impl Into<String>,
+        original_shas: Vec<String>,
+        operation: RewriteMetricOperation,
+    ) -> Self {
+        let mut deduped = Vec::with_capacity(original_shas.len());
+        for sha in original_shas {
+            if !sha.is_empty() && !deduped.contains(&sha) {
+                deduped.push(sha);
+            }
+        }
+        Self {
+            new_sha: new_sha.into(),
+            original_shas: deduped,
+            operation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RewriteOutcome {
+    pub(crate) metric_commits: Vec<RewriteMetricCommit>,
+}
+
+impl RewriteOutcome {
+    fn empty() -> Self {
+        Self::default()
+    }
+
+    fn from_metric_commits(metric_commits: Vec<RewriteMetricCommit>) -> Self {
+        Self { metric_commits }
+    }
+}
+
+pub(crate) fn metric_commits_from_mappings(
+    mappings: &[(String, String)],
+    operation: RewriteMetricOperation,
+) -> Vec<RewriteMetricCommit> {
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    for (source_sha, new_sha) in mappings {
+        if source_sha.is_empty() || new_sha.is_empty() {
+            continue;
+        }
+        if let Some((_, originals)) = grouped.iter_mut().find(|(sha, _)| sha == new_sha) {
+            if !originals.contains(source_sha) {
+                originals.push(source_sha.clone());
+            }
+        } else {
+            grouped.push((new_sha.clone(), vec![source_sha.clone()]));
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(new_sha, original_shas)| RewriteMetricCommit::new(new_sha, original_shas, operation))
+        .collect()
+}
+
+pub fn handle_rewrite_event(
+    repo: &Repository,
+    event: RewriteEvent,
+) -> Result<RewriteOutcome, GitAiError> {
     match event {
         RewriteEvent::SquashMerge {
             ref source_head,
@@ -48,11 +144,14 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
         } => {
             let mappings: Vec<(String, String)> = sources.into_iter().zip(new_commits).collect();
             if mappings.is_empty() {
-                return Ok(());
+                return Ok(RewriteOutcome::empty());
             }
             let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
             crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas)?;
-            shift_authorship_notes_merging_existing(repo, &mappings)
+            shift_authorship_notes_merging_existing(repo, &mappings)?;
+            Ok(RewriteOutcome::from_metric_commits(
+                metric_commits_from_mappings(&mappings, RewriteMetricOperation::CherryPick),
+            ))
         }
     }
 }
@@ -62,15 +161,33 @@ pub fn handle_non_fast_forward_rewrite(
     old_tip: &str,
     new_tip: &str,
     onto: Option<&str>,
-) -> Result<(), GitAiError> {
+) -> Result<RewriteOutcome, GitAiError> {
+    handle_non_fast_forward_rewrite_with_operation(
+        repo,
+        old_tip,
+        new_tip,
+        onto,
+        RewriteMetricOperation::NonFastForward,
+    )
+}
+
+pub(crate) fn handle_non_fast_forward_rewrite_with_operation(
+    repo: &Repository,
+    old_tip: &str,
+    new_tip: &str,
+    onto: Option<&str>,
+    operation: RewriteMetricOperation,
+) -> Result<RewriteOutcome, GitAiError> {
     let mappings = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto)?;
     if mappings.is_empty() {
-        return Ok(());
+        return Ok(RewriteOutcome::empty());
     }
     let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas)?;
     shift_authorship_notes_merging_existing(repo, &mappings)?;
-    Ok(())
+    Ok(RewriteOutcome::from_metric_commits(
+        metric_commits_from_mappings(&mappings, operation),
+    ))
 }
 
 fn handle_squash_merge(
@@ -78,7 +195,7 @@ fn handle_squash_merge(
     source_head: &str,
     squash_commit: &str,
     onto: &str,
-) -> Result<(), GitAiError> {
+) -> Result<RewriteOutcome, GitAiError> {
     use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 
     let target_notes = notes_api::read_notes_batch(repo, &[squash_commit.to_string()])?;
@@ -94,6 +211,11 @@ fn handle_squash_merge(
     } else {
         source_commits
     };
+    let metric_commit = RewriteMetricCommit::new(
+        squash_commit.to_string(),
+        sources.clone(),
+        RewriteMetricOperation::SquashMerge,
+    );
 
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &sources)?;
 
@@ -132,9 +254,11 @@ fn handle_squash_merge(
         if let Some(existing_log) = existing_target_log.as_ref()
             && !repo.storage.has_working_log(onto)
         {
-            return write_authorship_log(repo, squash_commit, existing_log);
+            return write_authorship_log(repo, squash_commit, existing_log)
+                .map(|_| RewriteOutcome::from_metric_commits(vec![metric_commit]));
         }
-        return post_squash_resolution_working_log(repo, onto, squash_commit, existing_target_log);
+        return post_squash_resolution_working_log(repo, onto, squash_commit, existing_target_log)
+            .map(|_| RewriteOutcome::from_metric_commits(vec![metric_commit]));
     }
 
     // Add the final source_head→squash_commit pair
@@ -178,7 +302,7 @@ fn handle_squash_merge(
     }
 
     let Some(mut final_log) = merged_log else {
-        return Ok(());
+        return Ok(RewriteOutcome::empty());
     };
 
     // Phase 2: Shift merged log from source_head to squash_commit
@@ -218,8 +342,10 @@ fn handle_squash_merge(
 
     if repo.storage.has_working_log(onto) {
         post_squash_resolution_working_log(repo, onto, squash_commit, Some(shifted_log))
+            .map(|_| RewriteOutcome::from_metric_commits(vec![metric_commit]))
     } else {
         write_authorship_log(repo, squash_commit, &shifted_log)
+            .map(|_| RewriteOutcome::from_metric_commits(vec![metric_commit]))
     }
 }
 
@@ -974,6 +1100,44 @@ fn extract_b_path(diff_header: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metric_commits_from_mappings_groups_squashed_sources() {
+        let mappings = vec![
+            ("old1".to_string(), "new".to_string()),
+            ("old2".to_string(), "new".to_string()),
+            ("old1".to_string(), "new".to_string()),
+        ];
+
+        let commits = metric_commits_from_mappings(&mappings, RewriteMetricOperation::Rebase);
+
+        assert_eq!(
+            commits,
+            vec![RewriteMetricCommit::new(
+                "new",
+                vec!["old1".to_string(), "old2".to_string()],
+                RewriteMetricOperation::Rebase,
+            )]
+        );
+    }
+
+    #[test]
+    fn rewrite_metric_operation_strings_are_stable() {
+        assert_eq!(RewriteMetricOperation::Rebase.as_str(), "rebase");
+        assert_eq!(RewriteMetricOperation::SquashMerge.as_str(), "squash_merge");
+        assert_eq!(RewriteMetricOperation::CherryPick.as_str(), "cherry_pick");
+        assert_eq!(
+            RewriteMetricOperation::CherryPickNoCommit.as_str(),
+            "cherry_pick_no_commit"
+        );
+        assert_eq!(RewriteMetricOperation::Amend.as_str(), "amend");
+        assert_eq!(RewriteMetricOperation::Revert.as_str(), "revert");
+        assert_eq!(RewriteMetricOperation::UpdateRef.as_str(), "update_ref");
+        assert_eq!(
+            RewriteMetricOperation::NonFastForward.as_str(),
+            "non_fast_forward"
+        );
+    }
 
     #[test]
     fn test_extract_b_path_simple() {
