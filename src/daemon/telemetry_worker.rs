@@ -559,6 +559,9 @@ where
             }
         }
 
+        let batch_min_id = record_ids.iter().chain(invalid_ids.iter()).min().copied();
+        let batch_max_id = record_ids.iter().chain(invalid_ids.iter()).max().copied();
+
         if !invalid_ids.is_empty() {
             result.invalid_records += invalid_ids.len();
             mark_delivered(&invalid_ids)?;
@@ -569,15 +572,36 @@ where
         }
 
         let metrics_batch = MetricsBatch::new(events);
+        tracing::info!(
+            min_id = ?batch_min_id,
+            max_id = ?batch_max_id,
+            events = record_ids.len(),
+            invalid_records = invalid_ids.len(),
+            "metrics upload batch sending"
+        );
         let response = match upload_batch(&metrics_batch) {
             Ok(response) => response,
             Err(e) => {
+                tracing::info!(
+                    min_id = ?batch_min_id,
+                    max_id = ?batch_max_id,
+                    events = record_ids.len(),
+                    error = %e,
+                    "metrics upload batch failed"
+                );
                 mark_failed(&record_ids, &e)?;
                 return Err(e);
             }
         };
 
         if let Err(e) = response.validate_error_indices(record_ids.len()) {
+            tracing::info!(
+                min_id = ?batch_min_id,
+                max_id = ?batch_max_id,
+                events = record_ids.len(),
+                error = %e,
+                "metrics upload batch returned invalid response"
+            );
             mark_failed(&record_ids, &e)?;
             return Err(e);
         }
@@ -592,6 +616,16 @@ where
             .iter()
             .map(|error| (record_ids[error.index], error.error.clone()))
             .collect();
+
+        tracing::info!(
+            min_id = ?batch_min_id,
+            max_id = ?batch_max_id,
+            events = record_ids.len(),
+            delivered_events = successful_ids.len(),
+            errored_events = undeliverable_records.len(),
+            errors = ?response.errors,
+            "metrics upload batch result"
+        );
 
         mark_delivered(&successful_ids)?;
         mark_undeliverable(&undeliverable_records)?;

@@ -6,9 +6,44 @@ use crate::error::GitAiError;
 use crate::metrics::MetricsBatch;
 use crate::observability::log_error;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Retry delay in seconds: single retry after 60s
 const RETRY_DELAYS_SECS: [u64; 1] = [60];
+const METRICS_UPLOAD_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
+static LAST_METRICS_UPLOAD_STARTED_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+fn wait_for_metrics_upload_rate_limit() -> Result<(), GitAiError> {
+    let limiter = LAST_METRICS_UPLOAD_STARTED_AT.get_or_init(|| Mutex::new(None));
+    let mut last_started_at = limiter.lock().map_err(|_| {
+        GitAiError::Generic("metrics upload rate limiter lock poisoned".to_string())
+    })?;
+
+    wait_for_metrics_upload_rate_limit_with(&mut last_started_at, Instant::now, std::thread::sleep);
+    Ok(())
+}
+
+fn wait_for_metrics_upload_rate_limit_with<Now, Sleep>(
+    last_started_at: &mut Option<Instant>,
+    mut now: Now,
+    mut sleep: Sleep,
+) where
+    Now: FnMut() -> Instant,
+    Sleep: FnMut(Duration),
+{
+    let started_at = now();
+    if let Some(previous_started_at) = *last_started_at {
+        let elapsed = started_at.saturating_duration_since(previous_started_at);
+        if let Some(remaining) = METRICS_UPLOAD_MIN_REQUEST_INTERVAL.checked_sub(elapsed)
+            && !remaining.is_zero()
+        {
+            sleep(remaining);
+        }
+    }
+
+    *last_started_at = Some(now());
+}
 
 /// Error for a single event in the batch
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +157,7 @@ impl ApiClient {
         &self,
         batch: &MetricsBatch,
     ) -> Result<MetricsUploadResponse, GitAiError> {
+        wait_for_metrics_upload_rate_limit()?;
         let response = self.context().post_json("/worker/metrics/upload", batch)?;
         let status_code = response.status_code;
 
@@ -169,6 +205,7 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
 
     #[test]
     fn test_successful_indices() {
@@ -212,6 +249,49 @@ mod tests {
         };
         let successful = response.successful_indices(2);
         assert!(successful.is_empty());
+    }
+
+    #[test]
+    fn metrics_upload_rate_limiter_enforces_half_second_spacing() {
+        let base = Instant::now();
+        let current = Cell::new(base);
+        let sleeps = RefCell::new(Vec::new());
+        let mut last_started_at = None;
+
+        wait_for_metrics_upload_rate_limit_with(
+            &mut last_started_at,
+            || current.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                current.set(current.get() + duration);
+            },
+        );
+        assert!(sleeps.borrow().is_empty());
+        assert_eq!(last_started_at, Some(base));
+
+        current.set(base + Duration::from_millis(100));
+        wait_for_metrics_upload_rate_limit_with(
+            &mut last_started_at,
+            || current.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                current.set(current.get() + duration);
+            },
+        );
+        assert_eq!(&*sleeps.borrow(), &[Duration::from_millis(400)]);
+        assert_eq!(last_started_at, Some(base + Duration::from_millis(500)));
+
+        current.set(base + Duration::from_millis(1000));
+        wait_for_metrics_upload_rate_limit_with(
+            &mut last_started_at,
+            || current.get(),
+            |duration| {
+                sleeps.borrow_mut().push(duration);
+                current.set(current.get() + duration);
+            },
+        );
+        assert_eq!(sleeps.borrow().len(), 1);
+        assert_eq!(last_started_at, Some(base + Duration::from_millis(1000)));
     }
 
     #[test]
