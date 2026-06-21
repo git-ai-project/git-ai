@@ -154,7 +154,7 @@ fn print_help() {
     eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Statistics are sourced from locally recorded metric events.");
-    eprintln!("Metric rows older than approximately 45 days are pruned locally.");
+    eprintln!("Metric rows older than approximately 365 days are pruned locally.");
 }
 
 fn print_terminal(

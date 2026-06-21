@@ -81,8 +81,8 @@ pub struct MetricsDatabase {
 }
 
 impl MetricsDatabase {
-    /// How long metric rows are retained for local history/offline retry (45 days).
-    const METRICS_RETENTION_SECS: u64 = 45 * 24 * 3600;
+    /// How long metric rows are retained for local history/offline retry (365 days).
+    const METRICS_RETENTION_SECS: u64 = 365 * 24 * 3600;
     /// Minimum interval between prune passes (24 hours).
     const METRICS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
 
@@ -711,9 +711,11 @@ mod tests {
     }
 
     fn days_ago(days: u64) -> u32 {
-        unix_now()
-            .saturating_sub(days * 24 * 3600)
-            .min(u32::MAX as u64) as u32
+        seconds_ago(days * 24 * 3600)
+    }
+
+    fn seconds_ago(seconds: u64) -> u32 {
+        unix_now().saturating_sub(seconds).min(u32::MAX as u64) as u32
     }
 
     fn event_json(ts: u32) -> String {
@@ -1118,8 +1120,8 @@ mod tests {
         let (mut db, _temp_dir) = create_test_db();
 
         let delivered_ts = unix_now();
-        let old_event_ts = days_ago(46);
-        let recent_event_ts = days_ago(44);
+        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let recent_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS - 1);
         let events = vec![event_json(old_event_ts), event_json(recent_event_ts)];
 
         db.insert_events_with_delivered_ts(&events, Some(delivered_ts))
@@ -1140,7 +1142,7 @@ mod tests {
     fn test_prunes_old_pending_metric_rows() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = days_ago(46);
+        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
         let recent_event_ts = days_ago(1);
         let pending = vec![event_json(old_event_ts), event_json(recent_event_ts)];
 
