@@ -1596,10 +1596,12 @@ fn test_graphite_style_multi_commit_single_update_ref() {
     repo.stage_all_and_commit("main advance 2").expect("main 2");
     let main_tip = head_sha(&repo);
 
-    // Switch back to feature for the replay
-    repo.git(&["checkout", "feature"])
-        .expect("checkout feature");
-    let old_tip = head_sha(&repo);
+    // Replay while main remains checked out to exercise off-HEAD update-ref handling.
+    let old_tip = repo
+        .git(&["rev-parse", "feature"])
+        .expect("rev-parse feature")
+        .trim()
+        .to_string();
 
     // Replay all commits via commit-tree (no update-ref yet)
     let mut new_parent = main_tip.clone();
@@ -1653,13 +1655,12 @@ fn test_graphite_style_multi_commit_single_update_ref() {
     let new_tip = new_parent;
     repo.git(&["update-ref", "refs/heads/feature", &new_tip, &old_tip])
         .expect("update-ref");
-    repo.git(&["reset", "--hard", &new_tip]).expect("reset");
 
     repo.sync_daemon();
 
     // Verify all 3 rebased commits have authorship notes
     let rebased_commits_str = repo
-        .git(&["rev-list", "--reverse", &format!("{}..HEAD", main_tip)])
+        .git(&["rev-list", "--reverse", &format!("{}..feature", main_tip)])
         .expect("rev-list rebased");
     let rebased_commits: Vec<&str> = rebased_commits_str
         .trim()
@@ -1677,6 +1678,9 @@ fn test_graphite_style_multi_commit_single_update_ref() {
             idx
         );
     }
+
+    repo.git(&["checkout", "feature"])
+        .expect("checkout rewritten feature");
 
     // Verify attribution on file_b (single-commit, straightforward)
     file_b.assert_lines_and_blame(lines!["b1 ai".ai(), "b2 ai".ai()]);

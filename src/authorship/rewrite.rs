@@ -62,6 +62,7 @@ pub(crate) struct RewriteMetricCommit {
     pub new_sha: String,
     pub original_shas: Vec<String>,
     pub operation: RewriteMetricOperation,
+    pub branch: Option<String>,
 }
 
 impl RewriteMetricCommit {
@@ -80,8 +81,24 @@ impl RewriteMetricCommit {
             new_sha: new_sha.into(),
             original_shas: deduped,
             operation,
+            branch: None,
         }
     }
+
+    pub(crate) fn with_branch(mut self, branch: impl Into<String>) -> Self {
+        let branch = branch.into();
+        if !branch.is_empty() {
+            self.branch = Some(branch);
+        }
+        self
+    }
+}
+
+pub(crate) fn branch_name_from_ref(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1119,6 +1136,16 @@ mod tests {
                 RewriteMetricOperation::Rebase,
             )]
         );
+    }
+
+    #[test]
+    fn branch_name_from_ref_only_accepts_local_branch_refs() {
+        assert_eq!(
+            branch_name_from_ref("refs/heads/feature").as_deref(),
+            Some("feature")
+        );
+        assert_eq!(branch_name_from_ref("HEAD"), None);
+        assert_eq!(branch_name_from_ref("refs/tags/v1"), None);
     }
 
     #[test]

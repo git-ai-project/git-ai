@@ -1314,6 +1314,77 @@ fn valid_non_zero_ref_change(change: &crate::daemon::domain::RefChange) -> bool 
         && change.old != change.new
 }
 
+fn rewrite_metric_branch_for_ref(repo: &Repository, reference: &str) -> Option<String> {
+    crate::authorship::rewrite::branch_name_from_ref(reference).or_else(|| {
+        if reference != "HEAD" {
+            return None;
+        }
+        repo.head()
+            .ok()
+            .and_then(|head_ref| head_ref.shorthand().ok())
+            .filter(|branch| !branch.is_empty())
+    })
+}
+
+fn rewrite_metric_branch_for_transition(
+    repo: &Repository,
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    old_tip: &str,
+    new_tip: &str,
+    reference_hint: Option<&str>,
+) -> Option<String> {
+    reference_hint
+        .and_then(|reference| rewrite_metric_branch_for_ref(repo, reference))
+        .or_else(|| {
+            cmd.ref_changes
+                .iter()
+                .rev()
+                .find(|change| {
+                    change.reference.starts_with("refs/heads/")
+                        && change.old == old_tip
+                        && change.new == new_tip
+                })
+                .and_then(|change| rewrite_metric_branch_for_ref(repo, &change.reference))
+        })
+}
+
+fn rewrite_metric_commits_with_branch(
+    metric_commits: Vec<crate::authorship::rewrite::RewriteMetricCommit>,
+    branch: Option<String>,
+) -> Vec<crate::authorship::rewrite::RewriteMetricCommit> {
+    match branch {
+        Some(branch) => metric_commits
+            .into_iter()
+            .map(|commit| commit.with_branch(branch.clone()))
+            .collect(),
+        None => metric_commits,
+    }
+}
+
+fn primary_command_skips_generic_non_ff(primary_command: Option<&str>) -> bool {
+    matches!(
+        primary_command,
+        Some("checkout" | "switch" | "branch" | "stash" | "update-ref")
+    )
+}
+
+fn update_ref_head_event_has_branch_mirror(
+    events: &[crate::daemon::domain::SemanticEvent],
+    old: &str,
+    new: &str,
+) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::RefUpdated {
+                reference,
+                old: event_old,
+                new: event_new,
+            } if reference.starts_with("refs/heads/") && event_old == old && event_new == new
+        )
+    })
+}
+
 fn rebase_new_tip_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     original_head: &str,
@@ -4104,15 +4175,22 @@ impl ActorDaemonCoordinator {
                     &new_tip,
                     conflict_base.as_deref(),
                 )?;
+                let branch = rewrite_metric_branch_for_transition(
+                    &repo,
+                    cmd,
+                    &original_head,
+                    &new_tip,
+                    None,
+                );
                 crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
                     &repo,
-                    outcome.metric_commits,
+                    rewrite_metric_commits_with_branch(outcome.metric_commits, branch),
                 );
             }
             return Ok(());
         }
 
-        for (old_tip, new_tip) in collapsed.values() {
+        for (reference, (old_tip, new_tip)) in &collapsed {
             if *old_tip == *new_tip {
                 continue;
             }
@@ -4148,9 +4226,11 @@ impl ActorDaemonCoordinator {
                 let conflict_base = rewrite_onto.clone().or_else(|| onto_hint.clone());
                 process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref())?;
             }
+            let branch =
+                rewrite_metric_branch_for_transition(&repo, cmd, old_tip, new_tip, Some(reference));
             crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
                 &repo,
-                outcome.metric_commits,
+                rewrite_metric_commits_with_branch(outcome.metric_commits, branch),
             );
         }
 
@@ -4286,10 +4366,7 @@ impl ActorDaemonCoordinator {
                         | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
                         | crate::daemon::domain::SemanticEvent::Reset { .. }
                 )
-            }) || matches!(
-                cmd.primary_command.as_deref(),
-                Some("checkout" | "switch" | "branch" | "stash")
-            )
+            }) || primary_command_skips_generic_non_ff(cmd.primary_command.as_deref())
         };
         if !skip_non_ff && cmd.exit_code == 0 {
             self.detect_and_handle_non_ff_rewrites(cmd)?;
@@ -4782,6 +4859,11 @@ impl ActorDaemonCoordinator {
                     new,
                 } = event
                 {
+                    if reference == "HEAD"
+                        && update_ref_head_event_has_branch_mirror(events, old, new)
+                    {
+                        continue;
+                    }
                     if reference != "HEAD" && !reference.starts_with("refs/heads/")
                         || !is_valid_oid(old)
                         || is_zero_oid(old)
@@ -4792,13 +4874,11 @@ impl ActorDaemonCoordinator {
                         continue;
                     }
                     let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                    let affects_checked_out_branch = reference == "HEAD"
+                        || cmd.ref_changes.iter().any(|change| {
+                            change.reference == "HEAD" && change.old == *old && change.new == *new
+                        });
                     if repo_is_ancestor(&repo, old, new) {
-                        let affects_checked_out_branch = reference == "HEAD"
-                            || cmd.ref_changes.iter().any(|change| {
-                                change.reference == "HEAD"
-                                    && change.old == *old
-                                    && change.new == *new
-                            });
                         if affects_checked_out_branch {
                             if repo.storage.has_working_log(old) {
                                 let author =
@@ -4822,9 +4902,19 @@ impl ActorDaemonCoordinator {
                             None,
                             crate::authorship::rewrite::RewriteMetricOperation::UpdateRef,
                         )?;
+                        if affects_checked_out_branch {
+                            repo.storage.rename_working_log(old, new)?;
+                        }
+                        let branch = rewrite_metric_branch_for_transition(
+                            &repo,
+                            cmd,
+                            old,
+                            new,
+                            Some(reference),
+                        );
                         crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
                             &repo,
-                            outcome.metric_commits,
+                            rewrite_metric_commits_with_branch(outcome.metric_commits, branch),
                         );
                     }
                 }
@@ -6811,6 +6901,40 @@ mod tests {
             ]),
             vec![SweepTrigger::PostCommit, SweepTrigger::PostPush]
         );
+    }
+
+    #[test]
+    fn update_ref_uses_explicit_rewrite_path_not_generic_non_ff_path() {
+        assert!(primary_command_skips_generic_non_ff(Some("update-ref")));
+        assert!(primary_command_skips_generic_non_ff(Some("stash")));
+        assert!(!primary_command_skips_generic_non_ff(Some("rebase")));
+        assert!(!primary_command_skips_generic_non_ff(Some("pull")));
+        assert!(!primary_command_skips_generic_non_ff(None));
+    }
+
+    #[test]
+    fn update_ref_head_event_detects_branch_mirror() {
+        use crate::daemon::domain::SemanticEvent;
+
+        let events = vec![
+            SemanticEvent::RefUpdated {
+                reference: "HEAD".to_string(),
+                old: "old".to_string(),
+                new: "new".to_string(),
+            },
+            SemanticEvent::RefUpdated {
+                reference: "refs/heads/feature".to_string(),
+                old: "old".to_string(),
+                new: "new".to_string(),
+            },
+        ];
+
+        assert!(update_ref_head_event_has_branch_mirror(
+            &events, "old", "new"
+        ));
+        assert!(!update_ref_head_event_has_branch_mirror(
+            &events, "old", "other"
+        ));
     }
 
     fn test_rebase_command(

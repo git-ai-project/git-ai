@@ -20,6 +20,19 @@ pub(crate) fn spawn_rewrite_commit_metrics(
         return;
     }
 
+    let fallback_branch = current_branch_name(repo);
+    let metric_commits = metric_commits
+        .into_iter()
+        .map(|commit| {
+            if commit.branch.is_some() {
+                commit
+            } else if let Some(branch) = fallback_branch.clone() {
+                commit.with_branch(branch)
+            } else {
+                commit
+            }
+        })
+        .collect();
     let metric_commits = dedupe_metric_commits(metric_commits);
     if metric_commits.is_empty() {
         return;
@@ -42,6 +55,13 @@ pub(crate) fn spawn_rewrite_commit_metrics(
             submit_events(build_rewrite_metric_events(&repo, &metric_commits));
         });
     }
+}
+
+fn current_branch_name(repo: &Repository) -> Option<String> {
+    repo.head()
+        .ok()
+        .and_then(|head_ref| head_ref.shorthand().ok())
+        .filter(|branch| !branch.is_empty())
 }
 
 fn submit_events(events: Vec<MetricEvent>) {
@@ -176,14 +196,28 @@ pub(crate) fn build_rewrite_committed_metric_event(
     };
 
     let human_author = repo.effective_author_identity().formatted_or_unknown();
-    let attrs = commit_metric_attrs(
-        repo,
-        &metric_commit.new_sha,
-        &base_commit_attr,
-        &human_author,
+    let attrs = apply_rewrite_metric_branch(
+        commit_metric_attrs(
+            repo,
+            &metric_commit.new_sha,
+            &base_commit_attr,
+            &human_author,
+        ),
+        metric_commit,
     );
 
     Ok(Some(MetricEvent::from_values(values, attrs.to_sparse())))
+}
+
+fn apply_rewrite_metric_branch(
+    attrs: crate::metrics::EventAttributes,
+    metric_commit: &RewriteMetricCommit,
+) -> crate::metrics::EventAttributes {
+    if let Some(branch) = metric_commit.branch.as_deref() {
+        return attrs.branch(branch);
+    }
+
+    attrs
 }
 
 #[cfg(test)]
@@ -250,6 +284,22 @@ mod tests {
         assert_eq!(
             sparse.get(&rewrite_committed_pos::ORIGINAL_COMMIT_SHAS.to_string()),
             Some(&serde_json::json!(["old"]))
+        );
+    }
+
+    #[test]
+    fn rewrite_metric_branch_overrides_head_branch_attr() {
+        let commit = metric_commit("new", &["old"], RewriteMetricOperation::NonFastForward)
+            .with_branch("feature");
+        let attrs = apply_rewrite_metric_branch(
+            crate::metrics::EventAttributes::with_version("test").branch("main"),
+            &commit,
+        );
+        let sparse = attrs.to_sparse();
+
+        assert_eq!(
+            sparse.get(&crate::metrics::attrs::attr_pos::BRANCH.to_string()),
+            Some(&serde_json::json!("feature"))
         );
     }
 }
