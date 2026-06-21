@@ -37,13 +37,6 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // Migration 2 -> 3: Keep delivered metrics and add row-level retry state.
     r#"
-    ALTER TABLE metrics ADD COLUMN delivered_ts INTEGER;
-    ALTER TABLE metrics ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE metrics ADD COLUMN last_sync_error TEXT;
-    ALTER TABLE metrics ADD COLUMN last_sync_at INTEGER;
-    ALTER TABLE metrics ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE metrics ADD COLUMN processing_started_at INTEGER;
-
     CREATE INDEX IF NOT EXISTS metrics_pending_retry
         ON metrics (delivered_ts, next_retry_at, id)
         WHERE delivered_ts IS NULL;
@@ -241,12 +234,78 @@ impl MetricsDatabase {
             )));
         }
 
+        if from_version == 2 {
+            self.add_row_level_retry_columns()?;
+        }
+
         let migration_sql = MIGRATIONS[from_version];
         let tx = self.conn.transaction()?;
         tx.execute_batch(migration_sql)?;
         tx.commit()?;
 
         Ok(())
+    }
+
+    fn add_row_level_retry_columns(&mut self) -> Result<(), GitAiError> {
+        for (name, sql) in [
+            (
+                "delivered_ts",
+                "ALTER TABLE metrics ADD COLUMN delivered_ts INTEGER",
+            ),
+            (
+                "attempts",
+                "ALTER TABLE metrics ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "last_sync_error",
+                "ALTER TABLE metrics ADD COLUMN last_sync_error TEXT",
+            ),
+            (
+                "last_sync_at",
+                "ALTER TABLE metrics ADD COLUMN last_sync_at INTEGER",
+            ),
+            (
+                "next_retry_at",
+                "ALTER TABLE metrics ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "processing_started_at",
+                "ALTER TABLE metrics ADD COLUMN processing_started_at INTEGER",
+            ),
+        ] {
+            self.add_column_if_missing("metrics", name, sql)?;
+        }
+        Ok(())
+    }
+
+    fn add_column_if_missing(
+        &mut self,
+        table: &str,
+        column: &str,
+        alter_sql: &str,
+    ) -> Result<(), GitAiError> {
+        if self.column_exists(table, column)? {
+            return Ok(());
+        }
+
+        match self.conn.execute(alter_sql, []) {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("duplicate column name") =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool, GitAiError> {
+        let count: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            params![column],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// Insert undelivered events as JSON strings.
@@ -861,6 +920,59 @@ mod tests {
             .unwrap();
         assert_eq!(version, "3");
         assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.count_retryable().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_migrates_version_2_with_preexisting_retry_columns() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v2-partial-retry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json TEXT NOT NULL,
+                delivered_ts INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO metrics (event_json) VALUES ('{"t":1,"e":1,"v":{},"a":{}}');
+            CREATE TABLE agent_usage_throttle (
+                prompt_id TEXT PRIMARY KEY,
+                last_sent_ts INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "3");
+
+        for column in [
+            "delivered_ts",
+            "attempts",
+            "last_sync_error",
+            "last_sync_at",
+            "next_retry_at",
+            "processing_started_at",
+        ] {
+            assert!(db.column_exists("metrics", column).unwrap());
+        }
         assert_eq!(db.count_retryable().unwrap(), 1);
     }
 

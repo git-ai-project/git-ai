@@ -160,13 +160,11 @@ impl DaemonTelemetryWorkerHandle {
         }
 
         if !metric_events.is_empty() {
-            let result = tokio::task::spawn_blocking(move || store_metrics_in_db(&metric_events))
-                .await
-                .map_err(|e| GitAiError::Generic(format!("metrics DB task failed: {e}")))
-                .and_then(|result| result.map(|_| ()));
-            if let Err(e) = result {
-                tracing::warn!(%e, "telemetry: failed to persist metrics locally");
-            }
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                if let Err(e) = store_metrics_in_db(&metric_events) {
+                    tracing::warn!(%e, "telemetry: failed to persist metrics locally");
+                }
+            }));
         }
     }
 
@@ -254,10 +252,23 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
 /// Returns true if the handle was available and envelopes were submitted.
 pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
-        handle.submit_telemetry_sync(envelopes);
+        submit_daemon_internal_telemetry_with_handle(handle.clone(), envelopes);
         true
     } else {
         false
+    }
+}
+
+fn submit_daemon_internal_telemetry_with_handle(
+    handle: DaemonTelemetryWorkerHandle,
+    envelopes: Vec<TelemetryEnvelope>,
+) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            handle.submit_telemetry(envelopes).await;
+        });
+    } else {
+        handle.submit_telemetry_sync(envelopes);
     }
 }
 
@@ -1027,6 +1038,53 @@ mod tests {
 
     fn now_ts() -> u32 {
         unix_now().min(u32::MAX as u64) as u32
+    }
+
+    fn test_message_envelope(message: &str) -> TelemetryEnvelope {
+        TelemetryEnvelope::Message {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            message: message.to_string(),
+            level: "info".to_string(),
+            context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_daemon_internal_telemetry_spawns_when_runtime_exists() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+        let guard = handle.buffer.lock().await;
+
+        submit_daemon_internal_telemetry_with_handle(
+            handle.clone(),
+            vec![test_message_envelope("runtime")],
+        );
+
+        assert!(guard.messages.is_empty());
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if handle.buffer.lock().await.messages.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn submit_daemon_internal_telemetry_waits_without_runtime() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+
+        submit_daemon_internal_telemetry_with_handle(
+            handle.clone(),
+            vec![test_message_envelope("sync")],
+        );
+
+        let guard = handle.buffer.try_lock().unwrap();
+        assert_eq!(guard.messages.len(), 1);
     }
 
     #[test]
