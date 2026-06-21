@@ -27,8 +27,18 @@ pub struct MetricsUploadResponse {
 }
 
 impl MetricsUploadResponse {
+    /// Validate that all failed-event indices refer to events in this batch.
+    pub fn validate_error_indices(&self, batch_size: usize) -> Result<(), GitAiError> {
+        if let Some(error) = self.errors.iter().find(|error| error.index >= batch_size) {
+            return Err(GitAiError::Generic(format!(
+                "Metrics upload response error index {} is out of bounds for batch size {}",
+                error.index, batch_size
+            )));
+        }
+        Ok(())
+    }
+
     /// Get indices of successfully uploaded events
-    #[allow(dead_code)]
     pub fn successful_indices(&self, batch_size: usize) -> Vec<usize> {
         let error_indices: std::collections::HashSet<_> =
             self.errors.iter().map(|e| e.index).collect();
@@ -40,16 +50,16 @@ impl MetricsUploadResponse {
 
 /// Upload metrics batch with retry logic.
 ///
-/// Returns Ok(()) on success (200 response, even with partial errors).
+/// Returns Ok(response) on success (200 response, even with partial errors).
 /// Returns Err on failure after all retries exhausted.
 ///
-/// Partial errors (200 + errors array) are logged to Sentry but not retried,
-/// since validation errors won't succeed on retry.
+/// Partial errors (200 + errors array) are logged to Sentry and returned so
+/// callers can mark only the failed rows as permanently undeliverable.
 pub fn upload_metrics_with_retry(
     client: &ApiClient,
     batch: &MetricsBatch,
     operation: &str,
-) -> Result<(), GitAiError> {
+) -> Result<MetricsUploadResponse, GitAiError> {
     // First attempt (no delay), then retry with delays
     for (attempt, delay_secs) in std::iter::once(&0u64)
         .chain(RETRY_DELAYS_SECS.iter())
@@ -80,7 +90,7 @@ pub fn upload_metrics_with_retry(
                         })),
                     );
                 }
-                return Ok(());
+                return Ok(response);
             }
             Err(e) => {
                 // Non-200 - will retry if attempts remain
@@ -202,5 +212,17 @@ mod tests {
         };
         let successful = response.successful_indices(2);
         assert!(successful.is_empty());
+    }
+
+    #[test]
+    fn test_validate_error_indices_rejects_out_of_bounds_index() {
+        let response = MetricsUploadResponse {
+            errors: vec![MetricsUploadError {
+                index: 2,
+                error: "error".to_string(),
+            }],
+        };
+
+        assert!(response.validate_error_indices(2).is_err());
     }
 }

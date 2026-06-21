@@ -34,6 +34,7 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
     let mut total_uploaded = 0usize;
     let mut total_batches = 0usize;
     let mut total_invalid = 0usize;
+    let mut total_undeliverable = 0usize;
 
     loop {
         // Get batch from DB
@@ -86,17 +87,50 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
 
         // Upload with the HTTP helper's short retry, then persist DB backoff on failure.
         match upload_metrics_with_retry(&client, &metrics_batch, "flush_metrics_db") {
-            Ok(()) => {
-                total_uploaded += event_count;
+            Ok(response) => {
+                if let Err(e) = response.validate_error_indices(record_ids.len()) {
+                    eprintln!(
+                        "  ✗ batch upload response invalid ({} events kept for retry): {}",
+                        event_count, e
+                    );
+                    if let Ok(mut db_lock) = db.lock() {
+                        let now = current_unix_ts();
+                        let error = e.to_string();
+                        let _ = db_lock.mark_records_failed(&record_ids, &error, now);
+                    }
+                    break;
+                }
+
+                let successful_ids: Vec<i64> = response
+                    .successful_indices(record_ids.len())
+                    .into_iter()
+                    .map(|index| record_ids[index])
+                    .collect();
+                let undeliverable_records: Vec<(i64, String)> = response
+                    .errors
+                    .iter()
+                    .map(|error| (record_ids[error.index], error.error.clone()))
+                    .collect();
+
+                total_uploaded += successful_ids.len();
                 total_batches += 1;
+                total_undeliverable += undeliverable_records.len();
                 eprintln!(
-                    "  ✓ batch {} - uploaded {} events",
-                    total_batches, event_count
+                    "  ✓ batch {} - uploaded {} events{}",
+                    total_batches,
+                    successful_ids.len(),
+                    if undeliverable_records.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} marked undeliverable)", undeliverable_records.len())
+                    }
                 );
-                // Success - keep rows as history and mark them delivered.
-                // Validation errors are logged to Sentry and won't succeed on retry.
+                // Keep rows as history: mark successful rows delivered and
+                // server-rejected rows permanently undeliverable.
                 if let Ok(mut db_lock) = db.lock() {
-                    let _ = db_lock.mark_records_delivered(&record_ids, current_unix_ts());
+                    let now = current_unix_ts();
+                    let _ = db_lock.mark_records_delivered(&successful_ids, now);
+                    let _ = db_lock.mark_records_undeliverable(&undeliverable_records, now);
                 }
             }
             Err(e) => {
@@ -119,6 +153,12 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         eprintln!(
             "flush-metrics-db: marked {} invalid record(s) delivered",
             total_invalid
+        );
+    }
+    if total_undeliverable > 0 {
+        eprintln!(
+            "flush-metrics-db: marked {} server-rejected record(s) undeliverable",
+            total_undeliverable
         );
     }
 

@@ -429,6 +429,41 @@ impl MetricsDatabase {
         Ok(())
     }
 
+    /// Mark records as permanently undeliverable while retaining them in history.
+    pub fn mark_records_undeliverable(
+        &mut self,
+        records: &[(i64, String)],
+        failed_at: u64,
+    ) -> Result<(), GitAiError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE metrics \
+                 SET processing_started_at = NULL, \
+                     attempts = ?1, \
+                     last_sync_error = ?2, \
+                     last_sync_at = ?3, \
+                     next_retry_at = ?3 \
+                 WHERE id = ?4 AND delivered_ts IS NULL",
+            )?;
+
+            for (id, error) in records {
+                stmt.execute(params![
+                    MAX_METRIC_UPLOAD_ATTEMPTS as i64,
+                    error,
+                    failed_at as i64,
+                    id
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Get count of pending metrics that are currently eligible for upload.
     pub fn count_retryable(&self) -> Result<usize, GitAiError> {
         let now = current_unix_ts();
@@ -950,6 +985,35 @@ mod tests {
         assert_eq!(db.count().unwrap(), 1);
         assert_eq!(db.count_retryable().unwrap(), 0);
         assert!(db.dequeue_pending_batch(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_mark_records_undeliverable_keeps_history_without_retrying() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_ts = days_ago(1);
+        let ids = db.insert_events(&[event_json(event_ts)]).unwrap();
+
+        let batch = db.dequeue_pending_batch(1).unwrap();
+        assert_eq!(batch.len(), 1);
+        db.mark_records_undeliverable(&[(ids[0], "validation failed".to_string())], unix_now())
+            .unwrap();
+
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.count_retryable().unwrap(), 0);
+        assert!(db.dequeue_pending_batch(1).unwrap().is_empty());
+        assert_eq!(db.get_metric_history(0, None, &[1]).unwrap().len(), 1);
+
+        let (delivered_ts, attempts, last_sync_error): (Option<i64>, i64, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT delivered_ts, attempts, last_sync_error FROM metrics WHERE id = ?1",
+                params![ids[0]],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(delivered_ts.is_none());
+        assert_eq!(attempts, MAX_METRIC_UPLOAD_ATTEMPTS as i64);
+        assert_eq!(last_sync_error.as_deref(), Some("validation failed"));
     }
 
     #[test]
