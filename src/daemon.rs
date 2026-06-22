@@ -1361,30 +1361,6 @@ fn rewrite_metric_commits_with_branch(
     }
 }
 
-fn primary_command_skips_generic_non_ff(primary_command: Option<&str>) -> bool {
-    matches!(
-        primary_command,
-        Some("checkout" | "switch" | "branch" | "stash" | "update-ref")
-    )
-}
-
-fn update_ref_head_event_has_branch_mirror(
-    events: &[crate::daemon::domain::SemanticEvent],
-    old: &str,
-    new: &str,
-) -> bool {
-    events.iter().any(|event| {
-        matches!(
-            event,
-            crate::daemon::domain::SemanticEvent::RefUpdated {
-                reference,
-                old: event_old,
-                new: event_new,
-            } if reference.starts_with("refs/heads/") && event_old == old && event_new == new
-        )
-    })
-}
-
 fn rebase_new_tip_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     original_head: &str,
@@ -1491,7 +1467,8 @@ fn apply_revert_complete_rewrite(
             },
         )
         .collect();
-    let metric_commits = crate::authorship::rewrite_revert::handle_revert_commits(repo, &specs)?;
+    let metric_commits =
+        crate::authorship::rewrite_revert::handle_revert_commits_with_metrics(repo, &specs)?;
     crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(repo, metric_commits);
     Ok(())
 }
@@ -1510,7 +1487,7 @@ fn apply_cherry_pick_complete_rewrite(
     let mut rewrite_metric_commits = Vec::new();
     if !pairs.is_empty() {
         let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let outcome = crate::authorship::rewrite::handle_rewrite_event(
+        let outcome = crate::authorship::rewrite::handle_rewrite_event_with_metrics(
             repo,
             crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
                 sources: src,
@@ -4213,12 +4190,21 @@ impl ActorDaemonCoordinator {
                     rewrite_onto.as_deref(),
                     crate::authorship::rewrite::RewriteMetricOperation::Rebase,
                 )?
-            } else {
-                crate::authorship::rewrite::handle_non_fast_forward_rewrite(
+            } else if cmd.primary_command.as_deref() == Some("update-ref") {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
                     &repo,
                     old_tip,
                     new_tip,
                     rewrite_onto.as_deref(),
+                    crate::authorship::rewrite::RewriteMetricOperation::UpdateRef,
+                )?
+            } else {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                    &repo,
+                    old_tip,
+                    new_tip,
+                    rewrite_onto.as_deref(),
+                    crate::authorship::rewrite::RewriteMetricOperation::NonFastForward,
                 )?
             };
             repo.storage.rename_working_log(old_tip, new_tip)?;
@@ -4366,7 +4352,10 @@ impl ActorDaemonCoordinator {
                         | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
                         | crate::daemon::domain::SemanticEvent::Reset { .. }
                 )
-            }) || primary_command_skips_generic_non_ff(cmd.primary_command.as_deref())
+            }) || matches!(
+                cmd.primary_command.as_deref(),
+                Some("checkout" | "switch" | "branch" | "stash")
+            )
         };
         if !skip_non_ff && cmd.exit_code == 0 {
             self.detect_and_handle_non_ff_rewrites(cmd)?;
@@ -4679,14 +4668,15 @@ impl ActorDaemonCoordinator {
                         {
                             if base.as_deref().is_some_and(|base| base == pending.onto) {
                                 let repo = find_repository_in_path(&worktree)?;
-                                let outcome = crate::authorship::rewrite::handle_rewrite_event(
-                                    &repo,
-                                    crate::authorship::rewrite::RewriteEvent::SquashMerge {
-                                        source_head: pending.source_head,
-                                        squash_commit: new_head.clone(),
-                                        onto: pending.onto,
-                                    },
-                                )?;
+                                let outcome =
+                                    crate::authorship::rewrite::handle_rewrite_event_with_metrics(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::SquashMerge {
+                                            source_head: pending.source_head,
+                                            squash_commit: new_head.clone(),
+                                            onto: pending.onto,
+                                        },
+                                    )?;
                                 crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
                                     &repo,
                                     outcome.metric_commits,
@@ -4795,7 +4785,7 @@ impl ActorDaemonCoordinator {
                                         )?;
                                     } else if !is_ancestor_commit(&repo, old_head, new_head) {
                                         let outcome =
-                                            crate::authorship::rewrite::handle_rewrite_event(
+                                            crate::authorship::rewrite::handle_rewrite_event_with_metrics(
                                             &repo,
                                             crate::authorship::rewrite::RewriteEvent::NonFastForward {
                                                 old_tip: old_head.to_string(),
@@ -4859,11 +4849,6 @@ impl ActorDaemonCoordinator {
                     new,
                 } = event
                 {
-                    if reference == "HEAD"
-                        && update_ref_head_event_has_branch_mirror(events, old, new)
-                    {
-                        continue;
-                    }
                     if reference != "HEAD" && !reference.starts_with("refs/heads/")
                         || !is_valid_oid(old)
                         || is_zero_oid(old)
@@ -4874,11 +4859,13 @@ impl ActorDaemonCoordinator {
                         continue;
                     }
                     let repo = find_repository_in_path(&worktree.to_string_lossy())?;
-                    let affects_checked_out_branch = reference == "HEAD"
-                        || cmd.ref_changes.iter().any(|change| {
-                            change.reference == "HEAD" && change.old == *old && change.new == *new
-                        });
                     if repo_is_ancestor(&repo, old, new) {
+                        let affects_checked_out_branch = reference == "HEAD"
+                            || cmd.ref_changes.iter().any(|change| {
+                                change.reference == "HEAD"
+                                    && change.old == *old
+                                    && change.new == *new
+                            });
                         if affects_checked_out_branch {
                             if repo.storage.has_working_log(old) {
                                 let author =
@@ -4894,28 +4881,14 @@ impl ActorDaemonCoordinator {
                             repo.storage.rename_working_log(old, new)?;
                         }
                     } else {
-                        let outcome =
-                            crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                        crate::authorship::rewrite::handle_rewrite_event(
                             &repo,
-                            old,
-                            new,
-                            None,
-                            crate::authorship::rewrite::RewriteMetricOperation::UpdateRef,
+                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                old_tip: old.to_string(),
+                                new_tip: new.to_string(),
+                                onto: None,
+                            },
                         )?;
-                        if affects_checked_out_branch {
-                            repo.storage.rename_working_log(old, new)?;
-                        }
-                        let branch = rewrite_metric_branch_for_transition(
-                            &repo,
-                            cmd,
-                            old,
-                            new,
-                            Some(reference),
-                        );
-                        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
-                            &repo,
-                            rewrite_metric_commits_with_branch(outcome.metric_commits, branch),
-                        );
                     }
                 }
             }
@@ -6901,40 +6874,6 @@ mod tests {
             ]),
             vec![SweepTrigger::PostCommit, SweepTrigger::PostPush]
         );
-    }
-
-    #[test]
-    fn update_ref_uses_explicit_rewrite_path_not_generic_non_ff_path() {
-        assert!(primary_command_skips_generic_non_ff(Some("update-ref")));
-        assert!(primary_command_skips_generic_non_ff(Some("stash")));
-        assert!(!primary_command_skips_generic_non_ff(Some("rebase")));
-        assert!(!primary_command_skips_generic_non_ff(Some("pull")));
-        assert!(!primary_command_skips_generic_non_ff(None));
-    }
-
-    #[test]
-    fn update_ref_head_event_detects_branch_mirror() {
-        use crate::daemon::domain::SemanticEvent;
-
-        let events = vec![
-            SemanticEvent::RefUpdated {
-                reference: "HEAD".to_string(),
-                old: "old".to_string(),
-                new: "new".to_string(),
-            },
-            SemanticEvent::RefUpdated {
-                reference: "refs/heads/feature".to_string(),
-                old: "old".to_string(),
-                new: "new".to_string(),
-            },
-        ];
-
-        assert!(update_ref_head_event_has_branch_mirror(
-            &events, "old", "new"
-        ));
-        assert!(!update_ref_head_event_has_branch_mirror(
-            &events, "old", "other"
-        ));
     }
 
     fn test_rebase_command(

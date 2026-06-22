@@ -24,7 +24,11 @@ pub struct RevertSpec {
 /// commits were reverted: one batched first-parent rev-parse, one batched note
 /// read, one batched diff-tree (covering every commit's two diff pairs), and one
 /// batched note write. All per-commit work below is pure in-memory.
-pub(crate) fn handle_revert_commits(
+pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<(), GitAiError> {
+    handle_revert_commits_with_metrics(repo, specs).map(|_| ())
+}
+
+pub(crate) fn handle_revert_commits_with_metrics(
     repo: &Repository,
     specs: &[RevertSpec],
 ) -> Result<Vec<RewriteMetricCommit>, GitAiError> {

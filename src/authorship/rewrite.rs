@@ -102,7 +102,7 @@ pub(crate) fn branch_name_from_ref(reference: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RewriteOutcome {
+pub(crate) struct RewriteOutcome {
     pub(crate) metric_commits: Vec<RewriteMetricCommit>,
 }
 
@@ -140,7 +140,11 @@ pub(crate) fn metric_commits_from_mappings(
         .collect()
 }
 
-pub fn handle_rewrite_event(
+pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError> {
+    handle_rewrite_event_with_metrics(repo, event).map(|_| ())
+}
+
+pub(crate) fn handle_rewrite_event_with_metrics(
     repo: &Repository,
     event: RewriteEvent,
 ) -> Result<RewriteOutcome, GitAiError> {
@@ -154,7 +158,13 @@ pub fn handle_rewrite_event(
             ref old_tip,
             ref new_tip,
             ref onto,
-        } => handle_non_fast_forward_rewrite(repo, old_tip, new_tip, onto.as_deref()),
+        } => handle_non_fast_forward_rewrite_with_operation(
+            repo,
+            old_tip,
+            new_tip,
+            onto.as_deref(),
+            RewriteMetricOperation::NonFastForward,
+        ),
         RewriteEvent::CherryPickComplete {
             sources,
             new_commits,
@@ -178,7 +188,7 @@ pub fn handle_non_fast_forward_rewrite(
     old_tip: &str,
     new_tip: &str,
     onto: Option<&str>,
-) -> Result<RewriteOutcome, GitAiError> {
+) -> Result<(), GitAiError> {
     handle_non_fast_forward_rewrite_with_operation(
         repo,
         old_tip,
@@ -186,6 +196,7 @@ pub fn handle_non_fast_forward_rewrite(
         onto,
         RewriteMetricOperation::NonFastForward,
     )
+    .map(|_| ())
 }
 
 pub(crate) fn handle_non_fast_forward_rewrite_with_operation(
