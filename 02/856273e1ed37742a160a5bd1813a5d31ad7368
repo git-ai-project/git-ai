@@ -13,7 +13,6 @@ src/transcripts/agents/claude.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 29066,
       "total_deletions": 26403,
       "accepted_lines": 5,

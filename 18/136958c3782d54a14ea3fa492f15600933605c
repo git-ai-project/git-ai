@@ -2,8 +2,8 @@ tests/integration/amp.rs
   75b8b35dceb7e11d 1-22,25-31,36,39-41,44-50,55,58-135,138-234,236-363
   0cd56453d16f4fdd 23-24,32-35,37-38,42-43,51-54,56-57,364-368
 tests/integration/droid.rs
-  75b8b35dceb7e11d 1-17,19-25,37-208,211-272,275-325,328,330-338,34
-  0cd56453d16f4fdd 18,26-33,35-36,329
+  75b8b35dceb7e11d 1-17,19-25,34,37-208,211-272,275-325,328,330-338
+  0cd56453d16f4fdd 18,26-33,26-36,35-36,329
 tests/integration/windsurf.rs
   75b8b35dceb7e11d 1-184,187-189,199,202-242,245-495
   0cd56453d16f4fdd 185-186,190-191,193-198,200-201
@@ -14,12 +14,12 @@ tests/integration/gemini.rs
   75b8b35dceb7e11d 1-17,19-25,33-151,154-310,312-576,578-594
   0cd56453d16f4fdd 18,26-29,31-32,577
 tests/integration/opencode.rs
-  75b8b35dceb7e11d 1-16,18-21,23-24,26-30,32-33,81,89,101-188,191-406,409-411,46,60,68,86,98
-  0cd56453d16f4fdd 96,17,22,25,31,34-35,37,40-41,45,53-55,58-59,62-63,67,69,74-76,79-80,82-83,88,91,93,95,97,99-100,412
+  75b8b35dceb7e11d 1-16,18-21,23-24,26-30,32-33,46,60,68,81,86,89,98,101-188,191-406,409-411
+  0cd56453d16f4fdd 17,22,25,31,34-35,37,39-80,40-41,45,53-55,58-59,62-63,67,69,74-76,79-80,82-83,82-86,88,90-95,91,93,95,96,97,97-100,99-100,412
   759815a68a4f7264 48-49
 tests/integration/github_copilot.rs
-  75b8b35dceb7e11d 1-5,7-22,24,26,37-39,41,43-44,54-55,58,60-69,71-94,96-396,398-614,618-738,25,31,35,48
-  0cd56453d16f4fdd 23,28-30,32-34,36,40,42,45-47,49-53,56-57
+  75b8b35dceb7e11d 1-5,7-22,24,25,26,31,35,37-39,41,43-44,48,54-55,58,60-69,71-94,96-396,398-614,618-738
+  0cd56453d16f4fdd 23,25,28-30,28-36,32-34,36,40,42,45-47,45-53,49-53,56-57
 tests/integration/cursor.rs
   75b8b35dceb7e11d 1-17,19-25,31,35-521,523-527
   0cd56453d16f4fdd 18,26-30,33-34,522
@@ -27,11 +27,11 @@ tests/integration/continue_cli.rs
   75b8b35dceb7e11d 1-15,17-21,29-482,484-499
   0cd56453d16f4fdd 16,22,24-26,28,483
 tests/integration/claude_code.rs
-  75b8b35dceb7e11d 1-12,14-20,29-245,247,250-253,255-261,270-403,405-411,420-422,426-439,27
-  0cd56453d16f4fdd 418,13,21-26,28,254,262-267,269,404,412-417,419,423-425
+  75b8b35dceb7e11d 1-12,14-20,27,29-245,247,250-253,255-261,270-403,405-411,420-422,426-439
+  0cd56453d16f4fdd 13,21-26,21-28,28,254,262-267,269,404,412-417,418,419,423-425
 tests/integration/transcripts_claude_reader.rs
-  75b8b35dceb7e11d 1-19,21,24-26,36-83,86-133,23
-  0cd56453d16f4fdd 84-85,20,28-33,35
+  75b8b35dceb7e11d 1-19,21,23,24-26,36-83,86-133
+  0cd56453d16f4fdd 20,23,28-33,35,84-85
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -45,7 +45,6 @@ tests/integration/transcripts_claude_reader.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 1859,
       "total_deletions": 3520,
       "accepted_lines": 169,
@@ -58,7 +57,6 @@ tests/integration/transcripts_claude_reader.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 28,
       "total_deletions": 30,
       "accepted_lines": 2,
@@ -71,7 +69,6 @@ tests/integration/transcripts_claude_reader.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 29066,
       "total_deletions": 26403,
       "accepted_lines": 12,
