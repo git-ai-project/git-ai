@@ -362,6 +362,12 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::CodeBuddy => match tool_name {
+            "Write" | "write_to_file" | "Edit" | "replace_in_file" | "MultiEdit"
+            | "multi_edit" | "NotebookEdit" | "notebook_edit" => ToolClass::FileEdit,
+            "Bash" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -369,6 +375,7 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     Claude,
+    CodeBuddy,
     Gemini,
     ContinueCli,
     Droid,
