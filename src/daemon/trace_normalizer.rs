@@ -603,9 +603,17 @@ impl<B: GitBackend> TraceNormalizer<B> {
         // reflog. Surface the alias-expanded command+args when the invoked token
         // was itself an alias, so downstream analyzers (notably the pull span
         // matcher, which reconstructs a command's reflog action from its args)
-        // see the same flags git did. Non-alias invocations expand to the same
-        // command token and are left untouched, preserving existing behavior.
-        if let Some(worktree) = pending.worktree.as_deref()
+        // see the same flags git did.
+        //
+        // Fast path: only consult the backend when the resolved command differs
+        // from the literal invoked token — that mismatch is exactly the alias
+        // signature (git ignores an alias that shadows a builtin, so a plain
+        // `pull`/`status`/etc. always has primary == invoked and is skipped
+        // here). This keeps every common, non-aliased command off the
+        // alias-cache path entirely, so trace-ingestion finalize pays nothing
+        // extra for it.
+        if primary_command.as_deref() != invoked_command.as_deref()
+            && let Some(worktree) = pending.worktree.as_deref()
             && let Some((expanded_command, expanded_args)) = self
                 .backend
                 .resolve_invocation(worktree, &pending.raw_argv)?
