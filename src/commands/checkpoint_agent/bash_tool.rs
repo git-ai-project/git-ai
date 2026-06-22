@@ -720,20 +720,15 @@ pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
 
 /// Fall back to `git status --porcelain=v2` to detect changed files.
 /// Used when the pre-snapshot is lost (process restart) or on very large repos.
-fn git_status_fallback_args(repo_root: &Path) -> Vec<String> {
-    vec![
+pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> {
+    let args = vec![
         "-C".to_string(),
         repo_root.to_string_lossy().into_owned(),
-        "--no-optional-locks".to_string(),
         "status".to_string(),
         "--porcelain=v2".to_string(),
         "-z".to_string(),
         "--untracked-files=all".to_string(),
-    ]
-}
-
-pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> {
-    let args = git_status_fallback_args(repo_root);
+    ];
     let output = crate::git::repository::exec_git_allow_nonzero(&args)?;
 
     if !output.status.success() {
@@ -1071,16 +1066,6 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::time::Duration;
-
-    #[test]
-    fn test_git_status_fallback_disables_optional_index_locks() {
-        let args = git_status_fallback_args(Path::new("/repo"));
-
-        assert!(
-            args.iter().any(|arg| arg == "--no-optional-locks"),
-            "git status fallback should not opportunistically refresh the user's index"
-        );
-    }
 
     #[test]
     fn test_stat_entry_from_metadata() {
