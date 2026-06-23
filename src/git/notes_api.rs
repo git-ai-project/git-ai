@@ -23,7 +23,7 @@
 //! - `warm_cache_for_remote(repo, remote)` — fetches notes from the HTTP
 //!   backend into SQLite. Called additionally for `http` backend.
 
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::config::{Config, NotesBackendKind};
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
@@ -164,38 +164,55 @@ pub fn read_notes_batch(
 }
 
 pub fn read_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipLog> {
-    match Config::get().notes_backend_kind() {
-        NotesBackendKind::Http => {
-            // Check the cache first; fall through to git notes on miss.
-            if let Some(content) = http_read_note(commit_sha) {
-                AuthorshipLog::deserialize_from_string(&content)
-                    .map_err(|e| tracing::debug!("notes deserialization error: {}", e))
-                    .ok()
-            } else {
-                crate::git::refs::get_authorship(repo, commit_sha)
-            }
-        }
-        NotesBackendKind::GitNotes => crate::git::refs::get_authorship(repo, commit_sha),
-    }
+    read_notes_batch(repo, &[commit_sha.to_string()])
+        .map_err(|e| tracing::debug!("notes read error: {}", e))
+        .ok()
+        .and_then(|mut notes| notes.remove(commit_sha))
+        .and_then(|content| {
+            deserialize_authorship_for_commit(commit_sha, &content)
+                .map_err(|e| tracing::debug!("notes deserialization error: {}", e))
+                .ok()
+        })
 }
 
 pub fn read_authorship_v3(
     repo: &Repository,
     commit_sha: &str,
 ) -> Result<AuthorshipLog, GitAiError> {
-    match Config::get().notes_backend_kind() {
-        NotesBackendKind::Http => {
-            if let Some(content) = http_read_note(commit_sha) {
-                AuthorshipLog::deserialize_from_string(&content)
-                    .map_err(|e| GitAiError::Generic(format!("notes deserialization error: {}", e)))
-            } else {
-                crate::git::refs::get_reference_as_authorship_log_v3(repo, commit_sha)
-            }
-        }
-        NotesBackendKind::GitNotes => {
-            crate::git::refs::get_reference_as_authorship_log_v3(repo, commit_sha)
-        }
+    let mut notes = read_notes_batch(repo, &[commit_sha.to_string()])?;
+    let content = notes
+        .remove(commit_sha)
+        .ok_or_else(|| GitAiError::Generic("No authorship note found".to_string()))?;
+    deserialize_authorship_v3_for_commit(commit_sha, &content)
+}
+
+fn deserialize_authorship_for_commit(
+    commit_sha: &str,
+    content: &str,
+) -> Result<AuthorshipLog, GitAiError> {
+    let mut authorship_log = AuthorshipLog::deserialize_from_string(content)
+        .map_err(|e| GitAiError::Generic(format!("notes deserialization error: {}", e)))?;
+
+    // Keep metadata aligned with the commit where this note is attached.
+    authorship_log.metadata.base_commit_sha = commit_sha.to_string();
+
+    Ok(authorship_log)
+}
+
+fn deserialize_authorship_v3_for_commit(
+    commit_sha: &str,
+    content: &str,
+) -> Result<AuthorshipLog, GitAiError> {
+    let authorship_log = deserialize_authorship_for_commit(commit_sha, content)?;
+
+    if authorship_log.metadata.schema_version != AUTHORSHIP_LOG_VERSION {
+        return Err(GitAiError::Generic(format!(
+            "Unsupported authorship log version: {} (expected: {})",
+            authorship_log.metadata.schema_version, AUTHORSHIP_LOG_VERSION
+        )));
     }
+
+    Ok(authorship_log)
 }
 
 /// Return a map of commit SHA → note-blob OID for the given commits.
@@ -656,37 +673,16 @@ fn sync_from_git_ref_into_db(
         return Ok(());
     }
 
-    // 2. Filter out commit SHAs already in SQLite.
-    let all_commit_shas: Vec<&str> = pairs.iter().map(|(_, c)| c.as_str()).collect();
-    let already_cached: std::collections::HashSet<String> = db
-        .get_notes(&all_commit_shas)
-        .unwrap_or_default()
-        .into_keys()
-        .collect();
-
-    let missing_pairs: Vec<&(String, String)> = pairs
-        .iter()
-        .filter(|(_, commit_sha)| !already_cached.contains(commit_sha))
-        .collect();
-
-    if missing_pairs.is_empty() {
-        tracing::debug!(
-            "sync_from_git_ref: all {} notes already cached",
-            pairs.len()
-        );
-        return Ok(());
-    }
-
     tracing::debug!(
-        "sync_from_git_ref: importing {} new notes from refs/notes/ai",
-        missing_pairs.len()
+        "sync_from_git_ref: refreshing {} notes from refs/notes/ai",
+        pairs.len()
     );
 
-    // 3. Read note blob contents via `git cat-file --batch`.
+    // 2. Read note blob contents via `git cat-file --batch`.
     let mut cat_args = repo.global_args_for_exec();
     cat_args.extend_from_slice(&["cat-file".to_string(), "--batch".to_string()]);
 
-    let blob_oids: Vec<&str> = missing_pairs
+    let blob_oids: Vec<&str> = pairs
         .iter()
         .map(|(note_sha, _)| note_sha.as_str())
         .collect();
@@ -737,8 +733,11 @@ fn sync_from_git_ref_into_db(
         }
     }
 
-    // 4. Build (commit_sha, content) entries and insert into SQLite.
-    let entries: Vec<(String, String)> = missing_pairs
+    // 3. Build (commit_sha, content) entries and upsert them into SQLite.
+    // Refresh all local git notes, not just misses: after pull/fetch a remote
+    // note may have changed for an existing commit SHA, and refs/notes/ai is
+    // authoritative for the GitNotes backend.
+    let entries: Vec<(String, String)> = pairs
         .iter()
         .filter_map(|(note_sha, commit_sha)| {
             blob_to_content
@@ -756,7 +755,7 @@ fn sync_from_git_ref_into_db(
     } else {
         tracing::debug!(
             count = entries.len(),
-            "sync_from_git_ref: imported notes from refs/notes/ai"
+            "sync_from_git_ref: refreshed notes from refs/notes/ai"
         );
     }
 
@@ -786,12 +785,6 @@ fn http_write_batch(entries: &[(String, String)]) -> Result<(), GitAiError> {
     drop(db_lock);
     crate::daemon::telemetry_handle::submit_notes();
     Ok(())
-}
-
-fn http_read_note(commit_sha: &str) -> Option<String> {
-    let db = crate::notes::db::NotesDatabase::global().ok()?;
-    let db_lock = db.lock().ok()?;
-    db_lock.get_note(commit_sha).ok().flatten()
 }
 
 fn http_read_notes(commit_shas: &[String]) -> HashMap<String, String> {
@@ -912,8 +905,9 @@ mod tests {
         http_write_note("abc123def456abc123def456abc123def456abc1", "test content").expect("write");
 
         // Read back from cache.
-        let content = http_read_note("abc123def456abc123def456abc123def456abc1");
-        assert_eq!(content, Some("test content".to_string()));
+        let sha = "abc123def456abc123def456abc123def456abc1".to_string();
+        let content = http_read_notes(std::slice::from_ref(&sha));
+        assert_eq!(content.get(&sha), Some(&"test content".to_string()));
 
         // Confirm it is in the DB with synced=0.
         let db = crate::notes::db::NotesDatabase::global().expect("global db");
@@ -1470,9 +1464,10 @@ mod tests {
         );
     }
 
-    /// `sync_from_git_ref` skips commit SHAs already present in SQLite.
+    /// `sync_from_git_ref` refreshes commit SHAs already present in SQLite from
+    /// the authoritative local `refs/notes/ai` git ref.
     #[test]
-    fn sync_from_git_ref_skips_already_cached_shas() {
+    fn sync_from_git_ref_refreshes_already_cached_shas() {
         use crate::git::repository::exec_git;
         use crate::git::test_utils::TmpRepo;
 
@@ -1500,14 +1495,30 @@ mod tests {
         ]);
         exec_git(&args).expect("git notes add");
 
-        // sync_from_git_ref should not overwrite the existing cached value.
+        // sync_from_git_ref should refresh the existing cached value from git.
         sync_from_git_ref_into_db(repo.gitai_repo(), &mut db).expect("sync");
 
         let cached = db.get_note(&sha).expect("get");
         assert_eq!(
-            cached,
-            Some(pre_cached.to_string()),
-            "sync_from_git_ref must not overwrite already-cached entries"
+            cached.as_deref().map(str::trim_end),
+            Some("git-ref-content"),
+            "sync_from_git_ref must refresh already-cached entries from refs/notes/ai"
+        );
+    }
+
+    #[test]
+    fn deserialize_authorship_for_commit_sets_requested_commit_sha() {
+        let requested_sha = "1122334455667788990011223344556677889900";
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "stale-cache-sha".to_string();
+        let content = log.serialize_to_string().expect("serialize log");
+
+        let parsed =
+            deserialize_authorship_for_commit(requested_sha, &content).expect("deserialize log");
+
+        assert_eq!(
+            parsed.metadata.base_commit_sha, requested_sha,
+            "centralized authorship reads must attach logs to the requested commit"
         );
     }
 
