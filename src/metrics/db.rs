@@ -68,6 +68,20 @@ pub struct MetricHistoryRecord {
     pub event: MetricEvent,
 }
 
+/// Point-in-time status summary for local metric delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsStatus {
+    pub total: usize,
+    pub delivered: usize,
+    pub not_delivered: usize,
+    pub pending_retryable: usize,
+    pub waiting_retry: usize,
+    pub processing: usize,
+    pub stopped_after_errors: usize,
+    pub rows_with_errors: usize,
+    pub latest_error: Option<String>,
+}
+
 /// Database wrapper for metrics storage
 pub struct MetricsDatabase {
     conn: Connection,
@@ -536,6 +550,88 @@ impl MetricsDatabase {
             |row| row.get(0),
         )?;
         Ok(count as usize)
+    }
+
+    /// Summarize local metrics delivery state for user-facing diagnostics.
+    pub fn status(&self) -> Result<MetricsStatus, GitAiError> {
+        let now = current_unix_ts();
+        let (
+            total,
+            delivered,
+            not_delivered,
+            pending_retryable,
+            waiting_retry,
+            processing,
+            stopped_after_errors,
+            rows_with_errors,
+        ): (i64, i64, i64, i64, i64, i64, i64, i64) = self.conn.query_row(
+            r#"
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN delivered_ts IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN delivered_ts IS NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN delivered_ts IS NULL
+                     AND processing_started_at IS NULL
+                     AND next_retry_at <= ?1
+                     AND attempts < ?2 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN delivered_ts IS NULL
+                     AND processing_started_at IS NULL
+                     AND next_retry_at > ?1
+                     AND attempts < ?2 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN delivered_ts IS NULL
+                     AND processing_started_at IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN delivered_ts IS NULL
+                     AND attempts >= ?2 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE
+                    WHEN delivered_ts IS NULL
+                     AND last_sync_error IS NOT NULL
+                     AND last_sync_error != '' THEN 1 ELSE 0 END), 0)
+            FROM metrics
+            "#,
+            params![now as i64, MAX_METRIC_UPLOAD_ATTEMPTS as i64],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )?;
+
+        let latest_error: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT last_sync_error FROM metrics \
+                 WHERE delivered_ts IS NULL \
+                   AND last_sync_error IS NOT NULL \
+                   AND last_sync_error != '' \
+                 ORDER BY COALESCE(last_sync_at, 0) DESC, id DESC \
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        Ok(MetricsStatus {
+            total: total as usize,
+            delivered: delivered as usize,
+            not_delivered: not_delivered as usize,
+            pending_retryable: pending_retryable as usize,
+            waiting_retry: waiting_retry as usize,
+            processing: processing as usize,
+            stopped_after_errors: stopped_after_errors as usize,
+            rows_with_errors: rows_with_errors as usize,
+            latest_error,
+        })
     }
 
     fn release_stale_processing_locks(&mut self, now: u64) -> Result<(), GitAiError> {
@@ -1102,6 +1198,86 @@ mod tests {
     }
 
     #[test]
+    fn test_status_counts_delivery_buckets() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+
+        let delivered_ids = db
+            .insert_events_with_delivered_ts(&[event_json(days_ago(5))], Some(now))
+            .unwrap();
+        let delivered_id = delivered_ids[0];
+        let ids = db
+            .insert_events(&[
+                event_json(days_ago(4)),
+                event_json(days_ago(3)),
+                event_json(days_ago(2)),
+                event_json(days_ago(1)),
+            ])
+            .unwrap();
+        let pending_id = ids[0];
+        let waiting_id = ids[1];
+        let processing_id = ids[2];
+        let stopped_id = ids[3];
+
+        db.conn
+            .execute(
+                "UPDATE metrics \
+                 SET last_sync_error = ?1, last_sync_at = ?2 \
+                 WHERE id = ?3",
+                params![
+                    "delivered retry recovered",
+                    now.saturating_add(60) as i64,
+                    delivered_id
+                ],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics \
+                 SET attempts = 1, last_sync_error = ?1, last_sync_at = ?2, next_retry_at = ?3 \
+                 WHERE id = ?4",
+                params![
+                    "temporary outage",
+                    now.saturating_sub(10) as i64,
+                    now.saturating_add(600) as i64,
+                    waiting_id
+                ],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET processing_started_at = ?1 WHERE id = ?2",
+                params![now as i64, processing_id],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics \
+                 SET attempts = ?1, last_sync_error = ?2, last_sync_at = ?3, next_retry_at = ?3 \
+                 WHERE id = ?4",
+                params![
+                    MAX_METRIC_UPLOAD_ATTEMPTS as i64,
+                    "validation failed",
+                    now as i64,
+                    stopped_id
+                ],
+            )
+            .unwrap();
+
+        assert_ne!(pending_id, waiting_id);
+        let status = db.status().unwrap();
+        assert_eq!(status.total, 5);
+        assert_eq!(status.delivered, 1);
+        assert_eq!(status.not_delivered, 4);
+        assert_eq!(status.pending_retryable, 1);
+        assert_eq!(status.waiting_retry, 1);
+        assert_eq!(status.processing, 1);
+        assert_eq!(status.stopped_after_errors, 1);
+        assert_eq!(status.rows_with_errors, 2);
+        assert_eq!(status.latest_error.as_deref(), Some("validation failed"));
+    }
+
+    #[test]
     fn test_mark_records_undeliverable_keeps_history_without_retrying() {
         let (mut db, _temp_dir) = create_test_db();
         let event_ts = days_ago(1);
@@ -1305,6 +1481,17 @@ mod tests {
         // Count empty should return 0
         let count = db.count().unwrap();
         assert_eq!(count, 0);
+
+        let status = db.status().unwrap();
+        assert_eq!(status.total, 0);
+        assert_eq!(status.delivered, 0);
+        assert_eq!(status.not_delivered, 0);
+        assert_eq!(status.pending_retryable, 0);
+        assert_eq!(status.waiting_retry, 0);
+        assert_eq!(status.processing, 0);
+        assert_eq!(status.stopped_after_errors, 0);
+        assert_eq!(status.rows_with_errors, 0);
+        assert_eq!(status.latest_error, None);
     }
 
     #[test]

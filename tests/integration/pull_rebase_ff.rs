@@ -1,7 +1,7 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -322,6 +322,98 @@ fn test_pull_rebase_preserves_committed_ai_authorship() {
 
     // Verify AI authorship is preserved on the rebased commit
     let mut ai_file = local.filename("ai_feature.txt");
+    ai_file.assert_lines_and_blame(vec![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+}
+
+#[test]
+fn test_rejected_push_failed_pull_then_pull_rebase_preserves_committed_ai_authorship() {
+    let (local, upstream) = TestRepo::new_with_remote();
+
+    let mut readme = local.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    local
+        .stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+    local
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    let mut ai_file = local.filename("ai_feature.txt");
+    ai_file.set_contents(vec![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+    let local_ai_commit = local
+        .stage_all_and_commit("add AI feature")
+        .expect("AI feature commit should succeed");
+
+    assert!(
+        local
+            .read_authorship_note(&local_ai_commit.commit_sha)
+            .is_some(),
+        "precondition: original local AI commit should have authorship note"
+    );
+
+    let branch = local.current_branch();
+    let contributor_parent = tempfile::tempdir().expect("contributor temp dir");
+    let contributor_path = contributor_parent.path().join("contributor");
+    local
+        .git_og(&[
+            "clone",
+            upstream
+                .path()
+                .to_str()
+                .expect("upstream path should be utf-8"),
+            contributor_path
+                .to_str()
+                .expect("contributor path should be utf-8"),
+        ])
+        .expect("clone contributor should succeed");
+    let contributor =
+        TestRepo::new_at_path_with_daemon_scope(&contributor_path, DaemonTestScope::NoDaemon);
+    std::fs::write(
+        contributor.path().join("upstream_change.txt"),
+        "upstream content\n",
+    )
+    .expect("write upstream change");
+    contributor.git_og(&["add", "."]).unwrap();
+    contributor
+        .git_og(&["commit", "-m", "upstream divergent commit"])
+        .expect("upstream commit should succeed");
+    contributor
+        .git_og(&["push", "origin", &format!("HEAD:{}", branch)])
+        .expect("push upstream divergence should succeed");
+
+    assert!(
+        local.git(&["push"]).is_err(),
+        "push should be rejected because origin has diverged"
+    );
+    assert!(
+        local.git(&["pull"]).is_err(),
+        "plain pull should fail before an explicit reconciliation strategy"
+    );
+
+    local
+        .git(&["pull", "--rebase"])
+        .expect("pull --rebase should succeed");
+
+    let rebased_head = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(
+        rebased_head, local_ai_commit.commit_sha,
+        "HEAD should have a new SHA after rebase"
+    );
+    assert!(
+        local.read_authorship_note(&rebased_head).is_some(),
+        "rebased local AI commit should have authorship note"
+    );
+
     ai_file.assert_lines_and_blame(vec![
         "AI generated feature line 1".ai(),
         "AI generated feature line 2".ai(),

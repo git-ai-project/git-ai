@@ -3,7 +3,7 @@
 //! Runs inside the daemon process using tokio. Accumulates telemetry envelopes
 //! and CAS payloads, then flushes them to their destinations every 3 seconds.
 
-use crate::api::metrics::MetricsUploadResponse;
+use crate::api::metrics::{MetricsUploadResponse, metrics_upload_allowed};
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
@@ -430,11 +430,6 @@ fn flush_pending_metrics() {
     if let Err(e) = flush_pending_metrics_from_db(&client, deadline) {
         tracing::warn!(%e, "telemetry: failed to upload pending metrics");
     }
-}
-
-fn metrics_upload_allowed(api_base_url: &str, client: &ApiClient) -> bool {
-    let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    !using_default_api || client.is_logged_in() || client.has_api_key()
 }
 
 fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {

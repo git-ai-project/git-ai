@@ -99,6 +99,20 @@ struct ReflogAnchor {
     end_offset: u64,
 }
 
+enum ColdSeedMatchSpec {
+    SingleEntry {
+        expected: ExpectedTransition,
+        prefixes: Vec<String>,
+    },
+    PullSpan {
+        action: String,
+        expected: ExpectedTransition,
+    },
+    RebaseSpan {
+        expected: ExpectedTransition,
+    },
+}
+
 impl RefCursor {
     pub fn new(family: FamilyKey) -> Self {
         Self {
@@ -257,55 +271,120 @@ impl RefCursor {
         let Some(path) = self.reflog_path_for_key(key) else {
             return Ok(offset);
         };
-        let Some((expected, prefixes)) = self.cold_seed_match_spec(cmd) else {
+        let Some(spec) = self.cold_seed_match_spec(cmd) else {
             // No command-specific matcher (e.g. update-ref --stdin / stash that
             // match by transition only): keep the offset as the boundary to
             // preserve existing first-observed-boundary semantics.
             return Ok(offset);
         };
+        match spec {
+            ColdSeedMatchSpec::SingleEntry { expected, prefixes } => {
+                let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
+                let reference = if let Some(reference) = key.strip_prefix("common:") {
+                    reference.to_string()
+                } else {
+                    "HEAD".to_string()
+                };
+                let entries = read_reflog_entries(key.to_string(), &path, &reference, None)?;
+                let earliest_own = entries
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.start_offset < offset
+                            && expected.matches(entry)
+                            && message_matches(&entry.message, &prefix_refs)
+                    })
+                    .map(|entry| entry.start_offset)
+                    .min();
+                Ok(earliest_own.unwrap_or(offset))
+            }
+            ColdSeedMatchSpec::PullSpan { action, expected } => {
+                self.clamp_seed_to_pull_span_entry(key, &path, offset, &action, expected)
+            }
+            ColdSeedMatchSpec::RebaseSpan { expected } => {
+                self.clamp_seed_to_rebase_span_entry(key, &path, offset, expected)
+            }
+        }
+    }
+
+    fn clamp_seed_to_pull_span_entry(
+        &self,
+        key: &str,
+        path: &Path,
+        offset: u64,
+        action: &str,
+        expected: ExpectedTransition,
+    ) -> Result<u64, GitAiError> {
         let reference = if let Some(reference) = key.strip_prefix("common:") {
             reference.to_string()
         } else {
             "HEAD".to_string()
         };
-        let entries = read_reflog_entries(key.to_string(), &path, &reference, None)?;
-        let earliest_own = entries
-            .into_iter()
-            .filter(|entry| {
-                entry.start_offset < offset
-                    && expected.matches(entry)
-                    && message_matches(&entry.message, &prefixes)
-            })
-            .map(|entry| entry.start_offset)
-            .min();
-        Ok(earliest_own.unwrap_or(offset))
+        let entries = read_reflog_entries_including_noops(key.to_string(), path, &reference, None)?;
+        let prefixes = pull_reflog_message_prefixes(action);
+        let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
+
+        if key.starts_with("common:") {
+            return Ok(
+                clamp_seed_to_entry_containing_offset(&entries, offset, &prefix_refs)
+                    .unwrap_or(offset),
+            );
+        }
+
+        Ok(pull_span_start_containing_offset(&entries, offset, action, expected).unwrap_or(offset))
+    }
+
+    fn clamp_seed_to_rebase_span_entry(
+        &self,
+        key: &str,
+        path: &Path,
+        offset: u64,
+        expected: ExpectedTransition,
+    ) -> Result<u64, GitAiError> {
+        let reference = if let Some(reference) = key.strip_prefix("common:") {
+            reference.to_string()
+        } else {
+            "HEAD".to_string()
+        };
+        let entries = read_reflog_entries_including_noops(key.to_string(), path, &reference, None)?;
+        if key.starts_with("common:") {
+            return Ok(
+                clamp_seed_to_entry_containing_offset(&entries, offset, &["rebase"])
+                    .unwrap_or(offset),
+            );
+        }
+
+        Ok(rebase_span_start_containing_offset(&entries, offset, expected).unwrap_or(offset))
     }
 
     /// The expected transition + reflog message prefixes used to recognize a
     /// command's OWN entry during cold-start seed clamping. Returns None for
     /// commands matched by transition alone (no message discriminator), where
     /// clamping must not change the seed (update-ref --stdin, stash, etc.).
-    fn cold_seed_match_spec(
-        &self,
-        cmd: &NormalizedCommand,
-    ) -> Option<(ExpectedTransition, Vec<&'static str>)> {
-        // Only commit/amend entries carry a message specific enough to identify
-        // the command's own entry unambiguously (both on HEAD and on the branch
-        // ref it moves). These are exactly the attribution-critical cases the
-        // concurrent-burst / rebase-patch-stack flake hits.
+    fn cold_seed_match_spec(&self, cmd: &NormalizedCommand) -> Option<ColdSeedMatchSpec> {
+        // Only commands with enough reflog structure to distinguish their own
+        // rows should clamp a cold asynchronous seed backward. Single-entry
+        // commits use their subject-specific reflog message; rebase/pull use
+        // their start/pick/finish span shape.
         let args = command_args(cmd);
         match cmd.primary_command.as_deref()? {
             "commit" => {
                 let amend = args.iter().any(|arg| arg == "--amend");
-                let prefixes: Vec<&'static str> = if amend {
-                    vec!["commit (amend):"]
+                let prefixes: Vec<String> = if amend {
+                    vec!["commit (amend):".to_string()]
                 } else {
-                    vec!["commit", "commit (initial):"]
+                    vec!["commit".to_string(), "commit (initial):".to_string()]
                 };
                 let expected = ExpectedTransition::default()
                     .with_reflog_messages(commit_reflog_messages(&args, amend));
-                Some((expected, prefixes))
+                Some(ColdSeedMatchSpec::SingleEntry { expected, prefixes })
             }
+            "pull" => Some(ColdSeedMatchSpec::PullSpan {
+                action: pull_reflog_action(cmd),
+                expected: ExpectedTransition::default(),
+            }),
+            "rebase" => Some(ColdSeedMatchSpec::RebaseSpan {
+                expected: ExpectedTransition::default(),
+            }),
             _ => None,
         }
     }
@@ -2462,6 +2541,78 @@ fn pull_reflog_action_starts_new_command(message: &str, action: &str) -> bool {
     )
 }
 
+fn clamp_seed_to_entry_containing_offset(
+    entries: &[CursorEntry],
+    offset: u64,
+    message_prefixes: &[&str],
+) -> Option<u64> {
+    // A matching row after the offset means the offset is a real command-start
+    // boundary before the current command's reflog write. Do not rewind into
+    // older history in that case.
+    if entries.iter().any(|entry| {
+        entry.start_offset >= offset && message_matches(&entry.message, message_prefixes)
+    }) {
+        return None;
+    }
+
+    // If the asynchronous offset landed at EOF or in the middle of the command's
+    // own branch-finish row, seed from the row start so the parser never begins
+    // inside a reflog record.
+    entries
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.start_offset < offset
+                && offset <= entry.end_offset
+                && message_matches(&entry.message, message_prefixes)
+        })
+        .map(|entry| entry.start_offset)
+}
+
+fn pull_span_start_containing_offset(
+    entries: &[CursorEntry],
+    offset: u64,
+    action: &str,
+    expected: ExpectedTransition,
+) -> Option<u64> {
+    // If a rebase/pull start row exists after the offset, the offset is a true
+    // boundary before the current span. Keep it as-is.
+    if entries.iter().any(|entry| {
+        entry.start_offset >= offset && pull_reflog_action_is(&entry.message, action, "start")
+    }) {
+        return None;
+    }
+
+    entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(idx, entry)| {
+            entry.start_offset < offset
+                && pull_reflog_action_is(&entry.message, action, "start")
+                && expected.matches_span_boundary(entry)
+                && pull_span_covers_offset(entries, *idx, offset, action)
+        })
+        .map(|(_, entry)| entry.start_offset)
+}
+
+fn pull_span_covers_offset(
+    entries: &[CursorEntry],
+    start_idx: usize,
+    offset: u64,
+    action: &str,
+) -> bool {
+    for entry in entries.iter().skip(start_idx + 1) {
+        if entry.start_offset >= offset {
+            return true;
+        }
+        if pull_reflog_action_starts_new_command(&entry.message, action) {
+            return offset <= entry.end_offset;
+        }
+    }
+    true
+}
+
 fn rebase_reflog_action(message: &str) -> Option<&str> {
     let rest = message.strip_prefix("rebase")?;
     let open = rest.find('(')?;
@@ -2472,6 +2623,51 @@ fn rebase_reflog_action(message: &str) -> Option<&str> {
 
 fn rebase_reflog_action_is(message: &str, expected: &str) -> bool {
     rebase_reflog_action(message).is_some_and(|action| action == expected)
+}
+
+fn rebase_reflog_action_starts_new_command(message: &str) -> bool {
+    matches!(
+        rebase_reflog_action(message),
+        Some("start" | "continue" | "skip" | "abort" | "quit" | "finish")
+    )
+}
+
+fn rebase_span_start_containing_offset(
+    entries: &[CursorEntry],
+    offset: u64,
+    expected: ExpectedTransition,
+) -> Option<u64> {
+    // If a rebase start row exists after the offset, the offset is a true
+    // boundary before the current span. Keep it as-is.
+    if entries.iter().any(|entry| {
+        entry.start_offset >= offset && rebase_reflog_action_is(&entry.message, "start")
+    }) {
+        return None;
+    }
+
+    entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(idx, entry)| {
+            entry.start_offset < offset
+                && rebase_reflog_action_is(&entry.message, "start")
+                && expected.matches_span_boundary(entry)
+                && rebase_span_covers_offset(entries, *idx, offset)
+        })
+        .map(|(_, entry)| entry.start_offset)
+}
+
+fn rebase_span_covers_offset(entries: &[CursorEntry], start_idx: usize, offset: u64) -> bool {
+    for entry in entries.iter().skip(start_idx + 1) {
+        if entry.start_offset >= offset {
+            return true;
+        }
+        if rebase_reflog_action_starts_new_command(&entry.message) {
+            return offset <= entry.end_offset;
+        }
+    }
+    true
 }
 
 fn rebase_start_checkout_target_from_args(args: &[String]) -> Option<String> {
@@ -4491,6 +4687,156 @@ mod tests {
     }
 
     #[test]
+    fn cold_rebase_late_ingress_offset_still_recovers_start_and_branch_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+
+        let start_line = format!(
+            "{B} {C} Test User <test@example.com> 0 +0000\trebase (start): checkout main\n"
+        );
+        let pick_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\trebase (pick): Local commit\n");
+        let finish_line = format!(
+            "{D} {D} Test User <test@example.com> 0 +0000\trebase (finish): returning to refs/heads/topic\n"
+        );
+        fs::write(
+            git_dir.join("logs/HEAD"),
+            format!("{start_line}{pick_line}{finish_line}"),
+        )
+        .unwrap();
+        let late_head_offset = start_line.len() as u64;
+
+        let branch_line = format!(
+            "{B} {D} Test User <test@example.com> 0 +0000\trebase (finish): refs/heads/topic onto main\n"
+        );
+        fs::write(git_dir.join("logs/refs/heads/topic"), &branch_line).unwrap();
+        let late_branch_offset = branch_line.len() as u64;
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/topic".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "main"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), late_head_offset);
+        cmd.reflog_start_offsets
+            .insert(common_key("refs/heads/topic"), late_branch_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ],
+            "cold late rebase enrichment must preserve the non-fast-forward local-tip to rebased-tip pair"
+        );
+    }
+
+    #[test]
+    fn cold_rebase_true_boundary_does_not_replay_older_rebase_span() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+
+        let old_start = format!(
+            "{A} {B} Test User <test@example.com> 0 +0000\trebase (start): checkout main\n"
+        );
+        let old_pick =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\trebase (pick): Old commit\n");
+        let old_finish = format!(
+            "{C} {C} Test User <test@example.com> 0 +0000\trebase (finish): returning to refs/heads/topic\n"
+        );
+        let current_start = format!(
+            "{D} {E} Test User <test@example.com> 0 +0000\trebase (start): checkout main\n"
+        );
+        let current_pick = format!(
+            "{E} {F} Test User <test@example.com> 0 +0000\trebase (pick): Current commit\n"
+        );
+        let current_finish = format!(
+            "{F} {F} Test User <test@example.com> 0 +0000\trebase (finish): returning to refs/heads/topic\n"
+        );
+        let true_head_boundary = (old_start.len() + old_pick.len() + old_finish.len()) as u64;
+        fs::write(
+            git_dir.join("logs/HEAD"),
+            format!(
+                "{old_start}{old_pick}{old_finish}{current_start}{current_pick}{current_finish}"
+            ),
+        )
+        .unwrap();
+
+        let old_branch = format!(
+            "{A} {C} Test User <test@example.com> 0 +0000\trebase (finish): refs/heads/topic onto main\n"
+        );
+        let current_branch = format!(
+            "{D} {F} Test User <test@example.com> 0 +0000\trebase (finish): refs/heads/topic onto main\n"
+        );
+        let true_branch_boundary = old_branch.len() as u64;
+        fs::write(
+            git_dir.join("logs/refs/heads/topic"),
+            format!("{old_branch}{current_branch}"),
+        )
+        .unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), D.to_string());
+        state
+            .refs
+            .insert("refs/heads/topic".to_string(), D.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "main"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), true_head_boundary);
+        cmd.reflog_start_offsets
+            .insert(common_key("refs/heads/topic"), true_branch_boundary);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: D.to_string(),
+                    new: E.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: E.to_string(),
+                    new: F.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: D.to_string(),
+                    new: F.to_string(),
+                },
+            ],
+            "true command-start boundary must not rewind into an older rebase span"
+        );
+    }
+
+    #[test]
     fn rebase_span_stops_before_later_rebase_after_checkout() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("repo");
@@ -4804,6 +5150,158 @@ mod tests {
                     new: D.to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn cold_pull_rebase_late_ingress_offset_still_recovers_start_and_branch_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+
+        let start_line = format!(
+            "{B} {C} Test User <test@example.com> 0 +0000\tpull --rebase (start): checkout {C}\n"
+        );
+        let pick_line = format!(
+            "{C} {D} Test User <test@example.com> 0 +0000\tpull --rebase (pick): Local commit\n"
+        );
+        let finish_line = format!(
+            "{D} {D} Test User <test@example.com> 0 +0000\tpull --rebase (finish): returning to refs/heads/main\n"
+        );
+        fs::write(
+            git_dir.join("logs/HEAD"),
+            format!("{start_line}{pick_line}{finish_line}"),
+        )
+        .unwrap();
+        let late_head_offset = start_line.len() as u64;
+
+        let branch_line = format!(
+            "{B} {D} Test User <test@example.com> 0 +0000\tpull --rebase (finish): refs/heads/main onto {C}\n"
+        );
+        fs::write(git_dir.join("logs/refs/heads/main"), &branch_line).unwrap();
+        let late_branch_offset = branch_line.len() as u64;
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/main".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["pull", "--rebase"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), late_head_offset);
+        cmd.reflog_start_offsets
+            .insert(common_key("refs/heads/main"), late_branch_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/main".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ],
+            "cold late pull-rebase enrichment must preserve the non-fast-forward local-tip to rebased-tip pair"
+        );
+    }
+
+    #[test]
+    fn cold_pull_rebase_true_boundary_does_not_replay_older_pull_span() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+
+        let old_start = format!(
+            "{A} {B} Test User <test@example.com> 0 +0000\tpull --rebase (start): checkout main\n"
+        );
+        let old_pick = format!(
+            "{B} {C} Test User <test@example.com> 0 +0000\tpull --rebase (pick): Old commit\n"
+        );
+        let old_finish = format!(
+            "{C} {C} Test User <test@example.com> 0 +0000\tpull --rebase (finish): returning to refs/heads/main\n"
+        );
+        let current_start = format!(
+            "{D} {E} Test User <test@example.com> 0 +0000\tpull --rebase (start): checkout main\n"
+        );
+        let current_pick = format!(
+            "{E} {F} Test User <test@example.com> 0 +0000\tpull --rebase (pick): Current commit\n"
+        );
+        let current_finish = format!(
+            "{F} {F} Test User <test@example.com> 0 +0000\tpull --rebase (finish): returning to refs/heads/main\n"
+        );
+        let true_head_boundary = (old_start.len() + old_pick.len() + old_finish.len()) as u64;
+        fs::write(
+            git_dir.join("logs/HEAD"),
+            format!(
+                "{old_start}{old_pick}{old_finish}{current_start}{current_pick}{current_finish}"
+            ),
+        )
+        .unwrap();
+
+        let old_branch = format!(
+            "{A} {C} Test User <test@example.com> 0 +0000\tpull --rebase (finish): refs/heads/main onto main\n"
+        );
+        let current_branch = format!(
+            "{D} {F} Test User <test@example.com> 0 +0000\tpull --rebase (finish): refs/heads/main onto main\n"
+        );
+        let true_branch_boundary = old_branch.len() as u64;
+        fs::write(
+            git_dir.join("logs/refs/heads/main"),
+            format!("{old_branch}{current_branch}"),
+        )
+        .unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), D.to_string());
+        state
+            .refs
+            .insert("refs/heads/main".to_string(), D.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["pull", "--rebase"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), true_head_boundary);
+        cmd.reflog_start_offsets
+            .insert(common_key("refs/heads/main"), true_branch_boundary);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: D.to_string(),
+                    new: E.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: E.to_string(),
+                    new: F.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/main".to_string(),
+                    old: D.to_string(),
+                    new: F.to_string(),
+                },
+            ],
+            "true command-start boundary must not rewind into an older pull-rebase span"
         );
     }
 

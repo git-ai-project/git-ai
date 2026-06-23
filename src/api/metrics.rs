@@ -14,6 +14,16 @@ const RETRY_DELAYS_SECS: [u64; 1] = [60];
 const METRICS_UPLOAD_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 static LAST_METRICS_UPLOAD_STARTED_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
+/// Returns whether metrics are allowed to upload for the current API context.
+///
+/// Keep this in sync with user-facing status output: the default hosted API
+/// requires either OAuth login or an API key, while custom API URLs are assumed
+/// to be intentionally configured for delivery.
+pub fn metrics_upload_allowed(api_base_url: &str, client: &ApiClient) -> bool {
+    let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
+    !using_default_api || client.is_logged_in() || client.has_api_key()
+}
+
 fn wait_for_metrics_upload_rate_limit() -> Result<(), GitAiError> {
     let limiter = LAST_METRICS_UPLOAD_STARTED_AT.get_or_init(|| Mutex::new(None));
     let mut last_started_at = limiter.lock().map_err(|_| {
