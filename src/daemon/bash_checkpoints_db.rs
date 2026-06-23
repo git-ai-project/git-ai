@@ -178,6 +178,63 @@ impl BashCheckpointsDatabase {
         }
         Ok(())
     }
+
+    // ----- Write operations -----
+
+    /// Record (or update) a bash checkpoint's pre-hook facts. Upserts on the
+    /// `(session_id, tool_use_id)` correlation pair so a duplicate pre-hook does
+    /// not create a second row. A non-`None` command never overwrites a stored
+    /// command with `NULL`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_start(
+        &mut self,
+        session_id: &str,
+        tool_use_id: &str,
+        repo_work_dir: &str,
+        agent: &crate::authorship::working_log::AgentId,
+        command: Option<&str>,
+        start_ns: i64,
+        now_secs: i64,
+    ) -> Result<(), GitAiError> {
+        self.conn.execute(
+            "INSERT INTO bash_checkpoints
+                (session_id, tool_use_id, repo_work_dir, tool, agent_model, agent_internal_id, command, start_ns, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(session_id, tool_use_id) DO UPDATE SET
+                repo_work_dir     = excluded.repo_work_dir,
+                tool              = excluded.tool,
+                agent_model       = excluded.agent_model,
+                agent_internal_id = excluded.agent_internal_id,
+                command           = COALESCE(excluded.command, bash_checkpoints.command),
+                start_ns          = excluded.start_ns",
+            params![
+                session_id,
+                tool_use_id,
+                repo_work_dir,
+                agent.tool,
+                agent.model,
+                agent.id,
+                command,
+                start_ns,
+                now_secs
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record a bash checkpoint's post-hook end timestamp.
+    pub fn record_end(
+        &mut self,
+        session_id: &str,
+        tool_use_id: &str,
+        end_ns: i64,
+    ) -> Result<(), GitAiError> {
+        self.conn.execute(
+            "UPDATE bash_checkpoints SET end_ns = ?1 WHERE session_id = ?2 AND tool_use_id = ?3",
+            params![end_ns, session_id, tool_use_id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +246,53 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db = BashCheckpointsDatabase::open_at_path(&dir.path().join("bash-ckpt.db")).unwrap();
         (db, dir)
+    }
+
+    use crate::authorship::working_log::AgentId;
+
+    fn agent() -> AgentId {
+        AgentId {
+            tool: "claude".into(),
+            id: "sess1".into(),
+            model: "opus".into(),
+        }
+    }
+
+    #[test]
+    fn test_record_start_then_end_roundtrips() {
+        let (mut db, _t) = test_db();
+        db.record_start("s1", "t1", "/repo", &agent(), Some("ls -la"), 1_000, 10)
+            .unwrap();
+        db.record_end("s1", "t1", 2_000).unwrap();
+        let row: (String, Option<i64>, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT command, end_ns, tool FROM bash_checkpoints WHERE session_id='s1' AND tool_use_id='t1'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "ls -la");
+        assert_eq!(row.1, Some(2_000));
+        assert_eq!(row.2, Some("claude".to_string()));
+    }
+
+    #[test]
+    fn test_record_start_upsert_no_dup() {
+        let (mut db, _t) = test_db();
+        db.record_start("s1", "t1", "/repo", &agent(), None, 1_000, 10)
+            .unwrap();
+        db.record_start("s1", "t1", "/repo", &agent(), Some("cmd"), 1_500, 10)
+            .unwrap();
+        let n: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM bash_checkpoints WHERE session_id='s1' AND tool_use_id='t1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
