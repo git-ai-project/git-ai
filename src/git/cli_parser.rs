@@ -196,6 +196,14 @@ pub fn summarize_restore_args(command_args: &[String]) -> RestoreArgsSummary {
         }
 
         if arg.starts_with('-') {
+            // Flags that take a space-separated value (`--conflict <style>`,
+            // `--pathspec-from-file <file>`); skip the value so it is not
+            // mistaken for a pathspec. The `=` forms are self-contained.
+            let takes_value = matches!(arg, "--conflict" | "--pathspec-from-file");
+            if takes_value && !arg.contains('=') {
+                i += 2;
+                continue;
+            }
             // Other restore flags (--staged, --worktree, --ours, --theirs, ...)
             // are value-less; skip the flag itself.
             i += 1;
@@ -845,6 +853,37 @@ mod tests {
         let s = restore(&["restore", "-sHEAD~1", "--", "f.ts"]);
         assert_eq!(s.source.as_deref(), Some("HEAD~1"));
         assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_value_taking_flags_do_not_become_pathspecs() {
+        // `--conflict <style>` and `--pathspec-from-file <file>` take a
+        // space-separated value that must not be collected as a pathspec.
+        let s = restore(&[
+            "restore",
+            "--source",
+            "abc",
+            "--conflict",
+            "merge",
+            "--",
+            "f.ts",
+        ]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+
+        let s = restore(&[
+            "restore",
+            "--source",
+            "abc",
+            "--pathspec-from-file",
+            "paths.txt",
+        ]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert!(
+            s.pathspecs.is_empty(),
+            "the pathspec-from-file argument must not be treated as a pathspec, got {:?}",
+            s.pathspecs
+        );
     }
 
     #[test]
