@@ -86,6 +86,7 @@ pub fn may_mutate_repo_state_command(command: &str) -> bool {
             | "rebase"
             | "remote"
             | "reset"
+            | "restore"
             | "revert"
             | "stash"
             | "switch"
@@ -120,6 +121,7 @@ pub fn participates_in_family_sequencer_command(command: &str) -> bool {
             | "rebase"
             | "remote"
             | "reset"
+            | "restore"
             | "revert"
             | "stash"
             | "switch"
@@ -577,6 +579,7 @@ mod tests {
             "rebase",
             "remote",
             "reset",
+            "restore",
             "revert",
             "stash",
             "switch",
@@ -611,12 +614,39 @@ mod tests {
             );
         }
 
-        for cmd in ["commit", "rebase", "reset", "stash", "update-ref"] {
+        for cmd in [
+            "commit",
+            "rebase",
+            "reset",
+            "restore",
+            "stash",
+            "update-ref",
+        ] {
             assert!(
                 participates_in_family_sequencer_command(cmd),
                 "{cmd} should be sequenced inside its repo family"
             );
         }
+    }
+
+    #[test]
+    fn restore_with_source_is_mutating_and_sequenced_but_not_read_only() {
+        let args = ["--source", "abc123", "--", "file.ts"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            !is_definitely_read_only_git_invocation("restore", &args),
+            "git restore --source should never be read-only"
+        );
+        assert!(
+            git_invocation_may_mutate_repo_state("restore", &args),
+            "git restore --source should be treated as mutating"
+        );
+        assert!(
+            git_invocation_participates_in_family_sequencer("restore", &args),
+            "git restore --source should be sequenced inside its repo family"
+        );
     }
 
     #[test]

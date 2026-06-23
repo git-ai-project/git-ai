@@ -56,6 +56,11 @@ pub struct NormalizedCommand {
     pub stash_target_oid: Option<String>,
     pub cherry_pick_source_oids: Vec<String>,
     pub revert_source_oids: Vec<String>,
+    /// Resolved full commit OID of `git restore --source <X>`, when present.
+    /// `restore` does not move HEAD, so this is resolved against the live
+    /// worktree at analysis time. `None` for restores without `--source`.
+    #[serde(default)]
+    pub restore_source_oid: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
 }
@@ -176,7 +181,15 @@ pub enum SemanticEvent {
     NotesUpdated,
     ReplaceUpdated,
     CheckoutPaths,
-    RestorePaths,
+    RestorePaths {
+        /// Resolved full OID of `--source`; `None` => no-op (no cross-commit move).
+        source_oid: Option<String>,
+        /// Files being restored (pathspecs after `--`).
+        pathspecs: Vec<String>,
+        /// Current HEAD OID (restore does not move HEAD); the base the next
+        /// commit will use.
+        head: Option<String>,
+    },
     CleanedWorkspace,
     StashOperation {
         kind: StashOpKind,
