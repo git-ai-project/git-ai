@@ -277,7 +277,9 @@ fn fetch_authorship_notes_inner(
             "fetch_authorship_notes: rate-limited, skipping fetch from '{}'",
             remote_name
         );
-        return Ok(NotesExistence::NotFound);
+        // A recent fetch succeeded, so notes are presumed present. Returning
+        // NotFound here would falsely signal "confirmed no notes on remote".
+        return Ok(NotesExistence::Found);
     }
 
     // Generate tracking ref for this remote
