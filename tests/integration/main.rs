@@ -72,6 +72,7 @@ mod github_copilot_tools;
 mod github_integration;
 mod gix_config_tests;
 mod graphite;
+mod http_notes_backend;
 mod ignore_prompts;
 mod ignore_unit;
 mod initial_attributions;

@@ -126,14 +126,34 @@ pub fn read_notes_batch(
             Ok(notes)
         }
         NotesBackendKind::GitNotes => {
-            // git_notes: authoritative read from git ref. Errors are propagated
-            // to preserve the original contract — callers that detect corrupt
-            // notes rely on this returning Err.
-            //
-            // SQLite is used as a write-through cache on writes (see
-            // write_notes_batch) but is NOT consulted on reads — the git ref
-            // is always authoritative for this backend.
-            crate::git::refs::notes_for_commits(repo, commit_shas)
+            // Step 1 (git_notes): check SQLite cache — fast, no subprocess.
+            let mut notes = git_notes_read_from_sqlite(commit_shas);
+
+            let missing: Vec<String> = commit_shas
+                .iter()
+                .filter(|sha| !notes.contains_key(*sha))
+                .cloned()
+                .collect();
+
+            if missing.is_empty() {
+                return Ok(notes);
+            }
+
+            // Step 2 (git_notes): fall back to git ref for misses. Errors are
+            // propagated — callers that detect corrupt notes rely on this.
+            let from_git = crate::git::refs::notes_for_commits(repo, &missing)?;
+
+            // Step 3 (git_notes): cache git-ref hits back into SQLite.
+            if !from_git.is_empty() {
+                let entries: Vec<(String, String)> = from_git
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                git_notes_write_batch_to_sqlite(&entries);
+            }
+
+            notes.extend(from_git);
+            Ok(notes)
         }
     }
 }
@@ -403,16 +423,9 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
     use crate::api::client::{ApiClient, ApiContext};
     use crate::git::repository::exec_git;
 
-    // Rate-limit per repo: skip if we fetched HTTP notes for this repo less than 1s ago.
-    let repo_key = format!(
-        "{}::{}",
-        repo.workdir()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| repo.path().to_string_lossy().into_owned()),
-        remote
-    );
-    if crate::git::sync_authorship::http_notes_fetch_rate_limited(&repo_key) {
+    // Process-global rate limit: at most one HTTP notes fetch per second across
+    // all repos in the daemon.
+    if crate::git::sync_authorship::http_notes_fetch_rate_limited() {
         tracing::debug!(
             "warm_cache_for_remote: rate-limited, skipping HTTP fetch for '{}'",
             remote
@@ -830,6 +843,25 @@ fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String>
 
 fn http_check_exists(commit_shas: &[String]) -> HashSet<String> {
     http_read_notes(commit_shas).into_keys().collect()
+}
+
+/// Read-cache helper for the `git_notes` backend: return whatever entries are
+/// already in SQLite. Returns an empty map on any DB error (treated as a miss).
+fn git_notes_read_from_sqlite(commit_shas: &[String]) -> HashMap<String, String> {
+    let shas: Vec<&str> = commit_shas.iter().map(|s| s.as_str()).collect();
+    match crate::notes::db::NotesDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(lock) => lock.get_notes(&shas).unwrap_or_default(),
+            Err(e) => {
+                tracing::debug!("git_notes_read_from_sqlite: DB lock poisoned: {}", e);
+                HashMap::new()
+            }
+        },
+        Err(e) => {
+            tracing::debug!("git_notes_read_from_sqlite: failed to open DB: {}", e);
+            HashMap::new()
+        }
+    }
 }
 
 /// Write-through cache helper for the `git_notes` backend: persist entries into

@@ -2554,19 +2554,18 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_notes_backend_url_explicit_overrides_api_base_url() {
         // An explicit backend_url in env takes precedence over api_base_url.
         unsafe {
             std::env::set_var("GIT_AI_NOTES_BACKEND_URL", "https://notes.example.com");
         }
         let config = build_config();
-        assert_eq!(
-            config.notes_backend_url(),
-            Some("https://notes.example.com")
-        );
+        let result = config.notes_backend_url().map(|s| s.to_string());
         unsafe {
             std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
         }
+        assert_eq!(result.as_deref(), Some("https://notes.example.com"));
     }
 
     #[test]
@@ -2596,6 +2595,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_notes_backend_env_var_overrides_file_config_via_fresh() {
         // Verify that GIT_AI_NOTES_BACKEND_KIND=http is correctly resolved in
         // `build_config()`. We call Config::fresh() with the env var set.
