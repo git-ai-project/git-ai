@@ -7,7 +7,7 @@ use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::Config;
 use crate::error::GitAiError;
-use crate::git::notes_api::write_note as notes_add;
+use crate::git::notes_api::write_note;
 use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
@@ -275,7 +275,7 @@ where
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
-    notes_add(repo, &commit_sha, &authorship_note_str)?;
+    write_note(repo, &commit_sha, &authorship_note_str)?;
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
@@ -584,7 +584,7 @@ pub fn post_commit_amend(
     let authorship_note_str = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
-    notes_add(repo, amended_commit, &authorship_note_str)?;
+    write_note(repo, amended_commit, &authorship_note_str)?;
 
     // Write INITIAL file for uncommitted attributions
     if !initial_attributions.files.is_empty() {
