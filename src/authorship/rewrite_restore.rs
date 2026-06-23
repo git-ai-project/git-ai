@@ -28,6 +28,12 @@ use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 
 /// Trailing-`*` prefix glob matcher mirroring `rewrite_stash::path_matches_any`,
 /// so partial restores scoped to a directory/glob attribute only those paths.
+///
+/// `path` is repo-root-relative (authorship-log space); `pathspecs` come from the
+/// command's raw argv. As with the stash handler, a pathspec given relative to a
+/// subdirectory CWD (e.g. `feature.ts` from `src/`) is not CWD-normalized and so
+/// may not match the root-relative log path. This shares the trace2 raw-argv
+/// limitation of `rewrite_stash` and is acceptable for the common root-CWD case.
 fn path_matches_any(path: &str, pathspecs: &[String]) -> bool {
     pathspecs.iter().any(|spec| {
         if let Some(prefix) = spec.strip_suffix('*') {

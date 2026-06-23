@@ -155,6 +155,10 @@ pub struct RestoreArgsSummary {
 /// Parse `git restore` arguments (the args AFTER the `restore` subcommand).
 /// Consumes `--source`'s value so it is never mistaken for a pathspec, and
 /// collects pathspecs from after `--` (or trailing positionals if absent).
+///
+/// Note: pathspecs supplied via `--pathspec-from-file` live in a file and never
+/// appear in argv, so `pathspecs` is empty for that form and attribution carry
+/// is skipped — the same limitation the stash handler has.
 pub fn summarize_restore_args(command_args: &[String]) -> RestoreArgsSummary {
     let args = if command_args.first().is_some_and(|arg| arg == "restore") {
         &command_args[1..]
