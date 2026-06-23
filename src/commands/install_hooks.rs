@@ -1304,6 +1304,33 @@ mod tests {
 
     #[test]
     #[serial]
+    fn enterprise_bootstrap_preserves_fetch_error_when_cache_is_invalid() {
+        let temp = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
+        let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+
+        let server = mockito::Server::new();
+        crate::config::save_file_config(&crate::config::FileConfig {
+            api_base_url: Some(server.url()),
+            api_key: Some("sk-enterprise-key".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let cache_path = crate::enterprise_config::enterprise_config_cache_path().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(cache_path, b"not-json").unwrap();
+
+        let err = bootstrap_enterprise_config(false).unwrap_err().to_string();
+        assert!(err.contains("enterprise config bootstrap failed"));
+        assert!(err.contains("enterprise config fetch failed"));
+        assert!(!err.contains("invalid enterprise cache"));
+    }
+
+    #[test]
+    #[serial]
     fn enterprise_bootstrap_uses_valid_cache_on_fetch_failure() {
         let temp = tempdir().unwrap();
         let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
