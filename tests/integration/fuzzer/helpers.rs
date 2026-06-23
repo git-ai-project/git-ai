@@ -217,10 +217,8 @@ fn is_valid_line_ranges(ranges_str: &str) -> bool {
 pub fn extract_metadata_sessions(note: &str) -> Option<HashSet<&str>> {
     let json_section = if let Some(idx) = note.find("\n---\n") {
         &note[idx + 5..]
-    } else if let Some(stripped) = note.strip_prefix("---\n") {
-        stripped
     } else {
-        return None;
+        note.strip_prefix("---\n")?
     };
 
     let sessions_idx = json_section.find("\"sessions\"")?;

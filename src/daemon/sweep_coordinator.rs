@@ -175,6 +175,15 @@ impl SweepCoordinator {
         if !path.exists() {
             return Ok(None);
         }
+        if !crate::config::Config::fresh().is_allowed_repository_with_remotes(None) {
+            tracing::debug!(
+                tool,
+                stream_kind = stream.stream_kind,
+                path = %path.display(),
+                "skipping shared stream: repository cannot be verified under allow_repositories"
+            );
+            return Ok(None);
+        }
 
         Ok(Some(SweepItem::SharedStream {
             tool: tool.to_string(),
