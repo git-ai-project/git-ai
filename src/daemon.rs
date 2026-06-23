@@ -2515,6 +2515,7 @@ pub struct ActorDaemonCoordinator {
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
     stream_worker: Option<crate::daemon::stream_worker::StreamWorkerHandle>,
     transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    enterprise_config_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     streams_db: Option<Arc<crate::streams::db::StreamsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -2606,6 +2607,7 @@ impl ActorDaemonCoordinator {
             telemetry_worker: None,
             stream_worker: None,
             transcript_shutdown_notify: std::sync::OnceLock::new(),
+            enterprise_config_shutdown_notify: std::sync::OnceLock::new(),
             streams_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -2812,6 +2814,9 @@ impl ActorDaemonCoordinator {
         self.shutdown_notify.notify_waiters();
         if let Some(transcript_shutdown) = self.transcript_shutdown_notify.get() {
             transcript_shutdown.notify_one();
+        }
+        if let Some(enterprise_config_shutdown) = self.enterprise_config_shutdown_notify.get() {
+            enterprise_config_shutdown.notify_one();
         }
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
@@ -7163,7 +7168,6 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     remove_stale_daemon_files(&config);
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
-    write_pid_metadata(&config)?;
 
     // Initialize tracing subscriber before log file redirect so the fmt layer
     // captures stderr (fd 2). After dup2, writes go to the daemon log file.
@@ -7200,10 +7204,26 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
         "daemon started"
     );
 
+    match crate::enterprise_config::bootstrap_enterprise_config(
+        "daemon startup",
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(outcome) => tracing::info!(?outcome, "enterprise config bootstrap completed"),
+        Err(e) => return Err(GitAiError::Generic(e)),
+    }
+
+    write_pid_metadata(&config)?;
+
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
     let mut coordinator_inner = ActorDaemonCoordinator::new();
+
+    let enterprise_config_shutdown = Arc::new(tokio::sync::Notify::new());
+    crate::enterprise_config::spawn_enterprise_config_worker(enterprise_config_shutdown.clone());
+    let _ = coordinator_inner
+        .enterprise_config_shutdown_notify
+        .set(enterprise_config_shutdown);
 
     // Spawn the telemetry worker inside the daemon's tokio runtime.
     let telemetry_handle = crate::daemon::telemetry_worker::spawn_telemetry_worker();

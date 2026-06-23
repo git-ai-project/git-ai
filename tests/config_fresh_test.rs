@@ -2,7 +2,11 @@ use git_ai::api::client::ApiContext;
 use git_ai::auth::client::OAuthClient;
 /// Tests for config refresh behavior (Config::fresh() vs Config::get())
 /// These tests verify that Config::fresh() reads from disk while Config::get() uses cached values.
-use git_ai::config::{Config, load_file_config_public, save_file_config};
+use git_ai::config::{
+    Config, FileConfig, NotesBackendConfig, NotesBackendKind, load_file_config_public,
+    save_file_config,
+};
+use git_ai::enterprise_config::{EnterpriseConfig, EnterpriseConfigFetchResult};
 use serial_test::serial;
 use std::env;
 use tempfile::TempDir;
@@ -74,6 +78,41 @@ impl Drop for HomeEnvGuard {
                     Some(v) => env::set_var("HOMEPATH", v),
                     None => env::remove_var("HOMEPATH"),
                 }
+            }
+        }
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn remove(key: &'static str) -> Self {
+        let previous = env::var_os(key);
+        unsafe {
+            env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = env::var_os(key);
+        unsafe {
+            env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = self.previous.as_ref() {
+                env::set_var(self.key, previous);
+            } else {
+                env::remove_var(self.key);
             }
         }
     }
@@ -229,6 +268,126 @@ fn test_config_fresh_respects_env_vars() {
             env::remove_var("GIT_AI_API_BASE_URL");
         }
     }
+}
+
+#[test]
+#[serial]
+fn test_enterprise_config_overrides_user_config_for_compatible_fields() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let _api_key_guard = EnvVarGuard::remove("GIT_AI_API_KEY");
+
+    save_file_config(&FileConfig {
+        api_key: Some("enterprise-key".to_string()),
+        prompt_storage: Some("default".to_string()),
+        disable_auto_updates: Some(false),
+        ..Default::default()
+    })
+    .expect("save config");
+
+    git_ai::enterprise_config::save_cache_for_api_key(
+        "enterprise-key",
+        &EnterpriseConfig {
+            prompt_storage: Some("local".to_string()),
+            disable_auto_updates: Some(true),
+            ..Default::default()
+        },
+    )
+    .expect("save enterprise cache");
+
+    let config = Config::fresh();
+    assert_eq!(config.prompt_storage(), "local");
+    assert!(config.auto_updates_disabled());
+    assert_eq!(config.api_key(), Some("enterprise-key"));
+}
+
+#[test]
+#[serial]
+fn test_enterprise_config_cache_is_scoped_to_api_key() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let _api_key_guard = EnvVarGuard::remove("GIT_AI_API_KEY");
+
+    save_file_config(&FileConfig {
+        api_key: Some("new-key".to_string()),
+        prompt_storage: Some("notes".to_string()),
+        ..Default::default()
+    })
+    .expect("save config");
+
+    git_ai::enterprise_config::save_cache_for_api_key(
+        "old-key",
+        &EnterpriseConfig {
+            prompt_storage: Some("local".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("save enterprise cache");
+
+    let config = Config::fresh();
+    assert_eq!(config.prompt_storage(), "notes");
+    assert!(
+        git_ai::enterprise_config::effective_cached_config(Some("new-key")).is_none(),
+        "mismatched cache should not be used"
+    );
+}
+
+#[test]
+#[serial]
+fn test_env_vars_override_enterprise_config() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+    let _backend_kind_guard = EnvVarGuard::set("GIT_AI_NOTES_BACKEND_KIND", "git_notes");
+    let _backend_url_guard = EnvVarGuard::remove("GIT_AI_NOTES_BACKEND_URL");
+
+    save_file_config(&FileConfig {
+        api_key: Some("enterprise-key".to_string()),
+        notes_backend: Some(NotesBackendConfig {
+            kind: NotesBackendKind::GitNotes,
+            backend_url: None,
+        }),
+        ..Default::default()
+    })
+    .expect("save config");
+
+    git_ai::enterprise_config::save_cache_for_api_key(
+        "enterprise-key",
+        &EnterpriseConfig {
+            notes_backend: Some(NotesBackendConfig {
+                kind: NotesBackendKind::Http,
+                backend_url: Some("https://enterprise.example.com".to_string()),
+            }),
+            ..Default::default()
+        },
+    )
+    .expect("save enterprise cache");
+
+    let config = Config::fresh();
+    assert_eq!(config.notes_backend_kind(), NotesBackendKind::GitNotes);
+}
+
+#[test]
+#[serial]
+fn test_disabled_enterprise_response_clears_cache() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let _home_guard = HomeEnvGuard::set(temp_dir.path());
+
+    git_ai::enterprise_config::save_cache_for_api_key(
+        "enterprise-key",
+        &EnterpriseConfig {
+            prompt_storage: Some("local".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("save enterprise cache");
+
+    git_ai::enterprise_config::apply_fetch_result(
+        "enterprise-key",
+        EnterpriseConfigFetchResult::Disabled,
+    )
+    .expect("apply disabled");
+
+    assert!(git_ai::enterprise_config::effective_cached_config(Some("enterprise-key")).is_none());
 }
 /// Test that ApiContext picks up config changes via Config::fresh()
 #[test]
