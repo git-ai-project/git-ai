@@ -641,6 +641,26 @@ fn sync_from_git_ref_into_db(
     use crate::git::repository::exec_git;
     use crate::git::repository::exec_git_stdin;
 
+    let Some(notes_tip) = local_notes_ref_tip(repo)? else {
+        tracing::debug!("sync_from_git_ref: refs/notes/ai is absent, skipping");
+        return Ok(());
+    };
+
+    let sync_cursor_key = notes_ref_sync_cursor_key(repo);
+    if db
+        .get_metadata_value(&sync_cursor_key)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(notes_tip.as_str())
+    {
+        tracing::debug!(
+            notes_tip,
+            "sync_from_git_ref: refs/notes/ai unchanged, skipping"
+        );
+        return Ok(());
+    }
+
     // 1. List all notes: `git notes --ref=ai list` → "<note-sha> <commit-sha>"
     let mut list_args = repo.global_args_for_exec();
     list_args.extend_from_slice(&[
@@ -670,6 +690,12 @@ fn sync_from_git_ref_into_db(
         .collect();
 
     if pairs.is_empty() {
+        if let Err(e) = db.set_metadata_value(&sync_cursor_key, &notes_tip) {
+            tracing::debug!(
+                "sync_from_git_ref: failed to record notes ref cursor: {}",
+                e
+            );
+        }
         return Ok(());
     }
 
@@ -752,14 +778,49 @@ fn sync_from_git_ref_into_db(
 
     if let Err(e) = db.cache_synced_notes(&entries) {
         tracing::debug!("sync_from_git_ref: cache_synced_notes error: {}", e);
-    } else {
+        return Ok(());
+    }
+    if let Err(e) = db.set_metadata_value(&sync_cursor_key, &notes_tip) {
         tracing::debug!(
-            count = entries.len(),
-            "sync_from_git_ref: refreshed notes from refs/notes/ai"
+            "sync_from_git_ref: failed to record notes ref cursor: {}",
+            e
         );
     }
+    tracing::debug!(
+        count = entries.len(),
+        notes_tip,
+        "sync_from_git_ref: refreshed notes from refs/notes/ai"
+    );
 
     Ok(())
+}
+
+fn local_notes_ref_tip(repo: &Repository) -> Result<Option<String>, GitAiError> {
+    use crate::git::repository::exec_git;
+
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        crate::git::refs::AI_AUTHORSHIP_FULL_REF.to_string(),
+    ]);
+
+    match exec_git(&args) {
+        Ok(output) => Ok(Some(String::from_utf8(output.stdout)?.trim().to_string())),
+        Err(GitAiError::GitCliError {
+            code: Some(128), ..
+        })
+        | Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn notes_ref_sync_cursor_key(repo: &Repository) -> String {
+    let common_dir = repo
+        .common_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+    format!("git_notes_ref_sync_tip:{}", common_dir.display())
 }
 
 // --- HTTP backend helpers (private) ---
@@ -1503,6 +1564,47 @@ mod tests {
             cached.as_deref().map(str::trim_end),
             Some("git-ref-content"),
             "sync_from_git_ref must refresh already-cached entries from refs/notes/ai"
+        );
+    }
+
+    #[test]
+    fn sync_from_git_ref_skips_when_notes_tip_unchanged() {
+        use crate::git::repository::exec_git;
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp db file");
+        let mut db = crate::notes::db::NotesDatabase::open_at_path(tmp_db.path()).expect("open db");
+
+        let repo = TmpRepo::new().expect("TmpRepo::new");
+        repo.write_file("a.txt", "hello", false).expect("write");
+        let sha = repo.commit_all("initial").expect("commit");
+
+        let mut args = repo.gitai_repo().global_args_for_exec();
+        args.extend([
+            "notes".to_string(),
+            "--ref=ai".to_string(),
+            "add".to_string(),
+            "-m".to_string(),
+            "git-ref-content".to_string(),
+            sha.clone(),
+        ]);
+        exec_git(&args).expect("git notes add");
+
+        let notes_tip = local_notes_ref_tip(repo.gitai_repo())
+            .expect("read notes tip")
+            .expect("notes tip");
+        db.set_metadata_value(&notes_ref_sync_cursor_key(repo.gitai_repo()), &notes_tip)
+            .expect("set sync cursor");
+        db.cache_synced_notes(&[(sha.clone(), "already-synced".to_string())])
+            .expect("seed cache");
+
+        sync_from_git_ref_into_db(repo.gitai_repo(), &mut db).expect("sync");
+
+        let cached = db.get_note(&sha).expect("get");
+        assert_eq!(
+            cached,
+            Some("already-synced".to_string()),
+            "unchanged notes ref tip should skip the full refresh"
         );
     }
 
