@@ -1249,11 +1249,20 @@ mod tests {
         let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
         let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
         let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+        let _git_committer_name = EnvVarGuard::set("GIT_COMMITTER_NAME", "Enterprise User");
+        let _git_committer_email =
+            EnvVarGuard::set("GIT_COMMITTER_EMAIL", "enterprise@example.com");
 
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/worker/config/enterprise")
             .match_header("x-api-key", "sk-enterprise-key")
+            .match_header("x-git-ai-version", env!("CARGO_PKG_VERSION"))
+            .match_header("x-distinct-id", mockito::Matcher::Regex(".+".to_string()))
+            .match_header(
+                "x-author-identity",
+                "Enterprise User <enterprise@example.com>",
+            )
             .with_status(200)
             .with_body(r#"{"enabled":true,"config":{"prompt_storage":"local"}}"#)
             .create();
