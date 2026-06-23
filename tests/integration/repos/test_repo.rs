@@ -1239,6 +1239,26 @@ impl TestRepo {
         if let Some(feature_flags) = &patch.feature_flags {
             config.insert("feature_flags".to_string(), feature_flags.clone());
         }
+        if let Some(allow) = &patch.allow_repositories {
+            let values = allow
+                .iter()
+                .map(|pattern| serde_json::Value::String(pattern.clone()))
+                .collect();
+            config.insert(
+                "allow_repositories".to_string(),
+                serde_json::Value::Array(values),
+            );
+        }
+        if let Some(exclude) = &patch.exclude_repositories {
+            let values = exclude
+                .iter()
+                .map(|pattern| serde_json::Value::String(pattern.clone()))
+                .collect();
+            config.insert(
+                "exclude_repositories".to_string(),
+                serde_json::Value::Array(values),
+            );
+        }
 
         let config_dir = home.join(".git-ai");
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");

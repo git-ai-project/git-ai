@@ -40,6 +40,32 @@ pub fn extract_event_timestamp(event: &serde_json::Value) -> Option<u32> {
     }
 }
 
+/// Decide whether a session's transcript events may be emitted under the
+/// configured `allow_repositories` / `exclude_repositories` filters.
+///
+/// `work_dir` is the resolved working directory for the session (hook > DB >
+/// inferred cwd), or `None` when it could not be determined — which is always
+/// the case for shared streams (e.g. Copilot OTEL) since they serve many repos.
+///
+/// Semantics mirror the checkpoint-time filter (`Config::is_allowed_repository`):
+/// exclusions take precedence, an empty allowlist allows everything, and an
+/// active allowlist fails closed — a session whose repository can't be verified
+/// (no work_dir, not a git repo, or no remote) is dropped. That fail-closed
+/// behavior is intentional: customers set these filters for security, so an
+/// unverifiable repository must not leak session data.
+pub(super) fn session_repo_allowed(config: &config::Config, work_dir: Option<&Path>) -> bool {
+    // Fast path: no filters configured (common case). Avoids touching the repo.
+    if !config.has_repository_filters() {
+        return true;
+    }
+
+    let remotes = work_dir
+        .and_then(|wd| crate::git::repository::discover_repository_in_path_no_git_exec(wd).ok())
+        .and_then(|repo| repo.remotes_with_urls().ok());
+
+    config.is_allowed_repository_with_remotes(remotes.as_ref())
+}
+
 /// Priority levels for processing tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
@@ -937,6 +963,21 @@ impl StreamWorker {
                 .or_else(|| stream.repo_work_dir.as_ref().map(PathBuf::from))
                 .or_else(|| agent.infer_cwd(&path))
         };
+
+        // Respect the allow_repositories / exclude_repositories filters for
+        // session (transcript) data, mirroring the checkpoint-time filter in
+        // `git_ai_handlers.rs`. Read a fresh config so a customer toggling the
+        // filters takes effect without restarting the long-lived daemon. When
+        // the repository is excluded (or can't be verified under an active
+        // allowlist) we emit nothing and intentionally do NOT advance the
+        // watermark, so the backlog still flows if the filters later change.
+        if !session_repo_allowed(&config::Config::fresh(), resolved_work_dir.as_deref()) {
+            tracing::debug!(
+                session_id = %task.session_id,
+                "skipping session events: repository excluded or not in allow_repositories"
+            );
+            return Ok(());
+        }
 
         // Persist inferred cwd to DB if stream didn't already have one
         if !is_shared_stream
