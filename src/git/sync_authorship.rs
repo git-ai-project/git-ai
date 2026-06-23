@@ -49,10 +49,10 @@ fn notes_fetch_rate_limited(cell: &OnceLock<RepoFetchMap>, repo_key: &str) -> bo
         return false; // poisoned — allow the fetch
     };
     let now = Instant::now();
-    if let Some(&prev) = map.get(repo_key) {
-        if now.saturating_duration_since(prev) < NOTES_FETCH_MIN_INTERVAL {
-            return true; // too soon
-        }
+    if let Some(&prev) = map.get(repo_key)
+        && now.saturating_duration_since(prev) < NOTES_FETCH_MIN_INTERVAL
+    {
+        return true; // too soon
     }
     map.insert(repo_key.to_string(), now);
     false

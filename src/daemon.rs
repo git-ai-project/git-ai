@@ -4675,28 +4675,26 @@ impl ActorDaemonCoordinator {
                         kind,
                         old_head,
                         new_head,
-                    } => {
-                        if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                            let repo = find_repository_in_path(&worktree)?;
-                            match kind {
-                                crate::daemon::domain::ResetKind::Hard => {
-                                    repo.storage.delete_working_log_for_base_commit(old_head)?;
-                                }
-                                _ => {
-                                    if is_ancestor_commit(&repo, new_head, old_head) {
-                                        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
-                                            &repo, old_head, new_head,
-                                        )?;
-                                    } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                        crate::authorship::rewrite::handle_rewrite_event(
-                                            &repo,
-                                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                                old_tip: old_head.to_string(),
-                                                new_tip: new_head.to_string(),
-                                                onto: None,
-                                            },
-                                        )?;
-                                    }
+                    } if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head => {
+                        let repo = find_repository_in_path(&worktree)?;
+                        match kind {
+                            crate::daemon::domain::ResetKind::Hard => {
+                                repo.storage.delete_working_log_for_base_commit(old_head)?;
+                            }
+                            _ => {
+                                if is_ancestor_commit(&repo, new_head, old_head) {
+                                    crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+                                        &repo, old_head, new_head,
+                                    )?;
+                                } else if !is_ancestor_commit(&repo, old_head, new_head) {
+                                    crate::authorship::rewrite::handle_rewrite_event(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                            old_tip: old_head.to_string(),
+                                            new_tip: new_head.to_string(),
+                                            onto: None,
+                                        },
+                                    )?;
                                 }
                             }
                         }
