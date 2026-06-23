@@ -82,6 +82,8 @@ define_feature_flags!(
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = true,
     checkpoint_debug_log: checkpoint_debug_log, debug = false, release = false,
+    attribution_recovery: attribution_recovery, debug = true, release = true,
+    bash_checkpoint_tracking: bash_checkpoint_tracking, debug = true, release = true,
 );
 
 impl FeatureFlags {
@@ -135,6 +137,8 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(flags.attribution_recovery);
+            assert!(flags.bash_checkpoint_tracking);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -142,6 +146,8 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(flags.attribution_recovery);
+            assert!(flags.bash_checkpoint_tracking);
         }
     }
 
@@ -191,6 +197,8 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: false,
+            attribution_recovery: true,
+            bash_checkpoint_tracking: true,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -198,6 +206,8 @@ mod tests {
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
         assert!(serialized.contains("checkpoint_debug_log"));
+        assert!(serialized.contains("attribution_recovery"));
+        assert!(serialized.contains("bash_checkpoint_tracking"));
     }
 
     #[test]
@@ -207,6 +217,8 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: true,
+            attribution_recovery: true,
+            bash_checkpoint_tracking: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);

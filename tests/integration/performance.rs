@@ -19,6 +19,8 @@ fn setup() {
         transcript_streaming: true,
         transcript_sweep: true,
         checkpoint_debug_log: false,
+        attribution_recovery: true,
+        bash_checkpoint_tracking: true,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());
