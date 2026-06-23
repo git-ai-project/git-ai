@@ -1415,7 +1415,7 @@ mod tests {
         );
 
         // Run sync via the inner function with our isolated DB.
-        sync_from_git_ref_into_db(&repo.gitai_repo(), &mut db).expect("sync_from_git_ref");
+        sync_from_git_ref_into_db(repo.gitai_repo(), &mut db).expect("sync_from_git_ref");
 
         // Confirm the note is now in SQLite as synced=1 (not in pending queue).
         // Git appends a trailing newline to note content; trim for comparison.
@@ -1464,7 +1464,7 @@ mod tests {
         exec_git(&args).expect("git notes add");
 
         // sync_from_git_ref should not overwrite the existing cached value.
-        sync_from_git_ref_into_db(&repo.gitai_repo(), &mut db).expect("sync");
+        sync_from_git_ref_into_db(repo.gitai_repo(), &mut db).expect("sync");
 
         let cached = db.get_note(&sha).expect("get");
         assert_eq!(

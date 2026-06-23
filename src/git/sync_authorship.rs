@@ -33,10 +33,10 @@ pub fn http_notes_fetch_rate_limited(repo_key: &str) -> bool {
 #[cfg(test)]
 pub fn reset_notes_fetch_rate_limiters() {
     for cell in [&LAST_GIT_NOTES_FETCH_AT, &LAST_HTTP_NOTES_FETCH_AT] {
-        if let Some(mutex) = cell.get() {
-            if let Ok(mut map) = mutex.lock() {
-                map.clear();
-            }
+        if let Some(mutex) = cell.get()
+            && let Ok(mut map) = mutex.lock()
+        {
+            map.clear();
         }
     }
 }
