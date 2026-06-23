@@ -82,7 +82,7 @@ fn http_backend_write_does_not_touch_git_ref() {
 /// must still be readable from SQLite.
 #[test]
 fn git_notes_backend_uses_sqlite_as_primary_cache() {
-    let mut repo = TestRepo::new();
+    let repo = TestRepo::new();
 
     // Use a dedicated notes-db so we can inspect and seed it independently.
     let notes_db_path = repo.test_home_path().join("gitnotes-cache-test.db");

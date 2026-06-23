@@ -5,9 +5,8 @@
 //! sync/push direction:
 //!
 //! ## Write path
-//! - **Both backends:** write to SQLite first (as a write-through cache).
-//! - **`git_notes`:** additionally write to `refs/notes/ai` locally and push to
-//!   remote on `git push`.
+//! - **`git_notes`:** write to `refs/notes/ai` locally, then cache in SQLite
+//!   after the git write succeeds. Notes are pushed to remote on `git push`.
 //! - **`http`:** do not touch the git ref; the daemon flushes SQLite to the HTTP
 //!   backend asynchronously.
 //!
@@ -51,13 +50,19 @@ pub fn write_notes_batch(
             // HTTP: write to SQLite queue only; daemon flushes to HTTP backend.
             http_write_batch(entries)
         }
-        NotesBackendKind::GitNotes => {
-            // GitNotes: write to SQLite as a write-through cache, then also
-            // write to refs/notes/ai for remote push compatibility.
-            git_notes_write_batch_to_sqlite(entries);
-            crate::git::refs::notes_add_batch(repo, entries)
-        }
+        NotesBackendKind::GitNotes => git_notes_write_batch(repo, entries),
     }
+}
+
+fn git_notes_write_batch(
+    repo: &Repository,
+    entries: &[(String, String)],
+) -> Result<(), GitAiError> {
+    // GitNotes: refs/notes/ai is authoritative. Cache only after the git write
+    // succeeds so a failed fast-import cannot leave stale SQLite hits.
+    crate::git::refs::notes_add_batch(repo, entries)?;
+    git_notes_write_batch_to_sqlite(entries);
+    Ok(())
 }
 
 // --- Reads ---
@@ -1531,5 +1536,41 @@ mod tests {
             !pending.iter().any(|p| p.commit_sha == sha),
             "write-through cache entry must not be in pending upload queue"
         );
+    }
+
+    /// If the authoritative git notes write fails, `git_notes` must not leave a
+    /// SQLite cache hit for a note that never reached `refs/notes/ai`.
+    #[test]
+    #[serial_test::serial(notes_db_env)]
+    fn git_notes_write_batch_does_not_cache_when_git_write_fails() {
+        use crate::git::test_utils::TmpRepo;
+        use std::env;
+
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp db file");
+        unsafe {
+            env::set_var("GIT_AI_TEST_NOTES_DB_PATH", tmp_db.path());
+        }
+
+        let repo = TmpRepo::new().expect("TmpRepo::new");
+        let invalid_sha = "invalid\nsha".to_string();
+        let content = "should-not-cache".to_string();
+
+        let result = git_notes_write_batch(repo.gitai_repo(), &[(invalid_sha.clone(), content)]);
+        assert!(
+            result.is_err(),
+            "malformed note path should make git fast-import fail"
+        );
+
+        let db = crate::notes::db::NotesDatabase::global().expect("global db");
+        let lock = db.lock().expect("lock");
+        let cached = lock.get_note(&invalid_sha).expect("get note");
+        assert_eq!(
+            cached, None,
+            "failed git notes write must not populate SQLite cache"
+        );
+
+        unsafe {
+            env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
+        }
     }
 }
