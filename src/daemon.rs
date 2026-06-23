@@ -7204,14 +7204,6 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
         "daemon started"
     );
 
-    match crate::enterprise_config::bootstrap_enterprise_config(
-        "daemon startup",
-        std::time::Duration::from_secs(5),
-    ) {
-        Ok(outcome) => tracing::info!(?outcome, "enterprise config bootstrap completed"),
-        Err(e) => return Err(GitAiError::Generic(e)),
-    }
-
     write_pid_metadata(&config)?;
 
     remove_socket_if_exists(&config.trace_socket_path)?;
@@ -7220,7 +7212,7 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     let mut coordinator_inner = ActorDaemonCoordinator::new();
 
     let enterprise_config_shutdown = Arc::new(tokio::sync::Notify::new());
-    crate::enterprise_config::spawn_enterprise_config_worker(enterprise_config_shutdown.clone());
+    let enterprise_config_shutdown_for_worker = enterprise_config_shutdown.clone();
     let _ = coordinator_inner
         .enterprise_config_shutdown_notify
         .set(enterprise_config_shutdown);
@@ -7317,6 +7309,8 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     let health_thread = std::thread::spawn(move || {
         daemon_socket_health_check_loop(health_coord, health_control, health_trace);
     });
+
+    crate::enterprise_config::spawn_enterprise_config_worker(enterprise_config_shutdown_for_worker);
 
     coordinator.wait_for_shutdown().await;
 
