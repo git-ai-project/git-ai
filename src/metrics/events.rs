@@ -452,6 +452,7 @@ pub mod checkpoint_pos {
     pub const LINES_DELETED_SLOC: usize = 6; // u32 - for this file
     pub const TOOL_USE_ID: usize = 7; // String - nullable
     pub const EDIT_KIND: usize = 8; // String - nullable ("file_edit" | "bash")
+    pub const ATTRIBUTION_RECOVERY_METADATA: usize = 9; // String (nullable) JSON
 }
 
 /// Values for Event ID 4: checkpoint
@@ -482,6 +483,7 @@ pub struct CheckpointValues {
     pub lines_deleted_sloc: PosField<u32>,
     pub external_tool_use_id: PosField<String>,
     pub edit_kind: PosField<String>,
+    pub attribution_recovery_metadata: PosField<String>,
 }
 
 impl CheckpointValues {
@@ -587,6 +589,17 @@ impl CheckpointValues {
         self.edit_kind = Some(None);
         self
     }
+
+    pub fn attribution_recovery_metadata(mut self, value: impl Into<String>) -> Self {
+        self.attribution_recovery_metadata = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn attribution_recovery_metadata_null(mut self) -> Self {
+        self.attribution_recovery_metadata = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CheckpointValues {
@@ -634,6 +647,11 @@ impl PosEncoded for CheckpointValues {
             checkpoint_pos::EDIT_KIND,
             string_to_json(&self.edit_kind),
         );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA,
+            string_to_json(&self.attribution_recovery_metadata),
+        );
 
         map
     }
@@ -649,6 +667,10 @@ impl PosEncoded for CheckpointValues {
             lines_deleted_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED_SLOC),
             external_tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
             edit_kind: sparse_get_string(arr, checkpoint_pos::EDIT_KIND),
+            attribution_recovery_metadata: sparse_get_string(
+                arr,
+                checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA,
+            ),
         }
     }
 }
@@ -671,6 +693,22 @@ impl EventValues for CheckpointValues {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn test_checkpoint_attribution_recovery_metadata_roundtrips() {
+        let json = r#"{"solver":"bash_correlation","delta_ns":12345}"#;
+        use super::PosEncoded;
+        let values = CheckpointValues::new()
+            .kind("ai_agent")
+            .edit_kind("bash")
+            .attribution_recovery_metadata(json);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(
+            restored.attribution_recovery_metadata,
+            Some(Some(json.to_string()))
+        );
+    }
 
     #[test]
     fn test_committed_values_builder() {
