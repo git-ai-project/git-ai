@@ -186,6 +186,14 @@ pub fn summarize_restore_args(command_args: &[String]) -> RestoreArgsSummary {
             }
             break;
         }
+        // Combined short form: `-sHEAD~1` (value concatenated, no space).
+        if let Some(rev) = arg.strip_prefix("-s")
+            && !rev.is_empty()
+        {
+            source = Some(rev.to_string());
+            i += 1;
+            continue;
+        }
 
         if arg.starts_with('-') {
             // Other restore flags (--staged, --worktree, --ours, --theirs, ...)
@@ -828,6 +836,14 @@ mod tests {
         // `-s abc` must consume `abc` as the source, not treat it as a pathspec.
         let s = restore(&["restore", "-s", "abc", "--", "f.ts"]);
         assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_combined_short_source_flag() {
+        // Combined `-sabc` form (value concatenated without a space).
+        let s = restore(&["restore", "-sHEAD~1", "--", "f.ts"]);
+        assert_eq!(s.source.as_deref(), Some("HEAD~1"));
         assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
     }
 

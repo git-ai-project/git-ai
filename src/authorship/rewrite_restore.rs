@@ -119,39 +119,30 @@ pub fn reconstruct_working_log_after_restore(
         return Ok(());
     }
 
-    // Merge into any existing INITIAL: preserve entries for files we are NOT
-    // restoring, and add/overwrite entries for the restored files. We only touch
-    // the INITIAL file -- never checkpoints.jsonl (see rewrite_reset.rs note).
-    // `write_initial_attributions_with_contents` re-persists each file's blob, so
-    // we must supply content for every retained file, including preserved ones
-    // (reconstructed from their stored INITIAL blob snapshot).
-    let existing = working_log.read_initial_attributions();
-    for (path, attrs) in &existing.files {
-        if file_attributions.contains_key(path) {
-            continue; // restored file: source attribution wins
-        }
-        if let Some(content) = working_log.stored_initial_file_content_from(&existing, path) {
-            file_attributions.insert(path.clone(), attrs.clone());
-            contents.insert(path.clone(), content);
-        }
+    // Merge directly into the existing INITIAL: set entries (and persist blobs)
+    // for the restored files, while leaving every other file's entry and stored
+    // blob snapshot untouched. This avoids round-tripping unrelated files through
+    // content reconstruction, so a restore can never drop another file's INITIAL
+    // attribution. We only touch the INITIAL file -- never checkpoints.jsonl (see
+    // rewrite_reset.rs note).
+    let mut initial = working_log.read_initial_attributions();
+    for (path, attrs) in file_attributions {
+        let content = contents.remove(&path).unwrap_or_default();
+        let blob_sha = working_log.persist_file_version(&content)?;
+        initial.files.insert(path.clone(), attrs);
+        initial.file_blobs.insert(path, blob_sha);
     }
-    for (k, v) in existing.prompts {
-        prompts.entry(k).or_insert(v);
+    for (k, v) in prompts {
+        initial.prompts.entry(k).or_insert(v);
     }
-    for (k, v) in existing.humans {
-        humans.entry(k).or_insert(v);
+    for (k, v) in humans {
+        initial.humans.entry(k).or_insert(v);
     }
-    for (k, v) in existing.sessions {
-        sessions.entry(k).or_insert(v);
+    for (k, v) in sessions {
+        initial.sessions.entry(k).or_insert(v);
     }
 
-    working_log.write_initial_attributions_with_contents(
-        file_attributions,
-        prompts,
-        humans,
-        contents,
-        sessions,
-    )?;
+    working_log.write_initial(initial)?;
     Ok(())
 }
 
