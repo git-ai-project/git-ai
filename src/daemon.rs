@@ -1054,13 +1054,32 @@ fn apply_pull_notes_sync_side_effect(
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
     let remote = fetch_remote_from_args(&repo, &parsed)?;
+
+    // Always: fetch refs/notes/ai from remote (preserves notes from old clients).
     fetch_authorship_notes(&repo, &remote)?;
+
+    // Additionally when HTTP backend is active: import whatever landed in the
+    // local git ref into SQLite (no extra network call), then warm from HTTP.
+    if crate::config::Config::get().notes_backend_kind() == crate::config::NotesBackendKind::Http {
+        let _ = crate::git::notes_api::sync_from_git_ref(&repo);
+        let _ = crate::git::notes_api::warm_cache_for_remote(&repo, &remote);
+    }
+
     Ok(())
 }
 
 fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
     let repo = find_repository_in_path(worktree)?;
+
+    // Always: fetch refs/notes/ai from remote.
     fetch_authorship_notes(&repo, "origin")?;
+
+    // Additionally when HTTP backend is active.
+    if crate::config::Config::get().notes_backend_kind() == crate::config::NotesBackendKind::Http {
+        let _ = crate::git::notes_api::sync_from_git_ref(&repo);
+        let _ = crate::git::notes_api::warm_cache_for_remote(&repo, "origin");
+    }
+
     Ok(())
 }
 

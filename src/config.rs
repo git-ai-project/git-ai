@@ -1135,8 +1135,12 @@ fn build_config() -> Config {
         kind: kind_from_env
             .or_else(|| file_backend.as_ref().map(|b| b.kind))
             .unwrap_or(NotesBackendKind::GitNotes),
+        // Explicit backend_url > env var > file config > api_base_url fallback.
+        // Defaulting to api_base_url means users only need to set notes_backend.kind
+        // without also having to repeat the URL they already set as api_base_url.
         backend_url: url_from_env
-            .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone())),
+            .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone()))
+            .or_else(|| Some(api_base_url.clone())),
     };
 
     // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
@@ -2517,10 +2521,45 @@ mod tests {
     }
 
     #[test]
-    fn test_notes_backend_url_unset_returns_none() {
-        // When backend_url is absent, notes_backend_url() is None. Callers must handle the unconfigured case explicitly.
+    fn test_notes_backend_url_unset_on_raw_config_struct_returns_none() {
+        // NotesBackendConfig::default() has no backend_url. When constructing Config
+        // directly (not via build_config()), notes_backend_url() returns None.
+        // build_config() always populates backend_url from api_base_url as a fallback.
         let config = create_test_config(vec![], vec![]);
         assert_eq!(config.notes_backend_url(), None);
+    }
+
+    #[test]
+    fn test_notes_backend_url_defaults_to_api_base_url() {
+        // When notes_backend.backend_url is not set in config or env,
+        // build_config() falls back to api_base_url.
+        unsafe {
+            std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
+            std::env::remove_var("GIT_AI_NOTES_BACKEND_KIND");
+        }
+        let config = build_config();
+        // The fallback must equal api_base_url (whatever it resolved to).
+        assert_eq!(
+            config.notes_backend_url(),
+            Some(config.api_base_url()),
+            "notes_backend_url should fall back to api_base_url when not explicitly set"
+        );
+    }
+
+    #[test]
+    fn test_notes_backend_url_explicit_overrides_api_base_url() {
+        // An explicit backend_url in env takes precedence over api_base_url.
+        unsafe {
+            std::env::set_var("GIT_AI_NOTES_BACKEND_URL", "https://notes.example.com");
+        }
+        let config = build_config();
+        assert_eq!(
+            config.notes_backend_url(),
+            Some("https://notes.example.com")
+        );
+        unsafe {
+            std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
+        }
     }
 
     #[test]

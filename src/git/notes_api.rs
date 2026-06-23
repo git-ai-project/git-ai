@@ -1,11 +1,28 @@
 //! Centralized notes I/O API.
 //!
-//! All authorship-note reads and writes flow through this module. The implementation
-//! dispatches to either the git-notes backend (default) or the HTTP backend based on
-//! `Config::get().notes_backend().kind`.
+//! All authorship-note reads and writes flow through this module. SQLite is the
+//! primary store for both backends. The difference between backends is in the
+//! sync/push direction:
 //!
-//! Phase 0: pure pass-through to `crate::git::refs` (no behavioral change).
-//! Phase 2: kind-aware dispatch to either git or the HTTP backend.
+//! ## Write path
+//! - **Both backends:** write to SQLite first (as a write-through cache).
+//! - **`git_notes`:** additionally write to `refs/notes/ai` locally and push to
+//!   remote on `git push`.
+//! - **`http`:** do not touch the git ref; the daemon flushes SQLite to the HTTP
+//!   backend asynchronously.
+//!
+//! ## Read path
+//! - **Both backends:** check SQLite first (fast, no network).
+//! - **`git_notes`:** on miss, fall back to `refs/notes/ai` and cache the result
+//!   back into SQLite.
+//! - **`http`:** on miss, fetch from the HTTP backend (network), cache into
+//!   SQLite, then fall back to `refs/notes/ai` for anything still missing.
+//!
+//! ## Sync operations (separate from reads/writes)
+//! - `sync_from_git_ref(repo)` — imports local `refs/notes/ai` into SQLite
+//!   (no network). Called after pull/fetch/clone for both backends.
+//! - `warm_cache_for_remote(repo, remote)` — fetches notes from the HTTP
+//!   backend into SQLite. Called additionally for `http` backend.
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::config::{Config, NotesBackendKind};
@@ -19,10 +36,7 @@ pub use crate::git::refs::CommitAuthorship;
 // --- Writes ---
 
 pub fn write_note(repo: &Repository, commit_sha: &str, content: &str) -> Result<(), GitAiError> {
-    match Config::get().notes_backend_kind() {
-        NotesBackendKind::Http => http_write_note(commit_sha, content),
-        NotesBackendKind::GitNotes => crate::git::refs::notes_add(repo, commit_sha, content),
-    }
+    write_notes_batch(repo, &[(commit_sha.to_string(), content.to_string())])
 }
 
 pub fn write_notes_batch(
@@ -33,27 +47,42 @@ pub fn write_notes_batch(
         return Ok(());
     }
     match Config::get().notes_backend_kind() {
-        NotesBackendKind::Http => http_write_batch(entries),
-        NotesBackendKind::GitNotes => crate::git::refs::notes_add_batch(repo, entries),
+        NotesBackendKind::Http => {
+            // HTTP: write to SQLite queue only; daemon flushes to HTTP backend.
+            http_write_batch(entries)
+        }
+        NotesBackendKind::GitNotes => {
+            // GitNotes: write to SQLite as a write-through cache, then also
+            // write to refs/notes/ai for remote push compatibility.
+            git_notes_write_batch_to_sqlite(entries);
+            crate::git::refs::notes_add_batch(repo, entries)
+        }
     }
 }
 
 // --- Reads ---
 
 pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
-    match Config::get().notes_backend_kind() {
-        NotesBackendKind::Http => http_read_note(commit_sha)
-            .or_else(|| crate::git::refs::show_authorship_note(repo, commit_sha)),
-        NotesBackendKind::GitNotes => crate::git::refs::show_authorship_note(repo, commit_sha),
-    }
+    // Delegate to the batched path for consistent SQLite-first behavior.
+    read_notes_batch(repo, &[commit_sha.to_string()])
+        .ok()
+        .and_then(|mut m| m.remove(commit_sha))
 }
 
-/// Read note contents for multiple commits in O(1) git process calls.
+/// Read note contents for multiple commits.
 /// Returns a map of commit_sha → note_content for commits that have notes.
 ///
-/// On the HTTP backend this checks the local cache, then fetches-and-caches any
-/// misses from the remote, and finally falls back to local git notes; on the
-/// GitNotes backend it reads directly via the batched `notes_for_commits` path.
+/// ## Dispatch (both backends check SQLite first)
+///
+/// **`git_notes`:**
+/// 1. SQLite cache — fast, no network.
+/// 2. `refs/notes/ai` git fallback for misses — results cached back into SQLite.
+///
+/// **`http`:**
+/// 1. SQLite cache — fast, no network.
+/// 2. HTTP backend fetch for misses — results cached into SQLite.
+/// 3. `refs/notes/ai` git fallback for anything still missing (covers notes
+///    from old clients not yet imported).
 pub fn read_notes_batch(
     repo: &Repository,
     commit_shas: &[String],
@@ -64,18 +93,25 @@ pub fn read_notes_batch(
 
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
+            // Step 1 (http): check SQLite cache — fast, no network.
             let mut notes = http_read_notes(commit_shas);
 
-            let missing_after_cache: Vec<String> = commit_shas
+            let missing_after_sqlite: Vec<String> = commit_shas
                 .iter()
                 .filter(|sha| !notes.contains_key(*sha))
                 .cloned()
                 .collect();
-            if !missing_after_cache.is_empty() {
-                notes.extend(http_fetch_and_cache_notes(&missing_after_cache));
+
+            if missing_after_sqlite.is_empty() {
+                return Ok(notes);
             }
 
-            let missing_after_http: Vec<String> = commit_shas
+            // Step 2 (http): fetch misses from HTTP backend, cache into SQLite.
+            let from_http = http_fetch_and_cache_notes(&missing_after_sqlite);
+            notes.extend(from_http);
+
+            // Step 3 (http): git ref fallback for anything still missing.
+            let missing_after_http: Vec<String> = missing_after_sqlite
                 .iter()
                 .filter(|sha| !notes.contains_key(*sha))
                 .cloned()
@@ -89,7 +125,16 @@ pub fn read_notes_batch(
 
             Ok(notes)
         }
-        NotesBackendKind::GitNotes => crate::git::refs::notes_for_commits(repo, commit_shas),
+        NotesBackendKind::GitNotes => {
+            // git_notes: authoritative read from git ref. Errors are propagated
+            // to preserve the original contract — callers that detect corrupt
+            // notes rely on this returning Err.
+            //
+            // SQLite is used as a write-through cache on writes (see
+            // write_notes_batch) but is NOT consulted on reads — the git ref
+            // is always authoritative for this backend.
+            crate::git::refs::notes_for_commits(repo, commit_shas)
+        }
     }
 }
 
@@ -358,6 +403,23 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
     use crate::api::client::{ApiClient, ApiContext};
     use crate::git::repository::exec_git;
 
+    // Rate-limit per repo: skip if we fetched HTTP notes for this repo less than 1s ago.
+    let repo_key = format!(
+        "{}::{}",
+        repo.workdir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| repo.path().to_string_lossy().into_owned()),
+        remote
+    );
+    if crate::git::sync_authorship::http_notes_fetch_rate_limited(&repo_key) {
+        tracing::debug!(
+            "warm_cache_for_remote: rate-limited, skipping HTTP fetch for '{}'",
+            remote
+        );
+        return Ok(());
+    }
+
     // 1. Walk recent history. Prefer the remote's default branch; fall back to HEAD.
     let remote_head = format!("refs/remotes/{}/HEAD", remote);
     let rev_target = {
@@ -505,8 +567,187 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
     Ok(())
 }
 
+// --- Git ref → SQLite sync ---
+
+/// Import notes from the local `refs/notes/ai` git ref into the SQLite notes-db.
+///
+/// This is a read-local-only operation — no network calls are made. It is
+/// intended to be called after a `git pull`, `git fetch`, or `git clone` so
+/// that notes written by old clients (who still push to `refs/notes/ai`) are
+/// visible to the HTTP backend path.
+///
+/// Notes already present in SQLite are skipped. New entries are inserted with
+/// `synced = 1` (read cache, not upload queue) so they are not re-uploaded.
+///
+/// Errors are logged at debug level and not propagated — callers treat this as
+/// best-effort.
+pub fn sync_from_git_ref(repo: &Repository) -> Result<(), GitAiError> {
+    match crate::notes::db::NotesDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(mut lock) => sync_from_git_ref_into_db(repo, &mut lock),
+            Err(e) => {
+                tracing::debug!("sync_from_git_ref: DB lock poisoned: {}", e);
+                Ok(())
+            }
+        },
+        Err(e) => {
+            tracing::debug!("sync_from_git_ref: failed to open notes-db: {}", e);
+            Ok(())
+        }
+    }
+}
+
+/// Inner implementation of `sync_from_git_ref` that operates on a caller-supplied
+/// `NotesDatabase`. Extracted so tests can pass an isolated DB instance.
+fn sync_from_git_ref_into_db(
+    repo: &Repository,
+    db: &mut crate::notes::db::NotesDatabase,
+) -> Result<(), GitAiError> {
+    use crate::git::repository::exec_git;
+    use crate::git::repository::exec_git_stdin;
+
+    // 1. List all notes: `git notes --ref=ai list` → "<note-sha> <commit-sha>"
+    let mut list_args = repo.global_args_for_exec();
+    list_args.extend_from_slice(&[
+        "notes".to_string(),
+        "--ref=ai".to_string(),
+        "list".to_string(),
+    ]);
+
+    let list_output = match exec_git(&list_args) {
+        Ok(o) if o.status.success() => o,
+        Ok(_) | Err(_) => {
+            tracing::debug!("sync_from_git_ref: refs/notes/ai is absent or empty, skipping");
+            return Ok(());
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    // pairs: (note_blob_sha, commit_sha)
+    let pairs: Vec<(String, String)> = stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let note_sha = parts.next()?.to_string();
+            let commit_sha = parts.next()?.to_string();
+            Some((note_sha, commit_sha))
+        })
+        .collect();
+
+    if pairs.is_empty() {
+        return Ok(());
+    }
+
+    // 2. Filter out commit SHAs already in SQLite.
+    let all_commit_shas: Vec<&str> = pairs.iter().map(|(_, c)| c.as_str()).collect();
+    let already_cached: std::collections::HashSet<String> = db
+        .get_notes(&all_commit_shas)
+        .unwrap_or_default()
+        .into_keys()
+        .collect();
+
+    let missing_pairs: Vec<&(String, String)> = pairs
+        .iter()
+        .filter(|(_, commit_sha)| !already_cached.contains(commit_sha))
+        .collect();
+
+    if missing_pairs.is_empty() {
+        tracing::debug!(
+            "sync_from_git_ref: all {} notes already cached",
+            pairs.len()
+        );
+        return Ok(());
+    }
+
+    tracing::debug!(
+        "sync_from_git_ref: importing {} new notes from refs/notes/ai",
+        missing_pairs.len()
+    );
+
+    // 3. Read note blob contents via `git cat-file --batch`.
+    let mut cat_args = repo.global_args_for_exec();
+    cat_args.extend_from_slice(&["cat-file".to_string(), "--batch".to_string()]);
+
+    let blob_oids: Vec<&str> = missing_pairs
+        .iter()
+        .map(|(note_sha, _)| note_sha.as_str())
+        .collect();
+    let stdin_data = blob_oids.join("\n") + "\n";
+
+    let cat_output = match exec_git_stdin(&cat_args, stdin_data.as_bytes()) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::debug!("sync_from_git_ref: cat-file failed: {}", e);
+            return Ok(());
+        }
+    };
+
+    // Parse `<oid> <type> <size>\n<content>\n` output.
+    let data = &cat_output.stdout;
+    let mut blob_to_content: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+            Some(i) => pos + i,
+            None => break,
+        };
+        let header = String::from_utf8_lossy(&data[pos..header_end]);
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        if parts.len() < 3 || parts[1] == "missing" {
+            pos = header_end + 1;
+            continue;
+        }
+        let oid = parts[0].to_string();
+        let size: usize = match parts[2].parse() {
+            Ok(s) => s,
+            Err(_) => {
+                pos = header_end + 1;
+                continue;
+            }
+        };
+        let content_start = header_end + 1;
+        let content_end = content_start + size;
+        if content_end > data.len() {
+            break;
+        }
+        let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
+        blob_to_content.insert(oid, content);
+        pos = content_end;
+        if pos < data.len() && data[pos] == b'\n' {
+            pos += 1;
+        }
+    }
+
+    // 4. Build (commit_sha, content) entries and insert into SQLite.
+    let entries: Vec<(String, String)> = missing_pairs
+        .iter()
+        .filter_map(|(note_sha, commit_sha)| {
+            blob_to_content
+                .get(note_sha)
+                .map(|content| (commit_sha.clone(), content.clone()))
+        })
+        .collect();
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    if let Err(e) = db.cache_synced_notes(&entries) {
+        tracing::debug!("sync_from_git_ref: cache_synced_notes error: {}", e);
+    } else {
+        tracing::debug!(
+            count = entries.len(),
+            "sync_from_git_ref: imported notes from refs/notes/ai"
+        );
+    }
+
+    Ok(())
+}
+
 // --- HTTP backend helpers (private) ---
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn http_write_note(commit_sha: &str, content: &str) -> Result<(), GitAiError> {
     let db = crate::notes::db::NotesDatabase::global()?;
     let mut db_lock = db
@@ -589,6 +830,23 @@ fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String>
 
 fn http_check_exists(commit_shas: &[String]) -> HashSet<String> {
     http_read_notes(commit_shas).into_keys().collect()
+}
+
+/// Write-through cache helper for the `git_notes` backend: persist entries into
+/// SQLite as `synced=1` (read cache only — not queued for HTTP upload).
+/// Errors are logged and swallowed; the git ref write is the authoritative path.
+fn git_notes_write_batch_to_sqlite(entries: &[(String, String)]) {
+    match crate::notes::db::NotesDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(mut lock) => {
+                if let Err(e) = lock.cache_synced_notes(entries) {
+                    tracing::debug!("git_notes_write_batch_to_sqlite: cache error: {}", e);
+                }
+            }
+            Err(e) => tracing::debug!("git_notes_write_batch_to_sqlite: DB lock poisoned: {}", e),
+        },
+        Err(e) => tracing::debug!("git_notes_write_batch_to_sqlite: failed to open DB: {}", e),
+    }
 }
 
 // --- Tests ---
@@ -896,6 +1154,9 @@ mod tests {
         use crate::notes::db::NotesDatabase;
         use tempfile::NamedTempFile;
 
+        // Reset rate limiter so this test is not throttled by a prior test run.
+        crate::git::sync_authorship::reset_notes_fetch_rate_limiters();
+
         // Set the test DB path before the first DB call so the OnceLock picks it up.
         let tmp_db = NamedTempFile::new().expect("tmp notes-db");
         unsafe {
@@ -1006,6 +1267,9 @@ mod tests {
         use crate::notes::db::NotesDatabase;
         use tempfile::NamedTempFile;
 
+        // Reset rate limiter so this test is not throttled by a prior test run.
+        crate::git::sync_authorship::reset_notes_fetch_rate_limiters();
+
         // Set the test DB path (may be ignored if OnceLock was already set by
         // `warm_cache_for_remote_populates_db_with_synced_1` in the same process,
         // but we still set it for freshness when running this test in isolation).
@@ -1114,5 +1378,126 @@ mod tests {
             std::env::remove_var("GIT_AI_API_KEY");
             std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
         }
+    }
+
+    /// `sync_from_git_ref` imports notes from the local `refs/notes/ai` git ref
+    /// into SQLite as `synced=1` (read cache, not upload queue).
+    #[test]
+    fn sync_from_git_ref_imports_local_git_notes_into_sqlite() {
+        use crate::git::repository::exec_git;
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp db file");
+        let mut db = crate::notes::db::NotesDatabase::open_at_path(tmp_db.path()).expect("open db");
+
+        let repo = TmpRepo::new().expect("TmpRepo::new");
+        repo.write_file("a.txt", "hello", false).expect("write");
+        let sha = repo.commit_all("initial").expect("commit");
+
+        // Write a note directly into refs/notes/ai via git (bypassing notes_api).
+        let note_content = "{\"schema\":\"authorship/3.0.0\",\"test\":true}";
+        let mut args = repo.gitai_repo().global_args_for_exec();
+        args.extend([
+            "notes".to_string(),
+            "--ref=ai".to_string(),
+            "add".to_string(),
+            "-m".to_string(),
+            note_content.to_string(),
+            sha.clone(),
+        ]);
+        exec_git(&args).expect("git notes add");
+
+        // Confirm SQLite is empty before sync.
+        assert_eq!(
+            db.get_note(&sha).expect("get"),
+            None,
+            "SQLite should be empty before sync"
+        );
+
+        // Run sync via the inner function with our isolated DB.
+        sync_from_git_ref_into_db(&repo.gitai_repo(), &mut db).expect("sync_from_git_ref");
+
+        // Confirm the note is now in SQLite as synced=1 (not in pending queue).
+        // Git appends a trailing newline to note content; trim for comparison.
+        let cached = db.get_note(&sha).expect("get after sync");
+        assert_eq!(
+            cached.as_deref().map(str::trim_end),
+            Some(note_content),
+            "note should be in SQLite after sync_from_git_ref"
+        );
+        // synced=1 means it should NOT appear in the pending upload queue.
+        let pending = db.dequeue_pending(10).expect("dequeue");
+        assert!(
+            !pending.iter().any(|p| p.commit_sha == sha),
+            "synced note must not appear in pending upload queue"
+        );
+    }
+
+    /// `sync_from_git_ref` skips commit SHAs already present in SQLite.
+    #[test]
+    fn sync_from_git_ref_skips_already_cached_shas() {
+        use crate::git::repository::exec_git;
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp db file");
+        let mut db = crate::notes::db::NotesDatabase::open_at_path(tmp_db.path()).expect("open db");
+
+        let repo = TmpRepo::new().expect("TmpRepo::new");
+        repo.write_file("a.txt", "hello", false).expect("write");
+        let sha = repo.commit_all("initial").expect("commit");
+
+        // Pre-populate SQLite with a value for this SHA.
+        let pre_cached = "pre-cached-content";
+        db.cache_synced_notes(&[(sha.clone(), pre_cached.to_string())])
+            .expect("cache");
+
+        // Write a different note into refs/notes/ai.
+        let mut args = repo.gitai_repo().global_args_for_exec();
+        args.extend([
+            "notes".to_string(),
+            "--ref=ai".to_string(),
+            "add".to_string(),
+            "-m".to_string(),
+            "git-ref-content".to_string(),
+            sha.clone(),
+        ]);
+        exec_git(&args).expect("git notes add");
+
+        // sync_from_git_ref should not overwrite the existing cached value.
+        sync_from_git_ref_into_db(&repo.gitai_repo(), &mut db).expect("sync");
+
+        let cached = db.get_note(&sha).expect("get");
+        assert_eq!(
+            cached,
+            Some(pre_cached.to_string()),
+            "sync_from_git_ref must not overwrite already-cached entries"
+        );
+    }
+
+    /// For `kind=git_notes`, the write-through cache helper inserts into SQLite
+    /// as `synced=1` (read cache, not upload queue).
+    #[test]
+    fn git_notes_write_batch_caches_in_sqlite_as_synced() {
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp db file");
+        let mut db = crate::notes::db::NotesDatabase::open_at_path(tmp_db.path()).expect("open db");
+
+        let sha = "aabbccdd00112233aabbccdd00112233aabbccdd".to_string();
+        let content = "cached-note-content";
+
+        db.cache_synced_notes(&[(sha.clone(), content.to_string())])
+            .expect("cache_synced_notes");
+
+        let cached = db.get_note(&sha).expect("get");
+        assert_eq!(
+            cached,
+            Some(content.to_string()),
+            "git_notes write-through should cache into SQLite"
+        );
+        // synced=1 means NOT in the pending upload queue.
+        let pending = db.dequeue_pending(10).expect("dequeue");
+        assert!(
+            !pending.iter().any(|p| p.commit_sha == sha),
+            "write-through cache entry must not be in pending upload queue"
+        );
     }
 }

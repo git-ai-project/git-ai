@@ -460,14 +460,13 @@ pub fn post_commit_amend(
     final_state_snapshot.extend(observed_snapshot);
 
     // Check if original commit has existing authorship data
-    let has_existing_data =
-        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
-            .map(|log| {
-                !log.metadata.prompts.is_empty()
-                    || !log.metadata.humans.is_empty()
-                    || !log.metadata.sessions.is_empty()
-            })
-            .unwrap_or(false);
+    let has_existing_data = crate::git::notes_api::read_authorship_v3(repo, original_commit)
+        .map(|log| {
+            !log.metadata.prompts.is_empty()
+                || !log.metadata.humans.is_empty()
+                || !log.metadata.sessions.is_empty()
+        })
+        .unwrap_or(false);
 
     let working_va = crate::tokio_runtime::block_on(async {
         VirtualAttributions::from_working_log_for_commit_snapshot(
@@ -541,9 +540,7 @@ pub fn post_commit_amend(
     }
 
     // Preserve human/session metadata from the original commit's note
-    if let Ok(original_log) =
-        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
-    {
+    if let Ok(original_log) = crate::git::notes_api::read_authorship_v3(repo, original_commit) {
         for (id, record) in original_log.metadata.humans {
             authorship_log.metadata.humans.entry(id).or_insert(record);
         }

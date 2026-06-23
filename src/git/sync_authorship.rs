@@ -8,6 +8,55 @@ use crate::{
 };
 
 use super::repository::Repository;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Minimum interval between git notes fetches per repo. Calls within this
+/// window silently no-op to avoid hammering GitHub rate limits on busy monorepos.
+const NOTES_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+type RepoFetchMap = Mutex<std::collections::HashMap<String, Instant>>;
+
+// Per-repo rate limiters keyed by the repo's git-dir path.
+// Using per-repo keys ensures different repos in the same daemon process
+// don't interfere with each other's fetch cadence.
+static LAST_GIT_NOTES_FETCH_AT: OnceLock<RepoFetchMap> = OnceLock::new();
+static LAST_HTTP_NOTES_FETCH_AT: OnceLock<RepoFetchMap> = OnceLock::new();
+
+/// Returns `true` if the last HTTP notes fetch for `repo_key` was less than
+/// `NOTES_FETCH_MIN_INTERVAL` ago. Updates the timestamp when returning `false`.
+pub fn http_notes_fetch_rate_limited(repo_key: &str) -> bool {
+    notes_fetch_rate_limited(&LAST_HTTP_NOTES_FETCH_AT, repo_key)
+}
+
+/// Reset all rate-limiter entries. Only available in test builds.
+#[cfg(test)]
+pub fn reset_notes_fetch_rate_limiters() {
+    for cell in [&LAST_GIT_NOTES_FETCH_AT, &LAST_HTTP_NOTES_FETCH_AT] {
+        if let Some(mutex) = cell.get() {
+            if let Ok(mut map) = mutex.lock() {
+                map.clear();
+            }
+        }
+    }
+}
+
+/// Returns `true` if the last fetch for `repo_key` was less than
+/// `NOTES_FETCH_MIN_INTERVAL` ago. Updates the timestamp when returning `false`.
+fn notes_fetch_rate_limited(cell: &OnceLock<RepoFetchMap>, repo_key: &str) -> bool {
+    let mutex = cell.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let Ok(mut map) = mutex.lock() else {
+        return false; // poisoned — allow the fetch
+    };
+    let now = Instant::now();
+    if let Some(&prev) = map.get(repo_key) {
+        if now.saturating_duration_since(prev) < NOTES_FETCH_MIN_INTERVAL {
+            return true; // too soon
+        }
+    }
+    map.insert(repo_key.to_string(), now);
+    false
+}
 
 #[cfg(windows)]
 fn disabled_hooks_config() -> &'static str {
@@ -159,7 +208,9 @@ pub fn fetch_missing_notes_for_commits(
     if let Ok(remotes) = repository.remotes_with_urls() {
         for (remote_name, _) in remotes {
             tracing::debug!("Attempting safe notes fetch from remote {}", remote_name);
-            match fetch_authorship_notes(repository, &remote_name) {
+            // Bypass rate limiter: this is a targeted fetch for specific missing
+            // commits in the rewrite path, not a bulk sync from a user git op.
+            match fetch_authorship_notes_inner(repository, &remote_name, false) {
                 Ok(_) => tracing::debug!("Fetched and merged notes from remote {}", remote_name),
                 Err(e) => {
                     tracing::debug!("Notes fetch from remote {} failed: {}", remote_name, e);
@@ -196,6 +247,39 @@ pub fn fetch_authorship_notes(
     repository: &Repository,
     remote_name: &str,
 ) -> Result<NotesExistence, GitAiError> {
+    fetch_authorship_notes_inner(repository, remote_name, true)
+}
+
+/// Internal fetch that optionally bypasses the rate limiter.
+/// Used by `fetch_missing_notes_for_commits` which is a targeted fetch for
+/// specific missing commits in the rewrite path — not a bulk sync triggered
+/// by a user git operation.
+fn fetch_authorship_notes_inner(
+    repository: &Repository,
+    remote_name: &str,
+    rate_limit: bool,
+) -> Result<NotesExistence, GitAiError> {
+    // Rate-limit per worktree+remote: skip if we fetched git notes for this
+    // worktree+remote combination less than 1s ago. Using workdir (not git dir)
+    // keeps linked worktrees independent; including remote_name prevents
+    // cross-remote interference.
+    let repo_key = format!(
+        "{}::{}",
+        repository
+            .workdir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| repository.path().to_string_lossy().into_owned()),
+        remote_name
+    );
+    if rate_limit && notes_fetch_rate_limited(&LAST_GIT_NOTES_FETCH_AT, &repo_key) {
+        tracing::debug!(
+            "fetch_authorship_notes: rate-limited, skipping fetch from '{}'",
+            remote_name
+        );
+        return Ok(NotesExistence::NotFound);
+    }
+
     // Generate tracking ref for this remote
     let tracking_ref = tracking_ref_for_remote(remote_name);
 
@@ -316,6 +400,9 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
                 attempt + 1,
                 PUSH_NOTES_MAX_ATTEMPTS
             );
+            // Sleep ≥ 1s so the retry's internal fetch clears the rate-limiter
+            // window and is never silently skipped.
+            std::thread::sleep(NOTES_FETCH_MIN_INTERVAL);
         }
 
         fetch_and_merge_tracking_notes(repository, remote_name);
@@ -565,5 +652,68 @@ mod tests {
             args: vec!["fetch".to_string(), "origin".to_string()],
         };
         assert!(!is_missing_remote_notes_ref_error(&err));
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_blocks_within_one_second() {
+        let cell: OnceLock<RepoFetchMap> = OnceLock::new();
+        let key = "test-repo-1";
+
+        // First call: not rate-limited, sets the timestamp.
+        assert!(
+            !notes_fetch_rate_limited(&cell, key),
+            "first call should not be rate-limited"
+        );
+
+        // Immediate second call for same repo: should be rate-limited.
+        assert!(
+            notes_fetch_rate_limited(&cell, key),
+            "second call within 1s should be rate-limited"
+        );
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_different_repos_are_independent() {
+        let cell: OnceLock<RepoFetchMap> = OnceLock::new();
+
+        // First call for repo-a sets its timestamp.
+        assert!(!notes_fetch_rate_limited(&cell, "repo-a"));
+        // repo-a is now rate-limited.
+        assert!(notes_fetch_rate_limited(&cell, "repo-a"));
+        // repo-b has never been called — must not be rate-limited.
+        assert!(
+            !notes_fetch_rate_limited(&cell, "repo-b"),
+            "different repo must not be rate-limited by another repo's fetch"
+        );
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_allows_after_interval() {
+        let cell: OnceLock<RepoFetchMap> = OnceLock::new();
+        let key = "test-repo-interval";
+
+        // Seed with a timestamp older than the interval.
+        {
+            let mutex = cell.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+            let mut map = mutex.lock().unwrap();
+            map.insert(
+                key.to_string(),
+                Instant::now() - NOTES_FETCH_MIN_INTERVAL - Duration::from_millis(1),
+            );
+        }
+
+        assert!(
+            !notes_fetch_rate_limited(&cell, key),
+            "call after interval should not be rate-limited"
+        );
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_uninitialized_allows_first_call() {
+        let cell: OnceLock<RepoFetchMap> = OnceLock::new();
+        assert!(
+            !notes_fetch_rate_limited(&cell, "fresh-repo"),
+            "first call on fresh cell should not be rate-limited"
+        );
     }
 }
