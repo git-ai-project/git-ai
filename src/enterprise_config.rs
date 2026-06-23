@@ -11,7 +11,7 @@ const CACHE_FILE_NAME: &str = "config.enterprise.json";
 const FETCH_ENDPOINT: &str = "/worker/config/enterprise";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct EnterpriseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_prompts_in_repositories: Option<Vec<String>>,
@@ -198,9 +198,27 @@ pub fn enterprise_config_options() -> &'static [EnterpriseConfigOption] {
 }
 
 pub fn validate_enterprise_config_json(input: &str) -> Result<EnterpriseConfig, String> {
-    let config: EnterpriseConfig =
+    let value: serde_json::Value =
         serde_json::from_str(input).map_err(|e| format!("invalid enterprise config: {e}"))?;
+    reject_unknown_enterprise_config_keys(&value)?;
+    let config: EnterpriseConfig =
+        serde_json::from_value(value).map_err(|e| format!("invalid enterprise config: {e}"))?;
     validate_enterprise_config(config)
+}
+
+fn reject_unknown_enterprise_config_keys(value: &serde_json::Value) -> Result<(), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "enterprise config must be an object".to_string())?;
+    for key in obj.keys() {
+        if !enterprise_config_options()
+            .iter()
+            .any(|option| option.key == key)
+        {
+            return Err(format!("unknown enterprise config field: {key}"));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_enterprise_config(config: EnterpriseConfig) -> Result<EnterpriseConfig, String> {
@@ -388,16 +406,21 @@ pub fn bootstrap_enterprise_config(
         .and_then(|result| apply_fetch_result(&api_key, result))
     {
         Ok(outcome) => Ok(outcome),
-        Err(error) => {
-            if load_cache_for_api_key(&api_key)?.is_some() {
+        Err(error) => match load_cache_for_api_key(&api_key) {
+            Ok(Some(_)) => {
                 tracing::warn!(%reason, %error, "enterprise config fetch failed; using cached config");
                 Ok(EnterpriseConfigBootstrapOutcome::CachedAfterError(error))
-            } else {
+            }
+            Ok(None) => Err(format!(
+                "enterprise config bootstrap failed during {reason}: {error}"
+            )),
+            Err(cache_error) => {
+                tracing::debug!(%cache_error, "failed to load enterprise config cache after fetch failure");
                 Err(format!(
                     "enterprise config bootstrap failed during {reason}: {error}"
                 ))
             }
-        }
+        },
     }
 }
 
@@ -493,7 +516,17 @@ mod tests {
     #[test]
     fn validates_unknown_keys() {
         let err = validate_enterprise_config_json(r#"{"api_key":"secret"}"#).unwrap_err();
-        assert!(err.contains("unknown field") || err.contains("invalid enterprise config"));
+        assert!(err.contains("unknown enterprise config field"));
+    }
+
+    #[test]
+    fn response_deserialization_ignores_unknown_keys() {
+        let response: EnterpriseConfigFetchResponse = serde_json::from_str(
+            r#"{"enabled":true,"config":{"prompt_storage":"local","future_setting":true}}"#,
+        )
+        .unwrap();
+        let config = response.config.unwrap();
+        assert_eq!(config.prompt_storage.as_deref(), Some("local"));
     }
 
     #[test]
