@@ -400,8 +400,8 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
                 attempt + 1,
                 PUSH_NOTES_MAX_ATTEMPTS
             );
-            // Sleep ≥ 1s so the retry's internal fetch clears the rate-limiter
-            // window and is never silently skipped.
+            // Backoff between retries to avoid hammering the remote when
+            // concurrent pushers cause non-fast-forward rejections.
             std::thread::sleep(NOTES_FETCH_MIN_INTERVAL);
         }
 
