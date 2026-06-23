@@ -59,7 +59,6 @@ pub struct NormalizedCommand {
     /// Resolved full commit OID of `git restore --source <X>`, when present.
     /// `restore` does not move HEAD, so this is resolved against the live
     /// worktree at analysis time. `None` for restores without `--source`.
-    #[serde(default)]
     pub restore_source_oid: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
