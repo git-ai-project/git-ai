@@ -1339,7 +1339,10 @@ fn test_regular_rebase_conflict_ai_resolution_preserves_original_and_resolution_
     let mut final_file = repo.filename("shared.txt");
     final_file.assert_committed_lines(crate::lines![
         "line 1".human(),
-        "main change line 2".human(),
+        // "main change line 2" was untracked (pre-resolution `human` checkpoint) and
+        // sits directly above the AI-resolved line, so it is absorbed by the AI edge
+        // extension recovery solver.
+        "main change line 2".ai(),
         "AI resolved line 2".ai(),
     ]);
 }

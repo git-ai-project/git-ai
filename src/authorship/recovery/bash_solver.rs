@@ -46,12 +46,7 @@ impl BashCorrelationSolver {
 
     /// Query candidate bash checkpoints, routing through an explicit DB path
     /// (tests) or the process-global DB (production).
-    fn query_candidates(
-        &self,
-        repo_key: &str,
-        lo: i64,
-        hi: i64,
-    ) -> Vec<BashCheckpointRow> {
+    fn query_candidates(&self, repo_key: &str, lo: i64, hi: i64) -> Vec<BashCheckpointRow> {
         if let Some(path) = &self.db_path {
             return BashCheckpointsDatabase::open_at_path(path)
                 .ok()
@@ -138,7 +133,10 @@ impl RecoverySolver for BashCorrelationSolver {
             let agent_id = AgentId {
                 tool: cand.tool.clone(),
                 id: internal_id,
-                model: cand.agent_model.clone().unwrap_or_else(|| "unknown".to_string()),
+                model: cand
+                    .agent_model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
             };
             let recovery_json = serde_json::json!({
                 "solver": "bash_correlation",
@@ -216,7 +214,10 @@ mod tests {
         let meta = std::fs::symlink_metadata(&file).unwrap();
         let mtime_ns = system_time_to_ns(meta.modified().unwrap());
 
-        let repo_key = std::fs::canonicalize(work.path()).unwrap().to_string_lossy().to_string();
+        let repo_key = std::fs::canonicalize(work.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         {
             let mut db = BashCheckpointsDatabase::open_at_path(&db_path).unwrap();
             db.record_start(
@@ -254,7 +255,10 @@ mod tests {
         let work = TempDir::new().unwrap();
         let file = work.path().join("out.txt");
         std::fs::write(&file, "x\n").unwrap();
-        let repo_key = std::fs::canonicalize(work.path()).unwrap().to_string_lossy().to_string();
+        let repo_key = std::fs::canonicalize(work.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         {
             let mut db = BashCheckpointsDatabase::open_at_path(&db_path).unwrap();
             db.record_start("s", "t", &repo_key, &agent(), None, 1, 10)

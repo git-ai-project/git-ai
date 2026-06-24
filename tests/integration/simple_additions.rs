@@ -896,11 +896,11 @@ Another AI line
         .unwrap();
     repo.stage_all_and_commit("Fourth commit").unwrap();
     file.assert_committed_lines(lines![
-        "Untracked line".unattributed_human(),         // 'untracked'
-        "Human line".human(),                          // known human
-        "AI line".ai(),                                // AI line
-        "Another untracked line".unattributed_human(), // 'untracked'
-        "Another AI line".ai(),                        // AI line
+        "Untracked line".unattributed_human(), // 'untracked' (not adjacent to AI: known-human above)
+        "Human line".human(),                  // known human
+        "AI line".ai(),                        // AI line
+        "Another untracked line".ai(), // was untracked; absorbed into adjacent AI run by edge extension
+        "Another AI line".ai(),        // AI line
     ]);
 }
 
@@ -1173,15 +1173,15 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
     // Verify line-by-line attribution
     let mut file = repo.filename("data.txt");
     file.assert_lines_and_blame(crate::lines![
-        "Base Line 1".human(),
-        "Base Line 2".human(),
+        "Base Line 1".ai(), // untracked, absorbed into AI run by edge extension
+        "Base Line 2".ai(), // untracked, absorbed into AI run by edge extension
         "AI: Line 1".ai(),
         "AI: Line 3".ai(),
-        "Human: Line 1".human(), // Should be human, not AI (Bug #193)
-        "Human: Line 2".human(), // Should be human, not AI (Bug #193)
+        "Human: Line 1".human(), // known-human stays human (never stolen) (Bug #193)
+        "Human: Line 2".human(), // known-human stays human (never stolen) (Bug #193)
         "AI: New Line 1".ai(),
         "AI: New Line 2".ai(),
-        "Base Line 3".human(),
+        "Base Line 3".ai(), // untracked, absorbed into adjacent AI run by edge extension
     ]);
 
     // Verify the stats are correct for the last commit

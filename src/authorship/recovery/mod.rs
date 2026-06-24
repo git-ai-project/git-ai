@@ -192,6 +192,46 @@ fn ai_owner_for(log: &AuthorshipLog, session_key: &str) -> Option<(AgentId, Stri
     None
 }
 
+/// Drop, per file, unknown line numbers whose committed content already appears
+/// in the parent commit's version of that file. Such lines were not produced by
+/// this commit (they are unknown only as a diff-base artifact) and must not be
+/// recovered. No-op when there is no repo context (unit tests) or no parent
+/// (`initial`); files absent from the parent keep all their lines.
+fn retain_lines_new_vs_parent(ctx: &RecoveryContext, unknown: &mut HashMap<String, Vec<u32>>) {
+    let Some(repo) = ctx.repo else {
+        return;
+    };
+    if ctx.parent_sha == "initial" || ctx.parent_sha.is_empty() {
+        return;
+    }
+    let mut requests: Vec<(String, String)> = Vec::with_capacity(unknown.len() * 2);
+    for file in unknown.keys() {
+        requests.push((ctx.parent_sha.to_string(), file.clone()));
+        requests.push((ctx.commit_sha.to_string(), file.clone()));
+    }
+    let Ok(contents) = crate::git::repository::batch_read_paths_at_treeishes(repo, &requests)
+    else {
+        return;
+    };
+    unknown.retain(|file, lines| {
+        let Some(committed) = contents.get(&(ctx.commit_sha.to_string(), file.clone())) else {
+            return true;
+        };
+        // File absent from the parent ⇒ all lines are new; keep them.
+        let Some(parent) = contents.get(&(ctx.parent_sha.to_string(), file.clone())) else {
+            return true;
+        };
+        let parent_line_set: HashSet<&str> = parent.lines().collect();
+        let committed_lines: Vec<&str> = committed.lines().collect();
+        lines.retain(|&ln| {
+            committed_lines
+                .get((ln as usize).saturating_sub(1))
+                .is_none_or(|content| !parent_line_set.contains(content))
+        });
+        !lines.is_empty()
+    });
+}
+
 /// Run the ordered solver pipeline. Each solver sees the current unknown set and
 /// AI-line map; its proposals are applied before the next solver runs. Returns
 /// the collected metrics for emission. Solver panics are isolated and skipped.
@@ -202,7 +242,15 @@ pub fn recover_attribution(
 ) -> Vec<RecoveredCheckpointMetric> {
     let mut all_metrics = Vec::new();
     for solver in solvers {
-        let unknown = unknown_lines(log, ctx.committed_hunks);
+        let mut unknown = unknown_lines(log, ctx.committed_hunks);
+        // Recovery only attributes lines this commit genuinely *produced*. Drop
+        // unknown lines whose committed content already existed in the parent
+        // commit (pre-existing content that is unknown-in-this-commit only as a
+        // diff-base artifact, e.g. a prior untracked line carried forward). This
+        // applies to every solver so neither bash correlation nor edge extension
+        // sweeps up unrelated pre-existing lines. New files have no parent
+        // version, so all their lines remain eligible.
+        retain_lines_new_vs_parent(ctx, &mut unknown);
         if unknown.is_empty() {
             break;
         }
@@ -257,7 +305,10 @@ mod tests {
     fn test_unknown_lines_subtracts_attributed() {
         let mut log = AuthorshipLog::new();
         log.get_or_create_file("a.rs")
-            .add_entry(AttestationEntry::new("hash1".into(), vec![LineRange::Range(1, 3)]));
+            .add_entry(AttestationEntry::new(
+                "hash1".into(),
+                vec![LineRange::Range(1, 3)],
+            ));
         let mut committed = HashMap::new();
         committed.insert("a.rs".to_string(), vec![LineRange::Range(1, 5)]);
         let unknown = unknown_lines(&log, &committed);
@@ -268,7 +319,10 @@ mod tests {
     fn test_unknown_lines_all_attributed_omits_file() {
         let mut log = AuthorshipLog::new();
         log.get_or_create_file("a.rs")
-            .add_entry(AttestationEntry::new("hash1".into(), vec![LineRange::Range(1, 5)]));
+            .add_entry(AttestationEntry::new(
+                "hash1".into(),
+                vec![LineRange::Range(1, 5)],
+            ));
         let mut committed = HashMap::new();
         committed.insert("a.rs".to_string(), vec![LineRange::Range(1, 5)]);
         let unknown = unknown_lines(&log, &committed);

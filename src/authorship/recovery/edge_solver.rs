@@ -187,8 +187,9 @@ mod tests {
             [("a.rs".to_string(), ai_map)].into_iter().collect();
         let committed = HashMap::new();
         let ctx = RecoveryContext::for_test(Path::new("/r"), &committed, "h");
-        let unknown: HashMap<String, Vec<u32>> =
-            [("a.rs".to_string(), vec![2u32, 3u32])].into_iter().collect();
+        let unknown: HashMap<String, Vec<u32>> = [("a.rs".to_string(), vec![2u32, 3u32])]
+            .into_iter()
+            .collect();
         let recovered = AiEdgeExtensionSolver.solve(&ctx, &unknown, &ai_lines);
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].session_key, "s_ai");

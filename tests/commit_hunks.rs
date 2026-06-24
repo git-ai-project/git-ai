@@ -369,7 +369,9 @@ fn test_commit_hunks_attribution_boundaries_split() {
     let commit = repo.stage_all_and_commit("boundary split").unwrap();
 
     let mut file = repo.filename("split.txt");
-    file.assert_committed_lines(lines!["Untracked".unattributed_human(), "AI added".ai()]);
+    // "Untracked" was untracked, but it sits directly above the AI line, so the
+    // AI edge extension solver absorbs it into the AI session -> both lines AI.
+    file.assert_committed_lines(lines!["Untracked".ai(), "AI added".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -389,13 +391,16 @@ fn test_commit_hunks_attribution_boundaries_split() {
         .filter(|h| h.hunk_kind == "addition")
         .collect();
 
-    // Untracked and AI should be separate hunks
+    // The formerly-untracked line is absorbed into the AI session by the edge
+    // extension solver, so both lines are now AI-attributed. They remain two
+    // separate addition hunks (distinct attestation entries), but both now
+    // carry a prompt_id instead of the line-1 hunk being unattributed.
     assert_eq!(addition_hunks.len(), 2);
 
-    // First hunk: untracked (no prompt_id, no human_id)
+    // First hunk: formerly untracked, now AI (prompt_id present).
     assert_eq!(addition_hunks[0].start_line, 1);
     assert_eq!(addition_hunks[0].end_line, 1);
-    assert!(addition_hunks[0].prompt_id.is_none());
+    assert!(addition_hunks[0].prompt_id.is_some());
     assert!(addition_hunks[0].human_id.is_none());
 
     // Second hunk: AI

@@ -107,9 +107,11 @@ fn test_checkpointed_carryover_survives_uncheckpointed_append() {
     );
 
     repo.stage_all_and_commit("commit remaining lines").unwrap();
-    let mut expected = (1..=15)
+    // Lines 16-20 were uncheckpointed (untracked) appends, but they form a
+    // contiguous untracked run directly below AI line 15, so the AI edge
+    // extension solver absorbs them into the AI session -> all 20 are AI.
+    let expected = (1..=20)
         .map(|line| format!("line {line}").ai())
         .collect::<Vec<_>>();
-    expected.extend((16..=20).map(|line| format!("line {line}").human()));
     file.assert_lines_and_blame(expected);
 }

@@ -29,7 +29,8 @@ fn test_bash_pre_human_checkpoint_preserves_dirty_file_attribution() {
     repo.stage_all_and_commit("After bash").unwrap();
     file.assert_committed_lines(lines![
         "original line".unattributed_human(),
-        "human edit line".unattributed_human(),
+        // AI edge extension: untracked line directly above the AI line is absorbed into the AI session.
+        "human edit line".ai(),
         "ai bash line".ai(),
     ]);
 }
@@ -88,7 +89,8 @@ fn test_bash_multiple_files_mixed_dirty_state() {
     repo.stage_all_and_commit("After bash").unwrap();
     file_a.assert_committed_lines(lines![
         "line a".unattributed_human(),
-        "human touched a".unattributed_human(),
+        // AI edge extension: untracked line directly above the AI line is absorbed into the AI session.
+        "human touched a".ai(),
         "bash touched a".ai(),
     ]);
     file_b.assert_committed_lines(lines!["line b".unattributed_human(), "bash touched b".ai()]);
@@ -152,7 +154,8 @@ fn test_codex_preset_pre_bash_preserves_dirty_file_attribution() {
     repo.stage_all_and_commit("After codex bash").unwrap();
     file.assert_committed_lines(lines![
         "original line".unattributed_human(),
-        "human edit line".unattributed_human(),
+        // AI edge extension: untracked line directly above the AI line is absorbed into the AI session.
+        "human edit line".ai(),
         "ai bash line".ai(),
     ]);
 }

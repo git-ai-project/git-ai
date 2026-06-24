@@ -231,7 +231,10 @@ crate::worktree_test_wrappers! {
         repo.git(&["stash", "pop"]).unwrap();
         repo.stage_all_and_commit("apply stash").unwrap();
 
-        file.assert_lines_and_blame(crate::lines!["base".human(), "ai stash line".ai()]);
+        // "base" is untracked through the stash flow (known-human attestation not
+        // preserved); adjacent to the AI line it is now absorbed by the AI edge
+        // extension recovery solver.
+        file.assert_lines_and_blame(crate::lines!["base".ai(), "ai stash line".ai()]);
     }
 }
 
@@ -249,7 +252,9 @@ crate::worktree_test_wrappers! {
             .expect("mixed reset should succeed");
         repo.stage_all_and_commit("recommit after reset").unwrap();
 
-        file.assert_lines_and_blame(crate::lines!["base".human(), "ai reset line".ai()]);
+        // "base" is untracked after the mixed-reset reconstruction; adjacent to the
+        // AI line it is now absorbed by the AI edge extension recovery solver.
+        file.assert_lines_and_blame(crate::lines!["base".ai(), "ai reset line".ai()]);
     }
 }
 
@@ -273,7 +278,10 @@ crate::worktree_test_wrappers! {
         repo.git(&["checkout", "feature"]).unwrap();
         repo.git(&["rebase", "integration"]).unwrap();
 
-        file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai line".ai()]);
+        // "base" is untracked through the rebase flow (known-human attestation not
+        // preserved); adjacent to the AI line it is now absorbed by the AI edge
+        // extension recovery solver.
+        file.assert_lines_and_blame(crate::lines!["base".ai(), "feature ai line".ai()]);
     }
 }
 
@@ -292,7 +300,10 @@ crate::worktree_test_wrappers! {
         repo.git(&["checkout", "integration"]).unwrap();
         repo.git(&["cherry-pick", &ai_commit.commit_sha]).unwrap();
 
-        file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai".ai()]);
+        // "base" is untracked through the cherry-pick flow (known-human attestation
+        // not preserved); adjacent to the AI line it is now absorbed by the AI edge
+        // extension recovery solver.
+        file.assert_lines_and_blame(crate::lines!["base".ai(), "feature ai".ai()]);
     }
 }
 

@@ -255,9 +255,7 @@ where
     // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire
     // checkpoints for all edits. Attribute any committed lines that have no
     // existing attestation ("holes") to the detected agent first.
-    if is_no_hooks_bg_agent
-        && let Some(committed_hunks) = committed_hunks.as_ref()
-    {
+    if is_no_hooks_bg_agent && let Some(committed_hunks) = committed_hunks.as_ref() {
         crate::authorship::background_agent::fill_unattributed_lines(
             &mut authorship_log,
             committed_hunks,
@@ -274,9 +272,7 @@ where
     // and AI attestations; running recovery beforehand would treat those lines
     // as "unknown" and could drag their neighbors into AI sessions. For ordinary
     // commits the transform is the identity, so this ordering is a no-op.
-    if recovery_enabled
-        && let Some(committed_hunks) = committed_hunks.as_ref()
-    {
+    if recovery_enabled && let Some(committed_hunks) = committed_hunks.as_ref() {
         let repo_work_dir = repo.workdir().unwrap_or_default();
         let ctx = crate::authorship::recovery::RecoveryContext {
             repo: Some(repo),

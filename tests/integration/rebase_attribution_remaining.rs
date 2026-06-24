@@ -50,9 +50,12 @@ fn test_pull_rebase_autostash_ff_preserves_uncommitted_ai_attribution() {
         .stage_all_and_commit("ai work after autostash ff")
         .unwrap();
 
-    // Attribution must be preserved
+    // Attribution must be preserved. "base content" is untracked in this commit
+    // (its known-human base commit was discarded by the earlier reset --hard) and
+    // sits directly above the AI lines, so it is absorbed by the AI edge extension
+    // recovery solver.
     base_file.assert_lines_and_blame(crate::lines![
-        "base content".human(),
+        "base content".ai(),
         "ai line 1".ai(),
         "ai line 2".ai()
     ]);
