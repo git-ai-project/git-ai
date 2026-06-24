@@ -24,6 +24,21 @@ fn status_json(repo: &TestRepo) -> StatusOutput {
     serde_json::from_str(&json).expect("valid status json")
 }
 
+/// Mirror of `StatusOutput` where `checkpoints` is optional, so tests can
+/// distinguish "field present" (default mode) from "field omitted" (--diff-only).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct DiffOnlyStatusOutput {
+    stats: CommitStats,
+    checkpoints: Option<Vec<serde_json::Value>>,
+}
+
+fn status_json_with_args(repo: &TestRepo, args: &[&str]) -> DiffOnlyStatusOutput {
+    let raw = repo.git_ai(args).expect("git-ai status should succeed");
+    let json = extract_json_object(&raw);
+    serde_json::from_str(&json).expect("valid status json")
+}
+
 fn write_file(repo: &TestRepo, path: &str, contents: &str) {
     let abs_path = repo.path().join(path);
     if let Some(parent) = abs_path.parent() {
@@ -243,6 +258,64 @@ fn test_ai_accepted_respects_ignore_patterns() {
     );
 }
 
+/// `--diff-only` must keep the same diff-scoped `stats` as a plain `--json`
+/// run, while omitting the per-checkpoint breakdown.
+#[test]
+fn test_diff_only_omits_checkpoints_but_keeps_stats() {
+    let repo = TestRepo::new();
+
+    write_file(&repo, "a.txt", "L1\nL2\nL3\n");
+    repo.stage_all_and_commit("initial").unwrap();
+
+    write_file(&repo, "a.txt", "L1\nL2\nL3\nL4\nL5\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "a.txt"]).unwrap();
+
+    // Default mode includes the checkpoints array.
+    let default = status_json_with_args(&repo, &["status", "--json"]);
+    assert!(
+        default.checkpoints.is_some(),
+        "default --json should include the checkpoints array"
+    );
+    assert!(
+        !default.checkpoints.as_ref().unwrap().is_empty(),
+        "default --json should list the recorded checkpoint"
+    );
+
+    // --diff-only omits the checkpoints field entirely.
+    let diff_only = status_json_with_args(&repo, &["status", "--json", "--diff-only"]);
+    assert!(
+        diff_only.checkpoints.is_none(),
+        "--diff-only should omit the checkpoints field"
+    );
+
+    // Diff-scoped stats are identical between the two modes.
+    assert_eq!(
+        diff_only.stats.git_diff_added_lines, default.stats.git_diff_added_lines,
+        "--diff-only must not change the diff-scoped stats"
+    );
+    assert_eq!(
+        diff_only.stats.git_diff_added_lines, 2,
+        "a.txt adds 2 lines (L4, L5)"
+    );
+}
+
+/// `--diff-only` also omits checkpoints in the no-changes empty state.
+#[test]
+fn test_diff_only_no_changes_omits_checkpoints() {
+    let repo = TestRepo::new();
+
+    write_file(&repo, "a.txt", "L1\nL2\n");
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let diff_only = status_json_with_args(&repo, &["status", "--json", "--diff-only"]);
+    assert!(
+        diff_only.checkpoints.is_none(),
+        "--diff-only should omit checkpoints even with no changes"
+    );
+    assert_eq!(diff_only.stats.git_diff_added_lines, 0);
+    assert_eq!(diff_only.stats.git_diff_deleted_lines, 0);
+}
+
 crate::reuse_tests_in_worktree!(
     test_working_dir_diff_stats_single_file_checkpoint,
     test_working_dir_diff_stats_exclusion_by_checkpoint,
@@ -251,4 +324,6 @@ crate::reuse_tests_in_worktree!(
     test_working_dir_diff_stats_with_rename,
     test_working_dir_diff_stats_respects_ignore_patterns,
     test_ai_accepted_respects_ignore_patterns,
+    test_diff_only_omits_checkpoints_but_keeps_stats,
+    test_diff_only_no_changes_omits_checkpoints,
 );

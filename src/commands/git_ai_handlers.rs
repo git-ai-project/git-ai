@@ -339,6 +339,9 @@ fn print_help() {
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!(
+        "    --diff-only            Report only current-diff stats, omitting the per-checkpoint breakdown"
+    );
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
     eprintln!("  show-prompt <id>   Display a prompt record by its ID");
     eprintln!("    --commit <rev>        Look in a specific commit only");

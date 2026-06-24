@@ -5857,10 +5857,17 @@ fn spawn_self_restart() -> Result<(), String> {
 
     #[cfg(windows)]
     {
+        use crate::utils::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS};
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        // Match the detachment flags used by the wrapper's daemon spawn
+        // (commands::daemon::spawn_daemon_run_detached): DETACHED_PROCESS gives
+        // the child no inherited console, CREATE_NO_WINDOW suppresses any
+        // console window, and CREATE_NEW_PROCESS_GROUP isolates it from parent
+        // signals. No NonInheritableStdHandles guard is needed here: the daemon
+        // is configured with null stdio, so it holds no pipe handles a spawned
+        // child could inherit (the guard only matters when a parent captured our
+        // stdout/stderr via a pipe).
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
     cmd.spawn()

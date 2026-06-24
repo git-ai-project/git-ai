@@ -46,6 +46,18 @@ fn raw_commit_file(repo: &TestRepo, path: &str, content: &str, message: &str) ->
     raw_commit_all(repo, message)
 }
 
+fn raw_clone(source: &TestRepo, target_path: &std::path::Path) -> TestRepo {
+    raw_git(
+        source,
+        &[
+            "clone",
+            source.path().to_str().expect("source path should be utf-8"),
+            target_path.to_str().expect("target path should be utf-8"),
+        ],
+    );
+    TestRepo::new_at_path_with_daemon_scope(target_path, DaemonTestScope::NoDaemon)
+}
+
 fn traced_ai_commit_file(repo: &TestRepo, path: &str, content: &str, message: &str) -> String {
     write_file(repo, path, content);
     repo.git_ai(&["checkpoint", "mock_ai", path])
@@ -77,6 +89,20 @@ fn run_traced_git_without_sync(repo: &TestRepo, args: &[&str]) -> String {
     );
     repo.git(args)
         .unwrap_or_else(|error| panic!("traced git {:?} failed: {}", args, error))
+}
+
+fn assert_ai_authorship_note(repo: &TestRepo, commit_sha: &str) {
+    let note = repo
+        .read_authorship_note(commit_sha)
+        .unwrap_or_else(|| panic!("commit {commit_sha} should have an authorship note"));
+    let log = AuthorshipLog::deserialize_from_string(&note)
+        .unwrap_or_else(|error| panic!("failed to parse authorship note: {}", error));
+    assert!(
+        log.attestations
+            .iter()
+            .any(|attestation| !attestation.entries.is_empty()),
+        "commit {commit_sha} should contain AI authorship entries"
+    );
 }
 
 fn assert_no_ai_authorship_for_commit(repo: &TestRepo, commit_sha: &str) {
@@ -136,6 +162,84 @@ fn test_cold_repo_first_traced_commit_is_processed() {
     assert_no_ai_authorship_for_commit(&repo, &raw_first);
     assert_no_ai_authorship_for_commit(&repo, &raw_second);
     assert_no_ai_authorship_for_commit(&repo, &head);
+}
+
+fn run_cold_repo_first_traced_pull_rebase_preserves_rebased_ai_authorship() {
+    let upstream = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
+    raw_git(&upstream, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    let mut repo = cold_repo();
+    raw_git(&repo, &["branch", "-M", "main"]);
+    raw_git(
+        &repo,
+        &["remote", "add", "origin", upstream.path().to_str().unwrap()],
+    );
+    raw_commit_file(&repo, "README.md", "# Test Repo\n", "raw initial");
+    raw_git(&repo, &["push", "-u", "origin", "HEAD:main"]);
+
+    start_cold_daemon(&mut repo);
+    let local_ai_commit = traced_ai_commit_file(
+        &repo,
+        "ai_feature.txt",
+        "AI generated feature line 1\nAI generated feature line 2\n",
+        "add AI feature",
+    );
+    assert_ai_authorship_note(&repo, &local_ai_commit);
+
+    let contributor_parent = tempfile::tempdir().expect("contributor temp dir");
+    let contributor_path = contributor_parent.path().join("contributor");
+    let contributor = raw_clone(&upstream, &contributor_path);
+    raw_git(&contributor, &["checkout", "main"]);
+    raw_commit_file(
+        &contributor,
+        "upstream_change.txt",
+        "upstream content\n",
+        "upstream divergent commit",
+    );
+    raw_git(&contributor, &["push", "origin", "HEAD:main"]);
+
+    assert!(
+        repo.git(&["push"]).is_err(),
+        "push should be rejected because origin has diverged"
+    );
+    assert!(
+        repo.git(&["pull"]).is_err(),
+        "plain pull should fail before an explicit reconciliation strategy"
+    );
+    repo.git(&["pull", "--rebase"])
+        .expect("pull --rebase should succeed");
+    repo.sync_daemon_force();
+
+    let rebased = raw_head(&repo);
+    assert_ne!(rebased, local_ai_commit);
+    assert_ai_authorship_note(&repo, &rebased);
+}
+
+#[test]
+fn test_cold_repo_first_traced_pull_rebase_preserves_rebased_ai_authorship() {
+    run_cold_repo_first_traced_pull_rebase_preserves_rebased_ai_authorship();
+}
+
+#[test]
+#[ignore = "stress test for nondeterministic cold pull-rebase reflog timing"]
+fn stress_cold_repo_first_traced_pull_rebase_preserves_rebased_ai_authorship() {
+    std::thread::scope(|scope| {
+        let handles = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    for _ in 0..3 {
+                        run_cold_repo_first_traced_pull_rebase_preserves_rebased_ai_authorship();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("cold pull-rebase stress worker panicked");
+        }
+    });
 }
 
 #[test]

@@ -64,20 +64,7 @@ impl FirebenderPreset {
 
     fn extract_patch_paths(patch: &str) -> Vec<String> {
         let mut paths = Vec::new();
-
-        for line in patch.lines() {
-            for prefix in [
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ] {
-                if let Some(path) = line.strip_prefix(prefix) {
-                    Self::push_unique_path(&mut paths, path);
-                }
-            }
-        }
-
+        parse::collect_apply_patch_paths_from_text(patch, &mut paths);
         paths
     }
 

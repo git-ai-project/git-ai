@@ -107,6 +107,7 @@ fn print_config_help() {
     println!("  disable_auto_updates         Disable auto updates (bool)");
     println!("  update_channel               Update channel (latest/next)");
     println!("  feature_flags                Feature flags (object)");
+    println!("  api_base_url                 API base URL (default: https://usegitai.com)");
     println!("  api_key                      API key for X-API-Key header");
     println!("  author.name                  git-ai author display name override");
     println!("  author.email                 git-ai author email override");
@@ -351,6 +352,12 @@ fn show_all_config() -> Result<(), String> {
         .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
     effective_config.insert("feature_flags".to_string(), flags_value);
 
+    // API base URL
+    effective_config.insert(
+        "api_base_url".to_string(),
+        Value::String(runtime_config.api_base_url().to_string()),
+    );
+
     // API key - show masked value if set
     if let Some(ref key) = file_config.api_key {
         let masked = mask_api_key(key);
@@ -425,6 +432,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 serde_json::to_value(runtime_config.get_feature_flags())
                     .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
             }
+            "api_base_url" => Value::String(runtime_config.api_base_url().to_string()),
             "api_key" => {
                 if let Some(ref key) = file_config.api_key {
                     Value::String(mask_api_key(key))
@@ -637,6 +645,11 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.feature_flags = Some(json_value);
                 crate::config::save_file_config(&file_config)?;
                 println!("[feature_flags]: {}", value);
+            }
+            "api_base_url" => {
+                file_config.api_base_url = Some(value.to_string());
+                crate::config::save_file_config(&file_config)?;
+                println!("[api_base_url]: {}", value);
             }
             "api_key" => {
                 file_config.api_key = Some(value.to_string());
@@ -940,6 +953,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [feature_flags]: {}", v);
+                }
+            }
+            "api_base_url" => {
+                let old_value = file_config.api_base_url.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [api_base_url]: {}", v);
                 }
             }
             "api_key" => {

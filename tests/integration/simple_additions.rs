@@ -1,6 +1,8 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::attribution_tracker::Attribution;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::authorship::working_log::{CheckpointKind, WorkingLogEntry};
 use git_ai::config::AuthorConfig;
 use std::fs;
 
@@ -1783,6 +1785,70 @@ fn test_ai_generated_file_then_human_full_rewrite() {
     file.assert_lines_and_blame(crate::lines![
         "console.log('hello world');".human(),
         "console.log('goodbye');".human(),
+    ]);
+}
+
+/// Regression test: one stale checkpoint entry with character attribution but no
+/// line attribution must not abort note generation for the whole commit.
+#[test]
+fn test_stale_zero_width_checkpoint_entry_does_not_abort_persisted_working_log() {
+    let repo = TestRepo::new();
+    let feature_path = repo.path().join("feature.rs");
+
+    fs::write(&feature_path, "fn main() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "feature.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let mut file = repo.filename("feature.rs");
+    file.assert_committed_lines(crate::lines!["fn main() {}".human(),]);
+
+    fs::write(
+        &feature_path,
+        "fn main() {}\nfn generated_by_ai() -> bool { true }\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.rs"])
+        .unwrap();
+
+    let working_log = repo.current_working_logs();
+    let mut checkpoints = working_log
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    let ai_checkpoint = checkpoints
+        .iter_mut()
+        .find(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent)
+        .expect("AI checkpoint should exist");
+    let feature_entry = ai_checkpoint
+        .entries
+        .iter()
+        .find(|entry| entry.file == "feature.rs")
+        .expect("feature checkpoint entry should exist")
+        .clone();
+    let ai_author_id = feature_entry
+        .line_attributions
+        .iter()
+        .find(|attr| {
+            attr.author_id != CheckpointKind::Human.to_str() && !attr.author_id.starts_with("h_")
+        })
+        .expect("feature entry should have an AI line attribution")
+        .author_id
+        .clone();
+
+    ai_checkpoint.entries.push(WorkingLogEntry::new(
+        "stale.rs".to_string(),
+        feature_entry.blob_sha,
+        vec![Attribution::new(0, 0, ai_author_id, 0)],
+        Vec::new(),
+    ));
+    working_log
+        .write_all_checkpoints(&checkpoints)
+        .expect("modified checkpoints should be writable");
+
+    repo.stage_all_and_commit("AI feature").unwrap();
+
+    file.assert_lines_and_blame(crate::lines![
+        "fn main() {}".human(),
+        "fn generated_by_ai() -> bool { true }".ai(),
     ]);
 }
 
