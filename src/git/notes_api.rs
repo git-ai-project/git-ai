@@ -105,7 +105,17 @@ pub fn read_notes_batch(
         .into_iter()
         .collect();
 
-    let notes = match Config::get().notes_backend_kind() {
+    let notes = read_notes_batch_for_kind(repo, &lookup_shas, Config::get().notes_backend_kind())?;
+
+    Ok(remap_notes_to_requested_keys(notes, &canonical_pairs))
+}
+
+fn read_notes_batch_for_kind(
+    repo: &Repository,
+    lookup_shas: &[String],
+    backend_kind: NotesBackendKind,
+) -> Result<HashMap<String, String>, GitAiError> {
+    match backend_kind {
         NotesBackendKind::Http => {
             // Step 1 (http): check SQLite cache — fast, no network.
             let mut notes = http_read_notes(&lookup_shas);
@@ -138,11 +148,6 @@ pub fn read_notes_batch(
             Ok::<HashMap<String, String>, GitAiError>(notes)
         }
         NotesBackendKind::GitNotes => {
-            // Keep the SQLite cache coherent with direct local git-note changes
-            // (for example, notes fetched from a remote or test fixtures that
-            // intentionally overwrite refs/notes/ai).
-            let _ = sync_from_git_ref(repo);
-
             // Step 1 (git_notes): check SQLite cache — fast, no subprocess.
             let mut notes = git_notes_read_from_sqlite(&lookup_shas);
 
@@ -170,9 +175,7 @@ pub fn read_notes_batch(
             }
             Ok::<HashMap<String, String>, GitAiError>(notes)
         }
-    }?;
-
-    Ok(remap_notes_to_requested_keys(notes, &canonical_pairs))
+    }
 }
 
 pub fn read_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipLog> {
@@ -1636,6 +1639,80 @@ mod tests {
             Some("already-synced".to_string()),
             "unchanged notes ref tip should skip the full refresh"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(notes_db_env)]
+    fn git_notes_read_does_not_sync_entire_git_ref() {
+        use crate::git::repository::exec_git;
+        use crate::git::test_utils::TmpRepo;
+        use crate::notes::db::NotesDatabase;
+        use std::env;
+
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp db file");
+        unsafe {
+            env::set_var("GIT_AI_TEST_NOTES_DB_PATH", tmp_db.path());
+        }
+
+        let repo = TmpRepo::new().expect("TmpRepo::new");
+        repo.write_file("a.txt", "hello", false).expect("write");
+        let sha = repo.commit_all("initial").expect("commit");
+
+        let note_content = "git-ref-content";
+        let mut args = repo.gitai_repo().global_args_for_exec();
+        args.extend([
+            "notes".to_string(),
+            "--ref=ai".to_string(),
+            "add".to_string(),
+            "-m".to_string(),
+            note_content.to_string(),
+            sha.clone(),
+        ]);
+        exec_git(&args).expect("git notes add");
+
+        let notes_tip = local_notes_ref_tip(repo.gitai_repo())
+            .expect("read notes tip")
+            .expect("notes tip");
+        let sync_cursor_key = notes_ref_sync_cursor_key(repo.gitai_repo());
+
+        let db = NotesDatabase::global().expect("global db");
+        {
+            let mut lock = db.lock().expect("lock");
+            lock.set_metadata_value(&sync_cursor_key, "stale-sync-cursor")
+                .expect("set stale cursor");
+        }
+
+        let notes = read_notes_batch_for_kind(
+            repo.gitai_repo(),
+            std::slice::from_ref(&sha),
+            NotesBackendKind::GitNotes,
+        )
+        .expect("read git note");
+
+        assert_eq!(
+            notes.get(&sha).map(|content| content.trim_end()),
+            Some(note_content),
+            "GitNotes reads should still fall back to refs/notes/ai for requested misses"
+        );
+
+        let lock = db.lock().expect("lock");
+        let cursor = lock
+            .get_metadata_value(&sync_cursor_key)
+            .expect("get sync cursor");
+        assert_eq!(
+            cursor.as_deref(),
+            Some("stale-sync-cursor"),
+            "GitNotes reads must not run full sync_from_git_ref or advance its cursor"
+        );
+        assert_ne!(
+            cursor.as_deref(),
+            Some(notes_tip.as_str()),
+            "full ref sync should be reserved for explicit pull/fetch/clone sync triggers"
+        );
+
+        unsafe {
+            env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
+        }
     }
 
     #[test]
