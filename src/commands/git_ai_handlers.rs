@@ -4,7 +4,7 @@ use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
 use crate::commands;
 use crate::config;
-use crate::daemon::ControlRequest;
+use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{CommitRange, Repository};
@@ -609,7 +609,12 @@ fn likely_utf16_endian(bytes: &[u8]) -> Option<Utf16Endian> {
 
     let sample = &bytes[..sample_len];
     let even_nuls = sample.iter().step_by(2).filter(|&&b| b == 0).count();
-    let odd_nuls = sample.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+    let odd_nuls = sample
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter(|&&b| b == 0)
+        .count();
     let min_nuls = sample_len / 8;
 
     if odd_nuls > min_nuls && odd_nuls > even_nuls.saturating_mul(4) {
@@ -1008,6 +1013,7 @@ fn handle_stats(args: &[String]) {
     }
 
     let effective_patterns = effective_ignore_patterns(&repo, &ignore_patterns, &[]);
+    sync_daemon_before_stats_read(&repo);
 
     // Handle commit range if detected
     if let Some(range) = commit_range {
@@ -1043,6 +1049,32 @@ fn handle_stats(args: &[String]) {
             }
         }
         std::process::exit(1);
+    }
+}
+
+fn sync_daemon_before_stats_read(repo: &Repository) {
+    let Ok(workdir) = repo.workdir() else {
+        return;
+    };
+    let Ok(config) = DaemonConfig::from_env_or_default_paths() else {
+        return;
+    };
+    let request = ControlRequest::SyncFamily {
+        repo_working_dir: workdir.to_string_lossy().to_string(),
+    };
+    match send_control_request(&config.control_socket_path, &request) {
+        Ok(response) if response.ok => {}
+        Ok(response) => {
+            tracing::debug!(
+                "daemon sync before stats failed: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string())
+            );
+        }
+        Err(error) => {
+            tracing::debug!("daemon sync before stats unavailable: {}", error);
+        }
     }
 }
 

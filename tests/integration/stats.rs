@@ -21,6 +21,14 @@ fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
     serde_json::from_str(&json).expect("valid stats json")
 }
 
+fn stats_from_args_without_pre_sync(repo: &TestRepo, args: &[&str]) -> CommitStats {
+    let raw = repo
+        .git_ai_without_pre_sync_for_test(args)
+        .expect("git-ai stats should succeed");
+    let json = extract_json_object(&raw);
+    serde_json::from_str(&json).expect("valid stats json")
+}
+
 fn run_git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -561,6 +569,34 @@ fn test_stats_keeps_negative_linguist_patterns_counted() {
     let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
     assert_eq!(stats.git_diff_added_lines, 1);
     assert_eq!(stats.ai_additions, 1);
+}
+
+#[test]
+fn test_copied_code_without_agent_hook_remains_untracked_after_immediate_stats() {
+    let repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=750",
+    )]);
+
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Project"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut readme = repo.filename("README.md");
+    readme.assert_committed_lines(crate::lines!["# Project".unattributed_human(),]);
+
+    fs::write(
+        repo.path().join("copied.rs"),
+        "pub fn copied() {\n    println!(\"from clipboard\");\n}\n",
+    )
+    .unwrap();
+    repo.git(&["add", "copied.rs"]).unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "Paste copied code"], &[])
+        .unwrap();
+
+    let stats = stats_from_args_without_pre_sync(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 3);
+    assert_eq!(stats.ai_additions, 0);
+    assert_eq!(stats.unknown_additions, 3);
 }
 
 #[test]
