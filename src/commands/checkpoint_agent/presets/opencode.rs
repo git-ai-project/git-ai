@@ -48,24 +48,6 @@ impl OpenCodePreset {
         normalized_paths
     }
 
-    fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            let maybe_path = trimmed
-                .strip_prefix("*** Update File: ")
-                .or_else(|| trimmed.strip_prefix("*** Add File: "))
-                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-                .or_else(|| trimmed.strip_prefix("*** Move to: "));
-
-            if let Some(path) = maybe_path {
-                let path = path.trim().trim_matches('"').trim_matches('\'');
-                if !path.is_empty() && !out.iter().any(|existing| existing == path) {
-                    out.push(path.to_string());
-                }
-            }
-        }
-    }
-
     fn collect_tool_paths(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {
             serde_json::Value::Object(map) => {
@@ -110,7 +92,7 @@ impl OpenCodePreset {
                 if s.starts_with("file://") {
                     out.push(s.to_string());
                 }
-                Self::collect_apply_patch_paths_from_text(s, out);
+                super::parse::collect_apply_patch_paths_from_text(s, out);
             }
             _ => {}
         }
@@ -478,7 +460,7 @@ mod tests {
     #[test]
     fn test_opencode_collect_apply_patch_paths() {
         let mut out = Vec::new();
-        OpenCodePreset::collect_apply_patch_paths_from_text(
+        super::super::parse::collect_apply_patch_paths_from_text(
             "*** Update File: src/main.rs\n*** Add File: src/new.rs",
             &mut out,
         );

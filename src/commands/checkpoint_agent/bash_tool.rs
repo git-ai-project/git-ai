@@ -358,7 +358,7 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             _ => ToolClass::Skip,
         },
         Agent::Cursor => match tool_name {
-            "Write" | "Delete" | "StrReplace" => ToolClass::FileEdit,
+            "Write" | "Delete" | "StrReplace" | "ApplyPatch" => ToolClass::FileEdit,
             "Shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
@@ -1303,6 +1303,10 @@ mod tests {
         assert_eq!(classify_tool(Agent::Cursor, "Delete"), ToolClass::FileEdit);
         assert_eq!(
             classify_tool(Agent::Cursor, "StrReplace"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Cursor, "ApplyPatch"),
             ToolClass::FileEdit
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);

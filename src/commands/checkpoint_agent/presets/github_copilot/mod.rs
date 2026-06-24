@@ -158,7 +158,7 @@ pub(super) fn collect_tool_paths(value: &serde_json::Value, out: &mut Vec<String
             if s.starts_with("file://") {
                 out.push(s.to_string());
             }
-            ide::collect_apply_patch_paths_from_text(s, out);
+            parse::collect_apply_patch_paths_from_text(s, out);
         }
         _ => {}
     }
