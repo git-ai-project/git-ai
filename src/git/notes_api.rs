@@ -135,7 +135,7 @@ pub fn read_notes_batch(
                 }
             }
 
-            Ok(notes)
+            Ok::<HashMap<String, String>, GitAiError>(notes)
         }
         NotesBackendKind::GitNotes => {
             // Keep the SQLite cache coherent with direct local git-note changes
@@ -168,7 +168,7 @@ pub fn read_notes_batch(
 
                 notes.extend(from_git);
             }
-            Ok(notes)
+            Ok::<HashMap<String, String>, GitAiError>(notes)
         }
     }?;
 
@@ -232,9 +232,9 @@ fn canonicalize_commit_sha(repo: &Repository, commit_sha: &str) -> String {
     ]);
 
     match exec_git(&args) {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string(),
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
         _ => commit_sha.to_string(),
     }
 }
