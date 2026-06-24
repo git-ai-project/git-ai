@@ -4161,12 +4161,7 @@ impl ActorDaemonCoordinator {
         let Some(worktree) = command.worktree.clone() else {
             return HashMap::new();
         };
-        if command.exit_code != 0
-            || !matches!(
-                command.primary_command.as_deref(),
-                Some("commit" | "merge" | "am")
-            )
-        {
+        if command.exit_code != 0 || command.primary_command.as_deref() != Some("commit") {
             return HashMap::new();
         }
 
