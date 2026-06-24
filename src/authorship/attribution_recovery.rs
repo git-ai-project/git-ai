@@ -126,7 +126,9 @@ fn recover_bash_mtime(
             "target_repo_work_dir": repo_work_dir.as_str(),
             "file_timestamps_ns": timestamps,
             "selected_bash_call_id": candidate.id,
+            "selected_bash_original_cwd": candidate.original_cwd.as_str(),
             "selected_bash_repo_work_dir": candidate.repo_work_dir.as_deref(),
+            "selected_bash_repo_discovery_error": candidate.repo_discovery_error.as_deref(),
             "selected_tool_use_id": candidate.tool_use_id,
             "selected_command": candidate.command,
             "distance_ns": distance_ns,
@@ -313,6 +315,7 @@ struct BashCandidateSelection<'a> {
 enum BashCandidateTier {
     ExistingCommitSession,
     WorkdirAncestor,
+    CwdAncestor,
     TimeOnly,
 }
 
@@ -321,7 +324,8 @@ impl BashCandidateTier {
         match self {
             Self::ExistingCommitSession => 0,
             Self::WorkdirAncestor => 1,
-            Self::TimeOnly => 2,
+            Self::CwdAncestor => 2,
+            Self::TimeOnly => 3,
         }
     }
 
@@ -329,6 +333,7 @@ impl BashCandidateTier {
         match self {
             Self::ExistingCommitSession => "existing_commit_session",
             Self::WorkdirAncestor => "workdir_ancestor",
+            Self::CwdAncestor => "cwd_ancestor",
             Self::TimeOnly => "time_only",
         }
     }
@@ -348,6 +353,10 @@ fn bash_candidate_tier(
         && path_is_equal_or_child(target_repo_work_dir, repo_work_dir)
     {
         return BashCandidateTier::WorkdirAncestor;
+    }
+
+    if path_is_equal_or_child(target_repo_work_dir, &candidate.original_cwd) {
+        return BashCandidateTier::CwdAncestor;
     }
 
     BashCandidateTier::TimeOnly
@@ -704,6 +713,32 @@ mod tests {
         }
     }
 
+    fn unresolved_bash_attempt(
+        id: i64,
+        external_session_id: &str,
+        tool_use_id: &str,
+        original_cwd: &str,
+        start_time_ns: u128,
+        end_time_ns: Option<u128>,
+    ) -> BashCheckpointCall {
+        BashCheckpointCall {
+            id,
+            invocation_key: format!("{}:{}", external_session_id, tool_use_id),
+            original_cwd: original_cwd.to_string(),
+            repo_work_dir: None,
+            repo_discovery_error: Some("No git repository found".to_string()),
+            session_id: external_session_id.to_string(),
+            tool_use_id: tool_use_id.to_string(),
+            agent_id: test_agent(external_session_id),
+            start_trace_id: Some(format!("t_start_{}", id)),
+            end_trace_id: end_time_ns.map(|_| format!("t_end_{}", id)),
+            start_time_ns,
+            end_time_ns,
+            command: Some("cd repo && true".to_string()),
+            metadata: HashMap::new(),
+        }
+    }
+
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
         let mut log = AuthorshipLog::new();
@@ -779,6 +814,57 @@ mod tests {
 
         assert_eq!(selection.candidate.tool_use_id, "tool-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::WorkdirAncestor);
+    }
+
+    #[test]
+    fn bash_candidate_ranking_prefers_workdir_ancestor_over_cwd_ancestor() {
+        let candidates = vec![
+            bash_call(
+                1,
+                "workdir-ancestor-session",
+                "tool-workdir-ancestor",
+                "/tmp/work",
+                900,
+                None,
+            ),
+            unresolved_bash_attempt(
+                2,
+                "cwd-ancestor-session",
+                "tool-cwd-ancestor",
+                "/tmp/work",
+                1_040,
+                None,
+            ),
+        ];
+
+        let selection =
+            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
+                .expect("expected candidate");
+
+        assert_eq!(selection.candidate.tool_use_id, "tool-workdir-ancestor");
+        assert_eq!(selection.tier, BashCandidateTier::WorkdirAncestor);
+    }
+
+    #[test]
+    fn bash_candidate_ranking_prefers_cwd_ancestor_over_time_only() {
+        let candidates = vec![
+            unresolved_bash_attempt(
+                1,
+                "cwd-ancestor-session",
+                "tool-cwd-ancestor",
+                "/tmp/work",
+                900,
+                None,
+            ),
+            bash_call(2, "closer-session", "tool-closer", "/other", 1_040, None),
+        ];
+
+        let selection =
+            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
+                .expect("expected candidate");
+
+        assert_eq!(selection.candidate.tool_use_id, "tool-cwd-ancestor");
+        assert_eq!(selection.tier, BashCandidateTier::CwdAncestor);
     }
 
     #[test]

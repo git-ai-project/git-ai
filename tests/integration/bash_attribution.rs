@@ -176,7 +176,7 @@ fn test_codex_preset_bash_recovery_minimizes_dirty_untracked_attribution() {
 }
 
 #[test]
-fn test_codex_parent_cwd_bash_attempt_is_persisted_without_attribution() {
+fn test_codex_parent_cwd_bash_attempt_recovers_attribution() {
     let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
     let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
     let repo = TestRepo::new_with_daemon_env(&env);
@@ -204,7 +204,7 @@ fn test_codex_parent_cwd_bash_attempt_is_persisted_without_attribution() {
         &parent_cwd,
         &["checkpoint", "codex", "--hook-input", &pre_hook_input],
     )
-    .expect("parent-cwd pre hook should record an attempt and degrade without checkpointing");
+    .expect("parent-cwd pre hook should record an attempt");
 
     fs::write(repo_root.join("src/parent-cwd.txt"), "x\n").unwrap();
 
@@ -230,10 +230,10 @@ fn test_codex_parent_cwd_bash_attempt_is_persisted_without_attribution() {
         .expect("commit should succeed");
 
     let mut file = repo.filename("src/parent-cwd.txt");
-    file.assert_committed_lines(lines!["x".unattributed_human()]);
+    file.assert_committed_lines(lines!["x".ai()]);
     assert!(
-        commit.authorship_log.metadata.sessions.is_empty(),
-        "attempt persistence alone must not create AI attribution"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "parent-cwd bash attempt should create recovered AI attribution"
     );
 
     let db = BashHistoryDatabase::open_at_path(std::path::Path::new(&bash_db_path)).unwrap();

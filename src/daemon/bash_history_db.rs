@@ -535,8 +535,7 @@ impl BashHistoryDatabase {
                    start_trace_id, end_trace_id, start_time_ns, end_time_ns,
                    command, metadata_json
             FROM bash_checkpoint_calls
-            WHERE repo_work_dir IS NOT NULL
-              AND start_time_ns <= ?1
+            WHERE start_time_ns <= ?1
               AND COALESCE(end_time_ns, start_time_ns) >= ?2
             ORDER BY id ASC
             "#,
@@ -791,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_cwd_call_persists_without_becoming_candidate() {
+    fn unresolved_cwd_call_is_available_as_candidate() {
         let (mut db, _dir) = test_db();
 
         db.record_start(&BashCallStart {
@@ -833,7 +832,9 @@ mod tests {
         );
 
         let candidates = db.candidates_near_timestamps(&[1_500], 1_000).unwrap();
-        assert!(candidates.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].tool_use_id, "tool-3");
+        assert_eq!(candidates[0].repo_work_dir, None);
     }
 
     #[test]
