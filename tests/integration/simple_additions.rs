@@ -1123,7 +1123,8 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
 
     fs::write(&file_path, "Base Line 1\nBase Line 2\nBase Line 3").unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "data.txt"])
+        .unwrap();
 
     fs::write(
         &file_path,

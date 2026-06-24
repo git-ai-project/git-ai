@@ -25,9 +25,17 @@ fn add_self_origin(repo: &TestRepo) {
 fn test_ci_fork_squash_merge() {
     // Setup: create "upstream" repo with initial commit
     let upstream = TestRepo::new();
-    let mut file = upstream.filename("feature.js");
 
-    file.set_contents(lines!["// Original code", "function original() {}"]);
+    let upstream_feature_path = upstream.path().join("feature.js");
+    fs::write(
+        &upstream_feature_path,
+        "// Original code\nfunction original() {}\n",
+    )
+    .unwrap();
+    upstream
+        .git_ai(&["checkpoint", "mock_known_human", "feature.js"])
+        .unwrap();
+    let mut file = upstream.filename("feature.js");
     let base_commit = upstream.stage_all_and_commit("Initial commit").unwrap();
     upstream.git(&["branch", "-M", "main"]).unwrap();
     add_self_origin(&upstream);
@@ -44,8 +52,8 @@ fn test_ci_fork_squash_merge() {
     // Fork contributor adds AI code using git-ai
     let mut fork_file = fork.filename("feature.js");
     fork_file.set_contents(lines![
-        "// Original code",
-        "function original() {}",
+        "// Original code".human(),
+        "function original() {}".human(),
         "// AI added function".ai(),
         "function aiFeature() {".ai(),
         "  return 'from fork';".ai(),

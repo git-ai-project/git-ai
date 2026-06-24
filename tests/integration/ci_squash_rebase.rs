@@ -1224,19 +1224,18 @@ fn test_ci_squash_merge_mixed_content() {
         .commit_sha;
     repo.git(&["branch", "-M", "main"]).unwrap();
 
-    // Feature branch: human comment, AI code, human comment.
+    // Feature branch: known-human comment, AI code, known-human comment.
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-    file.insert_at(
-        2,
-        crate::lines![
-            "// Human comment",
-            "// AI generated function".ai(),
-            "function aiHelper() {".ai(),
-            "  return true;".ai(),
-            "}".ai(),
-            "// Another human comment"
-        ],
-    );
+    file.set_contents(crate::lines![
+        "// Base code".human(),
+        "const base = 1;".human(),
+        "// Human comment".human(),
+        "// AI generated function".ai(),
+        "function aiHelper() {".ai(),
+        "  return true;".ai(),
+        "}".ai(),
+        "// Another human comment".human()
+    ]);
     let head_sha = repo
         .stage_all_and_commit("Add mixed content")
         .unwrap()
@@ -1247,13 +1246,12 @@ fn test_ci_squash_merge_mixed_content() {
     let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
     assert_ci_rewrite_succeeded(&output);
 
-    // The squashed commit splits attribution by author: the AI block (and the
-    // bare `// Human comment` pulled into the AI hunk boundary) is AI; the
-    // trailing untracked human comment stays human.
+    // The squashed commit splits attribution by author: known-human lines stay
+    // human and the AI block stays AI.
     file.assert_lines_and_blame(crate::lines![
         "// Base code".human(),
         "const base = 1;".human(),
-        "// Human comment".ai(),
+        "// Human comment".human(),
         "// AI generated function".ai(),
         "function aiHelper() {".ai(),
         "  return true;".ai(),
