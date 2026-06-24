@@ -794,6 +794,15 @@ fn sync_from_git_ref_into_db(
     let entries: Vec<(String, String)> = notes.into_iter().collect();
 
     if entries.is_empty() {
+        // We successfully observed this notes ref tip and attempted to read its
+        // listed notes. Avoid repeating the full sync on every GitNotes read
+        // when a race or malformed notes tree produces no readable entries.
+        if let Err(e) = db.set_metadata_value(&sync_cursor_key, &notes_tip) {
+            tracing::debug!(
+                "sync_from_git_ref: failed to record notes ref cursor: {}",
+                e
+            );
+        }
         return Ok(());
     }
 
