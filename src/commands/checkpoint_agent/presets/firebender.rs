@@ -198,10 +198,17 @@ impl AgentPreset for FirebenderPreset {
 
         let tool_use_id_str = tool_use_id.unwrap_or_else(|| "bash".to_string());
 
+        let bash_command = tool_input
+            .get("command")
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         let event = match (hook_event_name.as_str(), is_bash) {
             ("preToolUse", true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -213,6 +220,7 @@ impl AgentPreset for FirebenderPreset {
                 context,
                 tool_use_id: tool_use_id_str,
                 stream_source: None,
+                command: bash_command,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

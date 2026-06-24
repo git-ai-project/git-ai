@@ -141,15 +141,19 @@ impl AgentPreset for CursorPreset {
             .unwrap_or("bash")
             .to_string();
 
+        let bash_command = parse::bash_command_from_tool_input(&data);
+
         let event = match (tool_class, is_pre) {
             (ToolClass::Bash, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id,
+                command: bash_command,
             }),
             (ToolClass::Bash, false) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id,
                 stream_source,
+                command: bash_command,
             }),
             (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,

@@ -190,11 +190,13 @@ impl AgentPreset for PiPreset {
             PiHookEvent::BeforeCommand => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: None,
             }),
             PiHookEvent::AfterCommand => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
                 stream_source,
+                command: None,
             }),
         };
 

@@ -66,6 +66,8 @@ impl AgentPreset for ClaudePreset {
             .map(|n| bash_tool::classify_tool(Agent::Claude, n) == ToolClass::Bash)
             .unwrap_or(false);
 
+        let bash_command = parse::bash_command_from_tool_input(&data);
+
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "claude".to_string(),
@@ -102,6 +104,7 @@ impl AgentPreset for ClaudePreset {
             (Some("PreToolUse"), true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
+                command: bash_command,
             }),
             (Some("PreToolUse"), false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -113,6 +116,7 @@ impl AgentPreset for ClaudePreset {
                 context,
                 tool_use_id: tool_use_id.to_string(),
                 stream_source,
+                command: bash_command,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

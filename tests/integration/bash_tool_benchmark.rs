@@ -338,6 +338,7 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
             &tool_use_id,
             &agent_id,
             None,
+            None,
         )
         .expect("pre-hook should succeed");
         let pre_hook_duration = pre_start.elapsed();
@@ -621,6 +622,7 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
             session_id,
             &tool_use_id,
             &agent_id,
+            None,
             None,
         );
         let pre_elapsed = pre_start.elapsed();

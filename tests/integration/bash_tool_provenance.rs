@@ -55,7 +55,7 @@ fn dummy_agent_id() -> AgentId {
 }
 
 fn pre_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) {
-    handle_bash_pre_tool_use_with_context(root, session_id, tool_use_id, &dummy_agent_id(), None)
+    handle_bash_pre_tool_use_with_context(root, session_id, tool_use_id, &dummy_agent_id(), None, None)
         .expect("pre-hook should succeed");
 }
 

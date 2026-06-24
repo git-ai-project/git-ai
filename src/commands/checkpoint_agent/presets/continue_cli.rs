@@ -51,11 +51,13 @@ impl AgentPreset for ContinueCliPreset {
         });
 
         let is_pre = hook_event == Some("PreToolUse");
+        let bash_command = parse::bash_command_from_tool_input(&data);
 
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -67,6 +69,7 @@ impl AgentPreset for ContinueCliPreset {
                 context,
                 tool_use_id: tool_use_id.to_string(),
                 stream_source,
+                command: bash_command,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

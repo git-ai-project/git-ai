@@ -57,11 +57,13 @@ impl AgentPreset for GeminiPreset {
 
         // Gemini uses "BeforeTool" instead of "PreToolUse"
         let is_pre = matches!(hook_event, Some("BeforeTool") | Some("PreToolUse"));
+        let bash_command = parse::bash_command_from_tool_input(&data);
 
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -73,6 +75,7 @@ impl AgentPreset for GeminiPreset {
                 context,
                 tool_use_id: tool_use_id.to_string(),
                 stream_source,
+                command: bash_command,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

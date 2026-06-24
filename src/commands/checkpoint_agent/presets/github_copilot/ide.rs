@@ -254,11 +254,14 @@ pub(super) fn parse_vscode_native_hooks(
         external_parent_session_id: None,
     });
 
+    let bash_command = parse::bash_command_from_tool_input(data);
+
     if hook_event_name == "PreToolUse" {
         if is_bash {
             return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id,
+                command: bash_command,
             })]);
         }
 
@@ -302,6 +305,7 @@ pub(super) fn parse_vscode_native_hooks(
             context,
             tool_use_id,
             stream_source,
+            command: bash_command,
         })]);
     }
 

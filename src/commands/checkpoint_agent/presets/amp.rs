@@ -263,6 +263,14 @@ impl AgentPreset for AmpPreset {
         let tool_use_id = hook_input.tool_use_id.clone();
         let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
 
+        let bash_command = hook_input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command"))
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         let file_paths = Self::extract_file_paths(&hook_input, cwd);
 
         // Resolve transcript path for StreamSource
@@ -333,6 +341,7 @@ impl AgentPreset for AmpPreset {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -344,6 +353,7 @@ impl AgentPreset for AmpPreset {
                 context,
                 tool_use_id: tool_use_id_str,
                 stream_source,
+                command: bash_command,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

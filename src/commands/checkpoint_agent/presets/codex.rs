@@ -138,12 +138,15 @@ impl AgentPreset for CodexPreset {
             external_parent_session_id: None,
         });
 
+        let bash_command = parse::bash_command_from_tool_input(&data);
+
         let event = match hook_event {
             Some("PreToolUse") => {
                 if is_bash {
                     ParsedHookEvent::PreBashCall(PreBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
+                        command: bash_command,
                     })
                 } else if is_file_edit {
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -165,6 +168,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         tool_use_id: tool_use_id.to_string(),
                         stream_source,
+                        command: bash_command,
                     })
                 } else if is_file_edit {
                     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));

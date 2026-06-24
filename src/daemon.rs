@@ -3725,6 +3725,14 @@ impl ActorDaemonCoordinator {
             .to_string()
     }
 
+    /// Current wall-clock time in UNIX seconds.
+    fn unix_secs_now() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
     fn set_pending_rebase_original_head_for_worktree(
         &self,
         worktree: &Path,
@@ -5070,12 +5078,37 @@ impl ActorDaemonCoordinator {
                 agent_id,
                 metadata,
                 stat_snapshot,
+                command,
+                start_ns,
             } => {
+                let repo_key = Self::worktree_state_key(Path::new(&repo_work_dir));
+                // Persist the bash-checkpoint fact for post-commit attribution
+                // recovery before moving the owned fields into the in-memory
+                // session state. Best-effort: never block the checkpoint.
+                if crate::config::Config::fresh()
+                    .get_feature_flags()
+                    .bash_checkpoint_tracking
+                    && let Ok(db) =
+                        crate::daemon::bash_checkpoints_db::BashCheckpointsDatabase::global()
+                    && let Ok(mut guard) = db.lock()
+                {
+                    let now_secs = Self::unix_secs_now();
+                    let _ = guard.record_start(
+                        &session_id,
+                        &tool_use_id,
+                        &repo_key,
+                        &agent_id,
+                        command.as_deref(),
+                        start_ns,
+                        now_secs,
+                    );
+                    let _ = guard.prune_old(now_secs);
+                }
                 let mut state = self.bash_sessions.lock().unwrap();
                 state.start_session(
                     session_id,
                     tool_use_id,
-                    Self::worktree_state_key(Path::new(&repo_work_dir)),
+                    repo_key,
                     agent_id,
                     metadata,
                     *stat_snapshot,
@@ -5085,9 +5118,21 @@ impl ActorDaemonCoordinator {
             ControlRequest::BashSessionEnd {
                 session_id,
                 tool_use_id,
+                end_ns,
             } => {
-                let mut state = self.bash_sessions.lock().unwrap();
-                state.end_session(&session_id, &tool_use_id);
+                {
+                    let mut state = self.bash_sessions.lock().unwrap();
+                    state.end_session(&session_id, &tool_use_id);
+                }
+                if crate::config::Config::fresh()
+                    .get_feature_flags()
+                    .bash_checkpoint_tracking
+                    && let Ok(db) =
+                        crate::daemon::bash_checkpoints_db::BashCheckpointsDatabase::global()
+                    && let Ok(mut guard) = db.lock()
+                {
+                    let _ = guard.record_end(&session_id, &tool_use_id, end_ns);
+                }
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionQuery { repo_work_dir } => {

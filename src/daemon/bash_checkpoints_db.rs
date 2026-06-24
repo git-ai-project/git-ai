@@ -366,6 +366,21 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(bash_ckpt_env)]
+    fn test_database_path_honors_env_override() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("g.db");
+        unsafe {
+            std::env::set_var("GIT_AI_TEST_BASH_CHECKPOINTS_DB_PATH", &path);
+        }
+        let resolved = BashCheckpointsDatabase::database_path().unwrap();
+        unsafe {
+            std::env::remove_var("GIT_AI_TEST_BASH_CHECKPOINTS_DB_PATH");
+        }
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
     fn test_find_candidates_window_and_repo() {
         let (mut db, _t) = test_db();
         db.record_start("s1", "t1", "/repo", &agent(), None, 1_000, 10)

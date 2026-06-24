@@ -13,6 +13,16 @@ pub fn optional_str<'a>(data: &'a Value, key: &str) -> Option<&'a str> {
     data.get(key).and_then(|v| v.as_str())
 }
 
+/// Extract a bash command string from a hook payload's `tool_input.command`
+/// (or `toolInput.command`). Returns `None` when absent or empty.
+pub fn bash_command_from_tool_input(data: &Value) -> Option<String> {
+    let ti = data.get("tool_input").or_else(|| data.get("toolInput"))?;
+    ti.get("command")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 pub fn optional_str_multi<'a>(data: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| data.get(*key).and_then(|v| v.as_str()))
@@ -154,6 +164,21 @@ pub fn pathbuf_array(data: &Value, key: &str, cwd: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_bash_command_from_tool_input() {
+        let v = json!({"tool_input": {"command": "cargo test"}});
+        assert_eq!(
+            bash_command_from_tool_input(&v),
+            Some("cargo test".to_string())
+        );
+        let v2 = json!({"toolInput": {"command": "ls"}});
+        assert_eq!(bash_command_from_tool_input(&v2), Some("ls".to_string()));
+        let v3 = json!({"tool_input": {}});
+        assert_eq!(bash_command_from_tool_input(&v3), None);
+        let v4 = json!({"tool_input": {"command": ""}});
+        assert_eq!(bash_command_from_tool_input(&v4), None);
+    }
 
     #[test]
     fn test_required_str_present() {

@@ -83,6 +83,9 @@ pub struct UntrackedEdit {
 pub struct PreBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
+    /// Bash command string when the agent exposes it (else `None`).
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +93,9 @@ pub struct PostBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
     pub stream_source: Option<StreamSource>,
+    /// Bash command string when the agent exposes it (else `None`).
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

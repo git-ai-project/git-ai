@@ -261,6 +261,12 @@ impl AgentPreset for OpenCodePreset {
         } = hook_input;
 
         let file_paths = Self::extract_filepaths_from_tool_input(tool_input.as_ref(), &cwd);
+        let bash_command = tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command"))
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
 
         // Build metadata
@@ -301,6 +307,7 @@ impl AgentPreset for OpenCodePreset {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -312,6 +319,7 @@ impl AgentPreset for OpenCodePreset {
                 context,
                 tool_use_id: tool_use_id_str,
                 stream_source,
+                command: bash_command,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

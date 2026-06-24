@@ -85,15 +85,19 @@ pub(super) fn parse_cli_hooks(
         external_parent_session_id: None,
     });
 
+    let bash_command = parse::bash_command_from_tool_input(data);
+
     match (hook_event_name, class) {
         ("PreToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
             context,
             tool_use_id,
+            command: bash_command,
         })]),
         ("PostToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
             context,
             tool_use_id,
             stream_source,
+            command: bash_command,
         })]),
         ("PreToolUse", ToolClass::FileEdit) => {
             // `create` PreToolUse: synthesize empty dirty_files for the new path

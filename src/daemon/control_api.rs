@@ -34,11 +34,20 @@ pub enum ControlRequest {
         agent_id: AgentId,
         metadata: HashMap<String, String>,
         stat_snapshot: Box<StatSnapshot>,
+        /// Bash command string when the agent exposes it; persisted for recovery.
+        #[serde(default)]
+        command: Option<String>,
+        /// Pre-hook wall-clock timestamp (UNIX nanoseconds).
+        #[serde(default)]
+        start_ns: i64,
     },
     #[serde(rename = "bash_session.end")]
     BashSessionEnd {
         session_id: String,
         tool_use_id: String,
+        /// Post-hook wall-clock timestamp (UNIX nanoseconds).
+        #[serde(default)]
+        end_ns: i64,
     },
     #[serde(rename = "bash_session.query")]
     BashSessionQuery { repo_work_dir: String },

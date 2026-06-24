@@ -798,6 +798,14 @@ fn system_time_to_nanos(t: SystemTime) -> u128 {
         .as_nanos()
 }
 
+/// Current wall-clock time in UNIX nanoseconds (saturating to i64 range).
+pub fn unix_nanos_now() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Daemon watermark query + stale file detection
 // ---------------------------------------------------------------------------
@@ -893,6 +901,7 @@ fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
     let request = ControlRequest::BashSessionEnd {
         session_id: session_id.to_string(),
         tool_use_id: tool_use_id.to_string(),
+        end_ns: unix_nanos_now(),
     };
     if let Err(e) = send_control_request_with_timeout(&socket, &request, Duration::from_millis(500))
     {
@@ -914,6 +923,7 @@ pub fn handle_bash_pre_tool_use_with_context(
     tool_use_id: &str,
     agent_id: &AgentId,
     agent_metadata: Option<&HashMap<String, String>>,
+    command: Option<&str>,
 ) -> Result<BashPreHookResult, GitAiError> {
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
@@ -950,6 +960,8 @@ pub fn handle_bash_pre_tool_use_with_context(
         agent_id: agent_id.clone(),
         metadata: agent_metadata.cloned().unwrap_or_default(),
         stat_snapshot: Box::new(snap),
+        command: command.map(|c| c.to_string()),
+        start_ns: unix_nanos_now(),
     };
 
     send_control_request(&socket, &request)?;

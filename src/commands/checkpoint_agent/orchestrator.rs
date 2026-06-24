@@ -406,6 +406,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
         &e.tool_use_id,
         &e.context.agent_id,
         Some(&e.context.metadata),
+        e.command.as_deref(),
     ) {
         Ok(result) => result.dirty_paths,
         Err(error) => {
