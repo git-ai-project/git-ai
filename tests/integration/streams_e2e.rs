@@ -59,6 +59,7 @@ fn test_session_database_basic() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
 
     // Insert
@@ -176,6 +177,7 @@ fn test_multiple_sessions_isolation() {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: None,
+            last_filter_fingerprint: None,
         };
         db.insert_stream(&session).unwrap();
     }
@@ -226,6 +228,7 @@ fn test_database_persistence() {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: None,
+            last_filter_fingerprint: None,
         };
         db.insert_stream(&session).unwrap();
     }
@@ -267,6 +270,7 @@ fn test_error_tracking() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
 
     db.insert_stream(&session).unwrap();
@@ -328,6 +332,7 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&session).unwrap();
 
@@ -423,6 +428,7 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&session).unwrap();
 
@@ -503,6 +509,7 @@ fn test_subagent_session_record_has_parent_link() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&session).unwrap();
 
@@ -567,6 +574,7 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&session).unwrap();
 

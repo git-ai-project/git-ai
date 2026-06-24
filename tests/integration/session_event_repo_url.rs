@@ -82,6 +82,7 @@ fn make_stream_record(
         processing_errors: 0,
         last_error: None,
         repo_work_dir: repo_work_dir.map(|s| s.to_string()),
+        last_filter_fingerprint: None,
     }
 }
 

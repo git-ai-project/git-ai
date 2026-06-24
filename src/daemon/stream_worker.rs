@@ -94,6 +94,25 @@ fn update_stream_file_metadata(
     )
 }
 
+fn record_filter_skip(
+    db: &StreamsDatabase,
+    stream: &StreamRecord,
+    filter_fingerprint: &str,
+) -> Result<(), StreamError> {
+    let Some((file_size, modified)) = stream_file_metadata(&stream.stream_path) else {
+        return Ok(());
+    };
+
+    db.record_filter_skip(
+        &stream.session_id,
+        &stream.stream_kind,
+        &stream.stream_path,
+        file_size,
+        modified,
+        filter_fingerprint,
+    )
+}
+
 /// Priority levels for processing tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
@@ -813,6 +832,7 @@ impl StreamWorker {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
+            last_filter_fingerprint: None,
         };
 
         self.streams_db.insert_stream(&record)
@@ -873,6 +893,7 @@ impl StreamWorker {
             } else {
                 repo_work_dir.map(|p| p.display().to_string())
             },
+            last_filter_fingerprint: None,
         };
 
         self.streams_db.insert_stream(&record)
@@ -998,10 +1019,16 @@ impl StreamWorker {
         // filters takes effect without restarting the long-lived daemon. When
         // the repository is excluded (or can't be verified under an active
         // allowlist) we emit nothing and do NOT advance the watermark. We still
-        // record file metadata so periodic sweeps do not rediscover an
-        // unchanged excluded transcript every cycle.
-        if !session_repo_allowed(&config::Config::fresh(), resolved_work_dir.as_deref()) {
-            update_stream_file_metadata(db, &stream)?;
+        // record file metadata plus the active filter fingerprint, so periodic
+        // sweeps do not rediscover an unchanged excluded transcript until the
+        // repository filters change.
+        let config = config::Config::fresh();
+        if !session_repo_allowed(&config, resolved_work_dir.as_deref()) {
+            if let Some(filter_fingerprint) = config.repository_filters_fingerprint() {
+                record_filter_skip(db, &stream, &filter_fingerprint)?;
+            } else {
+                update_stream_file_metadata(db, &stream)?;
+            }
             tracing::debug!(
                 session_id = %task.session_id,
                 "skipping session events: repository excluded or not in allow_repositories"
@@ -1384,7 +1411,7 @@ mod filter_skip_tests {
     use tempfile::TempDir;
 
     #[test]
-    fn metadata_update_marks_file_seen_without_advancing_watermark() {
+    fn filter_skip_marks_file_seen_and_records_filter_without_advancing_watermark() {
         let temp = TempDir::new().unwrap();
         let stream_path = temp.path().join("session.jsonl");
         std::fs::write(
@@ -1412,10 +1439,11 @@ mod filter_skip_tests {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: None,
+            last_filter_fingerprint: None,
         };
         db.insert_stream(&stream).unwrap();
 
-        update_stream_file_metadata(&db, &stream).unwrap();
+        record_filter_skip(&db, &stream, "allow=*github.com/acme/*;exclude=").unwrap();
 
         let updated = db
             .get_stream("session-1", "transcript", &stream_path_str)
@@ -1433,6 +1461,10 @@ mod filter_skip_tests {
         assert_eq!(
             updated.last_processed_at, 1704067200,
             "metadata updates must not mark filtered events as processed"
+        );
+        assert_eq!(
+            updated.last_filter_fingerprint.as_deref(),
+            Some("allow=*github.com/acme/*;exclude=")
         );
     }
 }

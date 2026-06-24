@@ -395,6 +395,31 @@ impl Config {
         !self.allow_repositories.is_empty() || !self.exclude_repositories.is_empty()
     }
 
+    pub(crate) fn repository_filters_fingerprint(&self) -> Option<String> {
+        if !self.has_repository_filters() {
+            return None;
+        }
+
+        let mut allow = self
+            .allow_repositories
+            .iter()
+            .map(Pattern::as_str)
+            .collect::<Vec<_>>();
+        let mut exclude = self
+            .exclude_repositories
+            .iter()
+            .map(Pattern::as_str)
+            .collect::<Vec<_>>();
+        allow.sort_unstable();
+        exclude.sort_unstable();
+
+        Some(format!(
+            "allow={};exclude={}",
+            allow.join("\u{1f}"),
+            exclude.join("\u{1f}")
+        ))
+    }
+
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
         // Fetch remotes once and reuse for both exclude and allow checks
         let remotes = repository
