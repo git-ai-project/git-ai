@@ -235,6 +235,76 @@ impl BashCheckpointsDatabase {
         )?;
         Ok(())
     }
+
+    // ----- Read operations -----
+
+    /// Return bash checkpoints for `repo_work_dir` whose `[start_ns, end_ns]`
+    /// interval overlaps the query window `[window_lo_ns, window_hi_ns]`. A NULL
+    /// `end_ns` is treated as a point at `start_ns`.
+    pub fn find_candidates(
+        &self,
+        repo_work_dir: &str,
+        window_lo_ns: i64,
+        window_hi_ns: i64,
+    ) -> Result<Vec<BashCheckpointRow>, GitAiError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, tool_use_id, tool, agent_internal_id, agent_model, command, start_ns, end_ns
+             FROM bash_checkpoints
+             WHERE repo_work_dir = ?1
+               AND start_ns <= ?3
+               AND COALESCE(end_ns, start_ns) >= ?2
+             ORDER BY start_ns",
+        )?;
+        let rows = stmt.query_map(params![repo_work_dir, window_lo_ns, window_hi_ns], |r| {
+            Ok(BashCheckpointRow {
+                session_id: r.get(0)?,
+                tool_use_id: r.get(1)?,
+                tool: r.get(2)?,
+                agent_internal_id: r.get(3)?,
+                agent_model: r.get(4)?,
+                command: r.get(5)?,
+                start_ns: r.get(6)?,
+                end_ns: r.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Delete rows older than the 30-day retention window. Rate-limited to one
+    /// pass per 24h via the `bash_ckpt_last_prune_ts` metadata cursor. Returns
+    /// the number of rows deleted (0 when the pass is skipped).
+    pub fn prune_old(&mut self, now_secs: i64) -> Result<usize, GitAiError> {
+        const PRUNE_INTERVAL_SECS: i64 = 86_400;
+        let last: i64 = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'bash_ckpt_last_prune_ts'",
+                [],
+                |r| {
+                    let v: String = r.get(0)?;
+                    Ok(v.parse::<i64>().unwrap_or(0))
+                },
+            )
+            .unwrap_or(0);
+        if now_secs - last < PRUNE_INTERVAL_SECS {
+            return Ok(0);
+        }
+        let cutoff = now_secs - BASH_CKPT_RETENTION_SECS;
+        let deleted = self.conn.execute(
+            "DELETE FROM bash_checkpoints WHERE created_at < ?1",
+            params![cutoff],
+        )?;
+        self.conn.execute(
+            "INSERT INTO schema_metadata (key, value) VALUES ('bash_ckpt_last_prune_ts', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![now_secs.to_string()],
+        )?;
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +363,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn test_find_candidates_window_and_repo() {
+        let (mut db, _t) = test_db();
+        db.record_start("s1", "t1", "/repo", &agent(), None, 1_000, 10)
+            .unwrap();
+        db.record_end("s1", "t1", 2_000).unwrap();
+        db.record_start("s2", "t2", "/repo", &agent(), None, 50_000, 10)
+            .unwrap();
+        db.record_start("s3", "t3", "/other", &agent(), None, 1_500, 10)
+            .unwrap();
+
+        let hits = db.find_candidates("/repo", 1_800, 2_200).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].tool_use_id, "t1");
+    }
+
+    #[test]
+    fn test_find_candidates_null_end_is_point() {
+        let (mut db, _t) = test_db();
+        db.record_start("s1", "t1", "/repo", &agent(), None, 5_000, 10)
+            .unwrap();
+        assert_eq!(db.find_candidates("/repo", 4_000, 6_000).unwrap().len(), 1);
+        assert_eq!(db.find_candidates("/repo", 6_001, 7_000).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_prune_old_removes_expired() {
+        let (mut db, _t) = test_db();
+        let now = 100 * 86_400;
+        db.record_start("old", "t", "/repo", &agent(), None, 1, now - 40 * 86_400)
+            .unwrap();
+        db.record_start("new", "t", "/repo", &agent(), None, 1, now - 1)
+            .unwrap();
+        let deleted = db.prune_old(now).unwrap();
+        assert_eq!(deleted, 1);
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM bash_checkpoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn test_prune_rate_limited() {
+        let (mut db, _t) = test_db();
+        let now = 100 * 86_400;
+        db.record_start("old", "t", "/repo", &agent(), None, 1, now - 40 * 86_400)
+            .unwrap();
+        assert_eq!(db.prune_old(now).unwrap(), 1);
+        db.record_start("old2", "t", "/repo", &agent(), None, 1, now - 40 * 86_400)
+            .unwrap();
+        assert_eq!(
+            db.prune_old(now).unwrap(),
+            0,
+            "second prune within 24h is skipped"
+        );
     }
 
     #[test]
