@@ -18,6 +18,25 @@ fn isolated_bash_history_db_path() -> (tempfile::TempDir, String) {
     (dir, path.to_string_lossy().to_string())
 }
 
+fn codex_bash_hook_input(
+    cwd: &std::path::Path,
+    event: &str,
+    session_id: &str,
+    tool_use_id: &str,
+    command: &str,
+) -> String {
+    json!({
+        "cwd": cwd.to_string_lossy().to_string(),
+        "session_id": session_id,
+        "hook_event_name": event,
+        "tool_name": "Bash",
+        "tool_use_id": tool_use_id,
+        "tool_input": { "command": command },
+        "model": "gpt-5"
+    })
+    .to_string()
+}
+
 #[test]
 fn test_bash_pre_legacy_checkpoint_recovers_dirty_edge_attribution() {
     let repo = TestRepo::new();
@@ -45,6 +64,161 @@ fn test_bash_pre_legacy_checkpoint_recovers_dirty_edge_attribution() {
         "original line".unattributed_human(),
         "dirty pre-bash line".ai(),
         "ai bash line".ai(),
+    ]);
+}
+
+#[test]
+fn test_bash_history_recovers_parent_cwd_leading_cd_attempt() {
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+    let parent_cwd = repo_root.parent().unwrap().to_path_buf();
+    let repo_name = repo_root.file_name().unwrap().to_string_lossy().to_string();
+
+    fs::write(repo_root.join("README.md"), "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::create_dir_all(repo_root.join("src")).unwrap();
+    let command = format!("cd {} && printf x >> src/a.rs", repo_name);
+    let pre_hook_input = codex_bash_hook_input(
+        &parent_cwd,
+        "PreToolUse",
+        "session-parent-cwd",
+        "tool-parent-cwd",
+        &command,
+    );
+    repo.git_ai_from_working_dir(
+        &parent_cwd,
+        &["checkpoint", "codex", "--hook-input", &pre_hook_input],
+    )
+    .expect("parent-cwd pre hook exits successfully after recording attempt");
+
+    fs::write(repo_root.join("src/a.rs"), "x\n").unwrap();
+
+    let post_hook_input = codex_bash_hook_input(
+        &parent_cwd,
+        "PostToolUse",
+        "session-parent-cwd",
+        "tool-parent-cwd",
+        &command,
+    );
+    repo.git_ai_from_working_dir(
+        &parent_cwd,
+        &["checkpoint", "codex", "--hook-input", &post_hook_input],
+    )
+    .expect("parent-cwd post hook exits successfully after recording attempt");
+
+    let commit = repo
+        .stage_all_and_commit("Recover parent-cwd bash attribution")
+        .unwrap();
+
+    let mut file = repo.filename("src/a.rs");
+    file.assert_committed_lines(lines!["x".ai()]);
+
+    assert!(
+        commit
+            .authorship_log
+            .metadata
+            .sessions
+            .values()
+            .any(|record| {
+                record.agent_id.tool == "codex" && record.agent_id.id == "session-parent-cwd"
+            })
+    );
+
+    let db = BashHistoryDatabase::open_at_path(std::path::Path::new(&bash_db_path)).unwrap();
+    let calls = db.all_calls_for_test().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].original_cwd, parent_cwd.to_string_lossy());
+    assert_eq!(calls[0].repo_work_dir, None);
+    assert!(calls[0].repo_discovery_error.is_some());
+    assert_eq!(calls[0].command.as_deref(), Some(command.as_str()));
+}
+
+#[test]
+fn test_bash_history_skips_ambiguous_distinct_sessions_for_same_window() {
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+    set_daemon_socket_for_test(repo.daemon_control_socket_path());
+
+    fs::write(repo_root.join("base.txt"), "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let codex = AgentId {
+        tool: "codex".to_string(),
+        id: "session-ambiguous-codex".to_string(),
+        model: "gpt-5".to_string(),
+    };
+    let claude = AgentId {
+        tool: "claude".to_string(),
+        id: "session-ambiguous-claude".to_string(),
+        model: "unknown".to_string(),
+    };
+
+    handle_bash_pre_tool_use_with_context(
+        &repo_root,
+        "session-ambiguous-codex",
+        "tool-ambiguous-codex",
+        &codex,
+        None,
+        "t_ambiguous_codex_pre",
+        Some("printf codex >> ambiguous.txt"),
+    )
+    .expect("codex pre hook should record durable start");
+    handle_bash_pre_tool_use_with_context(
+        &repo_root,
+        "session-ambiguous-claude",
+        "tool-ambiguous-claude",
+        &claude,
+        None,
+        "t_ambiguous_claude_pre",
+        Some("printf claude >> ambiguous.txt"),
+    )
+    .expect("claude pre hook should record durable start");
+
+    fs::write(repo_root.join("ambiguous.txt"), "from codex\nfrom claude\n").unwrap();
+
+    set_walk_timeout_ms_for_test(0);
+    let codex_post = handle_bash_post_tool_use(
+        &repo_root,
+        "session-ambiguous-codex",
+        "tool-ambiguous-codex",
+        &codex,
+        None,
+        "t_ambiguous_codex_post",
+        Some("printf codex >> ambiguous.txt"),
+    )
+    .expect("codex post hook should degrade gracefully");
+    let claude_post = handle_bash_post_tool_use(
+        &repo_root,
+        "session-ambiguous-claude",
+        "tool-ambiguous-claude",
+        &claude,
+        None,
+        "t_ambiguous_claude_post",
+        Some("printf claude >> ambiguous.txt"),
+    )
+    .expect("claude post hook should degrade gracefully");
+    reset_timeout_overrides_for_test();
+    assert!(matches!(
+        codex_post.action,
+        BashCheckpointAction::SnapshotFailed
+    ));
+    assert!(matches!(
+        claude_post.action,
+        BashCheckpointAction::SnapshotFailed
+    ));
+
+    repo.stage_all_and_commit("Skip ambiguous bash attribution")
+        .unwrap();
+
+    let mut file = repo.filename("ambiguous.txt");
+    file.assert_committed_lines(lines![
+        "from codex".unattributed_human(),
+        "from claude".unattributed_human(),
     ]);
 }
 

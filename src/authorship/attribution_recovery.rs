@@ -2,6 +2,10 @@ use crate::authorship::authorship_log::{LineRange, SessionRecord};
 use crate::authorship::authorship_log_serialization::{
     AuthorshipLog, generate_session_id, generate_trace_id,
 };
+use crate::authorship::bash_repo_hints::{
+    BashAttemptView, BashHintConfidence, BashRepoHint, RecoveryContext, infer_bash_repo_hints,
+    normalize_path_for_matching,
+};
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint_agent::bash_tool::StatEntry;
 use crate::daemon::bash_history_db::{BashCheckpointCall, distance_to_call_window};
@@ -13,7 +17,7 @@ use crate::metrics::{CheckpointValues, EventAttributes, MetricEvent, PosEncoded}
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
@@ -143,35 +147,45 @@ fn recover_bash_mtime(
     all_timestamps.sort_unstable();
     all_timestamps.dedup();
 
-    let candidates = match crate::daemon::bash_history_db::BashHistoryDatabase::global() {
+    let checkpoint_calls = match crate::daemon::bash_history_db::BashHistoryDatabase::global() {
         Ok(db) => match db.lock() {
             Ok(db) => db.candidates_near_timestamps(&all_timestamps, BASH_RECOVERY_WINDOW_NS)?,
             Err(_) => Vec::new(),
         },
         Err(_) => Vec::new(),
     };
-    if candidates.is_empty() {
+    if checkpoint_calls.is_empty() {
         return Ok(());
     }
+    let target_repo_work_dir = PathBuf::from(&repo_work_dir);
 
     let existing_commit_sessions = existing_commit_session_ids(authorship_log);
     for (file_path, unknown_lines) in unknown_by_file {
         let Some(timestamps) = timestamps_by_file.get(&file_path) else {
             continue;
         };
-        let Some(selection) = select_best_bash_candidate(
-            &candidates,
+        let target_file_path = normalize_path_for_matching(&workdir.join(&file_path));
+        let candidates = recovery_candidates_for_file(
+            &checkpoint_calls,
             timestamps,
             &existing_commit_sessions,
             &repo_work_dir,
-        ) else {
-            continue;
-        };
-        let candidate = selection.candidate;
-        let distance_ns = selection.distance_ns;
-        if distance_ns > BASH_RECOVERY_WINDOW_NS {
+            &target_repo_work_dir,
+            &target_file_path,
+        );
+        if candidates.is_empty() {
             continue;
         }
+        if distinct_candidate_sessions(&candidates) > 1 {
+            tracing::debug!(
+                "bash_mtime recovery skipped for {}: multiple strong candidate sessions",
+                file_path
+            );
+            continue;
+        }
+        let Some(candidate) = select_best_recovery_candidate(&candidates) else {
+            continue;
+        };
 
         let trace_id = generate_trace_id();
         let session_id = generate_session_id(&candidate.agent_id.id, &candidate.agent_id.tool);
@@ -185,19 +199,22 @@ fn recover_bash_mtime(
             "unknown_lines": unknown_lines,
             "target_repo_work_dir": repo_work_dir.as_str(),
             "file_timestamps_ns": timestamps,
+            "selected_bash_source_id": candidate.source_id,
+            "selected_bash_source_kind": candidate.source_kind,
             "selected_bash_call_id": candidate.id,
             "selected_bash_original_cwd": candidate.original_cwd.as_str(),
             "selected_bash_repo_work_dir": candidate.repo_work_dir.as_deref(),
             "selected_bash_repo_discovery_error": candidate.repo_discovery_error.as_deref(),
             "selected_tool_use_id": candidate.tool_use_id,
             "selected_command": candidate.command,
-            "distance_ns": distance_ns,
+            "selected_evidence": candidate.evidence,
+            "distance_ns": candidate.distance_ns,
             "window_ns": BASH_RECOVERY_WINDOW_NS,
             "start_time_ns": candidate.start_time_ns,
             "end_time_ns": candidate.end_time_ns,
             "start_trace_id": candidate.start_trace_id,
             "end_trace_id": candidate.end_trace_id,
-            "selection_tier": selection.tier.as_str(),
+            "selection_tier": candidate.tier.as_str(),
             "candidate_count": candidates.len(),
         });
         record_recovery_metric(RecoveryMetricInput {
@@ -436,56 +453,177 @@ fn system_time_to_ns(time: SystemTime) -> u128 {
         .as_nanos()
 }
 
-fn select_best_bash_candidate<'a>(
-    candidates: &'a [BashCheckpointCall],
-    timestamps: &[u128],
-    existing_commit_sessions: &HashSet<String>,
-    target_repo_work_dir: &str,
-) -> Option<BashCandidateSelection<'a>> {
-    candidates
-        .iter()
-        .filter_map(|candidate| {
-            let distance = timestamps
-                .iter()
-                .filter_map(|ts| recovery_distance_to_call_window(*ts, candidate))
-                .min()?;
-            Some(BashCandidateSelection {
-                candidate,
-                distance_ns: distance,
-                tier: bash_candidate_tier(
-                    candidate,
-                    existing_commit_sessions,
-                    target_repo_work_dir,
-                ),
-            })
-        })
-        .min_by(|left, right| {
-            left.tier
-                .score()
-                .cmp(&right.tier.score())
-                .then_with(|| left.distance_ns.cmp(&right.distance_ns))
-                .then_with(|| {
-                    right
-                        .candidate
-                        .end_time_ns
-                        .is_some()
-                        .cmp(&left.candidate.end_time_ns.is_some())
-                })
-                .then_with(|| {
-                    right
-                        .candidate
-                        .command
-                        .is_some()
-                        .cmp(&left.candidate.command.is_some())
-                })
-                .then_with(|| right.candidate.id.cmp(&left.candidate.id))
-        })
+#[derive(Debug, Clone)]
+struct BashRecoveryCandidate {
+    source_id: i64,
+    source_kind: &'static str,
+    id: i64,
+    original_cwd: String,
+    repo_work_dir: Option<String>,
+    repo_discovery_error: Option<String>,
+    tool_use_id: String,
+    agent_id: crate::authorship::working_log::AgentId,
+    start_trace_id: Option<String>,
+    end_trace_id: Option<String>,
+    start_time_ns: u128,
+    end_time_ns: Option<u128>,
+    command: Option<String>,
+    distance_ns: u128,
+    evidence: String,
+    tier: BashCandidateTier,
 }
 
-struct BashCandidateSelection<'a> {
-    candidate: &'a BashCheckpointCall,
+fn recovery_candidates_for_file(
+    calls: &[BashCheckpointCall],
+    timestamps: &[u128],
+    existing_commit_sessions: &HashSet<String>,
+    target_repo_work_dir_str: &str,
+    target_repo_work_dir: &Path,
+    target_file_path: &Path,
+) -> Vec<BashRecoveryCandidate> {
+    let mut candidates = Vec::new();
+    for call in calls {
+        let distance_ns = timestamps
+            .iter()
+            .filter_map(|ts| recovery_distance_to_call_window(*ts, call))
+            .min();
+        let Some(distance_ns) = distance_ns else {
+            continue;
+        };
+        candidates.extend(call_to_recovery_candidates(
+            call,
+            distance_ns,
+            existing_commit_sessions,
+            target_repo_work_dir_str,
+            target_repo_work_dir,
+            target_file_path,
+        ));
+    }
+    candidates
+}
+
+fn call_to_recovery_candidates(
+    call: &BashCheckpointCall,
     distance_ns: u128,
-    tier: BashCandidateTier,
+    existing_commit_sessions: &HashSet<String>,
+    target_repo_work_dir_str: &str,
+    target_repo_work_dir: &Path,
+    target_file_path: &Path,
+) -> Vec<BashRecoveryCandidate> {
+    let original_cwd = Path::new(&call.original_cwd);
+    let discovered_repo = call.repo_work_dir.as_deref().map(Path::new);
+    let attempt = BashAttemptView {
+        original_cwd,
+        discovered_repo_work_dir: discovered_repo,
+        command: call.command.as_deref(),
+    };
+    let ctx = RecoveryContext {
+        target_repo_work_dir,
+    };
+    let hints = infer_bash_repo_hints(&attempt, &ctx);
+    let candidates: Vec<_> = hints
+        .into_iter()
+        .filter(|hint| hint_is_strong_file_match(hint, target_file_path))
+        .map(|hint| BashRecoveryCandidate {
+            tier: bash_candidate_tier_for_hint(
+                call,
+                &hint,
+                existing_commit_sessions,
+                target_repo_work_dir_str,
+            ),
+            source_id: call.id,
+            source_kind: "bash_checkpoint_call",
+            id: call.id,
+            original_cwd: call.original_cwd.clone(),
+            repo_work_dir: call.repo_work_dir.clone(),
+            repo_discovery_error: call.repo_discovery_error.clone(),
+            tool_use_id: call.tool_use_id.clone(),
+            agent_id: call.agent_id.clone(),
+            start_trace_id: call.start_trace_id.clone(),
+            end_trace_id: call.end_trace_id.clone(),
+            start_time_ns: call.start_time_ns,
+            end_time_ns: call.end_time_ns,
+            command: call.command.clone(),
+            distance_ns,
+            evidence: hint.evidence,
+        })
+        .collect();
+    if !candidates.is_empty() {
+        return candidates;
+    }
+
+    let tier = bash_candidate_tier(call, existing_commit_sessions, target_repo_work_dir_str);
+    if tier == BashCandidateTier::TimeOnly {
+        return Vec::new();
+    }
+
+    vec![BashRecoveryCandidate {
+        tier,
+        source_id: call.id,
+        source_kind: "bash_checkpoint_call",
+        id: call.id,
+        original_cwd: call.original_cwd.clone(),
+        repo_work_dir: call.repo_work_dir.clone(),
+        repo_discovery_error: call.repo_discovery_error.clone(),
+        tool_use_id: call.tool_use_id.clone(),
+        agent_id: call.agent_id.clone(),
+        start_trace_id: call.start_trace_id.clone(),
+        end_trace_id: call.end_trace_id.clone(),
+        start_time_ns: call.start_time_ns,
+        end_time_ns: call.end_time_ns,
+        command: call.command.clone(),
+        distance_ns,
+        evidence: tier.as_str().to_string(),
+    }]
+}
+
+fn hint_is_strong_file_match(hint: &BashRepoHint, target_file_path: &Path) -> bool {
+    if hint.confidence != BashHintConfidence::Strong {
+        return false;
+    }
+    if hint.target_paths.is_empty() {
+        return true;
+    }
+    let target_file_path = normalize_path_for_matching(target_file_path);
+    hint.target_paths
+        .iter()
+        .any(|path| normalize_path_for_matching(path) == target_file_path)
+}
+
+fn distinct_candidate_sessions(candidates: &[BashRecoveryCandidate]) -> usize {
+    candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.agent_id.tool.as_str(),
+                candidate.agent_id.id.as_str(),
+            )
+        })
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn select_best_recovery_candidate(
+    candidates: &[BashRecoveryCandidate],
+) -> Option<&BashRecoveryCandidate> {
+    candidates.iter().min_by(|left, right| {
+        left.tier
+            .score()
+            .cmp(&right.tier.score())
+            .then_with(|| left.distance_ns.cmp(&right.distance_ns))
+            .then_with(|| right.end_time_ns.is_some().cmp(&left.end_time_ns.is_some()))
+            .then_with(|| right.command.is_some().cmp(&left.command.is_some()))
+            .then_with(|| source_kind_rank(left).cmp(&source_kind_rank(right)))
+            .then_with(|| right.source_id.cmp(&left.source_id))
+    })
+}
+
+fn source_kind_rank(candidate: &BashRecoveryCandidate) -> u8 {
+    match candidate.source_kind {
+        "bash_hook_attempt" => 0,
+        "bash_checkpoint_call" => 1,
+        _ => 2,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,6 +631,7 @@ enum BashCandidateTier {
     ExistingCommitSession,
     WorkdirAncestor,
     CwdAncestor,
+    CommandHint,
     TimeOnly,
 }
 
@@ -502,6 +641,7 @@ impl BashCandidateTier {
             Self::ExistingCommitSession => 0,
             Self::WorkdirAncestor => 1,
             Self::CwdAncestor => 2,
+            Self::CommandHint => 2,
             Self::TimeOnly => 3,
         }
     }
@@ -511,8 +651,21 @@ impl BashCandidateTier {
             Self::ExistingCommitSession => "existing_commit_session",
             Self::WorkdirAncestor => "workdir_ancestor",
             Self::CwdAncestor => "cwd_ancestor",
+            Self::CommandHint => "command_hint",
             Self::TimeOnly => "time_only",
         }
+    }
+}
+
+fn bash_candidate_tier_for_hint(
+    candidate: &BashCheckpointCall,
+    _hint: &BashRepoHint,
+    existing_commit_sessions: &HashSet<String>,
+    target_repo_work_dir: &str,
+) -> BashCandidateTier {
+    match bash_candidate_tier(candidate, existing_commit_sessions, target_repo_work_dir) {
+        BashCandidateTier::TimeOnly => BashCandidateTier::CommandHint,
+        tier => tier,
     }
 }
 
@@ -684,7 +837,7 @@ fn path_is_equal_or_child(child: &str, parent: &str) -> bool {
 fn insert_session_record(
     authorship_log: &mut AuthorshipLog,
     session_id: &str,
-    candidate: &BashCheckpointCall,
+    candidate: &BashRecoveryCandidate,
     human_author: &str,
 ) {
     authorship_log
@@ -1055,6 +1208,25 @@ mod tests {
         }
     }
 
+    fn select_best_bash_candidate_for_test(
+        calls: &[BashCheckpointCall],
+        timestamps: &[u128],
+        existing_sessions: &HashSet<String>,
+        target_repo_work_dir: &str,
+    ) -> Option<BashRecoveryCandidate> {
+        let target_repo_path = Path::new(target_repo_work_dir);
+        let target_file_path = target_repo_path.join("file.txt");
+        let candidates = recovery_candidates_for_file(
+            calls,
+            timestamps,
+            existing_sessions,
+            target_repo_work_dir,
+            target_repo_path,
+            &target_file_path,
+        );
+        select_best_recovery_candidate(&candidates).cloned()
+    }
+
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
         let mut log = AuthorshipLog::new();
@@ -1084,10 +1256,10 @@ mod tests {
         ];
 
         let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &existing_sessions, "/repo")
+            select_best_bash_candidate_for_test(&candidates, &[1_050], &existing_sessions, "/repo")
                 .expect("expected candidate");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-existing");
+        assert_eq!(selection.tool_use_id, "tool-existing");
         assert_eq!(selection.tier, BashCandidateTier::ExistingCommitSession);
     }
 
@@ -1103,10 +1275,10 @@ mod tests {
         ];
 
         let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &existing_sessions, "/repo")
+            select_best_bash_candidate_for_test(&candidates, &[1_050], &existing_sessions, "/repo")
                 .expect("expected candidate");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-near");
+        assert_eq!(selection.tool_use_id, "tool-near");
         assert_eq!(selection.distance_ns, 50);
     }
 
@@ -1124,11 +1296,15 @@ mod tests {
             bash_call(2, "closer-session", "tool-closer", "/other", 1_040, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate_for_test(
+            &candidates,
+            &[1_050],
+            &HashSet::new(),
+            "/tmp/work/repo",
+        )
+        .expect("expected candidate");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-ancestor");
+        assert_eq!(selection.tool_use_id, "tool-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::WorkdirAncestor);
     }
 
@@ -1153,11 +1329,15 @@ mod tests {
             ),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate_for_test(
+            &candidates,
+            &[1_050],
+            &HashSet::new(),
+            "/tmp/work/repo",
+        )
+        .expect("expected candidate");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-workdir-ancestor");
+        assert_eq!(selection.tool_use_id, "tool-workdir-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::WorkdirAncestor);
     }
 
@@ -1175,27 +1355,32 @@ mod tests {
             bash_call(2, "closer-session", "tool-closer", "/other", 1_040, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate_for_test(
+            &candidates,
+            &[1_050],
+            &HashSet::new(),
+            "/tmp/work/repo",
+        )
+        .expect("expected candidate");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-cwd-ancestor");
+        assert_eq!(selection.tool_use_id, "tool-cwd-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::CwdAncestor);
     }
 
     #[test]
-    fn bash_candidate_ranking_falls_back_to_closest_time() {
+    fn bash_candidate_ranking_excludes_time_only_candidates() {
         let candidates = vec![
             bash_call(1, "far-session", "tool-far", "/other-a", 900, None),
             bash_call(2, "near-session", "tool-near", "/other-b", 1_040, None),
         ];
 
-        let selection = select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/repo")
-            .expect("expected candidate");
+        let selection =
+            select_best_bash_candidate_for_test(&candidates, &[1_050], &HashSet::new(), "/repo");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-near");
-        assert_eq!(selection.tier, BashCandidateTier::TimeOnly);
-        assert_eq!(selection.distance_ns, 10);
+        assert!(
+            selection.is_none(),
+            "unrelated time-only bash candidates must not recover attribution"
+        );
     }
 
     #[test]
@@ -1291,7 +1476,7 @@ mod tests {
         ];
 
         let selection =
-            select_best_bash_candidate(&candidates, &[1_500], &existing_sessions, "/repo");
+            select_best_bash_candidate_for_test(&candidates, &[1_500], &existing_sessions, "/repo");
 
         assert!(
             selection.is_none(),
@@ -1310,11 +1495,15 @@ mod tests {
             Some(3_000_000_000),
         )];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[2_000_000_000], &HashSet::new(), "/repo")
-                .expect("expected coarse timestamp to match");
+        let selection = select_best_bash_candidate_for_test(
+            &candidates,
+            &[2_000_000_000],
+            &HashSet::new(),
+            "/repo",
+        )
+        .expect("expected coarse timestamp to match");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-coarse");
+        assert_eq!(selection.tool_use_id, "tool-coarse");
         assert_eq!(selection.distance_ns, 500_000_000);
     }
 
