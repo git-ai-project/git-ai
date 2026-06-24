@@ -12,6 +12,7 @@ use crate::metrics::{CheckpointValues, EventAttributes, MetricEvent, PosEncoded}
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
@@ -91,18 +92,22 @@ fn recover_bash_mtime(
     if candidates.is_empty() {
         return Ok(());
     }
+    let commit_session_ids = session_ids_in_commit(authorship_log);
 
     for (file_path, unknown_lines) in unknown_by_file {
         let Some(timestamps) = timestamps_by_file.get(&file_path) else {
             continue;
         };
-        let Some((candidate, distance_ns)) = select_best_bash_candidate(&candidates, timestamps)
+        let target_path = workdir.join(&file_path);
+        let Some(selection) =
+            select_best_bash_candidate(&candidates, timestamps, &commit_session_ids, &target_path)
         else {
             continue;
         };
-        if distance_ns > BASH_RECOVERY_WINDOW_NS {
+        if selection.distance_ns > BASH_RECOVERY_WINDOW_NS {
             continue;
         }
+        let candidate = selection.candidate;
 
         let trace_id = generate_trace_id();
         let session_id = generate_session_id(&candidate.agent_id.id, &candidate.agent_id.tool);
@@ -120,7 +125,9 @@ fn recover_bash_mtime(
             "selected_bash_repo_work_dir": candidate.repo_work_dir.as_str(),
             "selected_tool_use_id": candidate.tool_use_id,
             "selected_command": candidate.command,
-            "distance_ns": distance_ns,
+            "distance_ns": selection.distance_ns,
+            "ranking_session_already_in_commit": selection.session_already_in_commit,
+            "ranking_repo_workdir_is_parent": selection.repo_workdir_is_parent,
             "window_ns": BASH_RECOVERY_WINDOW_NS,
             "start_time_ns": candidate.start_time_ns,
             "end_time_ns": candidate.end_time_ns,
@@ -246,27 +253,102 @@ fn system_time_to_ns(time: SystemTime) -> u128 {
         .as_nanos()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BashCandidateSelection<'a> {
+    candidate: &'a BashCheckpointCall,
+    distance_ns: u128,
+    session_already_in_commit: bool,
+    repo_workdir_is_parent: bool,
+}
+
 fn select_best_bash_candidate<'a>(
     candidates: &'a [BashCheckpointCall],
     timestamps: &[u128],
-) -> Option<(&'a BashCheckpointCall, u128)> {
+    commit_session_ids: &HashSet<String>,
+    target_path: &Path,
+) -> Option<BashCandidateSelection<'a>> {
     candidates
         .iter()
-        .map(|candidate| {
+        .filter_map(|candidate| {
             let distance = timestamps
                 .iter()
                 .map(|ts| distance_to_call_window(*ts, candidate))
                 .min()
                 .unwrap_or(u128::MAX);
-            (candidate, distance)
+            (distance <= BASH_RECOVERY_WINDOW_NS).then(|| {
+                let session_id =
+                    generate_session_id(&candidate.agent_id.id, &candidate.agent_id.tool);
+                BashCandidateSelection {
+                    candidate,
+                    distance_ns: distance,
+                    session_already_in_commit: commit_session_ids.contains(&session_id),
+                    repo_workdir_is_parent: candidate_workdir_contains_path(candidate, target_path),
+                }
+            })
         })
-        .min_by(|(left, left_distance), (right, right_distance)| {
-            left_distance
-                .cmp(right_distance)
-                .then_with(|| right.end_time_ns.is_some().cmp(&left.end_time_ns.is_some()))
-                .then_with(|| right.command.is_some().cmp(&left.command.is_some()))
-                .then_with(|| right.id.cmp(&left.id))
+        .min_by(compare_bash_candidate_selection)
+}
+
+fn compare_bash_candidate_selection(
+    left: &BashCandidateSelection<'_>,
+    right: &BashCandidateSelection<'_>,
+) -> std::cmp::Ordering {
+    left.session_already_in_commit
+        .cmp(&right.session_already_in_commit)
+        .reverse()
+        .then_with(|| {
+            if left.session_already_in_commit && right.session_already_in_commit {
+                std::cmp::Ordering::Equal
+            } else {
+                left.repo_workdir_is_parent
+                    .cmp(&right.repo_workdir_is_parent)
+                    .reverse()
+            }
         })
+        .then_with(|| left.distance_ns.cmp(&right.distance_ns))
+        .then_with(|| {
+            right
+                .candidate
+                .end_time_ns
+                .is_some()
+                .cmp(&left.candidate.end_time_ns.is_some())
+        })
+        .then_with(|| {
+            right
+                .candidate
+                .command
+                .is_some()
+                .cmp(&left.candidate.command.is_some())
+        })
+        .then_with(|| right.candidate.id.cmp(&left.candidate.id))
+}
+
+fn session_ids_in_commit(authorship_log: &AuthorshipLog) -> HashSet<String> {
+    authorship_log
+        .attestations
+        .iter()
+        .flat_map(|file| file.entries.iter())
+        .filter(|entry| entry.hash.starts_with("s_"))
+        .map(|entry| {
+            entry
+                .hash
+                .split("::")
+                .next()
+                .unwrap_or(&entry.hash)
+                .to_string()
+        })
+        .collect()
+}
+
+fn candidate_workdir_contains_path(candidate: &BashCheckpointCall, target_path: &Path) -> bool {
+    let candidate_workdir = PathBuf::from(&candidate.repo_work_dir);
+    let candidate_workdir = candidate_workdir
+        .canonicalize()
+        .unwrap_or(candidate_workdir);
+    let target_path = target_path
+        .canonicalize()
+        .unwrap_or_else(|_| target_path.to_path_buf());
+    target_path.starts_with(candidate_workdir)
 }
 
 fn insert_session_record(
@@ -533,6 +615,34 @@ mod tests {
     use crate::authorship::authorship_log_serialization::{
         AttestationEntry, AuthorshipLog, FileAttestation,
     };
+    use crate::authorship::working_log::AgentId;
+
+    fn test_candidate(
+        id: i64,
+        external_session_id: &str,
+        repo_work_dir: &str,
+        start_time_ns: u128,
+        end_time_ns: u128,
+    ) -> BashCheckpointCall {
+        BashCheckpointCall {
+            id,
+            invocation_key: format!("{external_session_id}/tool"),
+            repo_work_dir: repo_work_dir.to_string(),
+            session_id: external_session_id.to_string(),
+            tool_use_id: "tool".to_string(),
+            agent_id: AgentId {
+                tool: "codex".to_string(),
+                id: external_session_id.to_string(),
+                model: "gpt-5".to_string(),
+            },
+            start_trace_id: Some(format!("t_start_{id}")),
+            end_trace_id: Some(format!("t_end_{id}")),
+            start_time_ns,
+            end_time_ns: Some(end_time_ns),
+            command: Some("cat > target.txt".to_string()),
+            metadata: HashMap::new(),
+        }
+    }
 
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
@@ -602,5 +712,74 @@ mod tests {
             None,
             "known-human neighbors must not be used for edge extension"
         );
+    }
+
+    #[test]
+    fn bash_candidate_ranking_prefers_session_already_in_commit_then_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.txt");
+        let in_commit_far =
+            test_candidate(1, "in-commit-far", "/outside", 1_000_000_000, 1_100_000_000);
+        let in_commit_near = test_candidate(
+            2,
+            "in-commit-near",
+            "/outside",
+            2_000_000_000,
+            2_100_000_000,
+        );
+        let unrelated_closest =
+            test_candidate(3, "unrelated", "/outside", 2_400_000_000, 2_500_000_000);
+        let candidates = vec![in_commit_far, in_commit_near, unrelated_closest];
+        let commit_sessions = HashSet::from([
+            generate_session_id("in-commit-far", "codex"),
+            generate_session_id("in-commit-near", "codex"),
+        ]);
+
+        let selected =
+            select_best_bash_candidate(&candidates, &[2_550_000_000], &commit_sessions, &target)
+                .unwrap();
+
+        assert_eq!(selected.candidate.agent_id.id, "in-commit-near");
+        assert!(selected.session_already_in_commit);
+    }
+
+    #[test]
+    fn bash_candidate_ranking_prefers_parent_workdir_when_no_session_matches_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("repo").join("target.txt");
+        let parent = test_candidate(
+            1,
+            "parent",
+            temp.path().to_str().unwrap(),
+            1_000_000_000,
+            1_100_000_000,
+        );
+        let closer_non_parent =
+            test_candidate(2, "closer", "/outside", 2_000_000_000, 2_100_000_000);
+        let candidates = vec![parent, closer_non_parent];
+
+        let selected =
+            select_best_bash_candidate(&candidates, &[2_150_000_000], &HashSet::new(), &target)
+                .unwrap();
+
+        assert_eq!(selected.candidate.agent_id.id, "parent");
+        assert!(selected.repo_workdir_is_parent);
+    }
+
+    #[test]
+    fn bash_candidate_ranking_falls_back_to_closest_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.txt");
+        let older = test_candidate(1, "older", "/outside-a", 1_000_000_000, 1_100_000_000);
+        let closer = test_candidate(2, "closer", "/outside-b", 2_000_000_000, 2_100_000_000);
+        let candidates = vec![older, closer];
+
+        let selected =
+            select_best_bash_candidate(&candidates, &[2_200_000_000], &HashSet::new(), &target)
+                .unwrap();
+
+        assert_eq!(selected.candidate.agent_id.id, "closer");
+        assert!(!selected.session_already_in_commit);
+        assert!(!selected.repo_workdir_is_parent);
     }
 }
