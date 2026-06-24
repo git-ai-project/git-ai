@@ -701,6 +701,62 @@ fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
 }
 
 #[test]
+fn test_post_commit_large_ignored_deletions_do_not_trigger_skip_warning() {
+    let repo = TestRepo::new();
+
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    fs::create_dir_all(repo.path().join("generated")).unwrap();
+    fs::create_dir_all(repo.path().join("docs")).unwrap();
+
+    fs::write(
+        repo.path().join(".gitattributes"),
+        "generated/** linguist-generated=true\n",
+    )
+    .unwrap();
+    fs::write(repo.path().join(".git-ai-ignore"), "docs/**\n").unwrap();
+    fs::write(repo.path().join("src/lib.rs"), "pub fn existing() {}\n").unwrap();
+    fs::write(
+        repo.path().join("Cargo.lock"),
+        "lockfile-entry\n".repeat(2500),
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("generated/schema.ts"),
+        "export const generated = true;\n".repeat(2500),
+    )
+    .unwrap();
+    fs::write(repo.path().join("docs/api.md"), "docs\n".repeat(2500)).unwrap();
+    repo.stage_all_and_commit("Initial ignored artifacts")
+        .unwrap();
+
+    fs::remove_file(repo.path().join("Cargo.lock")).unwrap();
+    fs::remove_dir_all(repo.path().join("generated")).unwrap();
+    fs::remove_dir_all(repo.path().join("docs")).unwrap();
+    fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn existing() {}\npub fn counted() {}\n",
+    )
+    .unwrap();
+
+    let commit = repo
+        .stage_all_and_commit("Delete ignored artifacts and update source")
+        .expect("commit should succeed");
+
+    assert!(
+        !commit
+            .stdout
+            .contains("Skipped git-ai stats for large commit"),
+        "large ignored deletions should not trigger post-commit skip warning: {}",
+        commit.stdout
+    );
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.git_diff_deleted_lines, 0);
+    assert_eq!(stats.unknown_additions, 1);
+}
+
+#[test]
 fn test_stats_ignores_renamed_files() {
     // Test that stats correctly ignores pure renames (no content changes)
     // Reproduces issue #923
@@ -783,5 +839,6 @@ crate::reuse_tests_in_worktree!(
     test_stats_ignore_flag_is_additive_to_defaults,
     test_stats_range_uses_default_ignores,
     test_post_commit_large_ignored_files_do_not_trigger_skip_warning,
+    test_post_commit_large_ignored_deletions_do_not_trigger_skip_warning,
     test_stats_ignores_renamed_files,
 );

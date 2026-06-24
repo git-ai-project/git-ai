@@ -31,6 +31,10 @@ thread_local! {
 }
 static INTERNAL_GIT_HOOKS_DISABLED_DEPTH_GLOBAL: AtomicUsize = AtomicUsize::new(0);
 
+pub type DiffAddedLinesByFile = HashMap<String, Vec<u32>>;
+pub type DiffDeletedLineCountsByFile = HashMap<String, usize>;
+pub type DiffAddedAndDeletedLineCounts = (DiffAddedLinesByFile, DiffDeletedLineCountsByFile);
+
 pub struct InternalGitHooksGuard;
 
 impl Drop for InternalGitHooksGuard {
@@ -1826,6 +1830,19 @@ impl Repository {
         from_ref: &str,
         to_ref: &str,
     ) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
+        let (added_lines, deleted_lines_by_file) =
+            self.diff_added_lines_with_deleted_counts(from_ref, to_ref)?;
+        let deleted_count = deleted_lines_by_file.values().sum();
+        Ok((added_lines, deleted_count))
+    }
+
+    /// Like `diff_added_lines` but also returns deleted-line counts keyed by
+    /// the destination-oriented file path used by the stats hunk parser.
+    pub fn diff_added_lines_with_deleted_counts(
+        &self,
+        from_ref: &str,
+        to_ref: &str,
+    ) -> Result<DiffAddedAndDeletedLineCounts, GitAiError> {
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("-U0".to_string());
@@ -1837,7 +1854,7 @@ impl Repository {
         let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
         let diff_output = String::from_utf8_lossy(&output.stdout);
 
-        parse_diff_added_lines(&diff_output)
+        parse_diff_added_lines_and_deleted_counts(&diff_output)
     }
 
     /// Get list of changed files between two refs using `git diff --name-only`
@@ -2980,26 +2997,39 @@ pub fn parse_git_version(version_str: &str) -> Option<(u32, u32, u32)> {
 /// Also returns the total number of deleted lines across all hunks so that
 /// callers can estimate the cost of a deletion-heavy commit without a second
 /// git invocation.
-fn parse_diff_added_lines(
+fn parse_diff_added_lines(diff_output: &str) -> Result<(DiffAddedLinesByFile, usize), GitAiError> {
+    let (added_lines, deleted_lines_by_file) =
+        parse_diff_added_lines_and_deleted_counts(diff_output)?;
+    let total_deleted = deleted_lines_by_file.values().sum();
+    Ok((added_lines, total_deleted))
+}
+
+fn parse_diff_added_lines_and_deleted_counts(
     diff_output: &str,
-) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
-    let mut result: HashMap<String, Vec<u32>> = HashMap::new();
+) -> Result<DiffAddedAndDeletedLineCounts, GitAiError> {
+    let mut result: DiffAddedLinesByFile = HashMap::new();
+    let mut deleted_lines_by_file: DiffDeletedLineCountsByFile = HashMap::new();
+    let mut current_old_file: Option<String> = None;
     let mut current_file: Option<String> = None;
-    let mut total_deleted: usize = 0;
 
     for line in diff_output.lines() {
-        if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
-            current_file = path_opt;
-        } else if line.starts_with("@@ ") {
+        if line.starts_with("diff --git ") {
+            current_old_file = None;
+            current_file = None;
+        } else if let Some(path_opt) = parse_old_file_path_from_minus_header_line(line) {
+            current_old_file = path_opt;
+        } else if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            current_file = path_opt.or_else(|| current_old_file.clone());
+        } else if line.starts_with("@@ ")
+            && let Some((added_lines, _is_pure_insertion, old_count)) = parse_hunk_header(line)
+            && let Some(ref file) = current_file
+        {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if let Some((added_lines, _is_pure_insertion, old_count)) = parse_hunk_header(line) {
-                // Count deleted lines for ALL hunks, including those from purely
-                // deleted files (where current_file is None because +++ /dev/null).
-                total_deleted += old_count as usize;
-                // Only record added-line numbers when there is a destination file.
-                if let Some(ref file) = current_file {
-                    result.entry(file.clone()).or_default().extend(added_lines);
-                }
+            if old_count > 0 {
+                *deleted_lines_by_file.entry(file.clone()).or_default() += old_count as usize;
+            }
+            if !added_lines.is_empty() {
+                result.entry(file.clone()).or_default().extend(added_lines);
             }
         }
     }
@@ -3010,7 +3040,7 @@ fn parse_diff_added_lines(
         lines.dedup();
     }
 
-    Ok((result, total_deleted))
+    Ok((result, deleted_lines_by_file))
 }
 
 /// Parses the unified diff output to extract line numbers of added lines,
@@ -3082,7 +3112,15 @@ fn normalize_diff_path_token(path: &str) -> String {
 }
 
 fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String>> {
-    let raw = line.strip_prefix("+++ ")?;
+    parse_file_path_from_header_line(line, "+++ ")
+}
+
+fn parse_old_file_path_from_minus_header_line(line: &str) -> Option<Option<String>> {
+    parse_file_path_from_header_line(line, "--- ")
+}
+
+fn parse_file_path_from_header_line(line: &str, prefix: &str) -> Option<Option<String>> {
+    let raw = line.strip_prefix(prefix)?;
     if raw.trim_end() == "/dev/null" {
         return Some(None);
     }
