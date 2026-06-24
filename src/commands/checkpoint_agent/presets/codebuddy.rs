@@ -1,0 +1,213 @@
+use super::parse;
+use super::{
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, StreamFormat, StreamSource,
+};
+use crate::authorship::authorship_log_serialization::generate_session_id;
+use crate::authorship::working_log::AgentId;
+use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
+use crate::error::GitAiError;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+pub struct CodeBuddyPreset;
+
+impl AgentPreset for CodeBuddyPreset {
+    fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+        let data: serde_json::Value = serde_json::from_str(hook_input)
+            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+
+        let cwd = parse::required_str(&data, "cwd")?;
+        let transcript_path = parse::required_str(&data, "transcript_path")?;
+
+        let session_id = parse::optional_str(&data, "session_id")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                parse::required_file_stem(&data, "transcript_path")
+                    .unwrap_or_else(|_| "unknown".to_string())
+            });
+
+        let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
+        let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
+        let tool_use_id =
+            parse::str_or_default_multi(&data, &["tool_use_id", "toolUseId"], "bash");
+
+        let is_bash = tool_name
+            .map(|n| bash_tool::classify_tool(Agent::CodeBuddy, n) == ToolClass::Bash)
+            .unwrap_or(false);
+
+        let context = PresetContext {
+            agent_id: AgentId {
+                tool: "codebuddy".to_string(),
+                id: session_id.clone(),
+                model: crate::streams::model_extraction::extract_model(
+                    Path::new(transcript_path),
+                    crate::streams::sweep::StreamFormat::ClaudeJsonl,
+                    None,
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string()),
+            },
+            external_session_id: session_id.clone(),
+            trace_id: trace_id.to_string(),
+            cwd: PathBuf::from(cwd),
+            metadata: HashMap::from([(
+                "transcript_path".to_string(),
+                transcript_path.to_string(),
+            )]),
+        };
+
+        let transcript_path_buf = PathBuf::from(transcript_path);
+        let stream_source = Some(StreamSource {
+            path: transcript_path_buf,
+            format: StreamFormat::ClaudeJsonl,
+            session_id: generate_session_id(&session_id, "codebuddy"),
+            external_session_id: session_id.clone(),
+            external_parent_session_id: None,
+        });
+
+        let event = match (hook_event, is_bash) {
+            (Some("PreToolUse"), true) => ParsedHookEvent::PreBashCall(PreBashCall {
+                context,
+                tool_use_id: tool_use_id.to_string(),
+            }),
+            (Some("PreToolUse"), false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
+                context,
+                file_paths: parse::file_paths_from_tool_input(&data, cwd),
+                dirty_files: None,
+                tool_use_id: Some(tool_use_id.to_string()),
+            }),
+            (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
+                context,
+                tool_use_id: tool_use_id.to_string(),
+                stream_source,
+            }),
+            (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
+                context,
+                file_paths: parse::file_paths_from_tool_input(&data, cwd),
+                dirty_files: None,
+                stream_source,
+                tool_use_id: Some(tool_use_id.to_string()),
+            }),
+        };
+
+        Ok(vec![event])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::checkpoint_agent::presets::*;
+    use serde_json::json;
+
+    fn make_hook_input(event: &str, tool: &str) -> String {
+        json!({
+            "transcript_path": "/home/user/.codebuddy/sessions/abc123.jsonl",
+            "cwd": "/home/user/project",
+            "hook_event_name": event,
+            "tool_name": tool,
+            "session_id": "sess-1",
+            "tool_use_id": "tu-1",
+            "tool_input": {"file_path": "src/main.rs"}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_pre_file_edit() {
+        let input = make_hook_input("PreToolUse", "Write");
+        let events = CodeBuddyPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "codebuddy");
+                assert_eq!(e.context.external_session_id, "sess-1");
+                assert_eq!(e.context.trace_id, "t_test123456789a");
+                assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_post_file_edit() {
+        let input = make_hook_input("PostToolUse", "Write");
+        let events = CodeBuddyPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "codebuddy");
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+                assert!(e.stream_source.is_some());
+                if let Some(ts) = &e.stream_source {
+                    assert_eq!(ts.format, StreamFormat::ClaudeJsonl);
+                    assert_eq!(
+                        ts.session_id,
+                        generate_session_id("sess-1", "codebuddy")
+                    );
+                    assert_eq!(ts.external_session_id, "sess-1");
+                }
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_pre_bash_call() {
+        let input = make_hook_input("PreToolUse", "Bash");
+        let events = CodeBuddyPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PreBashCall(e) => {
+                assert_eq!(e.context.agent_id.tool, "codebuddy");
+                assert_eq!(e.tool_use_id, "tu-1");
+            }
+            _ => panic!("Expected PreBashCall"),
+        }
+    }
+
+    #[test]
+    fn test_post_bash_call() {
+        let input = make_hook_input("PostToolUse", "Bash");
+        let events = CodeBuddyPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostBashCall(e) => {
+                assert_eq!(e.context.agent_id.tool, "codebuddy");
+                assert_eq!(e.tool_use_id, "tu-1");
+            }
+            _ => panic!("Expected PostBashCall"),
+        }
+    }
+
+    #[test]
+    fn test_session_id_from_filename() {
+        let input = json!({
+            "transcript_path": "/home/user/.codebuddy/sessions/cb947e5b-246e-4253-a953-631f7e464c6b.jsonl",
+            "cwd": "/home/user/project",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "src/main.rs"}
+        })
+        .to_string();
+        let events = CodeBuddyPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.context.external_session_id,
+                    "cb947e5b-246e-4253-a953-631f7e464c6b"
+                );
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+}

@@ -57,6 +57,7 @@ pub fn file_paths_from_tool_input(data: &Value, cwd: &str) -> Vec<PathBuf> {
     // Try single file_path field
     if let Some(path) = tool_input
         .get("file_path")
+        .or_else(|| tool_input.get("filePath"))
         .or_else(|| tool_input.get("filepath"))
         .or_else(|| tool_input.get("path"))
         .and_then(|v| v.as_str())
