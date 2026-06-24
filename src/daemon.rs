@@ -5084,8 +5084,11 @@ impl ActorDaemonCoordinator {
                 let repo_key = Self::worktree_state_key(Path::new(&repo_work_dir));
                 // Persist the bash-checkpoint fact for post-commit attribution
                 // recovery before moving the owned fields into the in-memory
-                // session state. Best-effort: never block the checkpoint.
-                if crate::config::Config::fresh()
+                // session state. Best-effort: never block the checkpoint. Use the
+                // cached config (not `fresh()`): this runs on every bash tool-call,
+                // so a per-call disk read of the config would add up — especially
+                // on slow filesystems — and the flag is static for the process.
+                if crate::config::Config::get()
                     .get_feature_flags()
                     .bash_checkpoint_tracking
                     && let Ok(db) =
@@ -5124,7 +5127,8 @@ impl ActorDaemonCoordinator {
                     let mut state = self.bash_sessions.lock().unwrap();
                     state.end_session(&session_id, &tool_use_id);
                 }
-                if crate::config::Config::fresh()
+                // Cached config (not `fresh()`): hot path, see BashSessionStart.
+                if crate::config::Config::get()
                     .get_feature_flags()
                     .bash_checkpoint_tracking
                     && let Ok(db) =
