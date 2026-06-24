@@ -9,6 +9,8 @@ use git_ai::commands::checkpoint_agent::bash_tool::{
 use git_ai::daemon::bash_history_db::BashHistoryDatabase;
 use serde_json::json;
 use std::fs;
+use std::thread;
+use std::time::Duration;
 
 fn isolated_bash_history_db_path() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("failed to create isolated bash history db dir");
@@ -173,6 +175,80 @@ fn test_codex_preset_bash_recovery_minimizes_dirty_untracked_attribution() {
         "dirty pre-bash line".ai(),
         "ai bash line".ai(),
     ]);
+}
+
+#[test]
+fn test_bash_recovery_uses_commit_time_file_timestamps_when_processing_is_delayed() {
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [
+        ("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str()),
+        (
+            "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+            "remote=6500",
+        ),
+    ];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("delayed.txt");
+
+    fs::write(&file_path, "dirty pre-bash line\n").unwrap();
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-transcript.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "delayed-commit-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "delayed-commit-tool",
+        "tool_input": { "command": "printf 'ai bash line\\n' >> delayed.txt" },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("codex pre-hook checkpoint should succeed");
+
+    fs::write(&file_path, "dirty pre-bash line\nai bash line\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "delayed-commit-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "delayed-commit-tool",
+        "tool_input": { "command": "printf 'ai bash line\\n' >> delayed.txt" },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("codex post-hook checkpoint should succeed");
+
+    repo.git_without_test_sync_for_test(
+        &[
+            "remote",
+            "add",
+            "delayed-side-effect",
+            "https://example.invalid/repo.git",
+        ],
+        &[],
+    )
+    .expect("remote add should succeed");
+    repo.git_without_test_sync_for_test(&["add", "-A"], &[])
+        .expect("add should succeed");
+    repo.git_without_test_sync_for_test(&["commit", "-m", "Delayed commit"], &[])
+        .expect("commit should succeed");
+
+    thread::sleep(Duration::from_millis(3500));
+    fs::write(
+        &file_path,
+        "dirty pre-bash line\nai bash line\nmanual edit after commit\n",
+    )
+    .unwrap();
+
+    let mut file = repo.filename("delayed.txt");
+    file.assert_committed_lines(lines!["dirty pre-bash line".ai(), "ai bash line".ai(),]);
 }
 
 #[test]

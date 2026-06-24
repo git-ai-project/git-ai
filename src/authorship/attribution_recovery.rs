@@ -19,6 +19,8 @@ const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const BASH_RECOVERY_COARSE_TIMESTAMP_NS: u128 = 1_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 
+pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
+
 pub(crate) fn recover_attribution(
     repo: &Repository,
     parent_sha: &str,
@@ -26,6 +28,7 @@ pub(crate) fn recover_attribution(
     human_author: &str,
     authorship_log: &mut AuthorshipLog,
     committed_hunks: &HashMap<String, Vec<LineRange>>,
+    file_timestamps: Option<&FileTimestampsByPath>,
 ) -> Result<(), GitAiError> {
     if committed_hunks.is_empty() {
         return Ok(());
@@ -42,6 +45,7 @@ pub(crate) fn recover_attribution(
         human_author,
         authorship_log,
         committed_hunks,
+        file_timestamps,
     )?;
     recover_adjacent_edges(
         repo,
@@ -60,6 +64,7 @@ fn recover_bash_mtime(
     human_author: &str,
     authorship_log: &mut AuthorshipLog,
     committed_hunks: &HashMap<String, Vec<LineRange>>,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
 ) -> Result<(), GitAiError> {
     let repo_work_dir = repo_worktree_key(repo)?;
     let workdir = repo.workdir()?;
@@ -71,7 +76,11 @@ fn recover_bash_mtime(
     let mut timestamps_by_file = HashMap::new();
     let mut all_timestamps = Vec::new();
     for file_path in unknown_by_file.keys() {
-        let timestamps = file_timestamps_ns(&workdir, file_path);
+        let timestamps = captured_file_timestamps
+            .and_then(|timestamps| timestamps.get(file_path))
+            .filter(|timestamps| !timestamps.is_empty())
+            .cloned()
+            .unwrap_or_else(|| file_timestamps_ns(&workdir, file_path));
         if !timestamps.is_empty() {
             all_timestamps.extend(timestamps.iter().copied());
             timestamps_by_file.insert(file_path.clone(), timestamps);
@@ -237,7 +246,11 @@ fn repo_worktree_key(repo: &Repository) -> Result<String, GitAiError> {
 }
 
 fn file_timestamps_ns(workdir: &std::path::Path, file_path: &str) -> Vec<u128> {
-    let Ok(meta) = fs::symlink_metadata(workdir.join(file_path)) else {
+    file_timestamps_for_path(&workdir.join(file_path))
+}
+
+pub(crate) fn file_timestamps_for_path(path: &Path) -> Vec<u128> {
+    let Ok(meta) = fs::symlink_metadata(path) else {
         return Vec::new();
     };
     let stat = StatEntry::from_metadata(&meta);

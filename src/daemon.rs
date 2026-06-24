@@ -950,6 +950,25 @@ fn compute_watermarks_from_stat(
     watermarks
 }
 
+fn capture_commit_file_timestamps(
+    worktree: &Path,
+    commit_sha: &str,
+) -> Result<crate::authorship::attribution_recovery::FileTimestampsByPath, GitAiError> {
+    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let workdir = repo.workdir()?;
+    let files = repo.list_commit_files(commit_sha, None)?;
+    let mut timestamps_by_path = HashMap::new();
+    for file_path in files {
+        let timestamps = crate::authorship::attribution_recovery::file_timestamps_for_path(
+            &workdir.join(&file_path),
+        );
+        if !timestamps.is_empty() {
+            timestamps_by_path.insert(file_path, timestamps);
+        }
+    }
+    Ok(timestamps_by_path)
+}
+
 fn parsed_invocation_for_side_effect(
     command: Option<&str>,
     args: &[String],
@@ -1923,6 +1942,12 @@ struct PendingRootSlot {
     order: FamilySequencerOrder,
 }
 
+type CommitFileTimestampSnapshotHandle =
+    tokio::task::JoinHandle<Option<crate::authorship::attribution_recovery::FileTimestampsByPath>>;
+type CommitFileTimestampSnapshotHandles = HashMap<String, CommitFileTimestampSnapshotHandle>;
+
+const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
+
 #[derive(Debug, Clone)]
 struct PendingSquashMerge {
     source_head: String,
@@ -1987,6 +2012,8 @@ pub struct ActorDaemonCoordinator {
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
+    commit_file_timestamp_snapshots_by_root:
+        Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
     recent_replay_prerequisites_by_family:
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
@@ -2071,6 +2098,7 @@ impl ActorDaemonCoordinator {
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
+            commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
@@ -3417,11 +3445,15 @@ impl ActorDaemonCoordinator {
                     // does not kill the daemon process.
                     let side_effect_result = {
                         let future = async {
+                            let root_sid = command.root_sid.clone();
+                            let mut commit_file_timestamp_snapshots =
+                                self.take_cached_commit_file_timestamp_snapshots(&root_sid)?;
                             let applied = self.coordinator.route_command(*command).await?;
                             let side_effect = self
                                 .maybe_apply_side_effects_for_applied_command(
                                     Some(family),
                                     &applied,
+                                    &mut commit_file_timestamp_snapshots,
                                 )
                                 .await;
                             Ok::<_, GitAiError>((applied, side_effect))
@@ -4123,10 +4155,112 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    fn start_commit_file_timestamp_snapshots_for_command(
+        command: &crate::daemon::domain::NormalizedCommand,
+    ) -> CommitFileTimestampSnapshotHandles {
+        let Some(worktree) = command.worktree.clone() else {
+            return HashMap::new();
+        };
+        if command.exit_code != 0
+            || !matches!(
+                command.primary_command.as_deref(),
+                Some("commit" | "merge" | "am")
+            )
+        {
+            return HashMap::new();
+        }
+
+        let (_, new_head) = Self::resolve_heads_for_command(command);
+        if new_head.is_empty() || !is_valid_oid(&new_head) || is_zero_oid(&new_head) {
+            return HashMap::new();
+        }
+
+        let mut handles = HashMap::new();
+        let task_commit_sha = new_head.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            match capture_commit_file_timestamps(&worktree, &task_commit_sha) {
+                Ok(timestamps) => Some(timestamps),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        commit_sha = %task_commit_sha,
+                        "failed to capture commit-time file timestamps"
+                    );
+                    None
+                }
+            }
+        });
+        handles.insert(new_head, handle);
+
+        handles
+    }
+
+    fn cache_commit_file_timestamp_snapshots_for_command(
+        &self,
+        command: &crate::daemon::domain::NormalizedCommand,
+    ) -> Result<(), GitAiError> {
+        let handles = Self::start_commit_file_timestamp_snapshots_for_command(command);
+        if handles.is_empty() {
+            return Ok(());
+        }
+        let mut cache = self
+            .commit_file_timestamp_snapshots_by_root
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "commit file timestamp snapshot cache lock poisoned".to_string(),
+                )
+            })?;
+        cache.insert(command.root_sid.clone(), handles);
+        Ok(())
+    }
+
+    fn take_cached_commit_file_timestamp_snapshots(
+        &self,
+        root_sid: &str,
+    ) -> Result<CommitFileTimestampSnapshotHandles, GitAiError> {
+        let mut cache = self
+            .commit_file_timestamp_snapshots_by_root
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "commit file timestamp snapshot cache lock poisoned".to_string(),
+                )
+            })?;
+        Ok(cache.remove(root_sid).unwrap_or_default())
+    }
+
+    async fn take_commit_file_timestamps(
+        handles: &mut CommitFileTimestampSnapshotHandles,
+        commit_sha: &str,
+    ) -> Option<crate::authorship::attribution_recovery::FileTimestampsByPath> {
+        let handle = handles.remove(commit_sha)?;
+        match tokio::time::timeout(COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT, handle).await {
+            Ok(Ok(Some(timestamps))) if !timestamps.is_empty() => Some(timestamps),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    %error,
+                    %commit_sha,
+                    "commit-time file timestamp task failed"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    %commit_sha,
+                    "commit-time file timestamp task timed out"
+                );
+                None
+            }
+        }
+    }
+
     async fn maybe_apply_side_effects_for_applied_command(
         &self,
         family: Option<&str>,
         applied: &crate::daemon::domain::AppliedCommand,
+        commit_file_timestamp_snapshots: &mut CommitFileTimestampSnapshotHandles,
     ) -> Result<(), GitAiError> {
         // Test-only: allow inducing a panic in the side-effect pipeline to verify
         // that the daemon's catch_unwind recovery keeps the process alive.
@@ -4607,13 +4741,19 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.effective_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
+                            let recovery_file_timestamps = Self::take_commit_file_timestamps(
+                                commit_file_timestamp_snapshots,
+                                new_head,
+                            )
+                            .await;
 
-                            crate::authorship::post_commit::post_commit_from_working_log(
+                            crate::authorship::post_commit::post_commit_from_working_log_with_recovery_timestamps(
                                 &repo,
                                 base_opt.clone(),
                                 new_head.clone(),
                                 author,
                                 true,
+                                recovery_file_timestamps.as_ref(),
                             )?;
 
                             if cmd.primary_command.as_deref() == Some("commit")
@@ -4649,8 +4789,17 @@ impl ActorDaemonCoordinator {
                         {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.effective_author_identity().formatted_or_unknown();
-                            crate::authorship::post_commit::post_commit_amend(
-                                &repo, old_head, new_head, author,
+                            let recovery_file_timestamps = Self::take_commit_file_timestamps(
+                                commit_file_timestamp_snapshots,
+                                new_head,
+                            )
+                            .await;
+                            crate::authorship::post_commit::post_commit_amend_with_recovery_timestamps(
+                                &repo,
+                                old_head,
+                                new_head,
+                                author,
+                                recovery_file_timestamps.as_ref(),
                             )?;
                         }
                     }
@@ -4855,6 +5004,7 @@ impl ActorDaemonCoordinator {
             )
             .await?
         {
+            self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
             family_to_drain_after_clear = Some(family);
             TracePayloadApplyOutcome::QueuedFamily
         } else if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
@@ -4863,6 +5013,7 @@ impl ActorDaemonCoordinator {
                 &command.raw_argv,
             )
         {
+            self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
             self.append_ready_command_entry(&family, command).await?;
             family_to_drain_after_clear = Some(family);
             TracePayloadApplyOutcome::QueuedFamily
@@ -4890,8 +5041,14 @@ impl ActorDaemonCoordinator {
             TracePayloadApplyOutcome::Applied(applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
+                    let mut commit_file_timestamp_snapshots =
+                        Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
                     let result = self
-                        .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
+                        .maybe_apply_side_effects_for_applied_command(
+                            Some(&family),
+                            &applied,
+                            &mut commit_file_timestamp_snapshots,
+                        )
                         .await;
                     let _ = self.end_family_effect(&family);
                     if let Err(error) = &result {
