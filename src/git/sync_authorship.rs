@@ -279,8 +279,11 @@ fn fetch_authorship_notes_inner(
             "fetch_authorship_notes: rate-limited, skipping fetch from '{}'",
             remote_name
         );
-        // A recent fetch succeeded, so notes are presumed present. Returning
-        // NotFound here would falsely signal "confirmed no notes on remote".
+        // A fetch was recently allowed for this repo+remote, so we presume notes
+        // are present rather than re-fetching. We deliberately do NOT return
+        // NotFound here: that variant means "confirmed no notes on remote" and
+        // triggers callers to skip syncing, which would be wrong to assert from a
+        // rate-limit skip alone (we don't know the prior fetch's result here).
         return Ok(NotesExistence::Found);
     }
 

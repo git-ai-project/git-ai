@@ -24,6 +24,13 @@ pub fn reconstruct_working_log_after_backward_reset(
         return Ok(());
     }
 
+    // Reconcile the note cache with refs/notes/ai before reading the un-done
+    // commits' notes. GitNotes reads are SQLite-first and no longer run a full
+    // ref sync per read, so a note changed on the ref out-of-band could be
+    // shadowed by a stale cache entry and lose its prompt/session metadata when
+    // reconstructed into the working log. Cursor-guarded and cheap when unchanged.
+    let _ = notes_api::sync_from_git_ref(repo);
+
     // Read authorship notes for all un-done commits
     let mut commit_logs: Vec<(String, AuthorshipLog)> = Vec::new();
     let notes = notes_api::read_notes_batch(repo, &commits)?;

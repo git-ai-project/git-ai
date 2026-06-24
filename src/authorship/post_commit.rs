@@ -441,6 +441,14 @@ pub fn post_commit_amend(
     amended_commit: &str,
     human_author: String,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
+    // Reconcile the note cache with refs/notes/ai before reading the original
+    // commit's note. GitNotes reads are SQLite-first and no longer run a full
+    // ref sync per read, so a note changed on the ref out-of-band (old clients,
+    // remote fetch, direct `git notes`) could otherwise be shadowed by a stale
+    // cache entry and lose human/session/prompt metadata across the amend.
+    // Cursor-guarded and cheap when the ref is unchanged.
+    let _ = crate::git::notes_api::sync_from_git_ref(repo);
+
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
 
