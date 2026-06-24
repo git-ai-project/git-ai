@@ -243,6 +243,21 @@ impl BashCheckpointsDatabase {
 
     // ----- Read operations -----
 
+    /// Cheap existence check: are there any bash checkpoints recorded for this
+    /// repo? Used to skip the (process-spawning) recovery diff entirely on the
+    /// common path where no bash command could have produced untracked content.
+    pub fn has_rows_for_repo(&self, repo_work_dir: &str) -> Result<bool, GitAiError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM bash_checkpoints WHERE repo_work_dir = ?1 LIMIT 1",
+                params![repo_work_dir],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(found.is_some())
+    }
+
     /// Return bash checkpoints for `repo_work_dir` whose `[start_ns, end_ns]`
     /// interval overlaps the query window `[window_lo_ns, window_hi_ns]`. A NULL
     /// `end_ns` is treated as a point at `start_ns`.

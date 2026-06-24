@@ -211,54 +211,50 @@ where
         crate::authorship::background_agent::BackgroundAgent::None
             | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
     );
-    let recovery_enabled = Config::fresh().get_feature_flags().attribution_recovery;
 
-    // Prefer the batched parent→commit diff when supplied (no extra spawn);
-    // otherwise fall back to a per-commit `git diff`. Shared between background-
-    // agent hole-filling (pre-transform) and attribution recovery (post-transform).
-    let committed_hunks: Option<
-        HashMap<String, Vec<crate::authorship::authorship_log::LineRange>>,
-    > = if is_no_hooks_bg_agent || recovery_enabled {
-        if let Some(diff) = precomputed_parent_diff {
-            Some(
-                crate::authorship::virtual_attribution::committed_hunks_from_diff_result(
-                    diff, None,
-                ),
-            )
-        } else {
-            let diff_base = if parent_sha == "initial" {
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    // Helper: compute per-file added-line ranges (parent→commit). Prefer the
+    // batched diff when supplied (no extra spawn); otherwise fall back to a
+    // per-commit `git diff`.
+    let compute_committed_hunks =
+        || -> Option<HashMap<String, Vec<crate::authorship::authorship_log::LineRange>>> {
+            if let Some(diff) = precomputed_parent_diff {
+                Some(
+                    crate::authorship::virtual_attribution::committed_hunks_from_diff_result(
+                        diff, None,
+                    ),
+                )
             } else {
-                &parent_sha
-            };
-            repo.diff_added_lines(diff_base, &commit_sha, None)
-                .ok()
-                .map(|added_lines| {
-                    added_lines
-                        .into_iter()
-                        .filter(|(_, lines)| !lines.is_empty())
-                        .map(|(path, lines)| {
-                            (
-                                path,
-                                crate::authorship::authorship_log::LineRange::compress_lines(
-                                    &lines,
-                                ),
-                            )
-                        })
-                        .collect()
-                })
-        }
-    } else {
-        None
-    };
+                let diff_base = if parent_sha == "initial" {
+                    "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+                } else {
+                    &parent_sha
+                };
+                repo.diff_added_lines(diff_base, &commit_sha, None)
+                    .ok()
+                    .map(|added_lines| {
+                        added_lines
+                            .into_iter()
+                            .filter(|(_, lines)| !lines.is_empty())
+                            .map(|(path, lines)| {
+                                (
+                                    path,
+                                    crate::authorship::authorship_log::LineRange::compress_lines(
+                                        &lines,
+                                    ),
+                                )
+                            })
+                            .collect()
+                    })
+            }
+        };
 
     // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire
     // checkpoints for all edits. Attribute any committed lines that have no
     // existing attestation ("holes") to the detected agent first.
-    if is_no_hooks_bg_agent && let Some(committed_hunks) = committed_hunks.as_ref() {
+    if is_no_hooks_bg_agent && let Some(committed_hunks) = compute_committed_hunks() {
         crate::authorship::background_agent::fill_unattributed_lines(
             &mut authorship_log,
-            committed_hunks,
+            &committed_hunks,
             &human_author,
         );
     }
@@ -272,14 +268,25 @@ where
     // and AI attestations; running recovery beforehand would treat those lines
     // as "unknown" and could drag their neighbors into AI sessions. For ordinary
     // commits the transform is the identity, so this ordering is a no-op.
-    if recovery_enabled && let Some(committed_hunks) = committed_hunks.as_ref() {
-        let repo_work_dir = repo.workdir().unwrap_or_default();
+    //
+    // `recovery_possible` is a cheap pre-check (in-memory AI scan + an indexed
+    // existence query) that lets the common fully-human commit with no bash
+    // activity skip the per-commit `git diff` entirely — important on Windows
+    // where each process spawn is expensive.
+    let repo_work_dir_for_recovery = repo.workdir().unwrap_or_default();
+    if Config::fresh().get_feature_flags().attribution_recovery
+        && crate::authorship::recovery::recovery_possible(
+            &authorship_log,
+            &repo_work_dir_for_recovery,
+        )
+        && let Some(committed_hunks) = compute_committed_hunks()
+    {
         let ctx = crate::authorship::recovery::RecoveryContext {
             repo: Some(repo),
             commit_sha: &commit_sha,
             parent_sha: &parent_sha,
-            repo_work_dir: &repo_work_dir,
-            committed_hunks,
+            repo_work_dir: &repo_work_dir_for_recovery,
+            committed_hunks: &committed_hunks,
             human_author: &human_author,
         };
         let solvers: Vec<Box<dyn crate::authorship::recovery::RecoverySolver>> = vec![

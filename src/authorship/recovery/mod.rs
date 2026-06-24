@@ -153,6 +153,38 @@ pub fn apply_recovered(log: &mut AuthorshipLog, rec: &RecoveredAttribution) {
     }
 }
 
+/// Cheap pre-check: could any solver possibly recover something for this commit?
+///
+/// Returns true only if the edge solver has AI attestations to extend from, or
+/// the bash solver has at least one recorded bash checkpoint for this repo.
+/// Lets callers skip the (process-spawning) committed-hunks diff on the common
+/// path — a fully human-attributed commit in a repo with no bash checkpoints.
+pub fn recovery_possible(log: &AuthorshipLog, repo_work_dir: &Path) -> bool {
+    // Edge solver: needs at least one AI (non-`h_`) attestation in the log.
+    let has_ai = log.attestations.iter().any(|fa| {
+        fa.entries.iter().any(|e| {
+            let key = e.hash.split("::").next().unwrap_or(&e.hash);
+            !key.starts_with("h_") && ai_owner_for(log, key).is_some()
+        })
+    });
+    if has_ai {
+        return true;
+    }
+    // Bash solver: needs a recorded bash checkpoint for this repo.
+    let repo_key = std::fs::canonicalize(repo_work_dir)
+        .unwrap_or_else(|_| repo_work_dir.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    crate::daemon::bash_checkpoints_db::BashCheckpointsDatabase::global()
+        .ok()
+        .and_then(|db| {
+            db.lock()
+                .ok()
+                .map(|g| g.has_rows_for_repo(&repo_key).unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
 /// Map each file's already-AI-attributed committed lines to their AI owner.
 ///
 /// An attestation hash is AI iff its session-key part (before `::`, if present)
