@@ -136,10 +136,16 @@ pub trait RecoverySolver {
 
 /// Apply a solver's proposal to the authorship log: register the session and
 /// add an attestation entry (hash `s_...::t_...`) per file.
+///
+/// The session record is inserted only if the key is new. The edge-extension
+/// solver deliberately reuses an existing AI session's key (with a fresh trace
+/// id); overwriting that session's record would clobber its real `human_author`
+/// and `custom_attributes`, so we preserve the original via `or_insert_with`.
 pub fn apply_recovered(log: &mut AuthorshipLog, rec: &RecoveredAttribution) {
     log.metadata
         .sessions
-        .insert(rec.session_key.clone(), rec.session_record.clone());
+        .entry(rec.session_key.clone())
+        .or_insert_with(|| rec.session_record.clone());
     let hash = format!("{}::{}", rec.session_key, rec.trace_id);
     for (file, ranges) in &rec.per_file_lines {
         let fa = log.get_or_create_file(file);
@@ -221,6 +227,13 @@ fn retain_lines_new_vs_parent(ctx: &RecoveryContext, unknown: &mut HashMap<Strin
         let Some(parent) = contents.get(&(ctx.parent_sha.to_string(), file.clone())) else {
             return true;
         };
+        // A committed line is eligible only if its content does not already exist
+        // in the parent version of the file. This is a deliberately conservative
+        // bag-of-lines test: it can under-recover a genuinely-new line that is
+        // textually identical to some unrelated parent line (e.g. a lone `}`),
+        // but it never mis-attributes pre-existing content. We accept the
+        // occasional false-negative because over-attribution (claiming a human's
+        // carried-forward line as AI) is far worse than missing one bare line.
         let parent_line_set: HashSet<&str> = parent.lines().collect();
         let committed_lines: Vec<&str> = committed.lines().collect();
         lines.retain(|&ln| {
@@ -244,10 +257,10 @@ pub fn recover_attribution(
     for solver in solvers {
         let mut unknown = unknown_lines(log, ctx.committed_hunks);
         // Recovery only attributes lines this commit genuinely *produced*. Drop
-        // unknown lines whose committed content already existed in the parent
-        // commit (pre-existing content that is unknown-in-this-commit only as a
-        // diff-base artifact, e.g. a prior untracked line carried forward). This
-        // applies to every solver so neither bash correlation nor edge extension
+        // unknown lines that are not insertions in the parent→commit diff
+        // (pre-existing content that is unknown-in-this-commit only as a diff-base
+        // artifact, e.g. a prior line carried forward into an in-flight commit).
+        // Applies to every solver so neither bash correlation nor edge extension
         // sweeps up unrelated pre-existing lines. New files have no parent
         // version, so all their lines remain eligible.
         retain_lines_new_vs_parent(ctx, &mut unknown);
