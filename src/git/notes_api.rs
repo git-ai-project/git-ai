@@ -45,12 +45,13 @@ pub fn write_notes_batch(
     if entries.is_empty() {
         return Ok(());
     }
+    let entries = canonicalize_note_entries(repo, entries);
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
             // HTTP: write to SQLite queue only; daemon flushes to HTTP backend.
-            http_write_batch(entries)
+            http_write_batch(&entries)
         }
-        NotesBackendKind::GitNotes => git_notes_write_batch(repo, entries),
+        NotesBackendKind::GitNotes => git_notes_write_batch(repo, &entries),
     }
 }
 
@@ -68,10 +69,11 @@ fn git_notes_write_batch(
 // --- Reads ---
 
 pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
+    let commit_sha = canonicalize_commit_sha(repo, commit_sha);
     // Delegate to the batched path for consistent SQLite-first behavior.
-    read_notes_batch(repo, &[commit_sha.to_string()])
+    read_notes_batch(repo, std::slice::from_ref(&commit_sha))
         .ok()
-        .and_then(|mut m| m.remove(commit_sha))
+        .and_then(|mut m| m.remove(&commit_sha))
 }
 
 /// Read note contents for multiple commits.
@@ -95,37 +97,42 @@ pub fn read_notes_batch(
     if commit_shas.is_empty() {
         return Ok(HashMap::new());
     }
+    let canonical_pairs = canonicalize_commit_shas(repo, commit_shas);
+    let lookup_shas: Vec<String> = canonical_pairs
+        .iter()
+        .map(|(_, canonical)| canonical.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
 
-    match Config::get().notes_backend_kind() {
+    let notes = match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
             // Step 1 (http): check SQLite cache — fast, no network.
-            let mut notes = http_read_notes(commit_shas);
+            let mut notes = http_read_notes(&lookup_shas);
 
-            let missing_after_sqlite: Vec<String> = commit_shas
+            let missing_after_sqlite: Vec<String> = lookup_shas
                 .iter()
                 .filter(|sha| !notes.contains_key(*sha))
                 .cloned()
                 .collect();
 
-            if missing_after_sqlite.is_empty() {
-                return Ok(notes);
-            }
+            if !missing_after_sqlite.is_empty() {
+                // Step 2 (http): fetch misses from HTTP backend, cache into SQLite.
+                let from_http = http_fetch_and_cache_notes(&missing_after_sqlite);
+                notes.extend(from_http);
 
-            // Step 2 (http): fetch misses from HTTP backend, cache into SQLite.
-            let from_http = http_fetch_and_cache_notes(&missing_after_sqlite);
-            notes.extend(from_http);
-
-            // Step 3 (http): git ref fallback for anything still missing.
-            let missing_after_http: Vec<String> = missing_after_sqlite
-                .iter()
-                .filter(|sha| !notes.contains_key(*sha))
-                .cloned()
-                .collect();
-            if !missing_after_http.is_empty()
-                && let Ok(git_notes) =
-                    crate::git::refs::notes_for_commits(repo, &missing_after_http)
-            {
-                notes.extend(git_notes);
+                // Step 3 (http): git ref fallback for anything still missing.
+                let missing_after_http: Vec<String> = missing_after_sqlite
+                    .iter()
+                    .filter(|sha| !notes.contains_key(*sha))
+                    .cloned()
+                    .collect();
+                if !missing_after_http.is_empty()
+                    && let Ok(git_notes) =
+                        crate::git::refs::notes_for_commits(repo, &missing_after_http)
+                {
+                    notes.extend(git_notes);
+                }
             }
 
             Ok(notes)
@@ -137,44 +144,45 @@ pub fn read_notes_batch(
             let _ = sync_from_git_ref(repo);
 
             // Step 1 (git_notes): check SQLite cache — fast, no subprocess.
-            let mut notes = git_notes_read_from_sqlite(commit_shas);
+            let mut notes = git_notes_read_from_sqlite(&lookup_shas);
 
-            let missing: Vec<String> = commit_shas
+            let missing: Vec<String> = lookup_shas
                 .iter()
                 .filter(|sha| !notes.contains_key(*sha))
                 .cloned()
                 .collect();
 
-            if missing.is_empty() {
-                return Ok(notes);
+            if !missing.is_empty() {
+                // Step 2 (git_notes): fall back to git ref for misses. Errors are
+                // propagated — callers that detect corrupt notes rely on this.
+                let from_git = crate::git::refs::notes_for_commits(repo, &missing)?;
+
+                // Step 3 (git_notes): cache git-ref hits back into SQLite.
+                if !from_git.is_empty() {
+                    let entries: Vec<(String, String)> = from_git
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    git_notes_write_batch_to_sqlite(&entries);
+                }
+
+                notes.extend(from_git);
             }
-
-            // Step 2 (git_notes): fall back to git ref for misses. Errors are
-            // propagated — callers that detect corrupt notes rely on this.
-            let from_git = crate::git::refs::notes_for_commits(repo, &missing)?;
-
-            // Step 3 (git_notes): cache git-ref hits back into SQLite.
-            if !from_git.is_empty() {
-                let entries: Vec<(String, String)> = from_git
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                git_notes_write_batch_to_sqlite(&entries);
-            }
-
-            notes.extend(from_git);
             Ok(notes)
         }
-    }
+    }?;
+
+    Ok(remap_notes_to_requested_keys(notes, &canonical_pairs))
 }
 
 pub fn read_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipLog> {
-    read_notes_batch(repo, &[commit_sha.to_string()])
+    let commit_sha = canonicalize_commit_sha(repo, commit_sha);
+    read_notes_batch(repo, std::slice::from_ref(&commit_sha))
         .map_err(|e| tracing::debug!("notes read error: {}", e))
         .ok()
-        .and_then(|mut notes| notes.remove(commit_sha))
+        .and_then(|mut notes| notes.remove(&commit_sha))
         .and_then(|content| {
-            deserialize_authorship_for_commit(commit_sha, &content)
+            deserialize_authorship_for_commit(&commit_sha, &content)
                 .map_err(|e| tracing::debug!("notes deserialization error: {}", e))
                 .ok()
         })
@@ -184,11 +192,68 @@ pub fn read_authorship_v3(
     repo: &Repository,
     commit_sha: &str,
 ) -> Result<AuthorshipLog, GitAiError> {
-    let mut notes = read_notes_batch(repo, &[commit_sha.to_string()])?;
+    let commit_sha = canonicalize_commit_sha(repo, commit_sha);
+    let mut notes = read_notes_batch(repo, std::slice::from_ref(&commit_sha))?;
     let content = notes
-        .remove(commit_sha)
+        .remove(&commit_sha)
         .ok_or_else(|| GitAiError::Generic("No authorship note found".to_string()))?;
-    deserialize_authorship_v3_for_commit(commit_sha, &content)
+    deserialize_authorship_v3_for_commit(&commit_sha, &content)
+}
+
+fn canonicalize_note_entries(
+    repo: &Repository,
+    entries: &[(String, String)],
+) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .map(|(commit_sha, content)| (canonicalize_commit_sha(repo, commit_sha), content.clone()))
+        .collect()
+}
+
+fn canonicalize_commit_shas(repo: &Repository, commit_shas: &[String]) -> Vec<(String, String)> {
+    commit_shas
+        .iter()
+        .map(|sha| (sha.clone(), canonicalize_commit_sha(repo, sha)))
+        .collect()
+}
+
+fn canonicalize_commit_sha(repo: &Repository, commit_sha: &str) -> String {
+    if is_full_hex_oid(commit_sha) {
+        return commit_sha.to_string();
+    }
+
+    use crate::git::repository::exec_git;
+
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        format!("{}^{{commit}}", commit_sha),
+    ]);
+
+    match exec_git(&args) {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string(),
+        _ => commit_sha.to_string(),
+    }
+}
+
+fn is_full_hex_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+}
+
+fn remap_notes_to_requested_keys(
+    notes: HashMap<String, String>,
+    canonical_pairs: &[(String, String)],
+) -> HashMap<String, String> {
+    let mut remapped = HashMap::new();
+    for (requested, canonical) in canonical_pairs {
+        if let Some(content) = notes.get(canonical) {
+            remapped.insert(requested.clone(), content.clone());
+        }
+    }
+    remapped
 }
 
 fn deserialize_authorship_for_commit(
@@ -650,7 +715,6 @@ fn sync_from_git_ref_into_db(
     db: &mut crate::notes::db::NotesDatabase,
 ) -> Result<(), GitAiError> {
     use crate::git::repository::exec_git;
-    use crate::git::repository::exec_git_stdin;
 
     let Some(notes_tip) = local_notes_ref_tip(repo)? else {
         tracing::debug!("sync_from_git_ref: refs/notes/ai is absent, skipping");
@@ -689,18 +753,17 @@ fn sync_from_git_ref_into_db(
     };
 
     let stdout = String::from_utf8_lossy(&list_output.stdout);
-    // pairs: (note_blob_sha, commit_sha)
-    let pairs: Vec<(String, String)> = stdout
+    let commit_shas: Vec<String> = stdout
         .lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
-            let note_sha = parts.next()?.to_string();
+            let _note_sha = parts.next()?;
             let commit_sha = parts.next()?.to_string();
-            Some((note_sha, commit_sha))
+            Some(commit_sha)
         })
         .collect();
 
-    if pairs.is_empty() {
+    if commit_shas.is_empty() {
         if let Err(e) = db.set_metadata_value(&sync_cursor_key, &notes_tip) {
             tracing::debug!(
                 "sync_from_git_ref: failed to record notes ref cursor: {}",
@@ -712,76 +775,24 @@ fn sync_from_git_ref_into_db(
 
     tracing::debug!(
         "sync_from_git_ref: refreshing {} notes from refs/notes/ai",
-        pairs.len()
+        commit_shas.len()
     );
 
-    // 2. Read note blob contents via `git cat-file --batch`.
-    let mut cat_args = repo.global_args_for_exec();
-    cat_args.extend_from_slice(&["cat-file".to_string(), "--batch".to_string()]);
-
-    let blob_oids: Vec<&str> = pairs
-        .iter()
-        .map(|(note_sha, _)| note_sha.as_str())
-        .collect();
-    let stdin_data = blob_oids.join("\n") + "\n";
-
-    let cat_output = match exec_git_stdin(&cat_args, stdin_data.as_bytes()) {
-        Ok(o) => o,
+    // 2. Read note contents through the canonical git notes resolver. This
+    // preserves the flat-over-fanout preference used everywhere else.
+    let notes = match crate::git::refs::notes_for_commits(repo, &commit_shas) {
+        Ok(notes) => notes,
         Err(e) => {
-            tracing::debug!("sync_from_git_ref: cat-file failed: {}", e);
+            tracing::debug!("sync_from_git_ref: notes_for_commits failed: {}", e);
             return Ok(());
         }
     };
-
-    // Parse `<oid> <type> <size>\n<content>\n` output.
-    let data = &cat_output.stdout;
-    let mut blob_to_content: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut pos = 0usize;
-    while pos < data.len() {
-        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-            Some(i) => pos + i,
-            None => break,
-        };
-        let header = String::from_utf8_lossy(&data[pos..header_end]);
-        let parts: Vec<&str> = header.split_whitespace().collect();
-        if parts.len() < 3 || parts[1] == "missing" {
-            pos = header_end + 1;
-            continue;
-        }
-        let oid = parts[0].to_string();
-        let size: usize = match parts[2].parse() {
-            Ok(s) => s,
-            Err(_) => {
-                pos = header_end + 1;
-                continue;
-            }
-        };
-        let content_start = header_end + 1;
-        let content_end = content_start + size;
-        if content_end > data.len() {
-            break;
-        }
-        let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
-        blob_to_content.insert(oid, content);
-        pos = content_end;
-        if pos < data.len() && data[pos] == b'\n' {
-            pos += 1;
-        }
-    }
 
     // 3. Build (commit_sha, content) entries and upsert them into SQLite.
     // Refresh all local git notes, not just misses: after pull/fetch a remote
     // note may have changed for an existing commit SHA, and refs/notes/ai is
     // authoritative for the GitNotes backend.
-    let entries: Vec<(String, String)> = pairs
-        .iter()
-        .filter_map(|(note_sha, commit_sha)| {
-            blob_to_content
-                .get(note_sha)
-                .map(|content| (commit_sha.clone(), content.clone()))
-        })
-        .collect();
+    let entries: Vec<(String, String)> = notes.into_iter().collect();
 
     if entries.is_empty() {
         return Ok(());
