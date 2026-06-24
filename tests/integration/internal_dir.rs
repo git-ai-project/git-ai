@@ -182,28 +182,31 @@ fn test_internal_dir_env_is_used_verbatim_for_all_runtime_paths() {
 
 #[test]
 #[serial_test::serial(git_ai_internal_dir_env)]
-fn test_internal_dir_empty_value_is_treated_as_unset() {
+fn test_internal_dir_empty_or_whitespace_value_is_treated_as_unset() {
     // With the var unset, capture the default resolution.
     let default_resolved = {
         let _guard = InternalDirEnvGuard::unset();
         internal_dir_path().expect("default internal_dir_path should resolve")
     };
-
-    // An empty value must be byte-for-byte identical to unset.
-    let empty_resolved = {
-        let _guard = InternalDirEnvGuard::set(Path::new(""));
-        internal_dir_path().expect("empty internal_dir_path should resolve")
-    };
-
-    assert_eq!(
-        empty_resolved, default_resolved,
-        "an empty GIT_AI_INTERNAL_DIR must behave exactly like unset"
-    );
     assert!(
         default_resolved.ends_with("internal"),
         "default internal dir should be ~/.git-ai/internal: {}",
         default_resolved.display()
     );
+
+    // An empty value AND a whitespace-only value must each be byte-for-byte
+    // identical to unset -- a whitespace-only value is a common misconfiguration
+    // that must not be turned into a literal relative directory.
+    for blank in ["", "   ", "\t"] {
+        let resolved = {
+            let _guard = InternalDirEnvGuard::set(Path::new(blank));
+            internal_dir_path().expect("blank internal_dir_path should resolve")
+        };
+        assert_eq!(
+            resolved, default_resolved,
+            "GIT_AI_INTERNAL_DIR={blank:?} must behave exactly like unset"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,27 +251,48 @@ fn test_internal_dir_distinct_machines_resolve_pairwise_disjoint_paths() {
 #[test]
 #[serial_test::serial(git_ai_internal_dir_env)]
 fn test_internal_dir_shared_machines_resolve_identical_colliding_paths() {
-    // COLLISION: two "machines" that point at the SAME internal dir (the case
-    // the feature exists to prevent -- e.g. an NFS home with the var unset)
-    // resolve byte-for-byte identical runtime paths, so they would clash on
-    // every socket, lock, and DB file.
+    // COLLISION: two machines that point GIT_AI_INTERNAL_DIR at the SAME dir (the
+    // case the feature exists to prevent -- an NFS home with the var unset, or two
+    // hosts misconfigured to the same path) resolve, THROUGH PRODUCTION CODE, to
+    // the identical internal dir and therefore the identical DB and daemon
+    // socket/lock files. This drives the real resolvers internal_dir_path() and
+    // DaemonConfig::from_default_paths() (which read the env var), so it FAILS if
+    // the variable is ever ignored -- it is not an `f(x) == f(x)` tautology.
+    let resolve = |value: &Path| -> (PathBuf, [PathBuf; 4], (PathBuf, PathBuf, PathBuf)) {
+        let _guard = InternalDirEnvGuard::set(value);
+        let internal = internal_dir_path().expect("internal dir should resolve");
+        let config = DaemonConfig::from_default_paths().expect("daemon config should resolve");
+        let dbs = db_paths(&internal);
+        (
+            internal,
+            dbs,
+            (
+                config.control_socket_path,
+                config.trace_socket_path,
+                config.lock_path,
+            ),
+        )
+    };
+
     let shared = unique_internal_dir("collision-shared");
+    let (internal_a, db_a, sockets_a) = resolve(&shared);
+    let (internal_b, db_b, sockets_b) = resolve(&shared);
 
-    let paths_first = all_runtime_paths(&shared);
-    let paths_second = all_runtime_paths(&shared);
+    // The production resolver HONORED the env on both machines (it would resolve
+    // ~/.git-ai/internal, not `shared`, if the var were ignored).
+    assert_eq!(internal_a, shared);
+    assert_eq!(internal_b, shared);
+    // ...so both machines collide on the identical internal dir, DB files, and
+    // daemon sockets/lock.
+    assert_eq!(internal_a, internal_b);
+    assert_eq!(db_a, db_b);
+    assert_eq!(sockets_a, sockets_b);
 
-    assert_eq!(
-        paths_first, paths_second,
-        "the same internal dir must resolve to identical runtime paths on both machines"
-    );
-
-    // Concretely, both would write to the same authorship/metrics/notes/transcripts DB.
-    let [a1, m1, n1, t1] = db_paths(&shared);
-    let [a2, m2, n2, t2] = db_paths(&shared);
-    assert_eq!(a1, a2);
-    assert_eq!(m1, m2);
-    assert_eq!(n1, n2);
-    assert_eq!(t1, t2);
+    // Contrast: a DISTINCT value resolves to a DIFFERENT internal dir, which is
+    // exactly how a unique GIT_AI_INTERNAL_DIR per host avoids the clash.
+    let distinct = unique_internal_dir("collision-distinct");
+    let (internal_distinct, _, _) = resolve(&distinct);
+    assert_ne!(internal_distinct, shared);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,42 +357,42 @@ fn test_internal_dir_distinct_daemon_locks_coexist() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial(git_ai_internal_dir_env)]
 fn test_internal_dir_distinct_db_writes_are_isolated() {
-    // ISOLATION proof at the filesystem level: the authorship DB path is
-    // `<internal_dir>/db`. A write under machine A's DB path is invisible under
-    // machine B's, because they are different files. (We assert on the resolved
-    // file locations -- the same locations production code uses -- so this
-    // proves two machines never share SQLite files.)
+    // ISOLATION at the filesystem level, grounded in PRODUCTION resolution: with
+    // GIT_AI_INTERNAL_DIR set to machine A's dir, the authorship DB resolves
+    // (through the real resolver internal_dir_path()) under A's dir; likewise for
+    // B. The two resolved DB files differ, so a write under A's is invisible under
+    // B's. Asserting each resolved path equals `<machine>/db` fails if the env var
+    // is ignored, so this is grounded in production behavior, not a bare fs check.
     let machine_a = unique_internal_dir("dbwrite-a");
     let machine_b = unique_internal_dir("dbwrite-b");
 
-    let [db_a, ..] = db_paths(&machine_a);
-    let [db_b, ..] = db_paths(&machine_b);
+    let db_a = {
+        let _guard = InternalDirEnvGuard::set(&machine_a);
+        internal_dir_path()
+            .expect("machine A internal dir should resolve")
+            .join("db")
+    };
+    let db_b = {
+        let _guard = InternalDirEnvGuard::set(&machine_b);
+        internal_dir_path()
+            .expect("machine B internal dir should resolve")
+            .join("db")
+    };
+    // Production resolution honored each machine's env value.
+    assert_eq!(db_a, machine_a.join("db"));
+    assert_eq!(db_b, machine_b.join("db"));
     assert_ne!(db_a, db_b);
 
     std::fs::create_dir_all(&machine_a).unwrap();
     std::fs::create_dir_all(&machine_b).unwrap();
     std::fs::write(&db_a, b"machine-a-authorship-bytes").unwrap();
-
-    // Machine B's DB file does not exist as a result of machine A's write.
     assert!(db_a.exists(), "machine A DB should exist after the write");
     assert!(
         !db_b.exists(),
         "machine B DB must NOT be created by machine A's write -- the files are isolated"
     );
-
-    // And the shared/collision counter-case: pointing both at the same dir
-    // yields the same file, so the write IS visible.
-    let shared = unique_internal_dir("dbwrite-shared");
-    std::fs::create_dir_all(&shared).unwrap();
-    let [shared_db_first, ..] = db_paths(&shared);
-    let [shared_db_second, ..] = db_paths(&shared);
-    std::fs::write(&shared_db_first, b"shared-bytes").unwrap();
-    assert!(
-        shared_db_second.exists(),
-        "two machines sharing one internal dir DO see the same DB file (collision)"
-    );
-    assert_eq!(shared_db_first, shared_db_second);
 }
 
 // ---------------------------------------------------------------------------
