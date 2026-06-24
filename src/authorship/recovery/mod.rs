@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub mod bash_solver;
+pub mod edge_solver;
 
 /// Per-file committed line numbers that have no attestation entry ("unknown").
 ///
