@@ -1907,7 +1907,11 @@ fn test_author_config_cli_set_get_unset() {
 
 #[test]
 fn test_author_config_overrides_session_and_known_human_records() {
-    let mut repo = TestRepo::new();
+    // Dedicated daemon: the author-config override is resolved via the daemon's
+    // process-global `Config::fresh_author_cached()`, which is keyed by config
+    // fingerprint and can be contended by other repos on the shared daemon pool
+    // under heavy parallelism. A dedicated daemon isolates this test's config.
+    let mut repo = TestRepo::new_dedicated_daemon();
     repo.patch_git_ai_config(|patch| {
         patch.author = Some(AuthorConfig {
             name: Some("Config User".to_string()),
@@ -1956,7 +1960,9 @@ fn test_author_config_overrides_session_and_known_human_records() {
 
 #[test]
 fn test_author_config_partial_overrides_fall_back_to_git_committer_identity() {
-    let mut name_repo = TestRepo::new();
+    // Dedicated daemon to isolate the process-global author-config cache from
+    // other repos on the shared daemon pool (see sibling test above).
+    let mut name_repo = TestRepo::new_dedicated_daemon();
     name_repo.patch_git_ai_config(|patch| {
         patch.author = Some(AuthorConfig {
             name: Some("Config Name".to_string()),
@@ -1990,7 +1996,7 @@ fn test_author_config_partial_overrides_fall_back_to_git_committer_identity() {
         );
     }
 
-    let mut email_repo = TestRepo::new();
+    let mut email_repo = TestRepo::new_dedicated_daemon();
     email_repo.patch_git_ai_config(|patch| {
         patch.author = Some(AuthorConfig {
             name: None,
