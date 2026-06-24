@@ -4,12 +4,42 @@ use crate::error::GitAiError;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
 use serde_json;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // Modern refspecs without force to enable proper merging
 pub const AI_AUTHORSHIP_REFNAME: &str = "ai";
 pub const AI_AUTHORSHIP_FULL_REF: &str = "refs/notes/ai";
 pub const AI_AUTHORSHIP_FORK_TRACKING_REF: &str = "refs/notes/ai-remote/fork";
 pub const AI_AUTHORSHIP_PUSH_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
+
+static NOTES_WRITE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn notes_write_lock(repo: &Repository, notes_ref: &str) -> Result<Arc<Mutex<()>>, GitAiError> {
+    let common_dir = repo
+        .common_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+    let key = format!("{}:{}", common_dir.to_string_lossy(), notes_ref);
+    let locks = NOTES_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .map_err(|_| GitAiError::Generic("notes write lock map poisoned".to_string()))?;
+    Ok(locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+fn notes_write_lock_for_ref(
+    repo: &Repository,
+    ref_name: &str,
+) -> Result<Option<Arc<Mutex<()>>>, GitAiError> {
+    if ref_name.starts_with("refs/notes/") {
+        notes_write_lock(repo, ref_name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
 
 pub fn notes_add(
     repo: &Repository,
@@ -373,19 +403,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
-
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
     for (commit_sha, note_content) in entries.iter().rev() {
@@ -395,43 +412,65 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     }
     deduped_entries.reverse();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
-        .as_secs();
+    {
+        let notes_lock = notes_write_lock(repo, AI_AUTHORSHIP_FULL_REF)?;
+        let _notes_guard = notes_lock
+            .lock()
+            .map_err(|_| GitAiError::Generic("notes write lock poisoned".to_string()))?;
 
-    let mut script = Vec::<u8>::new();
+        let mut args = repo.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push("--verify".to_string());
+        args.push("refs/notes/ai".to_string());
+        let existing_notes_tip = match exec_git(&args) {
+            Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+            Err(GitAiError::GitCliError {
+                code: Some(128), ..
+            })
+            | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+            Err(e) => return Err(e),
+        };
 
-    for (idx, (_commit_sha, note_content)) in deduped_entries.iter().enumerate() {
-        script.extend_from_slice(b"blob\n");
-        script.extend_from_slice(format!("mark :{}\n", idx + 1).as_bytes());
-        script.extend_from_slice(format!("data {}\n", note_content.len()).as_bytes());
-        script.extend_from_slice(note_content.as_bytes());
-        script.extend_from_slice(b"\n");
-    }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+            .as_secs();
 
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
+        let mut script = Vec::<u8>::new();
 
-    for (idx, (commit_sha, _note_content)) in deduped_entries.iter().enumerate() {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+        for (idx, (_commit_sha, note_content)) in deduped_entries.iter().enumerate() {
+            script.extend_from_slice(b"blob\n");
+            script.extend_from_slice(format!("mark :{}\n", idx + 1).as_bytes());
+            script.extend_from_slice(format!("data {}\n", note_content.len()).as_bytes());
+            script.extend_from_slice(note_content.as_bytes());
+            script.extend_from_slice(b"\n");
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 :{} {}\n", idx + 1, fanout_path).as_bytes());
-    }
-    script.extend_from_slice(b"\n");
 
-    let mut fast_import_args = repo.global_args_for_exec();
-    fast_import_args.push("fast-import".to_string());
-    fast_import_args.push("--quiet".to_string());
-    exec_git_stdin(&fast_import_args, &script)?;
+        script.extend_from_slice(b"commit refs/notes/ai\n");
+        script.extend_from_slice(
+            format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes(),
+        );
+        script.extend_from_slice(b"data 0\n");
+        if let Some(existing_tip) = existing_notes_tip {
+            script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
+        }
+
+        for (idx, (commit_sha, _note_content)) in deduped_entries.iter().enumerate() {
+            let fanout_path = notes_path_for_object(commit_sha);
+            let flat_path = commit_sha.clone();
+            if flat_path != fanout_path {
+                script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+            }
+            script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+            script.extend_from_slice(format!("M 100644 :{} {}\n", idx + 1, fanout_path).as_bytes());
+        }
+        script.extend_from_slice(b"\n");
+
+        let mut fast_import_args = repo.global_args_for_exec();
+        fast_import_args.push("fast-import".to_string());
+        fast_import_args.push("--quiet".to_string());
+        exec_git_stdin(&fast_import_args, &script)?;
+    }
     crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
 
     Ok(())
@@ -449,19 +488,6 @@ pub fn notes_add_blob_batch(
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
-
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
     for (commit_sha, blob_oid) in entries.iter().rev() {
@@ -471,34 +497,56 @@ pub fn notes_add_blob_batch(
     }
     deduped_entries.reverse();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
-        .as_secs();
+    {
+        let notes_lock = notes_write_lock(repo, AI_AUTHORSHIP_FULL_REF)?;
+        let _notes_guard = notes_lock
+            .lock()
+            .map_err(|_| GitAiError::Generic("notes write lock poisoned".to_string()))?;
 
-    let mut script = Vec::<u8>::new();
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
+        let mut args = repo.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push("--verify".to_string());
+        args.push("refs/notes/ai".to_string());
+        let existing_notes_tip = match exec_git(&args) {
+            Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+            Err(GitAiError::GitCliError {
+                code: Some(128), ..
+            })
+            | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+            Err(e) => return Err(e),
+        };
 
-    for (commit_sha, blob_oid) in &deduped_entries {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+            .as_secs();
+
+        let mut script = Vec::<u8>::new();
+        script.extend_from_slice(b"commit refs/notes/ai\n");
+        script.extend_from_slice(
+            format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes(),
+        );
+        script.extend_from_slice(b"data 0\n");
+        if let Some(existing_tip) = existing_notes_tip {
+            script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
-    }
-    script.extend_from_slice(b"\n");
 
-    let mut fast_import_args = repo.global_args_for_exec();
-    fast_import_args.push("fast-import".to_string());
-    fast_import_args.push("--quiet".to_string());
-    exec_git_stdin(&fast_import_args, &script)?;
+        for (commit_sha, blob_oid) in &deduped_entries {
+            let fanout_path = notes_path_for_object(commit_sha);
+            let flat_path = commit_sha.clone();
+            if flat_path != fanout_path {
+                script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+            }
+            script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+            script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
+        }
+        script.extend_from_slice(b"\n");
+
+        let mut fast_import_args = repo.global_args_for_exec();
+        fast_import_args.push("fast-import".to_string());
+        fast_import_args.push("--quiet".to_string());
+        exec_git_stdin(&fast_import_args, &script)?;
+    }
 
     let has_post_notes_updated_hooks = crate::config::Config::get()
         .git_ai_hook_commands("post_notes_updated")
@@ -763,6 +811,11 @@ pub fn ref_exists(repo: &Repository, ref_name: &str) -> bool {
 /// Merge notes from a source ref into refs/notes/ai
 /// Uses the 'ours' strategy to combine notes without data loss
 pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
+    let notes_lock = notes_write_lock(repo, AI_AUTHORSHIP_FULL_REF)?;
+    let _notes_guard = notes_lock
+        .lock()
+        .map_err(|_| GitAiError::Generic("notes write lock poisoned".to_string()))?;
+
     let mut args = repo.global_args_for_exec();
     args.push("notes".to_string());
     args.push(format!("--ref={}", AI_AUTHORSHIP_REFNAME));
@@ -789,6 +842,10 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
 /// large monorepos with thousands of notes.
 pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
     let local_ref = format!("refs/notes/{}", AI_AUTHORSHIP_REFNAME);
+    let notes_lock = notes_write_lock(repo, &local_ref)?;
+    let _notes_guard = notes_lock
+        .lock()
+        .map_err(|_| GitAiError::Generic("notes write lock poisoned".to_string()))?;
 
     // 1. List notes from both refs
     let source_notes = list_all_notes(repo, source_ref)?;
@@ -890,6 +947,16 @@ fn rev_parse(repo: &Repository, rev: &str) -> Result<String, GitAiError> {
 
 /// Copy a ref to another location (used for initial setup of local notes from tracking ref)
 pub fn copy_ref(repo: &Repository, source_ref: &str, dest_ref: &str) -> Result<(), GitAiError> {
+    let notes_lock = notes_write_lock_for_ref(repo, dest_ref)?;
+    let _notes_guard = if let Some(lock) = notes_lock.as_ref() {
+        Some(
+            lock.lock()
+                .map_err(|_| GitAiError::Generic("notes write lock poisoned".to_string()))?,
+        )
+    } else {
+        None
+    };
+
     let mut args = repo.global_args_for_exec();
     args.push("update-ref".to_string());
     args.push(dest_ref.to_string());
@@ -898,6 +965,39 @@ pub fn copy_ref(repo: &Repository, source_ref: &str, dest_ref: &str) -> Result<(
     tracing::debug!("Copying ref {} to {}", source_ref, dest_ref);
     exec_git(&args)?;
     Ok(())
+}
+
+/// Copy a ref only when the destination does not already exist.
+///
+/// For notes refs, the existence check and update happen under the same
+/// process-local notes write lock used by note writes and merges.
+pub fn copy_ref_if_missing(
+    repo: &Repository,
+    source_ref: &str,
+    dest_ref: &str,
+) -> Result<bool, GitAiError> {
+    let notes_lock = notes_write_lock_for_ref(repo, dest_ref)?;
+    let _notes_guard = if let Some(lock) = notes_lock.as_ref() {
+        Some(
+            lock.lock()
+                .map_err(|_| GitAiError::Generic("notes write lock poisoned".to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    if ref_exists(repo, dest_ref) {
+        return Ok(false);
+    }
+
+    let mut args = repo.global_args_for_exec();
+    args.push("update-ref".to_string());
+    args.push(dest_ref.to_string());
+    args.push(source_ref.to_string());
+
+    tracing::debug!("Copying ref {} to missing {}", source_ref, dest_ref);
+    exec_git(&args)?;
+    Ok(true)
 }
 
 /// Search AI notes for a pattern and return matching commit SHAs ordered by commit date (newest first)

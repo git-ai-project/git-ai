@@ -232,11 +232,11 @@ done\n"
         ])
         .expect("fetch remote notes ref");
 
-    // -- Step 5c: Verify that `git notes merge -s ours` fails on this tree. --
-    // This is the bug we're working around. The mixed-fanout merge base causes
-    // an assertion failure (or error) in git's notes-merge.c diff_tree_remote.
-    // We save the local notes ref before the attempt so we can restore it after,
-    // since a failed merge may leave the ref in a dirty state.
+    // -- Step 5c: Probe native `git notes merge -s ours` behavior on this tree. --
+    // Older Git builds fail on this mixed-fanout merge base due to notes-merge.c
+    // diff_tree_remote. Newer Git builds may handle it natively. We save the
+    // local notes ref before the attempt so we can restore it after either
+    // outcome and still test `git-ai fetch-notes` below.
     let pre_merge_tip = git_plumbing(mirror.path(), &["rev-parse", "refs/notes/ai"], None);
     let native_merge_result = mirror.git_og(&[
         "notes",
@@ -247,14 +247,16 @@ done\n"
         "--quiet",
         "refs/notes/ai-remote/origin",
     ]);
-    assert!(
-        native_merge_result.is_err(),
-        "precondition: `git notes merge -s ours` should FAIL on a mixed-fanout notes tree, \
-         but it succeeded. This means the bug this test guards against may be fixed in this \
-         version of git, and the fallback path is no longer exercised."
-    );
-    // Restore refs/notes/ai to its pre-merge state in case the failed merge
-    // left behind a dirty .git/NOTES_MERGE_* worktree.
+    if native_merge_result.is_ok() {
+        let native_notes = git_plumbing(mirror.path(), &["notes", "--ref=ai", "list"], None);
+        assert!(
+            native_notes.contains(&sha_c),
+            "native git notes merge succeeded but did not include commit C's remote-only note\n{}",
+            native_notes,
+        );
+    }
+    // Restore refs/notes/ai to its pre-merge state. Failed merges may leave
+    // behind .git/NOTES_MERGE_* state; successful merges mutate the ref.
     git_plumbing(
         mirror.path(),
         &["update-ref", "refs/notes/ai", &pre_merge_tip],
@@ -265,8 +267,9 @@ done\n"
 
     // -- Step 6: Run `git ai fetch-notes`. --
     // This fetches the fixed remote and tries to merge with the corrupted local.
-    // `git notes merge -s ours` will fail (as verified above), then the fallback
-    // merge (fast-import with `M` commands) kicks in and succeeds.
+    // On older Git, native `git notes merge -s ours` fails and the fallback
+    // merge (fast-import with `M` commands) kicks in and succeeds. On newer Git,
+    // the native merge may succeed directly.
     mirror
         .git_ai(&["fetch-notes"])
         .expect("fetch-notes should succeed despite corrupted local notes tree");

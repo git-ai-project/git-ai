@@ -45,10 +45,10 @@ use std::os::fd::{AsFd, AsRawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, oneshot};
 use tokio::time::Duration;
 
 pub mod analyzers;
@@ -100,6 +100,13 @@ const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(windows))]
 const TRACE_SOCKET_RECV_BUFFER_BYTES: usize = 512 * 1024;
 const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
+const BACKGROUND_SIDE_EFFECT_CONCURRENCY: usize = 4;
+const FAMILY_SIDE_EFFECT_REORDER_GRACE: Duration = Duration::from_millis(75);
+const FAMILY_SYNC_REORDER_GRACE: Duration = Duration::from_millis(75);
+const UNKNOWN_TRACE_ROOT_FAMILY_BLOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const EXITED_TRACE_ROOT_BLOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const STALE_OPEN_TRACE_ROOT_BLOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const TRACE_ROOT_FAMILY_WAIT_POLL: Duration = Duration::from_millis(50);
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
@@ -611,15 +618,6 @@ fn trace_invocation_is_definitely_read_only(
         ),
         None => false,
     }
-}
-
-fn trace_invocation_may_mutate_refs(primary_command: Option<&str>, argv: &[String]) -> bool {
-    primary_command.is_some_and(|cmd| {
-        crate::git::command_classification::git_invocation_may_mutate_repo_state(
-            cmd,
-            &trace_invocation_command_args(Some(cmd), argv),
-        )
-    })
 }
 
 fn trace_command_uses_target_repo_context_only(primary_command: Option<&str>) -> bool {
@@ -1345,6 +1343,27 @@ fn family_key_for_repository(repo: &Repository) -> String {
 }
 fn is_valid_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn read_rebase_state_oid(dir: &Path, file_name: &str) -> Option<String> {
+    let value = fs::read_to_string(dir.join(file_name)).ok()?;
+    let oid = value.trim().to_string();
+    is_valid_oid(&oid).then_some(oid)
+}
+
+fn read_in_progress_rebase_state(worktree: &Path) -> Option<(String, Option<String>)> {
+    let git_dir = git_dir_for_worktree(worktree)?;
+    for state_dir_name in ["rebase-merge", "rebase-apply"] {
+        let state_dir = git_dir.join(state_dir_name);
+        if !state_dir.is_dir() {
+            continue;
+        }
+        let original_head = read_rebase_state_oid(&state_dir, "orig-head")
+            .or_else(|| read_rebase_state_oid(&state_dir, "head"))?;
+        let onto = read_rebase_state_oid(&state_dir, "onto");
+        return Some((original_head, onto));
+    }
+    None
 }
 
 fn is_zero_oid(oid: &str) -> bool {
@@ -2091,6 +2110,10 @@ fn now_unix_nanos() -> u128 {
         .as_nanos()
 }
 
+fn now_unix_nanos_u64() -> u64 {
+    u64::try_from(now_unix_nanos()).unwrap_or(u64::MAX)
+}
+
 fn remove_socket_if_exists(path: &Path) -> Result<(), GitAiError> {
     #[cfg(unix)]
     if path.exists() {
@@ -2489,6 +2512,7 @@ struct TraceIngressState {
     root_mutating: HashMap<String, bool>,
     root_target_repo_only: HashMap<String, bool>,
     root_last_activity_ns: HashMap<String, u64>,
+    root_exit_seen_at_ns: HashMap<String, u64>,
     /// Roots whose start event was identified as definitely read-only. All
     /// subsequent events for these roots (including exit) take the fast path.
     root_definitely_read_only: HashSet<String>,
@@ -2516,6 +2540,8 @@ pub struct ActorDaemonCoordinator {
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
+    scheduled_family_drains_by_family: Mutex<HashMap<String, bool>>,
+    pending_background_side_effects_by_family: Mutex<HashMap<String, usize>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     commit_file_timestamp_snapshots_by_root:
         Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
@@ -2523,6 +2549,7 @@ pub struct ActorDaemonCoordinator {
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    background_side_effect_permits: Arc<Semaphore>,
     bash_sessions: Mutex<crate::daemon::bash_sessions::BashSessionState>,
     test_completion_log_dir: Option<PathBuf>,
     test_completion_log_lock: Mutex<()>,
@@ -2537,7 +2564,10 @@ pub struct ActorDaemonCoordinator {
     queued_trace_payloads: AtomicUsize,
     queued_trace_payloads_by_root: Mutex<HashMap<String, usize>>,
     processed_trace_ingest_seq: AtomicUsize,
+    last_trace_ingest_activity_ns: AtomicU64,
     trace_ingest_progress_notify: Notify,
+    scheduled_family_drain_notify: Notify,
+    background_side_effect_notify: Notify,
     trace_ingress_state: Mutex<TraceIngressState>,
     shutting_down: AtomicBool,
     shutdown_action: AtomicU8,
@@ -2581,7 +2611,7 @@ impl DaemonExitAction {
 enum TracePayloadApplyOutcome {
     None,
     Applied(Box<crate::daemon::domain::AppliedCommand>),
-    QueuedFamily,
+    QueuedFamilies(Vec<String>),
 }
 
 impl ActorDaemonCoordinator {
@@ -2602,11 +2632,16 @@ impl ActorDaemonCoordinator {
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
+            scheduled_family_drains_by_family: Mutex::new(HashMap::new()),
+            pending_background_side_effects_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
+            background_side_effect_permits: Arc::new(Semaphore::new(
+                BACKGROUND_SIDE_EFFECT_CONCURRENCY,
+            )),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
             test_completion_log_dir: std::env::var("GIT_AI_TEST_DB_PATH")
                 .ok()
@@ -2628,7 +2663,10 @@ impl ActorDaemonCoordinator {
             queued_trace_payloads: AtomicUsize::new(0),
             queued_trace_payloads_by_root: Mutex::new(HashMap::new()),
             processed_trace_ingest_seq: AtomicUsize::new(0),
+            last_trace_ingest_activity_ns: AtomicU64::new(0),
             trace_ingest_progress_notify: Notify::new(),
+            scheduled_family_drain_notify: Notify::new(),
+            background_side_effect_notify: Notify::new(),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
             shutting_down: AtomicBool::new(false),
             shutdown_action: AtomicU8::new(DaemonExitAction::Stop.as_u8()),
@@ -2916,7 +2954,7 @@ impl ActorDaemonCoordinator {
             map.retain(|_, state| !state.entries.is_empty());
         }
         if let Ok(mut map) = self.side_effect_exec_locks.lock() {
-            map.retain(|_, lock| Arc::strong_count(lock) <= 1);
+            map.retain(|_, lock| Arc::strong_count(lock) > 1);
         }
         if let Ok(mut map) = self.pending_rebase_original_head_by_worktree.lock() {
             map.shrink_to_fit();
@@ -3002,6 +3040,30 @@ impl ActorDaemonCoordinator {
         })
     }
 
+    fn family_has_sequencer_entries(&self, family: &str) -> Result<bool, GitAiError> {
+        let sequencers = self
+            .family_sequencers_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("family sequencer map lock poisoned".to_string()))?;
+        Ok(sequencers
+            .get(family)
+            .is_some_and(|state| !state.entries.is_empty()))
+    }
+
+    fn family_drain_is_scheduled(&self, family: &str) -> Result<bool, GitAiError> {
+        let scheduled = self.scheduled_family_drains_by_family.lock().map_err(|_| {
+            GitAiError::Generic("scheduled family drain map lock poisoned".to_string())
+        })?;
+        Ok(scheduled.contains_key(family))
+    }
+
+    fn family_has_pending_sync_work(&self, family: &str) -> Result<bool, GitAiError> {
+        Ok(self.family_has_sequencer_entries(family)?
+            || self.family_drain_is_scheduled(family)?
+            || self.family_has_pending_background_side_effects(family)?
+            || self.has_open_trace_roots_that_may_mutate_family(family))
+    }
+
     fn append_pending_root_entry(
         &self,
         family: &str,
@@ -3062,6 +3124,50 @@ impl ActorDaemonCoordinator {
             .map(|mut slots| slots.remove(root_sid))
     }
 
+    fn pending_root_sid_for_order(
+        &self,
+        family: &str,
+        order: FamilySequencerOrder,
+    ) -> Result<Option<String>, GitAiError> {
+        let slots = self
+            .pending_root_slots_by_root
+            .lock()
+            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))?;
+        Ok(slots.iter().find_map(|(root_sid, slot)| {
+            (slot.family == family && slot.order == order).then(|| root_sid.clone())
+        }))
+    }
+
+    fn trace_root_has_unprocessed_work(&self, root_sid: &str) -> Result<bool, GitAiError> {
+        {
+            let queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
+                GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
+            })?;
+            if queued.get(root_sid).copied().unwrap_or(0) > 0 {
+                return Ok(true);
+            }
+        }
+
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        if Self::trace_root_is_stale_open_block_locked(&ingress, root_sid) {
+            return Ok(false);
+        }
+        Ok(ingress.root_open_connections.contains_key(root_sid)
+            || ingress.root_close_markers_enqueued.contains(root_sid)
+            || ingress.root_worktrees.contains_key(root_sid)
+            || ingress.root_families.contains_key(root_sid)
+            || ingress.root_argv.contains_key(root_sid)
+            || ingress.root_started_at_ns.contains_key(root_sid)
+            || ingress.root_reflog_start_offsets.contains_key(root_sid)
+            || ingress.root_mutating.contains_key(root_sid)
+            || ingress.root_target_repo_only.contains_key(root_sid)
+            || ingress.root_last_activity_ns.contains_key(root_sid)
+            || ingress.root_definitely_read_only.contains(root_sid))
+    }
+
     fn maybe_append_pending_root_from_trace_payload(
         &self,
         payload: &Value,
@@ -3109,7 +3215,7 @@ impl ActorDaemonCoordinator {
         self.append_pending_root_entry(&family, root_sid, started_at_ns)
     }
 
-    async fn append_ready_command_entry(
+    async fn append_ready_command_entry_no_drain(
         &self,
         family: &str,
         command: crate::daemon::domain::NormalizedCommand,
@@ -3136,42 +3242,10 @@ impl ActorDaemonCoordinator {
                 .entries
                 .insert(order, FamilySequencerEntry::ReadyCommand(Box::new(command)));
         }
-        self.drain_ready_family_sequencer_entries_locked(family)
-            .await
-    }
-
-    async fn drain_ready_family_sequencer_entries(&self, family: &str) -> Result<(), GitAiError> {
-        let exec_lock = self.side_effect_exec_lock(family)?;
-        let _guard = exec_lock.lock().await;
-        self.drain_ready_family_sequencer_entries_locked(family)
-            .await
-    }
-
-    async fn drain_all_ready_family_sequencers(&self) -> Result<(), GitAiError> {
-        let families = {
-            let map = self.family_sequencers_by_family.lock().map_err(|_| {
-                GitAiError::Generic("family sequencer map lock poisoned".to_string())
-            })?;
-            map.keys().cloned().collect::<Vec<_>>()
-        };
-        for family in families {
-            self.drain_ready_family_sequencer_entries(&family).await?;
-        }
         Ok(())
     }
 
-    async fn drain_ready_family_sequencers_after_root_cleared(
-        &self,
-        family: Option<String>,
-    ) -> Result<(), GitAiError> {
-        if let Some(family) = family {
-            self.drain_ready_family_sequencer_entries(&family).await
-        } else {
-            self.drain_all_ready_family_sequencers().await
-        }
-    }
-
-    async fn replace_pending_root_entry(
+    async fn replace_pending_root_entry_no_drain(
         &self,
         root_sid: &str,
         replacement: FamilySequencerEntry,
@@ -3210,9 +3284,335 @@ impl ActorDaemonCoordinator {
                 }
             }
         }
+        Ok(Some(family))
+    }
+
+    #[cfg(test)]
+    async fn replace_pending_root_entry(
+        &self,
+        root_sid: &str,
+        replacement: FamilySequencerEntry,
+    ) -> Result<Option<String>, GitAiError> {
+        let Some(family) = self
+            .replace_pending_root_entry_no_drain(root_sid, replacement)
+            .await?
+        else {
+            return Ok(None);
+        };
         self.drain_ready_family_sequencer_entries_locked(&family)
             .await?;
         Ok(Some(family))
+    }
+
+    fn schedule_family_sequencer_drain(self: &Arc<Self>, family: String) {
+        {
+            let mut scheduled = match self.scheduled_family_drains_by_family.lock() {
+                Ok(scheduled) => scheduled,
+                Err(_) => {
+                    tracing::error!(
+                        %family,
+                        "scheduled family drain map lock poisoned"
+                    );
+                    return;
+                }
+            };
+            if let Some(dirty) = scheduled.get_mut(&family) {
+                *dirty = true;
+                return;
+            }
+            scheduled.insert(family.clone(), false);
+        }
+
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            loop {
+                coordinator
+                    .wait_for_trace_ingest_processed_through_family(&family)
+                    .await;
+                coordinator
+                    .wait_for_trace_ingest_queue_processed_and_quiet()
+                    .await;
+                let drain_result = async {
+                    let _permit = coordinator
+                        .background_side_effect_permits
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| {
+                            GitAiError::Generic(
+                                "background side-effect semaphore closed".to_string(),
+                            )
+                        })?;
+                    let exec_lock = coordinator.side_effect_exec_lock(&family)?;
+                    let _guard = exec_lock.lock().await;
+                    coordinator
+                        .drain_ready_family_sequencer_entries_locked(&family)
+                        .await
+                }
+                .await;
+                if let Err(error) = drain_result {
+                    let _ = coordinator.record_side_effect_error(&family, 0, &error);
+                    tracing::error!(
+                        %error,
+                        %family,
+                        "scheduled family sequencer drain failed"
+                    );
+                }
+
+                let mut scheduled = match coordinator.scheduled_family_drains_by_family.lock() {
+                    Ok(scheduled) => scheduled,
+                    Err(_) => {
+                        tracing::error!(
+                            %family,
+                            "scheduled family drain map lock poisoned"
+                        );
+                        return;
+                    }
+                };
+                match scheduled.get_mut(&family) {
+                    Some(dirty) if *dirty => {
+                        *dirty = false;
+                    }
+                    Some(_) => {
+                        scheduled.remove(&family);
+                        coordinator.scheduled_family_drain_notify.notify_waiters();
+                        return;
+                    }
+                    None => {
+                        coordinator.scheduled_family_drain_notify.notify_waiters();
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    async fn wait_for_scheduled_family_drain(&self, family: &str) {
+        loop {
+            match self.family_drain_is_scheduled(family) {
+                Ok(false) => return,
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        %family,
+                        "failed to check scheduled family drain"
+                    );
+                    return;
+                }
+            }
+            let notified = self.scheduled_family_drain_notify.notified();
+            match self.family_drain_is_scheduled(family) {
+                Ok(false) => return,
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        %family,
+                        "failed to check scheduled family drain"
+                    );
+                    return;
+                }
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = self.wait_for_shutdown() => return,
+            }
+        }
+    }
+
+    fn register_pending_background_side_effect(&self, family: &str) -> Result<(), GitAiError> {
+        let mut pending = self
+            .pending_background_side_effects_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending background side effects map lock poisoned".to_string())
+            })?;
+        *pending.entry(family.to_string()).or_insert(0) += 1;
+        Ok(())
+    }
+
+    fn finish_pending_background_side_effect(&self, family: &str) {
+        let mut pending = match self.pending_background_side_effects_by_family.lock() {
+            Ok(pending) => pending,
+            Err(_) => {
+                tracing::error!(
+                    %family,
+                    "pending background side effects map lock poisoned"
+                );
+                self.background_side_effect_notify.notify_waiters();
+                return;
+            }
+        };
+        if let Some(count) = pending.get_mut(family) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                pending.remove(family);
+            }
+        }
+        self.background_side_effect_notify.notify_waiters();
+    }
+
+    fn family_has_pending_background_side_effects(&self, family: &str) -> Result<bool, GitAiError> {
+        let pending = self
+            .pending_background_side_effects_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending background side effects map lock poisoned".to_string())
+            })?;
+        Ok(pending.get(family).copied().unwrap_or(0) > 0)
+    }
+
+    async fn wait_for_pending_background_side_effects(&self, family: &str) {
+        loop {
+            match self.family_has_pending_background_side_effects(family) {
+                Ok(false) => return,
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        %family,
+                        "failed to check pending background side effects"
+                    );
+                    return;
+                }
+            }
+            let notified = self.background_side_effect_notify.notified();
+            match self.family_has_pending_background_side_effects(family) {
+                Ok(false) => return,
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        %family,
+                        "failed to check pending background side effects"
+                    );
+                    return;
+                }
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = self.wait_for_shutdown() => return,
+            }
+        }
+    }
+
+    fn schedule_applied_side_effects(
+        self: &Arc<Self>,
+        family: String,
+        applied: Box<crate::daemon::domain::AppliedCommand>,
+    ) {
+        if let Err(error) = self.register_pending_background_side_effect(&family) {
+            let _ = self.record_side_effect_error(&family, applied.seq, &error);
+            tracing::error!(
+                %error,
+                %family,
+                seq = applied.seq,
+                "failed to register pending background side effect"
+            );
+            return;
+        }
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            let _permit = match coordinator
+                .background_side_effect_permits
+                .clone()
+                .acquire_owned()
+                .await
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let error =
+                        GitAiError::Generic("background side-effect semaphore closed".to_string());
+                    let _ = coordinator.record_side_effect_error(&family, applied.seq, &error);
+                    tracing::error!(
+                        %error,
+                        %family,
+                        seq = applied.seq,
+                        "failed to acquire background side-effect permit"
+                    );
+                    coordinator.finish_pending_background_side_effect(&family);
+                    return;
+                }
+            };
+            let exec_lock = match coordinator.side_effect_exec_lock(&family) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let _ = coordinator.record_side_effect_error(&family, applied.seq, &error);
+                    tracing::error!(
+                        %error,
+                        %family,
+                        seq = applied.seq,
+                        "failed to get side-effect execution lock"
+                    );
+                    coordinator.finish_pending_background_side_effect(&family);
+                    return;
+                }
+            };
+            let _guard = exec_lock.lock().await;
+            if let Err(error) = coordinator.begin_family_effect(&family) {
+                tracing::debug!(%error, %family, "failed to record family effect start");
+            }
+            let result = {
+                let mut commit_file_timestamp_snapshots =
+                    Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
+                let future = coordinator.maybe_apply_side_effects_for_applied_command(
+                    Some(&family),
+                    &applied,
+                    &mut commit_file_timestamp_snapshots,
+                );
+                let caught = std::panic::AssertUnwindSafe(future);
+                match futures::FutureExt::catch_unwind(caught).await {
+                    Ok(result) => result,
+                    Err(panic_payload) => {
+                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        tracing::error!(
+                            component = "daemon",
+                            phase = "async_side_effect",
+                            reason = "panic_in_side_effect",
+                            panic_msg = %panic_msg,
+                            %family,
+                            seq = applied.seq,
+                            "async side effect panic"
+                        );
+                        Err(GitAiError::Generic(format!(
+                            "daemon async side effect panic: {}",
+                            panic_msg
+                        )))
+                    }
+                }
+            };
+            if let Err(error) = coordinator.end_family_effect(&family) {
+                tracing::debug!(%error, %family, "failed to record family effect end");
+            }
+            if let Err(error) = &result {
+                let _ = coordinator.record_side_effect_error(&family, applied.seq, error);
+                tracing::error!(
+                    %error,
+                    %family,
+                    seq = applied.seq,
+                    "async side-effect error"
+                );
+            }
+            if let Err(error) =
+                coordinator.append_command_completion_log(&family, &applied, &result, applied.seq)
+            {
+                let _ = coordinator.record_side_effect_error(&family, applied.seq, &error);
+                tracing::error!(
+                    %error,
+                    %family,
+                    seq = applied.seq,
+                    "async completion log write failed"
+                );
+            }
+            coordinator.finish_pending_background_side_effect(&family);
+        });
     }
 
     fn family_entry_blocked_by_prior_open_trace_root(
@@ -3233,7 +3633,11 @@ impl ActorDaemonCoordinator {
             if ingress.root_definitely_read_only.contains(root_sid) {
                 continue;
             }
-            if !ingress.root_mutating.get(root_sid).copied().unwrap_or(true) {
+            if Self::trace_root_is_stale_open_block_locked(&ingress, root_sid) {
+                continue;
+            }
+            let root_may_mutate = ingress.root_mutating.get(root_sid).copied().unwrap_or(true);
+            if !root_may_mutate {
                 continue;
             }
             if ingress
@@ -3244,11 +3648,7 @@ impl ActorDaemonCoordinator {
             {
                 continue;
             }
-            if ingress
-                .root_families
-                .get(root_sid)
-                .is_none_or(|root_family| root_family == family)
-            {
+            if Self::trace_root_matches_family_locked(&ingress, root_sid, family) {
                 return Ok(true);
             }
         }
@@ -3404,6 +3804,7 @@ impl ActorDaemonCoordinator {
         ingress.root_mutating.remove(root_sid);
         ingress.root_target_repo_only.remove(root_sid);
         ingress.root_last_activity_ns.remove(root_sid);
+        ingress.root_exit_seen_at_ns.remove(root_sid);
         ingress.root_definitely_read_only.remove(root_sid);
         ingress.root_open_connections.remove(root_sid);
         ingress.root_close_markers_enqueued.remove(root_sid);
@@ -3527,6 +3928,7 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    #[cfg(test)]
     fn has_open_trace_roots_that_may_mutate_refs(&self) -> bool {
         let Ok(ingress) = self.trace_ingress_state.lock() else {
             return false;
@@ -3534,7 +3936,71 @@ impl ActorDaemonCoordinator {
         ingress.root_open_connections.iter().any(|(root, count)| {
             *count > 0
                 && !ingress.root_definitely_read_only.contains(root)
+                && !Self::trace_root_is_stale_open_block_locked(&ingress, root)
                 && ingress.root_mutating.get(root).copied().unwrap_or(true)
+        })
+    }
+
+    fn trace_root_is_stale_open_block_locked(ingress: &TraceIngressState, root: &str) -> bool {
+        if !ingress.root_open_connections.contains_key(root) {
+            return false;
+        }
+        let Some(last_activity_ns) = ingress.root_last_activity_ns.get(root).copied() else {
+            return false;
+        };
+        let timeout = if ingress.root_exit_seen_at_ns.contains_key(root) {
+            EXITED_TRACE_ROOT_BLOCK_TIMEOUT
+        } else {
+            STALE_OPEN_TRACE_ROOT_BLOCK_TIMEOUT
+        };
+        let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        now_unix_nanos_u64().saturating_sub(last_activity_ns) > timeout_ns
+    }
+
+    fn trace_root_matches_family_locked(
+        ingress: &TraceIngressState,
+        root: &str,
+        family: &str,
+    ) -> bool {
+        if let Some(root_family) = ingress.root_families.get(root) {
+            return root_family == family;
+        }
+        if let Some(worktree) = ingress.root_worktrees.get(root)
+            && let Some(common_dir) = common_dir_for_worktree(worktree)
+        {
+            let root_family = common_dir.canonicalize().unwrap_or(common_dir);
+            return root_family.to_string_lossy() == family;
+        }
+        if !ingress.root_started_at_ns.contains_key(root) {
+            return false;
+        }
+        // Until a mutating root identifies its repository, fail closed for a
+        // short bounded window: the next frame normally provides `def_repo`,
+        // and processing later ref changes too early can consume the wrong
+        // reflog cursor. If that metadata never arrives, age the global block
+        // out so one malformed trace stream cannot wedge every repo sharing the
+        // daemon.
+        let Some(last_activity_ns) = ingress.root_last_activity_ns.get(root).copied() else {
+            return false;
+        };
+        let block_timeout_ns =
+            u64::try_from(UNKNOWN_TRACE_ROOT_FAMILY_BLOCK_TIMEOUT.as_nanos()).unwrap_or(u64::MAX);
+        now_unix_nanos_u64().saturating_sub(last_activity_ns) <= block_timeout_ns
+    }
+
+    fn has_open_trace_roots_that_may_mutate_family(&self, family: &str) -> bool {
+        let Ok(ingress) = self.trace_ingress_state.lock() else {
+            return false;
+        };
+        ingress.root_open_connections.iter().any(|(root, count)| {
+            if *count == 0 || ingress.root_definitely_read_only.contains(root) {
+                return false;
+            }
+            if Self::trace_root_is_stale_open_block_locked(&ingress, root) {
+                return false;
+            }
+            let root_may_mutate = ingress.root_mutating.get(root).copied().unwrap_or(true);
+            root_may_mutate && Self::trace_root_matches_family_locked(&ingress, root, family)
         })
     }
 
@@ -3773,6 +4239,8 @@ impl ActorDaemonCoordinator {
                 json!(self.next_trace_ingest_seq()),
             );
         }
+        self.last_trace_ingest_activity_ns
+            .store(now_unix_nanos_u64(), Ordering::Release);
         // Relaxed: this counter tracks in-flight count for monitoring; no
         // ordering dependency with any other atomic.
         self.queued_trace_payloads.fetch_add(1, Ordering::Relaxed);
@@ -3780,36 +4248,73 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    /// Waits until all trace payloads enqueued up to now have been processed
-    /// by the ingest worker, and any identified trace root that may mutate refs
-    /// has closed. This is a causal drain fence: it guarantees that trace2 data
-    /// already visible to the daemon for prior mutating git operations has
-    /// reached the family sequencer before returning.
-    ///
-    /// Accepted sockets with no complete trace2 root are not causal evidence for
-    /// any repository family. They are tracked for connection cleanup, but must
-    /// not globally block checkpoint/sync control requests.
-    ///
-    /// Used by checkpoint entry to ensure ordering: a checkpoint must not be
-    /// processed until all causally-prior git operations have been ingested
-    /// through their root `atexit`/connection-close boundary.
+    /// Waits until all trace payloads enqueued up to now have been processed by
+    /// the ingest worker.
+    async fn wait_for_trace_ingest_queue_processed_through(&self) {
+        let target = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
+        loop {
+            let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
+            if processed >= target {
+                return;
+            }
+            let progress = self.trace_ingest_progress_notify.notified();
+            tokio::select! {
+                _ = progress => {}
+                _ = self.wait_for_shutdown() => return,
+            }
+        }
+    }
+
+    /// Waits for the ingest queue to be processed and then remain quiet for a
+    /// short grace period. This catches terminal trace2 frames that arrive just
+    /// after a git process exits without blocking family work on unrelated open
+    /// trace roots from other repositories.
+    async fn wait_for_trace_ingest_queue_processed_and_quiet(&self) {
+        self.wait_for_trace_ingest_queue_processed_and_quiet_for(FAMILY_SIDE_EFFECT_REORDER_GRACE)
+            .await;
+    }
+
+    async fn wait_for_trace_ingest_queue_processed_and_sync_quiet(&self) {
+        self.wait_for_trace_ingest_queue_processed_and_quiet_for(FAMILY_SYNC_REORDER_GRACE)
+            .await;
+    }
+
+    async fn wait_for_trace_ingest_queue_processed_and_quiet_for(&self, quiet_grace: Duration) {
+        let entered_at = now_unix_nanos_u64();
+        let quiet_grace_ns = u64::try_from(quiet_grace.as_nanos()).unwrap_or(u64::MAX);
+        loop {
+            self.wait_for_trace_ingest_queue_processed_through().await;
+
+            let last_activity = self.last_trace_ingest_activity_ns.load(Ordering::Acquire);
+            let quiet_from = last_activity.max(entered_at);
+            let elapsed_ns = now_unix_nanos_u64().saturating_sub(quiet_from);
+            if elapsed_ns >= quiet_grace_ns {
+                let latest_activity = self.last_trace_ingest_activity_ns.load(Ordering::Acquire);
+                let target = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
+                let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
+                if latest_activity <= quiet_from && processed >= target {
+                    return;
+                }
+                continue;
+            }
+
+            let remaining_ns = quiet_grace_ns.saturating_sub(elapsed_ns).max(1);
+            let progress = self.trace_ingest_progress_notify.notified();
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_nanos(remaining_ns)) => {}
+                _ = progress => {}
+                _ = self.wait_for_shutdown() => return,
+            }
+        }
+    }
+
+    #[cfg(test)]
     async fn wait_for_trace_ingest_processed_through(&self) {
         loop {
             // Read the current high-water mark. Any payload enqueued before this
             // point has a seq <= this value. We need to wait until the ingest
             // worker has processed through at least this seq.
-            let target = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
-            loop {
-                let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
-                if processed >= target {
-                    break;
-                }
-                let progress = self.trace_ingest_progress_notify.notified();
-                tokio::select! {
-                    _ = progress => {}
-                    _ = self.wait_for_shutdown() => return,
-                }
-            }
+            self.wait_for_trace_ingest_queue_processed_through().await;
 
             if !self.has_open_trace_roots_that_may_mutate_refs() {
                 return;
@@ -3821,6 +4326,29 @@ impl ActorDaemonCoordinator {
             }
             tokio::select! {
                 _ = progress => {}
+                _ = self.wait_for_shutdown() => return,
+            }
+        }
+    }
+
+    async fn wait_for_trace_ingest_processed_through_family(&self, family: &str) {
+        loop {
+            // Read the current high-water mark. Any payload enqueued before this
+            // point has a seq <= this value. We need to wait until the ingest
+            // worker has processed through at least this seq.
+            self.wait_for_trace_ingest_queue_processed_through().await;
+
+            if !self.has_open_trace_roots_that_may_mutate_family(family) {
+                return;
+            }
+
+            let progress = self.trace_ingest_progress_notify.notified();
+            if !self.has_open_trace_roots_that_may_mutate_family(family) {
+                return;
+            }
+            tokio::select! {
+                _ = progress => {}
+                _ = tokio::time::sleep(TRACE_ROOT_FAMILY_WAIT_POLL) => {}
                 _ = self.wait_for_shutdown() => return,
             }
         }
@@ -3878,9 +4406,15 @@ impl ActorDaemonCoordinator {
             Ok(guard) => guard,
             Err(_) => return false,
         };
+        let observed_at_ns = now_unix_nanos_u64();
         ingress
             .root_last_activity_ns
-            .insert(root.clone(), now_unix_nanos() as u64);
+            .insert(root.clone(), observed_at_ns);
+        if event == "exit" && sid == root {
+            ingress
+                .root_exit_seen_at_ns
+                .insert(root.clone(), observed_at_ns);
+        }
 
         if event == "start" && sid == root {
             let started_at_ns = started_at_ns.unwrap_or_else(now_unix_nanos);
@@ -3914,8 +4448,25 @@ impl ActorDaemonCoordinator {
         };
         let effective_primary =
             early_primary.or_else(|| trace_argv_primary_command(&effective_argv));
-        let command_mutates_refs =
-            trace_invocation_may_mutate_refs(effective_primary.as_deref(), &effective_argv);
+        let effective_command_args = effective_primary
+            .as_deref()
+            .map(|primary| trace_invocation_command_args(Some(primary), &effective_argv))
+            .unwrap_or_default();
+        let command_mutates_refs = effective_primary.as_deref().is_some_and(|cmd| {
+            crate::git::command_classification::git_invocation_may_mutate_repo_state(
+                cmd,
+                &effective_command_args,
+            )
+        });
+        let rebase_control_worktree = if effective_primary.as_deref() == Some("rebase")
+            && summarize_rebase_args(&effective_command_args).is_control_mode
+        {
+            worktree_hint
+                .clone()
+                .or_else(|| ingress.root_worktrees.get(&root).cloned())
+        } else {
+            None
+        };
         if let Some(primary) = effective_primary.as_deref() {
             ingress
                 .root_mutating
@@ -3936,8 +4487,11 @@ impl ActorDaemonCoordinator {
                 .clone()
                 .or_else(|| ingress.root_worktrees.get(&root).cloned())
         {
-            let offsets =
-                crate::daemon::ref_cursor::capture_reflog_start_offsets_for_worktree(&worktree);
+            let offsets = crate::daemon::ref_cursor::capture_reflog_start_offsets_for_command(
+                &worktree,
+                effective_primary.as_deref(),
+                &effective_command_args,
+            );
             ingress
                 .root_reflog_start_offsets
                 .insert(root.clone(), offsets);
@@ -3951,19 +4505,17 @@ impl ActorDaemonCoordinator {
             ingress.root_reflog_start_offsets.get(&root).cloned(),
             ingress.root_worktrees.get(&root).cloned(),
         );
-        if terminal {
-            ingress.root_worktrees.remove(&root);
-            ingress.root_families.remove(&root);
-            ingress.root_argv.remove(&root);
-            ingress.root_started_at_ns.remove(&root);
-            ingress.root_reflog_start_offsets.remove(&root);
-            ingress.root_mutating.remove(&root);
-            ingress.root_target_repo_only.remove(&root);
-            ingress.root_last_activity_ns.remove(&root);
-            ingress.root_definitely_read_only.remove(&root);
-        }
-
         drop(ingress);
+
+        if let Some(worktree) = rebase_control_worktree
+            && let Err(error) = self.capture_in_progress_rebase_state_for_worktree(&worktree)
+        {
+            tracing::debug!(
+                %error,
+                worktree = %worktree.display(),
+                "failed to capture in-progress rebase state"
+            );
+        }
 
         if let Some(object) = payload.as_object_mut() {
             if object.get("argv").is_none()
@@ -4022,7 +4574,9 @@ impl ActorDaemonCoordinator {
     ) -> Result<(), GitAiError> {
         // Causal drain fence: ensure already-visible trace2 work has reached
         // the family sequencer before inserting this checkpoint.
-        self.wait_for_trace_ingest_processed_through().await;
+        self.wait_for_trace_ingest_queue_processed_and_quiet().await;
+        self.wait_for_trace_ingest_processed_through_family(family)
+            .await;
 
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
@@ -4074,7 +4628,23 @@ impl ActorDaemonCoordinator {
                 });
             while let Some(first_entry) = state.entries.first_entry() {
                 if matches!(first_entry.get(), FamilySequencerEntry::PendingRoot) {
-                    break;
+                    let order = *first_entry.key();
+                    if self.family_entry_blocked_by_prior_open_trace_root(
+                        family,
+                        order.started_at_ns,
+                        None,
+                    )? {
+                        break;
+                    }
+                    if let Some(root_sid) = self.pending_root_sid_for_order(family, order)? {
+                        if self.trace_root_has_unprocessed_work(&root_sid)? {
+                            break;
+                        }
+                        let _ = self.take_pending_root_slot(&root_sid)?;
+                    }
+                    let _ = first_entry.remove_entry();
+                    progressed = true;
+                    continue;
                 }
                 let entry_root_sid = match first_entry.get() {
                     FamilySequencerEntry::ReadyCommand(command) => Some(command.root_sid.as_str()),
@@ -4417,6 +4987,29 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    async fn drain_family_sync_work_once(&self, family: &str) -> Result<(), GitAiError> {
+        let exec_lock = self.side_effect_exec_lock(family)?;
+        let _guard = exec_lock.lock().await;
+        self.drain_ready_family_sequencer_entries_locked(family)
+            .await?;
+        drop(_guard);
+
+        self.wait_for_pending_background_side_effects(family).await;
+        if self.family_drain_is_scheduled(family)? {
+            self.wait_for_scheduled_family_drain(family).await;
+            self.wait_for_pending_background_side_effects(family).await;
+        }
+
+        let exec_lock = self.side_effect_exec_lock(family)?;
+        let _guard = exec_lock.lock().await;
+        self.drain_ready_family_sequencer_entries_locked(family)
+            .await?;
+        drop(_guard);
+
+        self.wait_for_pending_background_side_effects(family).await;
+        Ok(())
+    }
+
     fn worktree_state_key(worktree: &Path) -> String {
         let normalized = worktree_root_for_path(worktree).unwrap_or_else(|| worktree.to_path_buf());
         normalized
@@ -4439,6 +5032,24 @@ impl ActorDaemonCoordinator {
                 GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
             })?;
         map.insert(Self::worktree_state_key(worktree), (original_head, onto));
+        Ok(())
+    }
+
+    fn capture_in_progress_rebase_state_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<(), GitAiError> {
+        let Some((original_head, onto)) = read_in_progress_rebase_state(worktree) else {
+            return Ok(());
+        };
+        let mut map = self
+            .pending_rebase_original_head_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
+            })?;
+        map.entry(Self::worktree_state_key(worktree))
+            .or_insert((original_head, onto));
         Ok(())
     }
 
@@ -5784,16 +6395,14 @@ impl ActorDaemonCoordinator {
                 let _ = normalizer.sweep_orphans_for_roots(&[root_sid.to_string()]);
             }
             let replaced_family = self
-                .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
+                .replace_pending_root_entry_no_drain(root_sid, FamilySequencerEntry::Canceled)
                 .await?;
-            let outcome = if replaced_family.is_some() {
-                TracePayloadApplyOutcome::QueuedFamily
+            let outcome = if let Some(family) = replaced_family {
+                TracePayloadApplyOutcome::QueuedFamilies(vec![family])
             } else {
                 TracePayloadApplyOutcome::None
             };
             self.clear_trace_root_tracking(root_sid)?;
-            self.drain_ready_family_sequencers_after_root_cleared(replaced_family)
-                .await?;
             return Ok(outcome);
         }
 
@@ -5803,38 +6412,21 @@ impl ActorDaemonCoordinator {
             normalizer.ingest_payload(&payload)?
         };
         let Some(command) = emitted else {
-            if is_terminal_root_trace_event(
-                &event,
-                payload
-                    .get("sid")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                payload_root_sid.as_deref().unwrap_or_default(),
-            ) && let Some(root_sid) = payload_root_sid.as_deref()
-                && let Some(family) = self
-                    .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
-                    .await?
-            {
-                self.clear_trace_root_tracking(root_sid)?;
-                self.drain_ready_family_sequencers_after_root_cleared(Some(family))
-                    .await?;
-                return Ok(TracePayloadApplyOutcome::QueuedFamily);
-            }
             return Ok(TracePayloadApplyOutcome::None);
         };
         let root_sid = command.root_sid.clone();
 
-        let mut family_to_drain_after_clear = None;
+        let mut families_to_drain_after_clear = Vec::new();
         let outcome = if let Some(family) = self
-            .replace_pending_root_entry(
+            .replace_pending_root_entry_no_drain(
                 &root_sid,
                 FamilySequencerEntry::ReadyCommand(Box::new(command.clone())),
             )
             .await?
         {
             self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
-            family_to_drain_after_clear = Some(family);
-            TracePayloadApplyOutcome::QueuedFamily
+            families_to_drain_after_clear.push(family);
+            TracePayloadApplyOutcome::QueuedFamilies(families_to_drain_after_clear)
         } else if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
             && Self::trace_invocation_participates_in_family_sequencer(
                 command.primary_command.as_deref(),
@@ -5842,9 +6434,10 @@ impl ActorDaemonCoordinator {
             )
         {
             self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
-            self.append_ready_command_entry(&family, command).await?;
-            family_to_drain_after_clear = Some(family);
-            TracePayloadApplyOutcome::QueuedFamily
+            self.append_ready_command_entry_no_drain(&family, command)
+                .await?;
+            families_to_drain_after_clear.push(family);
+            TracePayloadApplyOutcome::QueuedFamilies(families_to_drain_after_clear)
         } else {
             match self.coordinator.route_command(command).await {
                 Ok(applied) => TracePayloadApplyOutcome::Applied(Box::new(applied)),
@@ -5855,8 +6448,6 @@ impl ActorDaemonCoordinator {
             }
         };
         self.clear_trace_root_tracking(&root_sid)?;
-        self.drain_ready_family_sequencers_after_root_cleared(family_to_drain_after_clear)
-            .await?;
         Ok(outcome)
     }
 
@@ -5865,40 +6456,15 @@ impl ActorDaemonCoordinator {
             return Ok(());
         }
         match self.apply_trace_payload_to_state(payload).await? {
-            TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
+            TracePayloadApplyOutcome::None => {}
+            TracePayloadApplyOutcome::QueuedFamilies(families) => {
+                for family in families {
+                    self.schedule_family_sequencer_drain(family);
+                }
+            }
             TracePayloadApplyOutcome::Applied(applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
-                    self.begin_family_effect(&family)?;
-                    let mut commit_file_timestamp_snapshots =
-                        Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
-                    let result = self
-                        .maybe_apply_side_effects_for_applied_command(
-                            Some(&family),
-                            &applied,
-                            &mut commit_file_timestamp_snapshots,
-                        )
-                        .await;
-                    let _ = self.end_family_effect(&family);
-                    if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(&family, applied.seq, error);
-                        tracing::error!(
-                            %error,
-                            %family,
-                            seq = applied.seq,
-                            "async side-effect error"
-                        );
-                    }
-                    if let Err(error) =
-                        self.append_command_completion_log(&family, &applied, &result, applied.seq)
-                    {
-                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
-                        tracing::error!(
-                            %error,
-                            %family,
-                            seq = applied.seq,
-                            "async completion log write failed"
-                        );
-                    }
+                    self.schedule_applied_side_effects(family, applied);
                 }
             }
         }
@@ -5957,12 +6523,24 @@ impl ActorDaemonCoordinator {
 
     async fn sync_family(&self, repo_working_dir: String) -> Result<FamilyStatus, GitAiError> {
         let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
-        self.wait_for_trace_ingest_processed_through().await;
+        loop {
+            self.wait_for_trace_ingest_processed_through_family(&family.0)
+                .await;
+            self.wait_for_trace_ingest_queue_processed_and_sync_quiet()
+                .await;
+            self.wait_for_trace_ingest_processed_through_family(&family.0)
+                .await;
+            self.drain_family_sync_work_once(&family.0).await?;
+            self.wait_for_trace_ingest_queue_processed_and_sync_quiet()
+                .await;
+            self.wait_for_trace_ingest_processed_through_family(&family.0)
+                .await;
+            self.drain_family_sync_work_once(&family.0).await?;
 
-        let exec_lock = self.side_effect_exec_lock(&family.0)?;
-        let _guard = exec_lock.lock().await;
-        self.drain_ready_family_sequencer_entries_locked(&family.0)
-            .await?;
+            if !self.family_has_pending_sync_work(&family.0)? {
+                break;
+            }
+        }
 
         self.status_for_family(repo_working_dir).await
     }
@@ -8493,19 +9071,27 @@ mod tests {
         let head_log = git_dir.join("logs/HEAD");
         let stash_log = repo.join(".git/logs/refs/stash");
         let branch_log = repo.join(".git/logs/refs/heads/main");
+        let feature_branch_log = repo.join(".git/logs/refs/heads/feature");
+        let unrelated_branch_log = repo.join(".git/logs/refs/heads/unrelated");
         std::fs::create_dir_all(head_log.parent().unwrap()).unwrap();
         std::fs::create_dir_all(stash_log.parent().unwrap()).unwrap();
         std::fs::create_dir_all(branch_log.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(feature_branch_log.parent().unwrap()).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let old_head_reflog = b"old HEAD reflog entry\n";
         let old_reflog = b"old stash reflog entry\n";
         let old_branch_reflog = b"old branch reflog entry\n";
+        let old_feature_branch_reflog = b"old feature branch reflog entry\n";
+        let unrelated_branch_reflog = b"unrelated branch reflog entry\n";
         std::fs::write(&head_log, old_head_reflog).unwrap();
         std::fs::write(&stash_log, old_reflog).unwrap();
         std::fs::write(&branch_log, old_branch_reflog).unwrap();
+        std::fs::write(&feature_branch_log, old_feature_branch_reflog).unwrap();
+        std::fs::write(&unrelated_branch_log, unrelated_branch_reflog).unwrap();
         let mut payload = serde_json::json!({
             "event": "start",
             "sid": "20260411T120000.000000-Psid-reflog",
-            "argv": ["git", "reset", "--hard", "HEAD~1"],
+            "argv": ["git", "merge", "--squash", "feature"],
             "worktree": repo,
         });
 
@@ -8533,6 +9119,146 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(old_branch_reflog.len() as u64)
         );
+        assert_eq!(
+            offsets
+                .get("common:refs/heads/feature")
+                .and_then(Value::as_u64),
+            Some(old_feature_branch_reflog.len() as u64)
+        );
+        assert!(
+            !offsets.contains_key("common:refs/heads/unrelated"),
+            "common reflog capture should avoid scanning unrelated branch logs"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebase_control_payload_captures_in_progress_rebase_state() {
+        let coord = ActorDaemonCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let rebase_dir = repo.join(".git/rebase-merge");
+        std::fs::create_dir_all(&rebase_dir).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/topic\n").unwrap();
+        let original_head = "1111111111111111111111111111111111111111";
+        let onto = "2222222222222222222222222222222222222222";
+        std::fs::write(rebase_dir.join("orig-head"), format!("{original_head}\n")).unwrap();
+        std::fs::write(rebase_dir.join("onto"), format!("{onto}\n")).unwrap();
+
+        let mut payload = serde_json::json!({
+            "event": "start",
+            "sid": "20260411T120000.000000-Psid-rebase-continue",
+            "argv": ["git", "rebase", "--continue"],
+            "worktree": repo,
+        });
+
+        assert!(coord.prepare_trace_payload_for_ingest(&mut payload));
+        let key = ActorDaemonCoordinator::worktree_state_key(&repo);
+        let pending = coord
+            .pending_rebase_original_head_by_worktree
+            .lock()
+            .unwrap();
+        assert_eq!(
+            pending.get(&key),
+            Some(&(original_head.to_string(), Some(onto.to_string()))),
+            "rebase --continue ingress must preserve orig-head before git removes rebase state"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_family_state_gc_retains_active_side_effect_lock() {
+        let coord = ActorDaemonCoordinator::new();
+        let family = "/tmp/git-ai-active-lock-family";
+
+        let active_lock = coord
+            .side_effect_exec_lock(family)
+            .expect("active lock should be created");
+        coord.gc_stale_family_state();
+        let lock_after_gc = coord
+            .side_effect_exec_lock(family)
+            .expect("active lock should still be registered");
+        assert!(
+            Arc::ptr_eq(&active_lock, &lock_after_gc),
+            "GC must not drop an active per-family side-effect execution lock"
+        );
+
+        drop(active_lock);
+        drop(lock_after_gc);
+        let idle_lock = coord
+            .side_effect_exec_lock(family)
+            .expect("idle lock should be created");
+        let idle_weak = Arc::downgrade(&idle_lock);
+        drop(idle_lock);
+
+        coord.gc_stale_family_state();
+        assert!(
+            idle_weak.upgrade().is_none(),
+            "GC should remove idle per-family side-effect execution locks"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn terminal_trace_ingest_does_not_wait_for_side_effects() {
+        let _delay = EnvVarGuard::set("GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND", "commit=500");
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg(&repo)
+            .output()
+            .expect("git init should run");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        let sid = "20260411T120000.000000-Psid-side-effect-delay";
+        let repo_worktree = repo.to_string_lossy().to_string();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "commit", "-m", "synthetic"],
+            "worktree": repo_worktree.clone(),
+            "time_ns": 1u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+        coord
+            .clone()
+            .ingest_trace_payload_fast(start)
+            .await
+            .expect("start should ingest");
+
+        let mut atexit = serde_json::json!({
+            "event": "atexit",
+            "sid": sid,
+            "code": 0,
+            "worktree": repo_worktree.clone(),
+            "time_ns": 2u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut atexit));
+
+        let start = std::time::Instant::now();
+        coord
+            .clone()
+            .ingest_trace_payload_fast(atexit)
+            .await
+            .expect("terminal event should ingest");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "terminal trace ingest waited for side effects: {elapsed:?}"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            coord.sync_family(repo.to_string_lossy().to_string()),
+        )
+        .await
+        .expect("sync should wait for scheduled side effects without hanging")
+        .expect("sync should succeed");
+        coord.request_shutdown();
     }
 
     #[tokio::test]
@@ -8590,6 +9316,15 @@ mod tests {
 
         let family = coord.backend.resolve_family(&repo).unwrap().0;
         let root_sid = "20260411T120000.000000-Psid-blocking-root";
+        coord.trace_root_connection_opened(root_sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress
+                .root_families
+                .insert(root_sid.to_string(), family.clone());
+            ingress.root_started_at_ns.insert(root_sid.to_string(), 1);
+            ingress.root_mutating.insert(root_sid.to_string(), true);
+        }
         coord
             .append_pending_root_entry(&family, root_sid, 1)
             .unwrap();
@@ -8621,6 +9356,7 @@ mod tests {
             "checkpoint control request must not complete before its sequenced side effect runs"
         );
 
+        coord.clear_trace_root_tracking(root_sid).unwrap();
         coord
             .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
             .await
@@ -8717,6 +9453,162 @@ mod tests {
         )
         .await
         .expect("checkpoint fence should pass once the unidentified connection is resolved");
+    }
+
+    #[tokio::test]
+    async fn family_fence_waits_briefly_for_recent_identified_root_without_repo_metadata() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-missing-family";
+        coord.trace_root_connection_opened(sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress
+                .root_last_activity_ns
+                .insert(sid.to_string(), now_unix_nanos_u64());
+            ingress
+                .root_started_at_ns
+                .insert(sid.to_string(), now_unix_nanos());
+        }
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through_family("/tmp/unrelated-family"),
+            )
+            .await
+            .is_err(),
+            "family fence should briefly fail closed for a fresh root without repo metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn family_fence_does_not_wait_for_stale_identified_root_without_repo_metadata() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-stale-missing-family";
+        coord.trace_root_connection_opened(sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress.root_last_activity_ns.insert(sid.to_string(), 0);
+            ingress
+                .root_started_at_ns
+                .insert(sid.to_string(), now_unix_nanos());
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through_family("/tmp/unrelated-family"),
+        )
+        .await
+        .expect("family fence must not let a stale root without repo metadata block every family");
+    }
+
+    #[tokio::test]
+    async fn family_fence_does_not_wait_for_stale_open_root_with_family_metadata() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-stale-family";
+        let family = "/tmp/stale-family".to_string();
+        coord.trace_root_connection_opened(sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress
+                .root_families
+                .insert(sid.to_string(), family.clone());
+            ingress.root_last_activity_ns.insert(sid.to_string(), 0);
+            ingress.root_started_at_ns.insert(sid.to_string(), 1);
+            ingress.root_mutating.insert(sid.to_string(), true);
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through_family(&family),
+        )
+        .await
+        .expect("family fence must not let stale known-family roots block checkpoints forever");
+    }
+
+    #[tokio::test]
+    async fn family_fence_waits_for_fresh_exited_open_root_with_family_metadata() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-fresh-exited-family";
+        let family = "/tmp/fresh-exited-family".to_string();
+        coord.trace_root_connection_opened(sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            let now = now_unix_nanos_u64();
+            ingress
+                .root_families
+                .insert(sid.to_string(), family.clone());
+            ingress.root_last_activity_ns.insert(sid.to_string(), now);
+            ingress.root_exit_seen_at_ns.insert(sid.to_string(), now);
+            ingress.root_started_at_ns.insert(sid.to_string(), 1);
+            ingress.root_mutating.insert(sid.to_string(), true);
+        }
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through_family(&family),
+            )
+            .await
+            .is_err(),
+            "family fence should still wait briefly for a just-exited root to emit atexit"
+        );
+    }
+
+    #[tokio::test]
+    async fn family_fence_does_not_wait_long_for_exited_open_root_with_family_metadata() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-stale-exited-family";
+        let family = "/tmp/stale-exited-family".to_string();
+        coord.trace_root_connection_opened(sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress
+                .root_families
+                .insert(sid.to_string(), family.clone());
+            ingress.root_last_activity_ns.insert(sid.to_string(), 0);
+            ingress.root_exit_seen_at_ns.insert(sid.to_string(), 0);
+            ingress.root_started_at_ns.insert(sid.to_string(), 1);
+            ingress.root_mutating.insert(sid.to_string(), true);
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through_family(&family),
+        )
+        .await
+        .expect("family fence should stop waiting once an exited root misses its atexit grace");
+    }
+
+    #[tokio::test]
+    async fn pending_root_drain_does_not_wait_for_stale_open_root_tracking() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-stale-pending";
+        let family = "/tmp/stale-pending-family".to_string();
+        coord.trace_root_connection_opened(sid).unwrap();
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress
+                .root_families
+                .insert(sid.to_string(), family.clone());
+            ingress.root_last_activity_ns.insert(sid.to_string(), 0);
+            ingress.root_started_at_ns.insert(sid.to_string(), 1);
+            ingress.root_mutating.insert(sid.to_string(), true);
+        }
+        coord.append_pending_root_entry(&family, sid, 1).unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.drain_ready_family_sequencer_entries_locked(&family),
+        )
+        .await
+        .expect("drain should not wedge behind stale root tracking")
+        .unwrap();
+
+        assert!(
+            !coord.family_has_sequencer_entries(&family).unwrap(),
+            "stale pending root should be removed from the family sequencer"
+        );
     }
 
     #[tokio::test]
