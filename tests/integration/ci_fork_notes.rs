@@ -121,9 +121,7 @@ fn test_ci_fork_squash_merge() {
     // Verify authorship is preserved in the squash commit
     file.assert_lines_and_blame(lines![
         "// Original code".human(),
-        // Recovery (AI edge extension): untracked line directly above the AI
-        // block is absorbed into the adjacent AI session.
-        "function original() {}".ai(),
+        "function original() {}".human(),
         "// AI added function".ai(),
         "function aiFeature() {".ai(),
         "  return 'from fork';".ai(),

@@ -10268,8 +10268,6 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         &chain[2],
         "processor.py",
         "c3_blame_processor",
-        // method3 is an untracked context line directly below the AI "return result, label"
-        // line; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("class Processor:", false),
             ("def method1", false),
@@ -10280,7 +10278,7 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
             ("result.append", true),
             ("label = ", true),
             ("return result, label", true),
-            ("def method3", true),
+            ("def method3", false),
         ],
     );
 
@@ -10461,9 +10459,7 @@ fn test_conflict_ai_resolves_on_first_commit() {
         &chain[0],
         "version.py",
         "c1_blame_version",
-        // CODENAME is an untracked context line directly below the AI VERSION line;
-        // the AI edge-extension recovery solver absorbs it into the adjacent AI session.
-        &[("VERSION = \"2.1\"", true), ("CODENAME = \"beta\"", true)],
+        &[("VERSION = \"2.1\"", true), ("CODENAME = \"beta\"", false)],
     );
 
     // C2': changelog.py only
@@ -10672,11 +10668,9 @@ fn test_conflict_ai_resolves_on_last_commit() {
         &chain[4],
         "src/schema.rs",
         "c5_blame_schema",
-        // SCHEMA_VERSION is an untracked context line directly below the AI MAX_CONNECTIONS
-        // line; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("MAX_CONNECTIONS: u32 = 75", true),
-            ("SCHEMA_VERSION: u32 = 1", true),
+            ("SCHEMA_VERSION: u32 = 1", false),
         ],
     );
 
@@ -10882,11 +10876,9 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         &chain[2],
         "settings.py",
         "c3_blame_settings",
-        // CACHE_BACKEND is an untracked context line directly below the AI DATABASE_URL
-        // line; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("DATABASE_URL = 'postgres://localhost/feature_db'", true),
-            ("CACHE_BACKEND = 'redis'", true),
+            ("CACHE_BACKEND = 'redis'", false),
         ],
     );
 
@@ -11280,8 +11272,6 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         &chain[2],
         "src/models.rs",
         "c3_blame_models",
-        // The closing brace is an untracked context line directly below the AI metadata
-        // field; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("pub struct User {", false),
             ("pub id: u64,", false),
@@ -11292,7 +11282,7 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
             ("pub role: String,", true),
             ("pub score: f64,", true),
             ("pub metadata:", true),
-            ("}", true),
+            ("}", false),
         ],
     );
 
@@ -11864,10 +11854,9 @@ fn test_conflict_working_log_is_sole_attribution_source() {
     // C1': config.py only — note MUST exist (working-log fallback fired)
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["config.py"]);
-    // TIMEOUT = 45 is the AI-resolved line; RETRIES = 3 is an untracked context line
-    // directly below it, which the AI edge-extension recovery solver absorbs into the
-    // adjacent AI session — so accepted_lines is 2 (both lines AI-attested).
-    assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted_lines", 2);
+    // 1 AI line: TIMEOUT = 45 — accepted_lines must be 1 (not 0).
+    // If build_note_from_conflict_wl hard-codes accepted_lines=0, this assertion fails.
+    assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted_lines", 1);
     // The resolved value (45) must be AI-attributed, not human.
     // This can only be true if build_note_from_conflict_wl contributed the note.
     assert_blame_at_commit(
@@ -11875,7 +11864,7 @@ fn test_conflict_working_log_is_sole_attribution_source() {
         &chain[0],
         "config.py",
         "c1_blame",
-        &[("TIMEOUT = 45", true), ("RETRIES = 3", true)],
+        &[("TIMEOUT = 45", true), ("RETRIES = 3", false)],
     );
 
     // C2': helpers.py only (unaffected by conflict)
@@ -11973,11 +11962,9 @@ fn test_conflict_content_diff_wins_over_working_log() {
         &chain[0],
         "settings.py",
         "c1_blame",
-        // TIMEOUT = 10 is an untracked context line directly below the AI MAX_RETRIES line;
-        // the AI edge-extension recovery solver absorbs it into the adjacent AI session.
-        &[("MAX_RETRIES = 5", true), ("TIMEOUT = 10", true)],
+        &[("MAX_RETRIES = 5", true), ("TIMEOUT = 10", false)],
     );
-    assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted", 2);
+    assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted", 1);
 
     // C2': validator.py only
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
@@ -12363,8 +12350,6 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
         &chain[2],
         "processor.py",
         "c3_blame_processor",
-        // method3 is an untracked context line directly below the AI "return result, label"
-        // line; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("class Processor:", false),
             ("def method1", false),
@@ -12375,7 +12360,7 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
             ("result.append", true),
             ("label = ", true),
             ("return result, label", true),
-            ("def method3", true),
+            ("def method3", false),
         ],
     );
 
@@ -12542,9 +12527,7 @@ fn test_conflict_ai_resolves_on_first_commit_standard_human() {
         &chain[0],
         "version.py",
         "c1_blame_version",
-        // CODENAME is an untracked context line directly below the AI VERSION line;
-        // the AI edge-extension recovery solver absorbs it into the adjacent AI session.
-        &[("VERSION = \"2.1\"", true), ("CODENAME = \"beta\"", true)],
+        &[("VERSION = \"2.1\"", true), ("CODENAME = \"beta\"", false)],
     );
 
     // C2': changelog.py only
@@ -12739,11 +12722,9 @@ fn test_conflict_ai_resolves_on_last_commit_standard_human() {
         &chain[4],
         "src/schema.rs",
         "c5_blame_schema",
-        // SCHEMA_VERSION is an untracked context line directly below the AI MAX_CONNECTIONS
-        // line; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("MAX_CONNECTIONS: u32 = 75", true),
-            ("SCHEMA_VERSION: u32 = 1", true),
+            ("SCHEMA_VERSION: u32 = 1", false),
         ],
     );
 }
@@ -12935,11 +12916,9 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit_standard_human() {
         &chain[2],
         "settings.py",
         "c3_blame_settings",
-        // CACHE_BACKEND is an untracked context line directly below the AI DATABASE_URL
-        // line; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("DATABASE_URL = 'postgres://localhost/feature_db'", true),
-            ("CACHE_BACKEND = 'redis'", true),
+            ("CACHE_BACKEND = 'redis'", false),
         ],
     );
 
@@ -13305,8 +13284,6 @@ fn test_conflict_ai_resolves_rust_struct_fields_standard_human() {
         &chain[2],
         "src/models.rs",
         "c3_blame_models",
-        // The closing brace is an untracked context line directly below the AI metadata
-        // field; the AI edge-extension recovery solver absorbs it into the adjacent AI session.
         &[
             ("pub struct User {", false),
             ("pub id: u64,", false),
@@ -13317,7 +13294,7 @@ fn test_conflict_ai_resolves_rust_struct_fields_standard_human() {
             ("pub role: String,", true),
             ("pub score: f64,", true),
             ("pub metadata:", true),
-            ("}", true),
+            ("}", false),
         ],
     );
 
