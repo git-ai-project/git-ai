@@ -131,6 +131,11 @@ pub fn read_notes_batch(
             Ok(notes)
         }
         NotesBackendKind::GitNotes => {
+            // Keep the SQLite cache coherent with direct local git-note changes
+            // (for example, notes fetched from a remote or test fixtures that
+            // intentionally overwrite refs/notes/ai).
+            let _ = sync_from_git_ref(repo);
+
             // Step 1 (git_notes): check SQLite cache — fast, no subprocess.
             let mut notes = git_notes_read_from_sqlite(commit_shas);
 
@@ -611,15 +616,21 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
 /// that notes written by old clients (who still push to `refs/notes/ai`) are
 /// visible to the HTTP backend path.
 ///
-/// Notes already present in SQLite are skipped. New entries are inserted with
-/// `synced = 1` (read cache, not upload queue) so they are not re-uploaded.
+/// Notes already present in SQLite are refreshed from the git ref. Entries are
+/// inserted with `synced = 1` (read cache, not upload queue) so they are not
+/// re-uploaded.
 ///
 /// Errors are logged at debug level and not propagated — callers treat this as
 /// best-effort.
 pub fn sync_from_git_ref(repo: &Repository) -> Result<(), GitAiError> {
     match crate::notes::db::NotesDatabase::global() {
         Ok(db) => match db.lock() {
-            Ok(mut lock) => sync_from_git_ref_into_db(repo, &mut lock),
+            Ok(mut lock) => {
+                if let Err(e) = sync_from_git_ref_into_db(repo, &mut lock) {
+                    tracing::debug!("sync_from_git_ref: failed to refresh from git ref: {}", e);
+                }
+                Ok(())
+            }
             Err(e) => {
                 tracing::debug!("sync_from_git_ref: DB lock poisoned: {}", e);
                 Ok(())

@@ -1650,9 +1650,8 @@ fn apply_test_config_patch(config: &mut Config) {
         }
         if let Some(nb) = patch.notes_backend {
             config.notes_backend.kind = nb.kind;
-            if let Some(url) = nb.backend_url {
-                config.notes_backend.backend_url = Some(url);
-            }
+            config.notes_backend.backend_url =
+                nb.backend_url.or_else(|| Some(config.api_base_url.clone()));
         }
         if let Some(days) = patch.transcript_streaming_lookback_days {
             config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };

@@ -6,7 +6,7 @@
 ///    reads from SQLite first.
 /// 3. Pull sync import: sync_from_git_ref() imports refs/notes/ai into SQLite.
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use git_ai::config::{NotesBackendConfig, NotesBackendKind};
 use git_ai::notes::db::NotesDatabase;
 
@@ -15,38 +15,23 @@ use git_ai::notes::db::NotesDatabase;
 /// With kind=http, the daemon must not write authorship notes to refs/notes/ai.
 ///
 /// We verify this by:
-/// 1. Making a commit with git_notes backend (establishes a note in refs/notes/ai).
-/// 2. Switching to HTTP backend.
-/// 3. Making a second commit — refs/notes/ai must NOT gain a new note for it.
+/// 1. Starting a dedicated daemon with `notes_backend.kind = http`.
+/// 2. Making a commit through the proxy.
+/// 3. Checking that refs/notes/ai has no note for the commit.
 #[test]
 fn http_backend_write_does_not_touch_git_ref() {
-    // Start with git_notes so we can use commit() normally for setup.
-    let mut repo = TestRepo::new();
-
-    // First commit: git_notes backend — establishes refs/notes/ai.
-    let first = {
-        let mut file = repo.filename("feature.txt");
-        file.set_contents(lines!["human line".human()]);
-        repo.stage_all_and_commit("init").unwrap()
-    };
-
-    // Confirm refs/notes/ai has a note for the first commit.
-    assert!(
-        repo.read_authorship_note(&first.commit_sha).is_some(),
-        "precondition: git_notes backend must write to refs/notes/ai"
-    );
-
-    // Now patch the config to HTTP backend. The daemon is shared-pool and
-    // reads config fresh via Config::fresh() on each operation, so the patch
-    // takes effect for subsequent commits.
+    // Start without a daemon, patch the config, then start a dedicated daemon
+    // so the daemon's Config singleton initializes in HTTP mode.
+    let mut repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
     repo.patch_git_ai_config(|patch| {
         patch.notes_backend = Some(NotesBackendConfig {
             kind: NotesBackendKind::Http,
             backend_url: None,
         });
     });
+    repo.start_dedicated_daemon_for_test();
 
-    // Second commit: HTTP backend — must NOT write to refs/notes/ai.
+    // HTTP backend commit — must NOT write to refs/notes/ai.
     {
         let mut file = repo.filename("feature.txt");
         file.set_contents(lines!["human line".human(), "AI line".ai()]);
@@ -56,7 +41,7 @@ fn http_backend_write_does_not_touch_git_ref() {
     repo.git(&["commit", "-m", "http commit"]).expect("commit");
     repo.sync_daemon_force();
 
-    let second_sha = repo
+    let commit_sha = repo
         .git_og(&["rev-parse", "HEAD"])
         .expect("rev-parse")
         .trim()
@@ -64,13 +49,13 @@ fn http_backend_write_does_not_touch_git_ref() {
 
     // Use git_og (real git, bypasses proxy) to check the actual git ref.
     let note_in_git_ref = repo
-        .git_og(&["notes", "--ref=ai", "show", &second_sha])
+        .git_og(&["notes", "--ref=ai", "show", &commit_sha])
         .ok()
         .filter(|n| !n.trim().is_empty());
     assert!(
         note_in_git_ref.is_none(),
         "HTTP backend must not write to refs/notes/ai for commit {}; found: {:?}",
-        second_sha,
+        commit_sha,
         note_in_git_ref
     );
 }
