@@ -342,13 +342,24 @@ fn session_ids_in_commit(authorship_log: &AuthorshipLog) -> HashSet<String> {
 
 fn candidate_workdir_contains_path(candidate: &BashCheckpointCall, target_path: &Path) -> bool {
     let candidate_workdir = PathBuf::from(&candidate.repo_work_dir);
-    let candidate_workdir = candidate_workdir
-        .canonicalize()
-        .unwrap_or(candidate_workdir);
-    let target_path = target_path
-        .canonicalize()
-        .unwrap_or_else(|_| target_path.to_path_buf());
+    let candidate_workdir = canonicalize_path_or_parent(&candidate_workdir);
+    let target_path = canonicalize_path_or_parent(target_path);
     target_path.starts_with(candidate_workdir)
+}
+
+fn canonicalize_path_or_parent(path: &Path) -> PathBuf {
+    if let Ok(canonical_path) = path.canonicalize() {
+        return canonical_path;
+    }
+
+    if let Some(parent) = path.parent()
+        && let Some(file_name) = path.file_name()
+        && let Ok(canonical_parent) = parent.canonicalize()
+    {
+        return canonical_parent.join(file_name);
+    }
+
+    path.to_path_buf()
 }
 
 fn insert_session_record(
@@ -746,7 +757,9 @@ mod tests {
     #[test]
     fn bash_candidate_ranking_prefers_parent_workdir_when_no_session_matches_commit() {
         let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("repo").join("target.txt");
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        let target = repo_dir.join("target.txt");
         let parent = test_candidate(
             1,
             "parent",
