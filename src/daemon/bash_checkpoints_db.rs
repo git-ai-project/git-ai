@@ -165,9 +165,14 @@ impl BashCheckpointsDatabase {
                 },
             )
             .unwrap_or(0);
-        for target in current..SCHEMA_VERSION {
+        for (target, migration) in MIGRATIONS
+            .iter()
+            .enumerate()
+            .take(SCHEMA_VERSION)
+            .skip(current)
+        {
             let tx = self.conn.transaction()?;
-            tx.execute_batch(MIGRATIONS[target])?;
+            tx.execute_batch(migration)?;
             tx.commit()?;
             self.conn.execute(
                 "INSERT INTO schema_metadata (key, value) VALUES ('version', ?1)
