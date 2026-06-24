@@ -6,7 +6,7 @@ use crate::git::cli_parser::{
     ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
-use crate::git::repo_state::{common_dir_for_worktree, worktree_root_for_path};
+use crate::git::repo_state::{canonical_family_key_for_worktree, worktree_root_for_path};
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
@@ -2397,17 +2397,12 @@ impl ActorDaemonCoordinator {
         let Some(worktree) = trace_payload_worktree_hint(payload) else {
             return Ok(());
         };
-        let Some(common_dir) = common_dir_for_worktree(&worktree) else {
+        let Some(family) = canonical_family_key_for_worktree(&worktree) else {
             return Ok(());
         };
         let started_at_ns = trace_payload_root_started_at_ns(payload)
             .or_else(|| trace_payload_time_ns(payload))
             .unwrap_or_else(now_unix_nanos);
-        let family = common_dir
-            .canonicalize()
-            .unwrap_or(common_dir)
-            .to_string_lossy()
-            .to_string();
         self.append_pending_root_entry(&family, root_sid, started_at_ns)
     }
 
@@ -3193,11 +3188,8 @@ impl ActorDaemonCoordinator {
         }
 
         if let Some(worktree) = worktree_hint.clone() {
-            if let Some(common_dir) = common_dir_for_worktree(&worktree) {
-                let family = common_dir.canonicalize().unwrap_or(common_dir);
-                ingress
-                    .root_families
-                    .insert(root.clone(), family.to_string_lossy().to_string());
+            if let Some(family) = canonical_family_key_for_worktree(&worktree) {
+                ingress.root_families.insert(root.clone(), family);
             }
             ingress.root_worktrees.insert(root.clone(), worktree);
         }

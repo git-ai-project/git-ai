@@ -1,8 +1,58 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub fn is_valid_git_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Upper bound on memoized worktree→family-key entries. A daemon session
+/// touches a handful of repos, so this is never hit in practice; it only
+/// guards against unbounded growth in a very long-lived daemon spanning
+/// thousands of distinct worktrees. On overflow we clear and rebuild rather
+/// than evict per-entry — the set is tiny, so a coarse reset is cheapest.
+const FAMILY_KEY_CACHE_LIMIT: usize = 4096;
+
+fn family_key_cache() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve a worktree path to its canonical family key (the canonicalized
+/// common dir, as a string), memoizing the result.
+///
+/// `common_dir_for_worktree` walks parent dirs stat-ing for `.git` (and reads
+/// the `.git` file for linked worktrees), and `canonicalize` issues a
+/// stat/readlink per path component. This runs per mutating command on the
+/// trace-ingestion path, where the same worktree recurs constantly, so the
+/// uncached cost is pure repeated syscalls. The mapping is a stable function
+/// of the on-disk repo layout for a live worktree, so caching it is safe.
+///
+/// Only successful resolutions are cached: a path that is not yet a repository
+/// (before `clone`/`init` completes) returns `None` and is re-resolved on the
+/// next call, so a repo that appears later is still picked up.
+pub fn canonical_family_key_for_worktree(worktree: &Path) -> Option<String> {
+    if let Ok(cache) = family_key_cache().lock()
+        && let Some(key) = cache.get(worktree)
+    {
+        return Some(key.clone());
+    }
+
+    let common_dir = common_dir_for_worktree(worktree)?;
+    let key = common_dir
+        .canonicalize()
+        .unwrap_or(common_dir)
+        .to_string_lossy()
+        .to_string();
+
+    if let Ok(mut cache) = family_key_cache().lock() {
+        if cache.len() >= FAMILY_KEY_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(worktree.to_path_buf(), key.clone());
+    }
+    Some(key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,5 +192,48 @@ mod tests {
         );
         assert_eq!(state.branch.as_deref(), Some("main"));
         assert!(!state.detached);
+    }
+
+    #[test]
+    fn canonical_family_key_matches_uncached_computation_and_is_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        write_file(&worktree.join(".git/HEAD"), "ref: refs/heads/main\n");
+
+        // The memoized helper must equal the original uncached derivation:
+        // common_dir_for_worktree → canonicalize → string.
+        let common_dir = common_dir_for_worktree(worktree).unwrap();
+        let expected = common_dir
+            .canonicalize()
+            .unwrap_or(common_dir)
+            .to_string_lossy()
+            .to_string();
+
+        let first = canonical_family_key_for_worktree(worktree).unwrap();
+        assert_eq!(first, expected);
+        // A second call (served from cache) must return the identical value.
+        let second = canonical_family_key_for_worktree(worktree).unwrap();
+        assert_eq!(second, expected);
+    }
+
+    #[test]
+    fn canonical_family_key_does_not_cache_misses() {
+        // A path that is not yet a repository must return None AND must not be
+        // cached, so that once it becomes a repo (e.g. after clone/init) the
+        // next call resolves correctly rather than returning a stale miss.
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("not-a-repo-yet");
+        fs::create_dir_all(&worktree).unwrap();
+
+        assert!(canonical_family_key_for_worktree(&worktree).is_none());
+
+        // The repo now appears at this path.
+        write_file(&worktree.join(".git/HEAD"), "ref: refs/heads/main\n");
+
+        let resolved = canonical_family_key_for_worktree(&worktree);
+        assert!(
+            resolved.is_some(),
+            "a worktree that becomes a repo after a miss must resolve on the next call"
+        );
     }
 }

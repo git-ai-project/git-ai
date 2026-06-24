@@ -3,7 +3,7 @@ use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::repo_state::{
-    common_dir_for_repo_path, common_dir_for_worktree, worktree_root_for_path,
+    canonical_family_key_for_worktree, common_dir_for_repo_path, worktree_root_for_path,
 };
 use crate::observability;
 use serde_json::Value;
@@ -277,14 +277,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .or_else(|| self.state.sid_to_worktree.get(root_sid).cloned());
 
         let family_key = if let Some(worktree) = worktree.as_deref() {
-            if let Some(common_dir) = common_dir_for_worktree(worktree) {
-                let family = FamilyKey::new(
-                    common_dir
-                        .canonicalize()
-                        .unwrap_or(common_dir)
-                        .to_string_lossy()
-                        .to_string(),
-                );
+            if let Some(family) = canonical_family_key_for_worktree(worktree).map(FamilyKey::new) {
                 self.state
                     .sid_to_family
                     .insert(root_sid.to_string(), family.clone());
@@ -577,15 +570,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if pending.family_key.is_none()
             && let Some(worktree) = pending.worktree.as_deref()
         {
-            pending.family_key = common_dir_for_worktree(worktree).map(|common_dir| {
-                FamilyKey::new(
-                    common_dir
-                        .canonicalize()
-                        .unwrap_or(common_dir)
-                        .to_string_lossy()
-                        .to_string(),
-                )
-            });
+            pending.family_key = canonical_family_key_for_worktree(worktree).map(FamilyKey::new);
         }
 
         let mut primary_command = self.resolve_primary_hint(
