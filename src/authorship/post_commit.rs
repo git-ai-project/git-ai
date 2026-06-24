@@ -671,10 +671,12 @@ fn estimate_stats_cost(
     commit_sha: &str,
     ignore_patterns: &[String],
 ) -> Result<StatsCostEstimate, GitAiError> {
-    let (mut added_lines_by_file, total_deleted_lines) =
-        repo.diff_added_lines_with_deleted_count(parent_sha, commit_sha)?;
+    let (mut added_lines_by_file, mut deleted_lines_by_file) =
+        repo.diff_added_lines_with_deleted_counts(parent_sha, commit_sha)?;
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
     added_lines_by_file
+        .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
+    deleted_lines_by_file
         .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
 
     let files_with_additions = added_lines_by_file
@@ -697,7 +699,7 @@ fn estimate_stats_cost(
         files_with_additions,
         added_lines,
         hunk_ranges,
-        deleted_lines: total_deleted_lines,
+        deleted_lines: deleted_lines_by_file.values().sum(),
     })
 }
 
@@ -735,7 +737,7 @@ fn record_commit_metrics(
     checkpoints: &[Checkpoint],
     hunks_json: Option<&str>,
 ) {
-    use crate::metrics::{CommittedValues, EventAttributes, record};
+    use crate::metrics::{EventAttributes, record};
 
     // Never emit telemetry for mock_ai (test preset).  If every tool in the
     // breakdown is mock_ai the entire committed event is test data.
@@ -747,6 +749,66 @@ fn record_commit_metrics(
     if only_mock_ai {
         return;
     }
+
+    let (commit_subject, commit_body) = match repo.find_commit(commit_sha.to_string()) {
+        Ok(commit) => (
+            Some(commit.summary().unwrap_or_default().to_string()),
+            Some(commit.body().unwrap_or_default().to_string()),
+        ),
+        Err(_) => (None, None),
+    };
+
+    let values = build_committed_metric_values(
+        stats,
+        checkpoints,
+        commit_subject.as_deref(),
+        commit_body.as_deref(),
+        authorship_note,
+        hunks_json,
+    );
+
+    // Build attributes - start with version and extract session_id from first AI checkpoint
+    // session_id links this commit to the AI agent conversation that produced it
+    // Note: session_id removed from committed events - commits can contain code from multiple AI sessions
+    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
+
+    attrs = attrs
+        .author(human_author)
+        .commit_sha(commit_sha)
+        .base_commit_sha(parent_sha);
+
+    // Get repo URL from default remote
+    if let Ok(Some(remote_name)) = repo.get_default_remote()
+        && let Ok(remotes) = repo.remotes_with_urls()
+        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
+        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+    {
+        attrs = attrs.repo_url(normalized);
+    }
+
+    // Get current branch
+    if let Ok(head_ref) = repo.head()
+        && let Ok(short_branch) = head_ref.shorthand()
+    {
+        attrs = attrs.branch(short_branch);
+    }
+
+    // Attach custom attributes using Config::fresh() to support runtime config updates
+    attrs = attrs.custom_attributes_map(Config::fresh().custom_attributes());
+
+    // Record the metric
+    record(values, attrs);
+}
+
+fn build_committed_metric_values(
+    stats: &crate::authorship::stats::CommitStats,
+    checkpoints: &[Checkpoint],
+    commit_subject: Option<&str>,
+    commit_body: Option<&str>,
+    authorship_note: &str,
+    hunks_json: Option<&str>,
+) -> crate::metrics::CommittedValues {
+    use crate::metrics::CommittedValues;
 
     // Subtract mock_ai contributions from the aggregates so the "all" entry
     // only reflects real tools.
@@ -791,63 +853,128 @@ fn record_commit_metrics(
     };
 
     // Add commit subject and body
-    let values = if let Ok(commit) = repo.find_commit(commit_sha.to_string()) {
-        let subject = commit.summary().unwrap_or_default();
-        let values = values.commit_subject(subject);
-        let body = commit.body().unwrap_or_default();
-        if body.is_empty() {
-            values.commit_body_null()
-        } else {
-            values.commit_body(body)
-        }
+    let values = if let Some(subject) = commit_subject {
+        values.commit_subject(subject)
     } else {
-        values.commit_subject_null().commit_body_null()
+        values.commit_subject_null()
+    };
+    let values = if let Some(body) = commit_body.filter(|body| !body.is_empty()) {
+        values.commit_body(body)
+    } else {
+        values.commit_body_null()
     };
 
     let values = values.authorship_note(authorship_note);
 
-    let values = if let Some(hunks) = hunks_json {
+    if let Some(hunks) = hunks_json {
         values.hunks(hunks)
     } else {
         values.hunks_null()
-    };
-
-    // Build attributes - start with version and extract session_id from first AI checkpoint
-    // session_id links this commit to the AI agent conversation that produced it
-    // Note: session_id removed from committed events - commits can contain code from multiple AI sessions
-    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
-
-    attrs = attrs
-        .author(human_author)
-        .commit_sha(commit_sha)
-        .base_commit_sha(parent_sha);
-
-    // Get repo URL from default remote
-    if let Ok(Some(remote_name)) = repo.get_default_remote()
-        && let Ok(remotes) = repo.remotes_with_urls()
-        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        attrs = attrs.repo_url(normalized);
     }
-
-    // Get current branch
-    if let Ok(head_ref) = repo.head()
-        && let Ok(short_branch) = head_ref.shorthand()
-    {
-        attrs = attrs.branch(short_branch);
-    }
-
-    // Attach custom attributes using Config::fresh() to support runtime config updates
-    attrs = attrs.custom_attributes_map(Config::fresh().custom_attributes());
-
-    // Record the metric
-    record(values, attrs);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_committed_metric_values_use_filtered_stats_and_hunks_payload() {
+        use crate::authorship::stats::{CommitStats, ToolModelHeadlineStats};
+        use crate::metrics::PosEncoded;
+        use crate::metrics::events::committed_pos;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let mut tool_model_breakdown = BTreeMap::new();
+        tool_model_breakdown.insert(
+            "claude::sonnet".to_string(),
+            ToolModelHeadlineStats {
+                ai_additions: 2,
+                ai_accepted: 1,
+            },
+        );
+        tool_model_breakdown.insert(
+            "mock_ai::unknown".to_string(),
+            ToolModelHeadlineStats {
+                ai_additions: 10,
+                ai_accepted: 10,
+            },
+        );
+
+        let stats = CommitStats {
+            human_additions: 1,
+            unknown_additions: 1,
+            ai_additions: 12,
+            ai_accepted: 11,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 3,
+            tool_model_breakdown,
+        };
+
+        let mut checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            String::new(),
+            "agent@example.com".to_string(),
+            Vec::new(),
+        );
+        checkpoint.timestamp = 1_704_067_200;
+
+        let hunks_json = r#"[{"file_path":"src/lib.rs","hunk_kind":"addition"}]"#;
+        let values = build_committed_metric_values(
+            &stats,
+            &[checkpoint],
+            Some("Update source"),
+            Some(""),
+            "authorship-note",
+            Some(hunks_json),
+        );
+        let sparse = values.to_sparse();
+
+        assert_eq!(
+            sparse.get(&committed_pos::HUMAN_ADDITIONS.to_string()),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::GIT_DIFF_ADDED_LINES.to_string()),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::GIT_DIFF_DELETED_LINES.to_string()),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::TOOL_MODEL_PAIRS.to_string()),
+            Some(&json!(["all", "claude::sonnet"]))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::AI_ADDITIONS.to_string()),
+            Some(&json!([2, 2]))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::AI_ACCEPTED.to_string()),
+            Some(&json!([1, 1]))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::HUNKS.to_string()),
+            Some(&json!(hunks_json))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::FIRST_CHECKPOINT_TS.to_string()),
+            Some(&json!(1_704_067_200_u64))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::COMMIT_SUBJECT.to_string()),
+            Some(&json!("Update source"))
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::COMMIT_BODY.to_string()),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            sparse.get(&committed_pos::AUTHORSHIP_NOTE.to_string()),
+            Some(&json!("authorship-note"))
+        );
+    }
 
     #[test]
     fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {

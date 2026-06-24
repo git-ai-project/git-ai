@@ -575,3 +575,93 @@ fn test_commit_hunks_interleaved_attributions() {
     assert_eq!(addition_hunks[1].end_line, 3);
     assert!(addition_hunks[1].prompt_id.is_some());
 }
+
+#[test]
+fn test_commit_hunks_post_commit_path_respects_all_ignore_sources() {
+    let repo = TestRepo::new();
+
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    fs::create_dir_all(repo.path().join("generated")).unwrap();
+    fs::create_dir_all(repo.path().join("docs")).unwrap();
+
+    fs::write(
+        repo.path().join(".gitattributes"),
+        "generated/** linguist-generated=true\n",
+    )
+    .unwrap();
+    fs::write(repo.path().join(".git-ai-ignore"), "docs/**\n").unwrap();
+    fs::write(
+        repo.path().join("src/app.ts"),
+        "export const visible = 1;\n",
+    )
+    .unwrap();
+    repo.stage_all_and_commit("setup ignore metadata").unwrap();
+
+    fs::write(
+        repo.path().join("src/app.ts"),
+        "export const visible = 1;\nexport const counted = 2;\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("Cargo.lock"),
+        "lockfile-entry\n".repeat(10),
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("generated/schema.ts"),
+        "export const generated = true;\n".repeat(10),
+    )
+    .unwrap();
+    fs::write(repo.path().join("docs/api.md"), "docs\n".repeat(10)).unwrap();
+
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_ai",
+        "src/app.ts",
+        "Cargo.lock",
+        "generated/schema.ts",
+        "docs/api.md",
+    ])
+    .unwrap();
+    let commit = repo
+        .stage_all_and_commit("change visible and ignored files")
+        .unwrap();
+
+    let git_repo = get_repo(&repo);
+    let parent_sha = get_parent_sha(&repo);
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+
+    let raw_paths: Vec<&str> = diff_hunks
+        .iter()
+        .map(|hunk| hunk.file_path.as_str())
+        .collect();
+    assert!(raw_paths.contains(&"src/app.ts"));
+    assert!(raw_paths.contains(&"Cargo.lock"));
+    assert!(raw_paths.contains(&"generated/schema.ts"));
+    assert!(raw_paths.contains(&"docs/api.md"));
+
+    let artifacts = build_diff_artifacts_from_hunks(
+        &git_repo,
+        diff_hunks,
+        &commit.commit_sha,
+        Some(&commit.authorship_log),
+    )
+    .unwrap();
+
+    let mut artifact_paths: Vec<&str> = artifacts
+        .json_hunks
+        .iter()
+        .map(|hunk| hunk.file_path.as_str())
+        .collect();
+    artifact_paths.sort_unstable();
+    artifact_paths.dedup();
+
+    assert_eq!(artifact_paths, vec!["src/app.ts"]);
+
+    let hunks_json = serde_json::to_string(&artifacts.json_hunks).unwrap();
+    assert!(hunks_json.contains("src/app.ts"));
+    assert!(!hunks_json.contains("Cargo.lock"));
+    assert!(!hunks_json.contains("generated/schema.ts"));
+    assert!(!hunks_json.contains("docs/api.md"));
+}
