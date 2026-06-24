@@ -425,27 +425,6 @@ fn classify_copilot_tool(tool_name: &str) -> ToolClass {
     }
 }
 
-/// Extract file paths from apply_patch text format. Called from the shared
-/// `collect_tool_paths` because apply_patch payloads embed paths in the patch
-/// text rather than in JSON keys.
-pub(super) fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        let maybe_path = trimmed
-            .strip_prefix("*** Update File: ")
-            .or_else(|| trimmed.strip_prefix("*** Add File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .or_else(|| trimmed.strip_prefix("*** Move to: "));
-
-        if let Some(path) = maybe_path {
-            let path = path.trim();
-            if !path.is_empty() && !out.iter().any(|existing| existing == path) {
-                out.push(path.to_string());
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::super::AgentPreset;
@@ -792,7 +771,7 @@ mod tests {
     fn test_collect_apply_patch_paths() {
         let text = "*** Update File: /home/user/src/main.rs\n--- some diff ---\n*** Add File: /home/user/src/new.rs\n";
         let mut paths = Vec::new();
-        collect_apply_patch_paths_from_text(text, &mut paths);
+        parse::collect_apply_patch_paths_from_text(text, &mut paths);
         assert_eq!(
             paths,
             vec!["/home/user/src/main.rs", "/home/user/src/new.rs"]
