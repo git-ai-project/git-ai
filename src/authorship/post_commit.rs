@@ -202,14 +202,18 @@ where
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
-    // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire checkpoints
-    // for all edits. Attribute any committed lines that have no existing attestation
-    // ("holes") to the detected agent, preserving explicit attributions.
-    if !matches!(
+    // Whether any post-attribution stage that consumes the committed-line hunks
+    // is active. Computing the hunks is cheap when the batched parent→commit diff
+    // was supplied, but falls back to a `git diff` otherwise, so only do it when
+    // a consumer actually needs it.
+    let is_no_hooks_bg_agent = !matches!(
         crate::authorship::background_agent::detect(),
         crate::authorship::background_agent::BackgroundAgent::None
             | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
-    ) {
+    );
+    let recovery_enabled = Config::fresh().get_feature_flags().attribution_recovery;
+
+    if is_no_hooks_bg_agent || recovery_enabled {
         // Prefer the batched parent→commit diff when supplied (no extra spawn);
         // otherwise fall back to a per-commit `git diff`.
         let committed_hunks: Option<
@@ -243,12 +247,49 @@ where
                         .collect()
                 })
         };
+
         if let Some(committed_hunks) = committed_hunks {
-            crate::authorship::background_agent::fill_unattributed_lines(
-                &mut authorship_log,
-                &committed_hunks,
-                &human_author,
-            );
+            // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire
+            // checkpoints for all edits. Attribute any committed lines that have
+            // no existing attestation ("holes") to the detected agent first.
+            if is_no_hooks_bg_agent {
+                crate::authorship::background_agent::fill_unattributed_lines(
+                    &mut authorship_log,
+                    &committed_hunks,
+                    &human_author,
+                );
+            }
+
+            // Attribution recovery: bash mtime/ctime correlation, then AI edge
+            // extension. Runs for all agents on whatever lines remain unknown.
+            if recovery_enabled {
+                let repo_work_dir = repo.workdir().unwrap_or_default();
+                let ctx = crate::authorship::recovery::RecoveryContext {
+                    repo: Some(repo),
+                    commit_sha: &commit_sha,
+                    parent_sha: &parent_sha,
+                    repo_work_dir: &repo_work_dir,
+                    committed_hunks: &committed_hunks,
+                    human_author: &human_author,
+                };
+                let solvers: Vec<Box<dyn crate::authorship::recovery::RecoverySolver>> = vec![
+                    Box::new(
+                        crate::authorship::recovery::bash_solver::BashCorrelationSolver::default(),
+                    ),
+                    Box::new(crate::authorship::recovery::edge_solver::AiEdgeExtensionSolver),
+                ];
+                let metrics = crate::authorship::recovery::recover_attribution(
+                    &mut authorship_log,
+                    &ctx,
+                    &solvers,
+                );
+                crate::authorship::recovery::emit_recovered_metrics(
+                    repo,
+                    &commit_sha,
+                    &parent_sha,
+                    &metrics,
+                );
+            }
         }
     }
 

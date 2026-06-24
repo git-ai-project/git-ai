@@ -1476,6 +1476,112 @@ impl TestRepo {
         repo
     }
 
+    /// Create a repo whose dedicated daemon reads/writes a known
+    /// bash-checkpoints DB, enabling [`Self::seed_bash_checkpoint`] for
+    /// attribution-recovery tests. The DB path is derived deterministically from
+    /// the repo's unique test DB path so it is race-free across parallel tests
+    /// (no shared global env state read in-process).
+    pub fn new_with_bash_recovery() -> Self {
+        ensure_isolated_process_home();
+
+        let mut rng = rand::rng();
+        let n: u64 = rng.random_range(0..10000000000);
+        let base = std::env::temp_dir();
+        let path = base.join(n.to_string());
+        let test_home = base.join(format!("{}-home", n));
+        let test_db_path = resolve_test_db_path(&base, n, &test_home);
+        let bash_db_path = Self::bash_ckpt_db_path_for(&test_db_path);
+        let bash_db_str = bash_db_path.to_string_lossy().to_string();
+
+        clone_template_to(&path);
+
+        let mut repo = Self {
+            path,
+            feature_flags: FeatureFlags::default(),
+            config_patch: None,
+            test_db_path,
+            test_home,
+            daemon_scope: DaemonTestScope::Dedicated,
+            daemon_process: None,
+            _base_repo_path: None,
+            _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
+        };
+
+        repo.apply_default_config_patch();
+
+        let daemon = Arc::new(DaemonProcess::start_with_env(
+            &repo.path,
+            &repo.test_home,
+            &repo.test_db_path,
+            &[(
+                "GIT_AI_TEST_BASH_CHECKPOINTS_DB_PATH",
+                bash_db_str.as_str(),
+            )],
+        ));
+        repo.test_db_path = daemon.test_db_path.clone();
+        repo.daemon_process = Some(daemon);
+        repo.sync_test_home_config();
+
+        repo
+    }
+
+    /// Derive the bash-checkpoints DB path as a sibling of a test DB path.
+    fn bash_ckpt_db_path_for(test_db_path: &Path) -> PathBuf {
+        let mut p = test_db_path.to_path_buf();
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "test".to_string());
+        p.set_file_name(format!("{}-bash-ckpt.db", name));
+        p
+    }
+
+    /// Resolve the bash-checkpoints DB path used by this repo's daemon.
+    fn bash_ckpt_db_path(&self) -> PathBuf {
+        Self::bash_ckpt_db_path_for(&self.test_db_path)
+    }
+
+    /// Seed a bash checkpoint row whose `[start, end]` window brackets *now*,
+    /// keyed to this repo's canonical worktree path. Used to simulate a recorded
+    /// shell command for attribution-recovery tests.
+    pub fn seed_bash_checkpoint(&self, command: &str) {
+        self.seed_bash_checkpoint_at(command, 0);
+    }
+
+    /// Like [`Self::seed_bash_checkpoint`] but offsets the window by
+    /// `offset_secs` from now (negative = in the past).
+    pub fn seed_bash_checkpoint_at(&self, command: &str, offset_secs: i64) {
+        use git_ai::authorship::working_log::AgentId;
+        use git_ai::daemon::bash_checkpoints_db::BashCheckpointsDatabase;
+
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let center = now_ns + offset_secs * 1_000_000_000;
+        let repo_key = self.canonical_path().to_string_lossy().to_string();
+        let agent = AgentId {
+            tool: "claude".to_string(),
+            id: "recovery-sess".to_string(),
+            model: "opus".to_string(),
+        };
+        let mut db = BashCheckpointsDatabase::open_at_path(&self.bash_ckpt_db_path())
+            .expect("open bash-checkpoints DB");
+        db.record_start(
+            "recovery-sess",
+            "recovery-tu1",
+            &repo_key,
+            &agent,
+            Some(command),
+            center - 1_000_000_000,
+            now_ns / 1_000_000_000,
+        )
+        .expect("seed bash checkpoint start");
+        db.record_end("recovery-sess", "recovery-tu1", center + 1_000_000_000)
+            .expect("seed bash checkpoint end");
+    }
+
     pub fn new_worktree() -> Self {
         Self::new_worktree_with_daemon_scope(DaemonTestScope::Shared)
     }

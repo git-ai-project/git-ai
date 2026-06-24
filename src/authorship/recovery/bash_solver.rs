@@ -79,7 +79,12 @@ impl RecoverySolver for BashCorrelationSolver {
         unknown: &HashMap<String, Vec<u32>>,
         _ai_lines: &HashMap<String, HashMap<u32, AiLineOwner>>,
     ) -> Vec<RecoveredAttribution> {
-        let repo_key = ctx.repo_work_dir.to_string_lossy().to_string();
+        // Match the daemon's `worktree_state_key`: canonicalize the worktree
+        // path so the stored `repo_work_dir` and our query key agree.
+        let repo_key = std::fs::canonicalize(ctx.repo_work_dir)
+            .unwrap_or_else(|_| ctx.repo_work_dir.to_path_buf())
+            .to_string_lossy()
+            .to_string();
         let mut out = Vec::new();
         for (file, lines) in unknown {
             let full = ctx.repo_work_dir.join(file);
@@ -211,7 +216,7 @@ mod tests {
         let meta = std::fs::symlink_metadata(&file).unwrap();
         let mtime_ns = system_time_to_ns(meta.modified().unwrap());
 
-        let repo_key = work.path().to_string_lossy().to_string();
+        let repo_key = std::fs::canonicalize(work.path()).unwrap().to_string_lossy().to_string();
         {
             let mut db = BashCheckpointsDatabase::open_at_path(&db_path).unwrap();
             db.record_start(
@@ -249,7 +254,7 @@ mod tests {
         let work = TempDir::new().unwrap();
         let file = work.path().join("out.txt");
         std::fs::write(&file, "x\n").unwrap();
-        let repo_key = work.path().to_string_lossy().to_string();
+        let repo_key = std::fs::canonicalize(work.path()).unwrap().to_string_lossy().to_string();
         {
             let mut db = BashCheckpointsDatabase::open_at_path(&db_path).unwrap();
             db.record_start("s", "t", &repo_key, &agent(), None, 1, 10)
