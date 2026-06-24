@@ -118,7 +118,7 @@ fn read_notes_batch_for_kind(
     match backend_kind {
         NotesBackendKind::Http => {
             // Step 1 (http): check SQLite cache — fast, no network.
-            let mut notes = http_read_notes(&lookup_shas);
+            let mut notes = http_read_notes(lookup_shas);
 
             let missing_after_sqlite: Vec<String> = lookup_shas
                 .iter()
@@ -141,6 +141,13 @@ fn read_notes_batch_for_kind(
                     && let Ok(git_notes) =
                         crate::git::refs::notes_for_commits(repo, &missing_after_http)
                 {
+                    if !git_notes.is_empty() {
+                        let entries: Vec<(String, String)> = git_notes
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        git_notes_write_batch_to_sqlite(&entries);
+                    }
                     notes.extend(git_notes);
                 }
             }
@@ -149,7 +156,7 @@ fn read_notes_batch_for_kind(
         }
         NotesBackendKind::GitNotes => {
             // Step 1 (git_notes): check SQLite cache — fast, no subprocess.
-            let mut notes = git_notes_read_from_sqlite(&lookup_shas);
+            let mut notes = git_notes_read_from_sqlite(lookup_shas);
 
             let missing: Vec<String> = lookup_shas
                 .iter()
