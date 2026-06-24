@@ -515,9 +515,8 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
     use crate::api::client::{ApiClient, ApiContext};
     use crate::git::repository::exec_git;
 
-    // Process-global rate limit: at most one HTTP notes fetch per second across
-    // all repos in the daemon.
-    if crate::git::sync_authorship::http_notes_fetch_rate_limited() {
+    // Process-global rate limit scoped to this repo+remote target.
+    if crate::git::sync_authorship::http_notes_fetch_rate_limited(repo, remote) {
         tracing::debug!(
             "warm_cache_for_remote: rate-limited, skipping HTTP fetch for '{}'",
             remote
