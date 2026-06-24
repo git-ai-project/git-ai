@@ -33,9 +33,18 @@ export class AIEditManager {
   private readonly STABLE_CONTENT_DEBOUNCE_MS = 2000;
 
   constructor(context: vscode.ExtensionContext) {
-    this.legacyCopilotHooksEnabled = !shouldSkipLegacyCopilotHooks(vscode.version);
+    const chatUseHooksEnabled = vscode.workspace.getConfiguration("chat").get<boolean>("useHooks") === true;
+    const env = vscode.env as typeof vscode.env & { remoteName?: string; appHost?: string };
+    this.legacyCopilotHooksEnabled = !shouldSkipLegacyCopilotHooks({
+      vscodeVersion: vscode.version,
+      appName: vscode.env.appName,
+      uriScheme: vscode.env.uriScheme,
+      remoteName: env.remoteName,
+      appHost: env.appHost,
+      chatUseHooksEnabled,
+    });
     if (!this.legacyCopilotHooksEnabled) {
-      console.log(`[git-ai] AIEditManager: VS Code ${vscode.version} has native hooks; skipping legacy extension checkpoints`);
+      console.log(`[git-ai] AIEditManager: Native VS Code Copilot hooks confirmed active for ${vscode.version}; skipping legacy extension checkpoints`);
     }
 
     if (context.storageUri?.fsPath) {

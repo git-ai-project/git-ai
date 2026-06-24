@@ -124,7 +124,7 @@ export function activate(context: vscode.ExtensionContext) {
         })
       );
     } else {
-      console.log('[git-ai] VS Code has native Copilot hooks; skipping legacy extension checkpoint listeners');
+      console.log('[git-ai] Native VS Code Copilot hooks confirmed active; skipping legacy extension checkpoint listeners');
     }
   }
 
