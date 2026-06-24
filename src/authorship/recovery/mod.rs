@@ -16,6 +16,8 @@ use crate::git::repository::Repository;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+pub mod bash_solver;
+
 /// Per-file committed line numbers that have no attestation entry ("unknown").
 ///
 /// `committed_hunks` is the set of added lines per file in the commit; any line
