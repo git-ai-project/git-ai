@@ -102,7 +102,13 @@ fn test_change_across_commits_standard_human() {
     let commit = repo.stage_all_and_commit("add more AI").unwrap();
 
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
-    assert_eq!(file_attestation.entries.len(), 1);
+    // Post-commit attribution recovery (AI edge extension) now absorbs the
+    // untracked `name = name.upper()` line (line 5), which sits directly between
+    // the AI line above (line 4) and the AI line below (line 6), into the second
+    // AI commit's session. That yields a second attestation entry (line 5) on
+    // top of the second AI commit's own entry (line 6). Both share the second
+    // commit's session key but carry distinct trace ids.
+    assert_eq!(file_attestation.entries.len(), 2);
 
     let second_ai_session_hash = commit
         .authorship_log
@@ -113,9 +119,21 @@ fn test_change_across_commits_standard_human() {
         .unwrap();
     assert_ne!(*second_ai_session_hash, initial_ai_entry.hash);
 
-    let second_ai_entry = file_attestation.entries.first().unwrap();
-    assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
+    // The second AI commit's own entry covers the AI line at line 6.
+    let second_ai_entry = file_attestation
+        .entries
+        .iter()
+        .find(|e| e.line_ranges == vec![LineRange::Single(6)])
+        .expect("Should find entry for AI line at line 6");
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
+
+    // The recovered entry covers the absorbed untracked line at line 5.
+    let recovered_entry = file_attestation
+        .entries
+        .iter()
+        .find(|e| e.line_ranges == vec![LineRange::Single(5)])
+        .expect("Should find recovered entry for absorbed line at line 5");
+    assert_ne!(recovered_entry.hash, initial_ai_entry.hash);
 }
 
 crate::reuse_tests_in_worktree!(

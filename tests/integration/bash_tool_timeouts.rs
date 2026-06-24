@@ -139,8 +139,15 @@ fn test_post_hook_hook_timeout_returns_hook_timeout() {
     let root = repo_root(&repo);
 
     // Successful pre-hook so a snapshot exists in the daemon.
-    handle_bash_pre_tool_use_with_context(&root, "ht-sess", "ht-post", &dummy_agent_id(), None, None)
-        .expect("pre-hook should succeed");
+    handle_bash_pre_tool_use_with_context(
+        &root,
+        "ht-sess",
+        "ht-post",
+        &dummy_agent_id(),
+        None,
+        None,
+    )
+    .expect("pre-hook should succeed");
 
     fs::write(root.join("ht_changed.txt"), "content").expect("file write should succeed");
 
@@ -169,8 +176,15 @@ fn test_timeout_override_reset_restores_normal_operation() {
     reset_timeout_overrides_for_test();
 
     // Now a normal round-trip should detect a changed file.
-    handle_bash_pre_tool_use_with_context(&root, "reset-sess", "reset-t1", &dummy_agent_id(), None, None)
-        .expect("pre-hook should succeed after reset");
+    handle_bash_pre_tool_use_with_context(
+        &root,
+        "reset-sess",
+        "reset-t1",
+        &dummy_agent_id(),
+        None,
+        None,
+    )
+    .expect("pre-hook should succeed after reset");
 
     fs::write(root.join("reset_check.txt"), "hello").expect("write should succeed");
 

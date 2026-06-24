@@ -1351,9 +1351,14 @@ fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
         "rebased note should have sessions from AI conflict resolution checkpoint"
     );
 
-    // Verify AI attribution on the resolved line
+    // Verify AI attribution on the resolved line. Post-commit attribution
+    // recovery (AI edge extension) absorbs the untracked `Modified base line`
+    // -- which the rebase-conflict re-resolution leaves with no attestation --
+    // into the adjacent AI session because it sits directly above the AI
+    // resolved line. (The note carries no known-human attestation for it; both
+    // lines share the single AI session key.)
     file.assert_committed_lines(crate::lines![
-        "Modified base line".human(),
+        "Modified base line".ai(),
         "AI resolved line".ai(),
     ]);
 }

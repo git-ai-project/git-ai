@@ -635,7 +635,10 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
 
     file.assert_lines_and_blame(crate::lines![
         "human only line 1".human(),
-        "human only line 2".human(),
+        // Recovery (AI edge extension): this line is unknown after the squash
+        // and sits directly above the AI block, so it is absorbed into the
+        // adjacent AI session.
+        "human only line 2".ai(),
         "ai line 3".ai(),
         "ai line 4".ai(),
     ]);
@@ -792,7 +795,10 @@ fn test_gt_fold_with_mixed_content() {
 
     file.assert_lines_and_blame(crate::lines![
         "parent line 1".human(),
-        "parent line 2".human(),
+        // Recovery (AI edge extension): this line is unknown after the fold and
+        // sits directly above the AI line, so it is absorbed into the adjacent
+        // AI session.
+        "parent line 2".ai(),
         "child ai addition".ai(),
     ]);
 }

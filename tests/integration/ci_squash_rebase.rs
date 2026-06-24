@@ -1252,7 +1252,9 @@ fn test_ci_squash_merge_mixed_content() {
     // trailing untracked human comment stays human.
     file.assert_lines_and_blame(crate::lines![
         "// Base code".human(),
-        "const base = 1;".human(),
+        // Recovery (AI edge extension): this untracked line is directly above
+        // the AI block, so it is absorbed into the adjacent AI session.
+        "const base = 1;".ai(),
         "// Human comment".ai(),
         "// AI generated function".ai(),
         "function aiHelper() {".ai(),
@@ -1355,8 +1357,9 @@ fn test_ci_squash_merge_with_manual_changes() {
     // attribution. `enableAI: true,` gained a trailing comma during the squash,
     // so its committed content differs from the AI-authored `enableAI: true` and
     // it is attributed to the committer (human) -- along with the manually-added
-    // lines. (The removed engine attributed `enableAI: true,` to AI; this is the
-    // intended tightening under the rewrite.)
+    // lines. These manual lines are committed as real committer-human (attested),
+    // so the edge-extension solver does not touch them (recovery only ever
+    // covers lines with no attestation).
     file.assert_lines_and_blame(crate::lines![
         "const config = {".human(),
         "  version: 1,".human(),
@@ -1503,13 +1506,17 @@ fn test_ci_squash_merge_mixed_content_standard_human() {
 
     file.assert_lines_and_blame(crate::lines![
         "// Base code".unattributed_human(),
-        "const base = 1;".unattributed_human(),
+        // Recovery (AI edge extension): untracked line directly above the AI
+        // block is absorbed into the adjacent AI session.
+        "const base = 1;".ai(),
         "// Human comment".ai(),
         "// AI generated function".ai(),
         "function aiHelper() {".ai(),
         "  return true;".ai(),
         "}".ai(),
-        "// Another human comment".unattributed_human()
+        // Recovery (AI edge extension): untracked line directly below the AI
+        // block is absorbed into the adjacent AI session.
+        "// Another human comment".ai()
     ]);
 }
 
@@ -1566,17 +1573,19 @@ fn test_ci_squash_merge_with_manual_changes_standard_human() {
     let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
     assert_ci_rewrite_succeeded(&output);
 
-    // Same new-logic tightening as test_ci_squash_merge_with_manual_changes:
     // `enableAI: true,` gained a trailing comma during the squash, so its
-    // committed content differs from the AI checkpoint and it falls back to
-    // untracked human rather than AI.
+    // committed content differs from the AI checkpoint and it is initially
+    // untracked. Attribution-recovery's edge-extension solver then absorbs the
+    // contiguous untracked run adjacent to the AI line `// AI added feature flag`
+    // (both the `version: 1,` line above and the `enableAI`/manual lines below)
+    // into that AI session. The outer structural braces remain untracked.
     file.assert_lines_and_blame(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".ai(),
-        "  enableAI: true,".unattributed_human(),
-        "  // Manual addition during merge".unattributed_human(),
-        "  production: false".unattributed_human(),
+        "  enableAI: true,".ai(),
+        "  // Manual addition during merge".ai(),
+        "  production: false".ai(),
         "};".unattributed_human()
     ]);
 }

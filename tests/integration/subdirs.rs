@@ -835,11 +835,15 @@ crate::subdir_test_variants! {
         );
 
         file = repo.filename("main.rs");
+        // Edge-extension recovery: `fn main() {` and `}` were written in the AI
+        // commit directly adjacent to the AI line, so they are absorbed into the
+        // AI session; the later-inserted `// Human` keeps its known-human
+        // attestation (recovery only ever touches unattested lines).
         file.assert_lines_and_blame(crate::lines![
-            "fn main() {".human(),
+            "fn main() {".ai(),
             "    // AI".ai(),
             "    // Human".human(),
-            "}".human(),
+            "}".ai(),
         ]);
     }
 }

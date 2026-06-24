@@ -55,7 +55,8 @@ fn test_edge_extension_absorbs_trailing_untracked_line() {
     // block.
     fs::write(&file_path, "ai one\nai two\nuntracked edge\n").unwrap();
 
-    repo.stage_all_and_commit("commit with trailing edge").unwrap();
+    repo.stage_all_and_commit("commit with trailing edge")
+        .unwrap();
 
     let mut file = repo.filename("m.txt");
     file.assert_committed_lines(crate::lines![

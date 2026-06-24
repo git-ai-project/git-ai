@@ -324,11 +324,15 @@ fn test_reset_mixed_ai_human_changes() {
     );
 
     file = repo.filename("main.rs");
+    // Edge-extension recovery: `fn main() {` and `}` were written in the AI
+    // commit directly adjacent to the AI line, so they are absorbed into the AI
+    // session. The later-inserted `// Human` line keeps its known-human
+    // attestation (recovery only ever touches lines with no attestation).
     file.assert_lines_and_blame(crate::lines![
-        "fn main() {".human(),
+        "fn main() {".ai(),
         "    // AI".ai(),
         "    // Human".human(),
-        "}".human(),
+        "}".ai(),
     ]);
 }
 

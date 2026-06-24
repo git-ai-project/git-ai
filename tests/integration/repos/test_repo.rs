@@ -1514,10 +1514,7 @@ impl TestRepo {
             &repo.path,
             &repo.test_home,
             &repo.test_db_path,
-            &[(
-                "GIT_AI_TEST_BASH_CHECKPOINTS_DB_PATH",
-                bash_db_str.as_str(),
-            )],
+            &[("GIT_AI_TEST_BASH_CHECKPOINTS_DB_PATH", bash_db_str.as_str())],
         ));
         repo.test_db_path = daemon.test_db_path.clone();
         repo.daemon_process = Some(daemon);
