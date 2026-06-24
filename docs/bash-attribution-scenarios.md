@@ -70,6 +70,18 @@ task dev
 
 The focused ranking test verifies the candidate ordering directly. The broader `bash_attribution` filter verifies the mtime recovery path through the integration test harness. `task dev` verifies the debug build can be installed locally for manual end-to-end testing.
 
+### PR #1644 Installed-Build Ranking Results
+
+Tested from local branch `siddhant/bash-attribution-rerank` after installing with `task dev`. Each scenario used temporary repos, real `git-ai checkpoint codex --hook-input ...` calls, real `git commit`, and `git notes --ref=ai show HEAD` to map the recovered file's session hash back to the external Codex session ID.
+
+| Scenario | Observed result | Status |
+| --- | --- | --- |
+| Commit already contained a normal Codex-attributed edit from `rank-session-a`; the unknown file was written during a closer unrelated `rank-session-b` bash call from another repo | The unknown file was attributed to `rank-session-a` | Working |
+| No session was already present in the commit; an older candidate from a parent workdir competed with a closer non-parent candidate | The unknown file was attributed to `rank-parent-session` | Working |
+| No session was already present in the commit and no candidate workdir contained the target file | The unknown file was attributed to the closest candidate, `rank-close-session` | Working |
+
+These manual runs exercise the installed debug build rather than only the unit-level ranking helper.
+
 ### Remaining Known Gaps
 
 - CWD-not-a-repo recording is intentionally out of scope for PR #1644.
