@@ -1,6 +1,7 @@
 pub mod bundle;
 pub mod cas;
 pub mod client;
+pub mod enterprise_config;
 pub mod metrics;
 pub mod notes;
 pub mod types;
