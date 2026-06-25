@@ -112,6 +112,7 @@ mod repository_unit;
 mod reset;
 mod rewrite_ops_attribution;
 mod secrets_benchmark;
+mod session_event_attribution;
 mod session_event_repo_url;
 mod sessions_backwards_compat;
 mod sessions_cutover;

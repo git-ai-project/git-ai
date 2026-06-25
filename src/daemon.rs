@@ -2293,6 +2293,18 @@ type CommitFileTimestampSnapshotHandle =
 type CommitFileTimestampSnapshotHandles = HashMap<String, CommitFileTimestampSnapshotHandle>;
 
 const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
+const SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT: Duration = Duration::from_secs(2);
+const SESSION_EVENT_RECOVERY_PREFLIGHT_POLL: Duration = Duration::from_millis(100);
+
+fn run_blocking_side_effect<T>(operation: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
+    }
+}
 
 #[derive(Debug, Clone)]
 struct PendingSquashMerge {
@@ -2495,6 +2507,169 @@ impl ActorDaemonCoordinator {
             tracing::info!(trigger = %trigger, "transcript sweep trigger enqueued");
         } else {
             tracing::debug!(trigger = %trigger, "transcript sweep trigger not enqueued");
+        }
+    }
+
+    fn trigger_transcript_sweep_for_recovery(
+        &self,
+        trigger: crate::daemon::stream_worker::SweepTrigger,
+    ) -> Option<std::sync::mpsc::Receiver<Result<(), String>>> {
+        let Some(worker) = &self.stream_worker else {
+            tracing::debug!(trigger = %trigger, "recovery transcript sweep skipped; worker is not running");
+            return None;
+        };
+
+        let completion = worker.trigger_sweep_for_recovery(trigger);
+        if completion.is_some() {
+            tracing::info!(trigger = %trigger, "recovery transcript sweep enqueued");
+        } else {
+            tracing::debug!(trigger = %trigger, "recovery transcript sweep not enqueued");
+        }
+        completion
+    }
+
+    fn wait_for_session_event_recovery_candidate(
+        &self,
+        repo: &Repository,
+        commit_sha: &str,
+        recovery_file_timestamps: Option<
+            &crate::authorship::attribution_recovery::FileTimestampsByPath,
+        >,
+        unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile,
+    ) {
+        if unknown_by_file.is_empty() {
+            return;
+        }
+        let unknown_files = unknown_by_file
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut timestamps = recovery_file_timestamps
+            .map(|recovery_file_timestamps| {
+                recovery_file_timestamps
+                    .iter()
+                    .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
+                    .flat_map(|(_, values)| values.iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if timestamps.is_empty()
+            && let Ok(workdir) = repo.workdir()
+            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+        {
+            timestamps = fallback_timestamps
+                .iter()
+                .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
+                .flat_map(|(_, values)| values.iter().copied())
+                .collect::<Vec<_>>();
+        }
+        if timestamps.is_empty() {
+            timestamps = recovery_file_timestamps
+                .map(|recovery_file_timestamps| {
+                    recovery_file_timestamps
+                        .values()
+                        .flat_map(|values| values.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
+        if timestamps.is_empty()
+            && let Ok(workdir) = repo.workdir()
+            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+        {
+            timestamps = fallback_timestamps
+                .values()
+                .flat_map(|values| values.iter().copied())
+                .collect::<Vec<_>>();
+        }
+        if timestamps.is_empty() {
+            return;
+        }
+        timestamps.sort_unstable();
+        timestamps.dedup();
+
+        let Some(target_repo_url) = crate::repo_url::resolve_repo_url_from_repo(repo) else {
+            return;
+        };
+
+        let has_candidate = || {
+            crate::authorship::attribution_recovery::matching_session_event_candidate_exists(
+                &timestamps,
+                &target_repo_url,
+            )
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "failed checking session-event recovery candidates");
+                false
+            })
+        };
+        if has_candidate() {
+            return;
+        }
+
+        let deadline = std::time::Instant::now() + SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT;
+        let sweep_completion = self.trigger_transcript_sweep_for_recovery(
+            crate::daemon::stream_worker::SweepTrigger::PostCommit,
+        );
+
+        let Some(sweep_completion) = sweep_completion else {
+            return;
+        };
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::debug!(
+                wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                "recovery transcript sweep wait expired"
+            );
+            return;
+        }
+        match sweep_completion.recv_timeout(remaining) {
+            Ok(Ok(())) => {
+                tracing::debug!("recovery transcript sweep completed before post-commit");
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    %error,
+                    "recovery transcript sweep failed before post-commit"
+                );
+                return;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "recovery transcript sweep wait expired"
+                );
+                return;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::debug!("recovery transcript sweep completion channel disconnected");
+                return;
+            }
+        }
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "session-event recovery preflight wait expired"
+                );
+                return;
+            }
+            std::thread::sleep(remaining.min(SESSION_EVENT_RECOVERY_PREFLIGHT_POLL));
+            if has_candidate() {
+                tracing::debug!(
+                    "session-event recovery candidate became visible before post-commit"
+                );
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "session-event recovery preflight wait expired"
+                );
+                return;
+            }
         }
     }
 
@@ -5156,15 +5331,29 @@ impl ActorDaemonCoordinator {
                                 new_head,
                             )
                             .await;
+                            let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
+                                self.wait_for_session_event_recovery_candidate(
+                                    &repo,
+                                    new_head,
+                                    recovery_file_timestamps.as_ref(),
+                                    unknown_by_file,
+                                );
+                            };
 
-                            crate::authorship::post_commit::post_commit_from_working_log_with_recovery_timestamps(
-                                &repo,
-                                base_opt.clone(),
-                                new_head.clone(),
-                                author,
-                                true,
-                                recovery_file_timestamps.as_ref(),
-                            )?;
+                            // Post-commit note generation does synchronous git/filesystem work
+                            // and may briefly wait for transcript recovery. Mark it as blocking
+                            // so the transcript worker can process the recovery sweep promptly.
+                            run_blocking_side_effect(|| {
+                                crate::authorship::post_commit::post_commit_from_working_log_with_recovery_timestamps(
+                                    &repo,
+                                    base_opt.clone(),
+                                    new_head.clone(),
+                                    author,
+                                    true,
+                                    recovery_file_timestamps.as_ref(),
+                                    Some(&recovery_preflight),
+                                )
+                            })?;
 
                             if cmd.primary_command.as_deref() == Some("commit")
                                 && let Some(pending) = self
@@ -5204,13 +5393,27 @@ impl ActorDaemonCoordinator {
                                 new_head,
                             )
                             .await;
-                            crate::authorship::post_commit::post_commit_amend_with_recovery_timestamps(
-                                &repo,
-                                old_head,
-                                new_head,
-                                author,
-                                recovery_file_timestamps.as_ref(),
-                            )?;
+                            let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
+                                self.wait_for_session_event_recovery_candidate(
+                                    &repo,
+                                    new_head,
+                                    recovery_file_timestamps.as_ref(),
+                                    unknown_by_file,
+                                );
+                            };
+                            // Post-commit note generation does synchronous git/filesystem work
+                            // and may briefly wait for transcript recovery. Mark it as blocking
+                            // so the transcript worker can process the recovery sweep promptly.
+                            run_blocking_side_effect(|| {
+                                crate::authorship::post_commit::post_commit_amend_with_recovery_timestamps(
+                                    &repo,
+                                    old_head,
+                                    new_head,
+                                    author,
+                                    recovery_file_timestamps.as_ref(),
+                                    Some(&recovery_preflight),
+                                )
+                            })?;
                         }
                     }
                     crate::daemon::domain::SemanticEvent::Reset {

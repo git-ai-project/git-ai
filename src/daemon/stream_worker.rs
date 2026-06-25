@@ -99,6 +99,22 @@ impl std::fmt::Display for SweepTrigger {
     }
 }
 
+struct SweepRequest {
+    trigger: SweepTrigger,
+    priority: Priority,
+    completion: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+}
+
+impl SweepRequest {
+    fn normal(trigger: SweepTrigger) -> Self {
+        Self {
+            trigger,
+            priority: Priority::Low,
+            completion: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SweepTriggerGate {
     last_triggered_at: Arc<Mutex<Option<Instant>>>,
@@ -145,13 +161,27 @@ impl SweepTriggerGate {
     fn try_mark_sweep_at(&self, now: Instant, source: &str) -> bool {
         self.try_trigger_at(now, source, || true)
     }
+
+    fn force_trigger_at(&self, now: Instant, trigger_action: impl FnOnce() -> bool) -> bool {
+        let Ok(mut last_triggered_at) = self.last_triggered_at.lock() else {
+            tracing::warn!("failed to lock transcript sweep trigger cooldown");
+            return false;
+        };
+
+        if !trigger_action() {
+            return false;
+        }
+
+        *last_triggered_at = Some(now);
+        true
+    }
 }
 
 /// Handle for sending checkpoint notifications and sweep requests to the worker.
 #[derive(Clone)]
 pub struct StreamWorkerHandle {
     checkpoint_tx: tokio::sync::mpsc::UnboundedSender<CheckpointNotification>,
-    sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepTrigger>,
+    sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepRequest>,
     sweep_trigger_gate: SweepTriggerGate,
 }
 
@@ -190,14 +220,40 @@ impl StreamWorkerHandle {
         self.trigger_sweep_at(trigger, Instant::now())
     }
 
+    /// Request a sweep for commit-time attribution recovery.
+    ///
+    /// This bypasses the user-facing cooldown because the caller performs its own
+    /// short bounded wait for a repo-linked metric row, but still marks the gate
+    /// so the regular post-commit sweep for the same command is suppressed.
+    pub fn trigger_sweep_for_recovery(
+        &self,
+        trigger: SweepTrigger,
+    ) -> Option<std::sync::mpsc::Receiver<Result<(), String>>> {
+        let (completion_tx, completion_rx) = std::sync::mpsc::channel();
+        let mut completion_tx = Some(completion_tx);
+        let sent = self
+            .sweep_trigger_gate
+            .force_trigger_at(Instant::now(), || {
+                self.sweep_tx
+                    .send(SweepRequest {
+                        trigger,
+                        priority: Priority::Immediate,
+                        completion: completion_tx.take(),
+                    })
+                    .is_ok()
+            });
+        sent.then_some(completion_rx)
+    }
+
     fn trigger_sweep_at(&self, trigger: SweepTrigger, now: Instant) -> bool {
         let source = trigger.to_string();
-        self.sweep_trigger_gate
-            .try_trigger_at(now, &source, || self.sweep_tx.send(trigger).is_ok())
+        self.sweep_trigger_gate.try_trigger_at(now, &source, || {
+            self.sweep_tx.send(SweepRequest::normal(trigger)).is_ok()
+        })
     }
 
     #[cfg(test)]
-    fn for_test_sweep_triggers(sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepTrigger>) -> Self {
+    fn for_test_sweep_triggers(sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepRequest>) -> Self {
         let (checkpoint_tx, _checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             checkpoint_tx,
@@ -230,7 +286,7 @@ struct StreamWorker {
     shutdown_notify: Arc<Notify>,
     shutdown_flag: Arc<AtomicBool>,
     checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
-    sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepTrigger>,
+    sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
     sweep_trigger_gate: SweepTriggerGate,
 }
 
@@ -242,7 +298,7 @@ impl StreamWorker {
         shutdown_notify: Arc<Notify>,
         shutdown_flag: Arc<AtomicBool>,
         checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
-        sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepTrigger>,
+        sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
         sweep_trigger_gate: SweepTriggerGate,
     ) -> Self {
         let sweep_coordinator =
@@ -279,7 +335,7 @@ impl StreamWorker {
             && self
                 .sweep_trigger_gate
                 .try_mark_sweep_at(Instant::now(), "initial")
-            && let Err(e) = self.run_sweep().await
+            && let Err(e) = self.run_sweep(Priority::Low).await
         {
             tracing::error!(error = %e, "initial sweep failed");
         }
@@ -316,7 +372,7 @@ impl StreamWorker {
                         && self
                             .sweep_trigger_gate
                             .try_mark_sweep_at(Instant::now(), "periodic")
-                        && let Err(e) = self.run_sweep().await
+                        && let Err(e) = self.run_sweep(Priority::Low).await
                     {
                         tracing::error!(error = %e, "sweep failed");
                     }
@@ -324,17 +380,26 @@ impl StreamWorker {
                 Some(notification) = self.checkpoint_rx.recv() => {
                     self.handle_checkpoint_notification(notification).await;
                 }
-                Some(trigger) = self.sweep_rx.recv() => {
+                Some(request) = self.sweep_rx.recv() => {
                     if sweep_enabled {
-                        tracing::info!(trigger = %trigger, "triggered transcript sweep requested");
-                        if let Err(e) = self.run_sweep().await {
-                            tracing::error!(trigger = %trigger, error = %e, "triggered sweep failed");
+                        tracing::info!(trigger = %request.trigger, "triggered transcript sweep requested");
+                        let result = self.run_sweep(request.priority).await;
+                        if let Err(e) = &result {
+                            tracing::error!(trigger = %request.trigger, error = %e, "triggered sweep failed");
+                        }
+                        if let Some(completion) = request.completion {
+                            let _ = completion.send(result.map(|_| ()));
                         }
                     } else {
                         tracing::debug!(
-                            trigger = %trigger,
+                            trigger = %request.trigger,
                             "triggered transcript sweep skipped because transcript_sweep is disabled"
                         );
+                        if let Some(completion) = request.completion {
+                            let _ = completion.send(Err(
+                                "transcript_sweep feature is disabled".to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -363,7 +428,7 @@ impl StreamWorker {
     }
 
     /// Run a sweep across all agents to discover new/behind sessions.
-    async fn run_sweep(&mut self) -> Result<(), String> {
+    async fn run_sweep(&mut self, priority: Priority) -> Result<(), String> {
         use crate::daemon::sweep_coordinator::SweepItem;
 
         let items = self
@@ -426,7 +491,7 @@ impl StreamWorker {
                     let tasks = self.enqueue_streams_for_session(
                         &tool,
                         &canonical_path,
-                        Priority::Low,
+                        priority,
                         None,
                         None,
                         Some(external_session_id.as_str()),
@@ -483,7 +548,7 @@ impl StreamWorker {
 
                     enqueued_this_sweep.insert(dedup_key);
                     self.priority_queue.push(ProcessingTask {
-                        priority: Priority::Low,
+                        priority,
                         session_id: SHARED_STREAM_SESSION_ID.to_string(),
                         stream_kind,
                         tool,
@@ -1487,23 +1552,57 @@ mod subagent_sweep_tests {
             SweepTrigger::PostCommit,
             started_at + Duration::from_secs(29)
         ));
-        assert_eq!(sweep_rx.try_recv(), Err(TryRecvError::Empty));
+        assert!(matches!(sweep_rx.try_recv(), Err(TryRecvError::Empty)));
 
         assert!(handle.trigger_sweep_at(
             SweepTrigger::PostCommit,
             started_at + Duration::from_secs(30)
         ));
-        assert_eq!(sweep_rx.try_recv().unwrap(), SweepTrigger::PostCommit);
+        let request = sweep_rx.try_recv().unwrap();
+        assert_eq!(request.trigger, SweepTrigger::PostCommit);
+        assert_eq!(request.priority, Priority::Low);
+        assert!(request.completion.is_none());
 
         assert!(
             !handle.trigger_sweep_at(SweepTrigger::PostPush, started_at + Duration::from_secs(59))
         );
-        assert_eq!(sweep_rx.try_recv(), Err(TryRecvError::Empty));
+        assert!(matches!(sweep_rx.try_recv(), Err(TryRecvError::Empty)));
 
         assert!(
             handle.trigger_sweep_at(SweepTrigger::PostPush, started_at + Duration::from_secs(60))
         );
-        assert_eq!(sweep_rx.try_recv().unwrap(), SweepTrigger::PostPush);
+        let request = sweep_rx.try_recv().unwrap();
+        assert_eq!(request.trigger, SweepTrigger::PostPush);
+        assert_eq!(request.priority, Priority::Low);
+        assert!(request.completion.is_none());
+    }
+
+    #[test]
+    fn recovery_sweep_bypasses_cooldown_and_suppresses_followup_trigger() {
+        let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = StreamWorkerHandle::for_test_sweep_triggers(sweep_tx);
+        let started_at = Instant::now();
+
+        assert!(
+            handle
+                .sweep_trigger_gate
+                .try_mark_sweep_at(started_at, "periodic")
+        );
+
+        let completion = handle
+            .trigger_sweep_for_recovery(SweepTrigger::PostCommit)
+            .expect("recovery sweep should enqueue");
+        let request = sweep_rx.try_recv().unwrap();
+        assert_eq!(request.trigger, SweepTrigger::PostCommit);
+        assert_eq!(request.priority, Priority::Immediate);
+        assert!(request.completion.is_some());
+        drop(completion);
+
+        assert!(!handle.trigger_sweep_at(
+            SweepTrigger::PostCommit,
+            started_at + Duration::from_secs(29)
+        ));
+        assert!(matches!(sweep_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]
