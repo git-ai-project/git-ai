@@ -4,6 +4,7 @@ use crate::authorship::ignore::{
 use crate::authorship::stats::{CommitStats, stats_from_authorship_log, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::CheckpointKind;
+use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
@@ -54,6 +55,8 @@ pub fn handle_status(args: &[String]) {
 
 fn run_status(json: bool, diff_only: bool) -> Result<(), GitAiError> {
     let repo = find_repository(&[])?;
+    sync_daemon_before_status_read(&repo);
+
     let ignore_patterns = effective_ignore_patterns(&repo, &[], &[]);
     let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
@@ -210,6 +213,32 @@ fn run_status(json: bool, diff_only: bool) -> Result<(), GitAiError> {
     }
 
     Ok(())
+}
+
+fn sync_daemon_before_status_read(repo: &Repository) {
+    let Ok(workdir) = repo.workdir() else {
+        return;
+    };
+    let Ok(config) = DaemonConfig::from_env_or_default_paths() else {
+        return;
+    };
+    let request = ControlRequest::SyncFamily {
+        repo_working_dir: workdir.to_string_lossy().to_string(),
+    };
+    match send_control_request(&config.control_socket_path, &request) {
+        Ok(response) if response.ok => {}
+        Ok(response) => {
+            tracing::debug!(
+                "daemon sync before status failed: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string())
+            );
+        }
+        Err(error) => {
+            tracing::debug!("daemon sync before status unavailable: {}", error);
+        }
+    }
 }
 
 fn format_time_ago(timestamp: u64) -> String {
