@@ -64,6 +64,23 @@
     re-attempts the (visible) launch. That second defect is the concrete, fixable root cause.</p>
   </div>
 
+  <div class="card" style="border-left:4px solid var(--good);background:linear-gradient(90deg,#0f2417,transparent 70%)">
+    <p style="margin:0 0 8px"><span class="pill good">RESOLVED UPSTREAM — hypothesis confirmed</span></p>
+    <p style="margin:0">After this analysis, the maintainers shipped <b><a href="https://github.com/git-ai-project/git-ai/pull/1659">PR&nbsp;#1659</a> — a straight revert of PR&nbsp;#1587</b> — as <b>v1.6.2</b>, and a
+    reporter confirmed the popups are gone. The revert restores the
+    <code>powershell.exe&nbsp;-WindowStyle&nbsp;Hidden</code> launcher and <b>removes
+    <code>DETACHED_PROCESS</code> from both spawn paths</b> — i.e. precisely the change this
+    report fingered. A maintainer also confirmed on the issue that <b>trace2 + agent hooks
+    are unchanged in 1.6.1 and are expected/correct</b> — matching section&nbsp;2 below.</p>
+    <p style="margin:10px 0 0;font-size:14.5px" class="muted">The team could not reproduce on 3 clean
+    Windows machines. That is consistent with section&nbsp;4: the amplifier only bites when
+    <code>~/.git-ai/internal</code> was created by an <b>elevated/other user</b> (an Administrator
+    install) — so a clean, same-user setup never trips it. The lock-diagnostics fix in this branch
+    is therefore <b>complementary hardening</b> (it makes that failure legible), <b>not</b> the
+    popup fix — the revert is.</p>
+  </div>
+
+
   <h2>1 · Timeline of the relevant change</h2>
   <svg viewBox="0 0 920 200" width="100%" role="img" aria-label="Release timeline">
     <defs>
@@ -232,15 +249,17 @@ match open(path) {
     </tbody>
   </table>
 
-  <h3>Scope &amp; deliberately-deferred follow-ups</h3>
-  <p>This fix targets the <b>amplifier</b> (factor B) — the highest-confidence, Linux-testable defect that
-     directly explains the diagnostics. Two complementary changes remain, documented for a follow-up:</p>
+  <h3>Scope — what this branch is (and isn't) for</h3>
+  <p>The user-facing popups are already fixed upstream by the <a href="https://github.com/git-ai-project/git-ai/pull/1659">#1659</a> revert (v1.6.2). This branch
+     does <b>not</b> re-fix that. It targets the <b>amplifier</b> (factor B) — the daemon-startup
+     permission-masking that made the failure environment-specific and illegible. It is the
+     highest-confidence, Linux-testable piece and is independent of the reverted spawn code.</p>
   <ul>
-    <li><b>Console flash itself (factor A).</b> A GUI-subsystem hook launcher (or making the checkpoint
-        entry point not allocate a console) is needed to fully suppress the per-hook flash, since the
-        top-level process is created by the agent and git-ai cannot set its own creation flags.</li>
-    <li><b><code>DETACHED_PROCESS</code> + <code>CREATE_NO_WINDOW</code>.</b> Re-evaluate the 1.6.0 flag
-        combo so window suppression doesn't depend on a flag the OS ignores.</li>
+    <li><b>Already resolved by the revert:</b> the <code>DETACHED_PROCESS</code> + <code>CREATE_NO_WINDOW</code>
+        combo (PR&nbsp;#1587) is gone from <code>main</code>; window suppression no longer rests on a flag the OS ignores.</li>
+    <li><b>Still open (factor A):</b> the bare per-hook console flash. A GUI-subsystem hook launcher
+        (or a checkpoint entry point that does not allocate a console) would suppress it at the source,
+        since the top-level process is created by the agent and git-ai cannot set its own creation flags.</li>
   </ul>
 
   <h2>6 · Reproduction</h2>
