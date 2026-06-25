@@ -292,12 +292,42 @@ pub struct LockFile {
     _file: std::fs::File,
 }
 
+/// Result of attempting to acquire a [`LockFile`].
+///
+/// Distinguishing these cases is load-bearing: a permission error on the lock
+/// file is **not** the same as the lock being held by a live process. The lock
+/// file (or its parent directory) is frequently created by an elevated/other
+/// user during an Administrator/`sudo` install, after which a normal-user
+/// process can no longer open it for writing and gets `EACCES` /
+/// `ERROR_ACCESS_DENIED`. Collapsing that into "lock held" makes the daemon
+/// look permanently blocked and sends users chasing a process that does not
+/// exist (see issue #1287 / #1657).
+pub enum LockAttempt {
+    /// The lock was acquired; hold the returned [`LockFile`] to keep it.
+    Acquired(LockFile),
+    /// Another live process currently holds the lock (genuine contention).
+    Contended,
+    /// The lock file could not be opened for reasons unrelated to contention —
+    /// most commonly a permission error. This is NOT a held lock.
+    Inaccessible(std::io::Error),
+}
+
 impl LockFile {
     /// Try to acquire an exclusive lock on the given path.
-    /// Returns `Some(LockFile)` if successful, `None` if another process holds the lock.
+    /// Returns `Some(LockFile)` if successful, `None` otherwise (held OR
+    /// inaccessible). Prefer [`LockFile::try_acquire_detailed`] when the caller
+    /// needs to distinguish contention from a permission/IO failure.
     pub fn try_acquire(path: &std::path::Path) -> Option<Self> {
-        let file = try_lock_exclusive(path)?;
-        Some(Self { _file: file })
+        match Self::try_acquire_detailed(path) {
+            LockAttempt::Acquired(lock) => Some(lock),
+            LockAttempt::Contended | LockAttempt::Inaccessible(_) => None,
+        }
+    }
+
+    /// Try to acquire an exclusive lock, distinguishing genuine contention from
+    /// a permission/IO failure on the lock file itself.
+    pub fn try_acquire_detailed(path: &std::path::Path) -> LockAttempt {
+        try_lock_exclusive(path)
     }
 }
 
@@ -311,30 +341,55 @@ impl Drop for LockFile {
 
 #[cfg(unix)]
 #[allow(clippy::suspicious_open_options)]
-fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
+fn try_lock_exclusive(path: &std::path::Path) -> LockAttempt {
     use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new()
+    // An open() failure here is an access/IO problem (e.g. the file or its
+    // parent dir is owned by another/elevated user), never lock contention --
+    // contention is reported by flock(), below.
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(path)
-        .ok()?;
+    {
+        Ok(file) => file,
+        Err(e) => return LockAttempt::Inaccessible(e),
+    };
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return None;
+    if rc == 0 {
+        return LockAttempt::Acquired(LockFile { _file: file });
     }
-    Some(file)
+    let err = std::io::Error::last_os_error();
+    // flock(LOCK_NB) reports a held lock as EWOULDBLOCK (== EAGAIN on Linux);
+    // anything else is an unexpected failure we should not mask as contention.
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        LockAttempt::Contended
+    } else {
+        LockAttempt::Inaccessible(err)
+    }
 }
 
 #[cfg(windows)]
 #[allow(clippy::suspicious_open_options)]
-fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
+fn try_lock_exclusive(path: &std::path::Path) -> LockAttempt {
     use std::os::windows::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
+    // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION mean another process holds
+    // the file open with share_mode(0) -- genuine contention. Every other error
+    // (notably ERROR_ACCESS_DENIED == 5 from a file created by an elevated user)
+    // is an accessibility problem and must not be reported as a held lock.
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .share_mode(0)
         .open(path)
-        .ok()
+    {
+        Ok(file) => LockAttempt::Acquired(LockFile { _file: file }),
+        Err(e) => match e.raw_os_error() {
+            Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION) => LockAttempt::Contended,
+            _ => LockAttempt::Inaccessible(e),
+        },
+    }
 }
 
 /// Windows-specific flag to prevent console window creation
@@ -498,6 +553,67 @@ mod tests {
             lock.is_none(),
             "should return None when parent directory does not exist"
         );
+    }
+
+    #[test]
+    fn test_lockfile_fresh_acquire_is_acquired_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        match LockFile::try_acquire_detailed(&lock_path) {
+            LockAttempt::Acquired(_) => {}
+            LockAttempt::Contended => panic!("fresh path should not be contended"),
+            LockAttempt::Inaccessible(e) => panic!("fresh path should be accessible: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_lockfile_held_lock_reports_contended_not_inaccessible() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        let _first = LockFile::try_acquire(&lock_path).expect("first acquire should succeed");
+        // The key regression guard: a genuinely held lock must classify as
+        // Contended, never as Inaccessible (and vice-versa, see the perm test).
+        match LockFile::try_acquire_detailed(&lock_path) {
+            LockAttempt::Contended => {}
+            LockAttempt::Acquired(_) => panic!("held lock should not be re-acquired"),
+            LockAttempt::Inaccessible(e) => {
+                panic!("held lock must be Contended, not Inaccessible: {e}")
+            }
+        }
+    }
+
+    // A permission failure on the lock file must classify as `Inaccessible`,
+    // NOT `Contended` -- this is the #1657 / #1287 masking bug. Skipped when the
+    // test runs as root/superuser (which bypasses the permission check) and on
+    // Windows (directory mode bits don't gate file creation the same way).
+    #[cfg(unix)]
+    #[test]
+    fn test_lockfile_permission_denied_reports_inaccessible_not_contended() {
+        use std::os::unix::fs::PermissionsExt;
+        if is_running_as_superuser() {
+            eprintln!("skipping: running as superuser bypasses permission checks");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked_dir = dir.path().join("readonly");
+        std::fs::create_dir(&locked_dir).unwrap();
+        // Make the directory non-writable so open(create, write) fails EACCES.
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let lock_path = locked_dir.join("test.lock");
+
+        let attempt = LockFile::try_acquire_detailed(&lock_path);
+        // Restore perms so tempdir cleanup succeeds regardless of assertion.
+        let _ = std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o700));
+
+        match attempt {
+            LockAttempt::Inaccessible(_) => {}
+            LockAttempt::Contended => {
+                panic!("permission failure must be Inaccessible, not Contended (the #1657 bug)")
+            }
+            LockAttempt::Acquired(_) => {
+                panic!("should not have acquired a lock in a non-writable directory")
+            }
+        }
     }
 
     #[test]

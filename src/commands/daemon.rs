@@ -3,11 +3,11 @@ use crate::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
     remove_stale_daemon_files, send_control_request, send_control_request_with_timeout,
 };
-use crate::utils::LockFile;
 #[cfg(windows)]
 use crate::utils::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
 };
+use crate::utils::{LockAttempt, LockFile};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -108,11 +108,25 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
 
     remove_stale_daemon_files(&config);
 
-    if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+    match daemon_lock_state(&config) {
+        DaemonLockState::Free => {}
+        DaemonLockState::Contended => {
+            return Err(format!(
+                "daemon startup blocked: lock held by another process at {}",
+                config.lock_path.display()
+            ));
+        }
+        DaemonLockState::Inaccessible(e) => {
+            return Err(format!(
+                "daemon lock is inaccessible at {} ({}). This usually means the file or its \
+                 parent directory was created by a different or elevated user (e.g. an \
+                 Administrator/sudo install). Fix the ownership/permissions of the \
+                 ~/.git-ai/internal directory (or remove it) so your normal user account can \
+                 write to it, then retry.",
+                config.lock_path.display(),
+                e
+            ));
+        }
     }
 
     #[cfg(not(windows))]
@@ -253,20 +267,37 @@ pub(crate) fn ensure_daemon_running(
     }
 }
 
-fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
+/// Why the daemon lock could not be taken, used to distinguish "another daemon
+/// owns it" from "we cannot even open the file" (a permission/ownership problem,
+/// typically an Administrator/`sudo` install -- see #1287 / #1657).
+enum DaemonLockState {
+    /// We could acquire the lock: no daemon owns it and the path is writable.
+    Free,
+    /// A live process holds the lock.
+    Contended,
+    /// The lock file (or its parent dir) is not accessible to this user.
+    Inaccessible(std::io::Error),
+}
+
+fn daemon_lock_state(config: &DaemonConfig) -> DaemonLockState {
     if let Some(parent) = config.lock_path.parent()
-        && std::fs::create_dir_all(parent).is_err()
+        && let Err(e) = std::fs::create_dir_all(parent)
     {
-        return false;
+        return DaemonLockState::Inaccessible(e);
     }
 
-    match LockFile::try_acquire(&config.lock_path) {
-        Some(lock) => {
+    match LockFile::try_acquire_detailed(&config.lock_path) {
+        LockAttempt::Acquired(lock) => {
             drop(lock);
-            false
+            DaemonLockState::Free
         }
-        None => true,
+        LockAttempt::Contended => DaemonLockState::Contended,
+        LockAttempt::Inaccessible(e) => DaemonLockState::Inaccessible(e),
     }
+}
+
+fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
+    !matches!(daemon_lock_state(config), DaemonLockState::Free)
 }
 
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
@@ -312,11 +343,29 @@ fn start_daemon_detached_with_config(
 
     remove_stale_daemon_files(&config);
 
-    if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+    match daemon_lock_state(&config) {
+        DaemonLockState::Free => {}
+        DaemonLockState::Contended => {
+            return Err(format!(
+                "daemon startup blocked: lock held by another process at {}",
+                config.lock_path.display()
+            ));
+        }
+        DaemonLockState::Inaccessible(e) => {
+            // Not a held lock: the file/dir is owned by a different or elevated
+            // user (commonly an Administrator/`sudo` install), so this account
+            // cannot open it. Reporting this as "lock held" sends users chasing
+            // a process that does not exist (#1287 / #1657).
+            return Err(format!(
+                "daemon lock is inaccessible at {} ({}). This usually means the file or its \
+                 parent directory was created by a different or elevated user (e.g. an \
+                 Administrator/sudo install). Fix the ownership/permissions of the \
+                 ~/.git-ai/internal directory (or remove it) so your normal user account can \
+                 write to it, then retry.",
+                config.lock_path.display(),
+                e
+            ));
+        }
     }
 
     spawn_daemon_run_detached(&config)?;
