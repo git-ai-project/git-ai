@@ -6,18 +6,20 @@
 
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
+use crate::metrics::events::{checkpoint_pos, otel_trace_pos, session_event_pos};
 use crate::metrics::pos_encoded::sparse_get_string;
-use crate::metrics::types::MetricEvent;
+use crate::metrics::types::{MetricEvent, MetricEventId};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Deserialize;
+use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 3;
+const SCHEMA_VERSION: usize = 4;
 
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
+pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -44,6 +46,24 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS metrics_processing_started_at
         ON metrics (processing_started_at)
         WHERE delivered_ts IS NULL AND processing_started_at IS NOT NULL;
+    "#,
+    // Migration 3 -> 4: Cache event metadata for efficient history/backfill queries.
+    r#"
+    CREATE INDEX IF NOT EXISTS metrics_event_ts_kind
+        ON metrics (event_ts, event_kind, id)
+        WHERE event_ts IS NOT NULL AND event_kind IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS metrics_session_kind_ts
+        ON metrics (session_id, event_kind, event_ts, id)
+        WHERE session_id IS NOT NULL
+            AND event_kind IS NOT NULL
+            AND event_ts IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS metrics_parent_session_kind_ts
+        ON metrics (parent_session_id, event_kind, event_ts, id)
+        WHERE parent_session_id IS NOT NULL
+            AND event_kind IS NOT NULL
+            AND event_ts IS NOT NULL;
     "#,
 ];
 
@@ -80,6 +100,28 @@ pub struct MetricsStatus {
     pub stopped_after_errors: usize,
     pub rows_with_errors: usize,
     pub latest_error: Option<String>,
+}
+
+/// Summary returned by event metadata backfill work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetricMetadataBackfillSummary {
+    pub scanned: usize,
+    pub updated: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetricEventMetadata {
+    event_ts: u32,
+    event_kind: u16,
+    trace_id: Option<String>,
+    session_id: Option<String>,
+    parent_session_id: Option<String>,
+    tool: Option<String>,
+    external_session_id: Option<String>,
+    external_parent_session_id: Option<String>,
+    external_event_id: Option<String>,
+    external_parent_event_id: Option<String>,
+    external_tool_use_id: Option<String>,
 }
 
 /// Database wrapper for metrics storage
@@ -251,6 +293,9 @@ impl MetricsDatabase {
         if from_version == 2 {
             self.add_row_level_retry_columns()?;
         }
+        if from_version == 3 {
+            self.add_event_metadata_columns()?;
+        }
 
         let migration_sql = MIGRATIONS[from_version];
         let tx = self.conn.transaction()?;
@@ -285,6 +330,58 @@ impl MetricsDatabase {
             (
                 "processing_started_at",
                 "ALTER TABLE metrics ADD COLUMN processing_started_at INTEGER",
+            ),
+        ] {
+            self.add_column_if_missing("metrics", name, sql)?;
+        }
+        Ok(())
+    }
+
+    fn add_event_metadata_columns(&mut self) -> Result<(), GitAiError> {
+        for (name, sql) in [
+            (
+                "event_ts",
+                "ALTER TABLE metrics ADD COLUMN event_ts INTEGER DEFAULT NULL",
+            ),
+            (
+                "event_kind",
+                "ALTER TABLE metrics ADD COLUMN event_kind INTEGER DEFAULT NULL",
+            ),
+            (
+                "trace_id",
+                "ALTER TABLE metrics ADD COLUMN trace_id TEXT DEFAULT NULL",
+            ),
+            (
+                "session_id",
+                "ALTER TABLE metrics ADD COLUMN session_id TEXT DEFAULT NULL",
+            ),
+            (
+                "parent_session_id",
+                "ALTER TABLE metrics ADD COLUMN parent_session_id TEXT DEFAULT NULL",
+            ),
+            (
+                "tool",
+                "ALTER TABLE metrics ADD COLUMN tool TEXT DEFAULT NULL",
+            ),
+            (
+                "external_session_id",
+                "ALTER TABLE metrics ADD COLUMN external_session_id TEXT DEFAULT NULL",
+            ),
+            (
+                "external_parent_session_id",
+                "ALTER TABLE metrics ADD COLUMN external_parent_session_id TEXT DEFAULT NULL",
+            ),
+            (
+                "external_event_id",
+                "ALTER TABLE metrics ADD COLUMN external_event_id TEXT DEFAULT NULL",
+            ),
+            (
+                "external_parent_event_id",
+                "ALTER TABLE metrics ADD COLUMN external_parent_event_id TEXT DEFAULT NULL",
+            ),
+            (
+                "external_tool_use_id",
+                "ALTER TABLE metrics ADD COLUMN external_tool_use_id TEXT DEFAULT NULL",
             ),
         ] {
             self.add_column_if_missing("metrics", name, sql)?;
@@ -341,16 +438,60 @@ impl MetricsDatabase {
         let mut ids = Vec::with_capacity(events.len());
 
         {
-            let mut stmt = tx.prepare_cached("INSERT INTO metrics (event_json) VALUES (?1)")?;
-            let mut delivered_stmt = tx
-                .prepare_cached("INSERT INTO metrics (event_json, delivered_ts) VALUES (?1, ?2)")?;
+            let mut stmt = tx.prepare_cached(
+                r#"
+                INSERT INTO metrics (
+                    event_json,
+                    delivered_ts,
+                    event_ts,
+                    event_kind,
+                    trace_id,
+                    session_id,
+                    parent_session_id,
+                    tool,
+                    external_session_id,
+                    external_parent_session_id,
+                    external_event_id,
+                    external_parent_event_id,
+                    external_tool_use_id
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "#,
+            )?;
 
             for event_json in events {
-                if let Some(ts) = delivered_ts {
-                    delivered_stmt.execute(params![event_json, ts as i64])?;
-                } else {
-                    stmt.execute(params![event_json])?;
-                }
+                let metadata = extract_metric_event_metadata(event_json);
+                let event_ts = metadata.as_ref().map(|m| i64::from(m.event_ts));
+                let event_kind = metadata.as_ref().map(|m| i64::from(m.event_kind));
+                let delivered_ts = delivered_ts.map(|ts| ts as i64);
+
+                stmt.execute(params![
+                    event_json,
+                    delivered_ts,
+                    event_ts,
+                    event_kind,
+                    metadata.as_ref().and_then(|m| m.trace_id.as_deref()),
+                    metadata.as_ref().and_then(|m| m.session_id.as_deref()),
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.parent_session_id.as_deref()),
+                    metadata.as_ref().and_then(|m| m.tool.as_deref()),
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.external_session_id.as_deref()),
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.external_parent_session_id.as_deref()),
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.external_event_id.as_deref()),
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.external_parent_event_id.as_deref()),
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.external_tool_use_id.as_deref()),
+                ])?;
                 ids.push(tx.last_insert_rowid());
             }
         }
@@ -693,21 +834,22 @@ impl MetricsDatabase {
     }
 
     fn old_metric_row_ids(&self, cutoff: u64) -> Result<Vec<i64>, GitAiError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, event_json, delivered_ts FROM metrics ORDER BY id ASC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_json, event_ts, delivered_ts FROM metrics ORDER BY id ASC",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         })?;
 
         let mut ids = Vec::new();
         for row in rows {
-            let (id, event_json, delivered_ts) = row?;
-            if metric_row_is_older_than_cutoff(&event_json, delivered_ts, cutoff) {
+            let (id, event_json, event_ts, delivered_ts) = row?;
+            if metric_row_is_older_than_cutoff(&event_json, event_ts, delivered_ts, cutoff) {
                 ids.push(id);
             }
         }
@@ -738,12 +880,25 @@ impl MetricsDatabase {
     ) -> Result<Vec<MetricHistoryRecord>, GitAiError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT event_json FROM metrics ORDER BY id ASC")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            .prepare("SELECT event_json, event_ts, event_kind FROM metrics WHERE event_ts IS NULL OR event_ts >= ?1 ORDER BY id ASC")?;
+        let rows = stmt.query_map(params![since_ts as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
 
         let mut records = Vec::new();
         for row in rows {
-            let event_json = row?;
+            let (event_json, _cached_ts, cached_kind) = row?;
+            if let Some(kind) = cached_kind
+                && (0..=u16::MAX as i64).contains(&kind)
+                && !event_ids.contains(&(kind as u16))
+            {
+                continue;
+            }
+
             let Ok(event) = serde_json::from_str::<MetricEvent>(&event_json) else {
                 continue;
             };
@@ -771,6 +926,117 @@ impl MetricsDatabase {
         }
 
         Ok(records)
+    }
+
+    /// Backfill cached event metadata for one bounded batch of legacy rows.
+    pub fn backfill_event_metadata_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<MetricMetadataBackfillSummary, GitAiError> {
+        self.backfill_event_metadata_batch_after(0, limit)
+            .map(|(summary, _)| summary)
+    }
+
+    /// Backfill cached event metadata for all currently eligible legacy rows.
+    pub fn backfill_event_metadata(&mut self) -> Result<MetricMetadataBackfillSummary, GitAiError> {
+        let mut total = MetricMetadataBackfillSummary::default();
+        let mut after_id = 0;
+
+        loop {
+            let (summary, last_id) =
+                self.backfill_event_metadata_batch_after(after_id, METADATA_BACKFILL_BATCH_SIZE)?;
+            total.scanned += summary.scanned;
+            total.updated += summary.updated;
+
+            let Some(id) = last_id else {
+                break;
+            };
+            after_id = id;
+
+            if summary.scanned < METADATA_BACKFILL_BATCH_SIZE {
+                break;
+            }
+        }
+
+        Ok(total)
+    }
+
+    pub(crate) fn backfill_event_metadata_batch_after(
+        &mut self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<(MetricMetadataBackfillSummary, Option<i64>), GitAiError> {
+        if limit == 0 {
+            return Ok((MetricMetadataBackfillSummary::default(), None));
+        }
+
+        let rows = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, event_json FROM metrics \
+                 WHERE id > ?1 AND (event_ts IS NULL OR event_kind IS NULL) \
+                 ORDER BY id ASC \
+                 LIMIT ?2",
+            )?;
+            let mapped = stmt.query_map(params![after_id, limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut summary = MetricMetadataBackfillSummary {
+            scanned: rows.len(),
+            updated: 0,
+        };
+        let last_id = rows.last().map(|(id, _)| *id);
+        if rows.is_empty() {
+            return Ok((summary, last_id));
+        }
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                r#"
+                UPDATE metrics
+                SET event_ts = ?1,
+                    event_kind = ?2,
+                    trace_id = ?3,
+                    session_id = ?4,
+                    parent_session_id = ?5,
+                    tool = ?6,
+                    external_session_id = ?7,
+                    external_parent_session_id = ?8,
+                    external_event_id = ?9,
+                    external_parent_event_id = ?10,
+                    external_tool_use_id = ?11
+                WHERE id = ?12
+                "#,
+            )?;
+
+            for (id, event_json) in rows {
+                let Some(metadata) = extract_metric_event_metadata(&event_json) else {
+                    continue;
+                };
+
+                stmt.execute(params![
+                    i64::from(metadata.event_ts),
+                    i64::from(metadata.event_kind),
+                    metadata.trace_id.as_deref(),
+                    metadata.session_id.as_deref(),
+                    metadata.parent_session_id.as_deref(),
+                    metadata.tool.as_deref(),
+                    metadata.external_session_id.as_deref(),
+                    metadata.external_parent_session_id.as_deref(),
+                    metadata.external_event_id.as_deref(),
+                    metadata.external_parent_event_id.as_deref(),
+                    metadata.external_tool_use_id.as_deref(),
+                    id,
+                ])?;
+                summary.updated += 1;
+            }
+        }
+        tx.commit()?;
+
+        Ok((summary, last_id))
     }
 
     /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
@@ -824,20 +1090,112 @@ fn current_unix_ts() -> u64 {
 
 fn metric_row_is_older_than_cutoff(
     event_json: &str,
+    event_ts: Option<i64>,
     delivered_ts: Option<i64>,
     cutoff: u64,
 ) -> bool {
-    if let Ok(event) = serde_json::from_str::<MetricTimestampOnly>(event_json) {
-        return u64::from(event.timestamp) < cutoff;
+    if let Some(ts) = event_ts
+        && ts >= 0
+    {
+        return (ts as u64) < cutoff;
+    }
+
+    if let Some(ts) = extract_metric_event_ts(event_json) {
+        return u64::from(ts) < cutoff;
     }
 
     delivered_ts.is_some_and(|ts| ts >= 0 && (ts as u64) < cutoff)
 }
 
-#[derive(Deserialize)]
-struct MetricTimestampOnly {
-    #[serde(rename = "t")]
-    timestamp: u32,
+fn extract_metric_event_ts(event_json: &str) -> Option<u32> {
+    let value: Value = serde_json::from_str(event_json).ok()?;
+    extract_metric_event_ts_from_value(&value)
+}
+
+fn extract_metric_event_ts_from_value(value: &Value) -> Option<u32> {
+    value
+        .get("t")
+        .and_then(Value::as_u64)
+        .filter(|ts| *ts <= u32::MAX as u64)
+        .map(|ts| ts as u32)
+}
+
+fn extract_metric_event_metadata(event_json: &str) -> Option<MetricEventMetadata> {
+    let value: Value = serde_json::from_str(event_json).ok()?;
+    let event_ts = extract_metric_event_ts_from_value(&value)?;
+    let event_kind = value
+        .get("e")
+        .and_then(Value::as_u64)
+        .filter(|kind| *kind <= u16::MAX as u64)? as u16;
+
+    let attrs = value.get("a").and_then(Value::as_object);
+    let values = value.get("v").and_then(Value::as_object);
+
+    Some(MetricEventMetadata {
+        event_ts,
+        event_kind,
+        trace_id: sparse_object_string(attrs, attr_pos::TRACE_ID),
+        session_id: sparse_object_string(attrs, attr_pos::SESSION_ID),
+        parent_session_id: sparse_object_string(attrs, attr_pos::PARENT_SESSION_ID),
+        tool: sparse_object_string(attrs, attr_pos::TOOL),
+        external_session_id: sparse_object_string(attrs, attr_pos::EXTERNAL_SESSION_ID),
+        external_parent_session_id: sparse_object_string(
+            attrs,
+            attr_pos::EXTERNAL_PARENT_SESSION_ID,
+        ),
+        external_event_id: event_specific_external_event_id(event_kind, values),
+        external_parent_event_id: event_specific_external_parent_event_id(event_kind, values),
+        external_tool_use_id: event_specific_external_tool_use_id(event_kind, values),
+    })
+}
+
+fn sparse_object_string(object: Option<&Map<String, Value>>, pos: usize) -> Option<String> {
+    object?
+        .get(&pos.to_string())
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn event_specific_external_event_id(
+    event_kind: u16,
+    values: Option<&Map<String, Value>>,
+) -> Option<String> {
+    if event_kind == MetricEventId::SessionEvent as u16 {
+        return sparse_object_string(values, session_event_pos::EXTERNAL_EVENT_ID);
+    }
+    if event_kind == MetricEventId::OtelTrace as u16 {
+        return sparse_object_string(values, otel_trace_pos::EXTERNAL_EVENT_ID);
+    }
+    None
+}
+
+fn event_specific_external_parent_event_id(
+    event_kind: u16,
+    values: Option<&Map<String, Value>>,
+) -> Option<String> {
+    if event_kind == MetricEventId::SessionEvent as u16 {
+        return sparse_object_string(values, session_event_pos::EXTERNAL_PARENT_EVENT_ID);
+    }
+    if event_kind == MetricEventId::OtelTrace as u16 {
+        return sparse_object_string(values, otel_trace_pos::EXTERNAL_PARENT_EVENT_ID);
+    }
+    None
+}
+
+fn event_specific_external_tool_use_id(
+    event_kind: u16,
+    values: Option<&Map<String, Value>>,
+) -> Option<String> {
+    if event_kind == MetricEventId::Checkpoint as u16 {
+        return sparse_object_string(values, checkpoint_pos::TOOL_USE_ID);
+    }
+    if event_kind == MetricEventId::SessionEvent as u16 {
+        return sparse_object_string(values, session_event_pos::EXTERNAL_TOOL_USE_ID);
+    }
+    if event_kind == MetricEventId::OtelTrace as u16 {
+        return sparse_object_string(values, otel_trace_pos::EXTERNAL_TOOL_USE_ID);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -890,6 +1248,88 @@ mod tests {
         rows.collect::<Result<Vec<_>, _>>().unwrap()
     }
 
+    fn assert_metric_index_exists(db: &MetricsDatabase, index: &str) {
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                params![index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing index {index}");
+    }
+
+    fn metric_metadata_rows(db: &MetricsDatabase) -> Vec<(Option<i64>, Option<i64>)> {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT event_ts, event_kind FROM metrics ORDER BY id ASC")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct MetricIdentifierRow {
+        trace_id: Option<String>,
+        session_id: Option<String>,
+        parent_session_id: Option<String>,
+        tool: Option<String>,
+        external_session_id: Option<String>,
+        external_parent_session_id: Option<String>,
+        external_event_id: Option<String>,
+        external_parent_event_id: Option<String>,
+        external_tool_use_id: Option<String>,
+    }
+
+    fn metric_identifier_rows(db: &MetricsDatabase) -> Vec<MetricIdentifierRow> {
+        let mut stmt = db
+            .conn
+            .prepare(
+                "SELECT trace_id, session_id, parent_session_id, tool, \
+                        external_session_id, external_parent_session_id, \
+                        external_event_id, external_parent_event_id, external_tool_use_id \
+                 FROM metrics ORDER BY id ASC",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(MetricIdentifierRow {
+                    trace_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    parent_session_id: row.get(2)?,
+                    tool: row.get(3)?,
+                    external_session_id: row.get(4)?,
+                    external_parent_session_id: row.get(5)?,
+                    external_event_id: row.get(6)?,
+                    external_parent_event_id: row.get(7)?,
+                    external_tool_use_id: row.get(8)?,
+                })
+            })
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    fn event_json_with_all_common_metadata(ts: u32, event_kind: u16) -> String {
+        format!(
+            r#"{{
+                "t":{ts},
+                "e":{event_kind},
+                "v":{{}},
+                "a":{{
+                    "20":"codex",
+                    "23":"external-session-1",
+                    "24":"session-1",
+                    "25":"trace-1",
+                    "26":"parent-session-1",
+                    "27":"external-parent-session-1"
+                }}
+            }}"#
+        )
+    }
+
     #[test]
     fn test_initialize_schema() {
         let (db, _temp_dir) = create_test_db();
@@ -914,7 +1354,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
 
         for column in [
             "delivered_ts",
@@ -923,6 +1363,17 @@ mod tests {
             "last_sync_at",
             "next_retry_at",
             "processing_started_at",
+            "event_ts",
+            "event_kind",
+            "trace_id",
+            "session_id",
+            "parent_session_id",
+            "tool",
+            "external_session_id",
+            "external_parent_session_id",
+            "external_event_id",
+            "external_parent_event_id",
+            "external_tool_use_id",
         ] {
             let column_count: i64 = db
                 .conn
@@ -933,6 +1384,14 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(column_count, 1, "missing column {column}");
+        }
+
+        for index in [
+            "metrics_event_ts_kind",
+            "metrics_session_kind_ts",
+            "metrics_parent_session_kind_ts",
+        ] {
+            assert_metric_index_exists(&db, index);
         }
     }
 
@@ -975,7 +1434,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
@@ -1014,7 +1473,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         assert_eq!(db.count().unwrap(), 1);
         assert_eq!(db.count_retryable().unwrap(), 1);
     }
@@ -1057,7 +1516,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
 
         for column in [
             "delivered_ts",
@@ -1066,10 +1525,91 @@ mod tests {
             "last_sync_at",
             "next_retry_at",
             "processing_started_at",
+            "event_ts",
+            "event_kind",
+            "trace_id",
+            "session_id",
+            "parent_session_id",
+            "tool",
+            "external_session_id",
+            "external_parent_session_id",
+            "external_event_id",
+            "external_parent_event_id",
+            "external_tool_use_id",
         ] {
             assert!(db.column_exists("metrics", column).unwrap());
         }
         assert_eq!(db.count_retryable().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_migrates_version_3_to_event_metadata_schema_without_sync_backfill() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v3.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '3');
+            CREATE TABLE metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json TEXT NOT NULL,
+                delivered_ts INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_sync_error TEXT,
+                last_sync_at INTEGER,
+                next_retry_at INTEGER NOT NULL DEFAULT 0,
+                processing_started_at INTEGER
+            );
+            INSERT INTO metrics (event_json)
+            VALUES ('{"t":1700000000,"e":4,"v":{},"a":{}}');
+            CREATE TABLE agent_usage_throttle (
+                prompt_id TEXT PRIMARY KEY,
+                last_sent_ts INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "4");
+        assert!(db.column_exists("metrics", "event_ts").unwrap());
+        assert!(db.column_exists("metrics", "event_kind").unwrap());
+        for index in [
+            "metrics_event_ts_kind",
+            "metrics_session_kind_ts",
+            "metrics_parent_session_kind_ts",
+        ] {
+            assert_metric_index_exists(&db, index);
+        }
+        assert_eq!(metric_metadata_rows(&db), vec![(None, None)]);
+        assert_eq!(
+            metric_identifier_rows(&db),
+            vec![MetricIdentifierRow {
+                trace_id: None,
+                session_id: None,
+                parent_session_id: None,
+                tool: None,
+                external_session_id: None,
+                external_parent_session_id: None,
+                external_event_id: None,
+                external_parent_event_id: None,
+                external_tool_use_id: None,
+            }]
+        );
     }
 
     #[test]
@@ -1089,6 +1629,332 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(db.count_retryable().unwrap(), 2);
         assert_eq!(ids.len(), 2);
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![(Some(ts1 as i64), Some(1)), (Some(ts2 as i64), Some(1))]
+        );
+    }
+
+    #[test]
+    fn test_insert_events_populates_existing_common_metadata_from_attrs() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_ts = days_ago(1);
+        db.insert_events(&[event_json_with_all_common_metadata(event_ts, 5)])
+            .unwrap();
+
+        let row: (Option<i64>, Option<i64>) = db
+            .conn
+            .query_row("SELECT event_ts, event_kind FROM metrics", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, (Some(event_ts as i64), Some(5)));
+        assert_eq!(
+            metric_identifier_rows(&db),
+            vec![MetricIdentifierRow {
+                trace_id: Some("trace-1".to_string()),
+                session_id: Some("session-1".to_string()),
+                parent_session_id: Some("parent-session-1".to_string()),
+                tool: Some("codex".to_string()),
+                external_session_id: Some("external-session-1".to_string()),
+                external_parent_session_id: Some("external-parent-session-1".to_string()),
+                external_event_id: None,
+                external_parent_event_id: None,
+                external_tool_use_id: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_insert_events_with_delivered_ts_populates_event_metadata() {
+        let (mut db, _temp_dir) = create_test_db();
+        let delivered_ts = unix_now();
+        let event_ts = days_ago(1);
+        db.insert_events_with_delivered_ts(
+            &[event_json_with_all_common_metadata(event_ts, 6)],
+            Some(delivered_ts),
+        )
+        .unwrap();
+
+        let row: (Option<i64>, Option<i64>, Option<i64>, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT event_ts, event_kind, delivered_ts, trace_id FROM metrics",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                Some(event_ts as i64),
+                Some(6),
+                Some(delivered_ts as i64),
+                Some("trace-1".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_insert_events_populates_event_specific_external_ids() {
+        let (mut db, _temp_dir) = create_test_db();
+        let session_event_ts = days_ago(2);
+        let otel_trace_ts = days_ago(1);
+        let checkpoint_ts = unix_now().min(u32::MAX as u64) as u32;
+        let events = vec![
+            format!(
+                r#"{{
+                    "t":{session_event_ts},
+                    "e":5,
+                    "v":{{"1":"legacy-event","2":"legacy-parent","3":"legacy-tool"}},
+                    "a":{{"24":"session-from-attrs"}}
+                }}"#
+            ),
+            format!(
+                r#"{{
+                    "t":{otel_trace_ts},
+                    "e":6,
+                    "v":{{"1":"otel-event","2":"otel-parent","3":"otel-tool"}},
+                    "a":{{"25":"trace-from-attrs"}}
+                }}"#
+            ),
+            format!(
+                r#"{{
+                    "t":{checkpoint_ts},
+                    "e":4,
+                    "v":{{"7":"checkpoint-tool-use"}},
+                    "a":{{"20":"claude-code"}}
+                }}"#
+            ),
+        ];
+
+        db.insert_events(&events).unwrap();
+
+        assert_eq!(
+            metric_identifier_rows(&db),
+            vec![
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: Some("session-from-attrs".to_string()),
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: Some("legacy-event".to_string()),
+                    external_parent_event_id: Some("legacy-parent".to_string()),
+                    external_tool_use_id: Some("legacy-tool".to_string()),
+                },
+                MetricIdentifierRow {
+                    trace_id: Some("trace-from-attrs".to_string()),
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: Some("otel-event".to_string()),
+                    external_parent_event_id: Some("otel-parent".to_string()),
+                    external_tool_use_id: Some("otel-tool".to_string()),
+                },
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: Some("claude-code".to_string()),
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: None,
+                    external_parent_event_id: None,
+                    external_tool_use_id: Some("checkpoint-tool-use".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_insert_events_leaves_event_metadata_null_for_invalid_json() {
+        let (mut db, _temp_dir) = create_test_db();
+        let recent_event_ts = days_ago(1);
+        let events = vec![
+            "not-json".to_string(),
+            format!(r#"{{"t":{recent_event_ts},"v":{{}},"a":{{}}}}"#),
+            format!(r#"{{"t":{recent_event_ts},"e":null,"v":{{}},"a":{{}}}}"#),
+        ];
+
+        db.insert_events(&events).unwrap();
+
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![(None, None), (None, None), (None, None)]
+        );
+        assert_eq!(
+            metric_identifier_rows(&db),
+            vec![
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: None,
+                    external_parent_event_id: None,
+                    external_tool_use_id: None,
+                },
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: None,
+                    external_parent_event_id: None,
+                    external_tool_use_id: None,
+                },
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: None,
+                    external_parent_event_id: None,
+                    external_tool_use_id: None,
+                },
+            ]
+        );
+        assert_eq!(db.count().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_backfill_event_metadata_batch_updates_valid_legacy_rows_only() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts1 = days_ago(3);
+        let ts2 = days_ago(2);
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1), (?2), (?3)",
+                params![
+                    event_json_with_all_common_metadata(ts1, 1),
+                    format!(
+                        r#"{{"t":{ts2},"e":5,"v":{{"1":"legacy-event","2":"legacy-parent","3":"legacy-tool"}},"a":{{"1":"https://github.com/acme/project"}}}}"#
+                    ),
+                    "not-json",
+                ],
+            )
+            .unwrap();
+
+        let summary = db.backfill_event_metadata_batch(100).unwrap();
+
+        assert_eq!(summary.scanned, 3);
+        assert_eq!(summary.updated, 2);
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![
+                (Some(ts1 as i64), Some(1)),
+                (Some(ts2 as i64), Some(5)),
+                (None, None),
+            ]
+        );
+        assert_eq!(
+            metric_identifier_rows(&db),
+            vec![
+                MetricIdentifierRow {
+                    trace_id: Some("trace-1".to_string()),
+                    session_id: Some("session-1".to_string()),
+                    parent_session_id: Some("parent-session-1".to_string()),
+                    tool: Some("codex".to_string()),
+                    external_session_id: Some("external-session-1".to_string()),
+                    external_parent_session_id: Some("external-parent-session-1".to_string()),
+                    external_event_id: None,
+                    external_parent_event_id: None,
+                    external_tool_use_id: None,
+                },
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: Some("legacy-event".to_string()),
+                    external_parent_event_id: Some("legacy-parent".to_string()),
+                    external_tool_use_id: Some("legacy-tool".to_string()),
+                },
+                MetricIdentifierRow {
+                    trace_id: None,
+                    session_id: None,
+                    parent_session_id: None,
+                    tool: None,
+                    external_session_id: None,
+                    external_parent_session_id: None,
+                    external_event_id: None,
+                    external_parent_event_id: None,
+                    external_tool_use_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_backfill_event_metadata_batch_after_advances_cursor() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts1 = days_ago(3);
+        let ts2 = days_ago(2);
+        let ts3 = days_ago(1);
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1), (?2), (?3)",
+                params![event_json(ts1), event_json(ts2), event_json(ts3)],
+            )
+            .unwrap();
+
+        let (first_summary, first_last_id) = db.backfill_event_metadata_batch_after(0, 2).unwrap();
+
+        assert_eq!(
+            first_summary,
+            MetricMetadataBackfillSummary {
+                scanned: 2,
+                updated: 2,
+            }
+        );
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![
+                (Some(ts1 as i64), Some(1)),
+                (Some(ts2 as i64), Some(1)),
+                (None, None),
+            ]
+        );
+
+        let first_last_id = first_last_id.unwrap();
+        let (second_summary, second_last_id) = db
+            .backfill_event_metadata_batch_after(first_last_id, 2)
+            .unwrap();
+
+        assert_eq!(
+            second_summary,
+            MetricMetadataBackfillSummary {
+                scanned: 1,
+                updated: 1,
+            }
+        );
+        assert!(second_last_id.is_some_and(|id| id > first_last_id));
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![
+                (Some(ts1 as i64), Some(1)),
+                (Some(ts2 as i64), Some(1)),
+                (Some(ts3 as i64), Some(1)),
+            ]
+        );
+
+        let (empty_summary, empty_last_id) = db
+            .backfill_event_metadata_batch_after(second_last_id.unwrap(), 2)
+            .unwrap();
+        assert_eq!(empty_summary, MetricMetadataBackfillSummary::default());
+        assert_eq!(empty_last_id, None);
     }
 
     #[test]
@@ -1404,6 +2270,48 @@ mod tests {
     }
 
     #[test]
+    fn test_get_metric_history_reads_legacy_rows_before_and_after_metadata_backfill() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts1 = days_ago(2);
+        let ts2 = days_ago(1);
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1), (?2)",
+                params![
+                    event_json_with_repo(ts1, 4, "https://github.com/acme/project"),
+                    event_json_with_repo(ts2, 5, "https://github.com/acme/project"),
+                ],
+            )
+            .unwrap();
+
+        let before = db
+            .get_metric_history(0, Some("acme/project"), &[4, 5])
+            .unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .map(|record| (record.event_id, record.ts))
+                .collect::<Vec<_>>(),
+            vec![(4, ts1), (5, ts2)]
+        );
+
+        let summary = db.backfill_event_metadata_batch(100).unwrap();
+        assert_eq!(summary.scanned, 2);
+        assert_eq!(summary.updated, 2);
+
+        let after = db
+            .get_metric_history(0, Some("acme/project"), &[4, 5])
+            .unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .map(|record| (record.event_id, record.ts))
+                .collect::<Vec<_>>(),
+            vec![(4, ts1), (5, ts2)]
+        );
+    }
+
+    #[test]
     fn test_prunes_metric_rows_older_than_retention_by_event_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
@@ -1427,6 +2335,28 @@ mod tests {
     }
 
     #[test]
+    fn test_prunes_metric_rows_older_than_retention_by_cached_event_timestamp() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let recent_json_ts = days_ago(1);
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json, event_ts, event_kind) VALUES (?1, ?2, ?3)",
+                params![event_json(recent_json_ts), old_event_ts as i64, 1],
+            )
+            .unwrap();
+
+        db.prune_old_metrics_if_due().unwrap();
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
     fn test_prunes_old_pending_metric_rows() {
         let (mut db, _temp_dir) = create_test_db();
 
@@ -1446,6 +2376,31 @@ mod tests {
         let batch = pending_event_jsons(&db);
         assert_eq!(batch.len(), 1);
         assert!(batch[0].contains(&format!("\"t\":{recent_event_ts}")));
+    }
+
+    #[test]
+    fn test_prunes_pending_rows_with_timestamp_even_when_kind_is_missing() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let recent_event_ts = days_ago(1);
+        let pending = vec![
+            format!(r#"{{"t":{old_event_ts},"v":{{}},"a":{{}}}}"#),
+            format!(r#"{{"t":{recent_event_ts},"v":{{}},"a":{{}}}}"#),
+        ];
+
+        db.insert_events(&pending).unwrap();
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+        let remaining: String = db
+            .conn
+            .query_row("SELECT event_json FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert!(remaining.contains(&format!("\"t\":{recent_event_ts}")));
     }
 
     #[test]

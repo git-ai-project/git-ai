@@ -786,6 +786,60 @@ fn test_rebase_patch_stack() {
     topic3_file.assert_lines_and_blame(crate::lines!["// AI topic 3".ai()]);
 }
 
+#[test]
+fn test_rebase_ignores_stale_pending_state_from_untraced_abort() {
+    let repo = TestRepo::new();
+
+    let mut stale_file = repo.filename("stale-conflict.txt");
+    stale_file.set_contents(crate::lines!["base"]);
+    let base_commit = repo.stage_all_and_commit("base").unwrap().commit_sha;
+    stale_file.assert_committed_lines(crate::lines!["base".human()]);
+
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "stale-topic"]).unwrap();
+    stale_file.replace_at(0, "stale side".ai());
+    let stale_tip = repo.stage_all_and_commit("stale topic").unwrap().commit_sha;
+    stale_file.assert_committed_lines(crate::lines!["stale side".ai()]);
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    stale_file.replace_at(0, "main side".human());
+    repo.stage_all_and_commit("main side").unwrap();
+    stale_file.assert_committed_lines(crate::lines!["main side".human()]);
+
+    repo.git(&["checkout", "stale-topic"]).unwrap();
+    let failed_rebase = repo.git(&["rebase", &default_branch]);
+    assert!(
+        failed_rebase.is_err(),
+        "stale-topic rebase should stop on the conflict that seeds pending daemon state"
+    );
+    repo.sync_daemon();
+
+    repo.git_og_with_env(&["rebase", "--abort"], &[("GIT_TRACE2_EVENT", "0")])
+        .expect("untraced rebase abort should restore Git state without clearing daemon memory");
+    let after_abort = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_eq!(after_abort, stale_tip);
+    stale_file.assert_committed_lines(crate::lines!["stale side".ai()]);
+
+    repo.git(&["checkout", "-b", "feature", &base_commit])
+        .unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["feature ai".ai()]);
+    let original_feature = repo.stage_all_and_commit("feature ai").unwrap().commit_sha;
+    feature_file.assert_committed_lines(crate::lines!["feature ai".ai()]);
+    assert!(
+        repo.read_authorship_note(&original_feature).is_some(),
+        "original feature commit should have an authorship note before rebase"
+    );
+
+    repo.git(&["rebase", &default_branch])
+        .expect("ordinary feature rebase should succeed");
+    let rebased_feature = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_ne!(rebased_feature, original_feature);
+
+    feature_file.assert_lines_and_blame(crate::lines!["feature ai".ai()]);
+}
+
 /// Test rebase with no changes (already up to date)
 #[test]
 fn test_rebase_already_up_to_date() {

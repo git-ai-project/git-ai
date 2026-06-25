@@ -612,10 +612,13 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
     gt_init(&repo);
 
     // First commit: all human
-    let mut file = repo.filename("squash_mixed.txt");
-    file.set_contents(crate::lines!["human only line 1", "human only line 2"]);
+    let file_path = repo.path().join("squash_mixed.txt");
+    std::fs::write(&file_path, "human only line 1\nhuman only line 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "squash_mixed.txt"])
+        .unwrap();
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "squash-mixed", "-m", "human commit"]).expect("gt create should succeed");
+    let mut file = crate::repos::test_file::TestFile::from_existing_file(file_path, &repo);
 
     // Second commit: add AI lines
     file.set_contents(crate::lines![
@@ -771,10 +774,13 @@ fn test_gt_fold_with_mixed_content() {
     gt_init(&repo);
 
     // Create parent branch with a file containing mixed content
-    let mut file = repo.filename("fold_mixed.txt");
-    file.set_contents(crate::lines!["parent line 1", "parent line 2"]);
+    let file_path = repo.path().join("fold_mixed.txt");
+    std::fs::write(&file_path, "parent line 1\nparent line 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "fold_mixed.txt"])
+        .unwrap();
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "fold-mixed-parent", "-m", "parent"]).expect("gt create should succeed");
+    let mut file = crate::repos::test_file::TestFile::from_existing_file(file_path, &repo);
 
     // Create child that modifies the same file
     file.set_contents(crate::lines![

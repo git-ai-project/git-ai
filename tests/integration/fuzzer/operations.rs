@@ -2,7 +2,7 @@ use rand::{Rng, RngExt};
 
 use crate::repos::test_repo::TestRepo;
 
-use super::model::{AttrRegistry, FileModel, LineAttribution};
+use super::model::{AttrRecord, AttrRegistry, FileModel, LineAttribution};
 
 pub struct CharAllocator {
     next: u32,
@@ -43,6 +43,7 @@ pub fn random_edit(
         for &ch in &new_chars {
             model.lines.push(ch);
             model.resolved_attrs.push(LineAttribution::Untracked);
+            model.resolved_ai_sessions.push(None);
         }
     } else {
         let strategy = rng.random_range(0..4);
@@ -54,6 +55,7 @@ pub fn random_edit(
                     model
                         .resolved_attrs
                         .insert(pos + j, LineAttribution::Untracked);
+                    model.resolved_ai_sessions.insert(pos + j, None);
                 }
             }
             1 => {
@@ -63,16 +65,19 @@ pub fn random_edit(
                 for (j, &ch) in new_chars.iter().take(replace_count).enumerate() {
                     model.lines[start + j] = ch;
                     model.resolved_attrs[start + j] = LineAttribution::Untracked;
+                    model.resolved_ai_sessions[start + j] = None;
                 }
                 for &ch in new_chars.iter().skip(replace_count) {
                     model.lines.insert(end, ch);
                     model.resolved_attrs.insert(end, LineAttribution::Untracked);
+                    model.resolved_ai_sessions.insert(end, None);
                 }
             }
             2 => {
                 for &ch in &new_chars {
                     model.lines.push(ch);
                     model.resolved_attrs.push(LineAttribution::Untracked);
+                    model.resolved_ai_sessions.push(None);
                 }
             }
             3 => {
@@ -81,6 +86,9 @@ pub fn random_edit(
                     let del_start = rng.random_range(0..model.lines.len() - del_count + 1);
                     model.lines.drain(del_start..del_start + del_count);
                     model.resolved_attrs.drain(del_start..del_start + del_count);
+                    model
+                        .resolved_ai_sessions
+                        .drain(del_start..del_start + del_count);
                 }
                 let pos = if model.lines.is_empty() {
                     0
@@ -92,6 +100,7 @@ pub fn random_edit(
                     model
                         .resolved_attrs
                         .insert(pos + j, LineAttribution::Untracked);
+                    model.resolved_ai_sessions.insert(pos + j, None);
                 }
             }
             _ => unreachable!(),
@@ -113,12 +122,16 @@ pub fn checkpoint_ai(
     repo.git_ai(&["checkpoint", "mock_ai", &model.filename])
         .unwrap_or_else(|e| panic!("checkpoint mock_ai failed: {}", e));
 
+    let session = registry.allocate_ai_session();
     for &ch in written_chars {
-        registry.register(ch, LineAttribution::Ai);
+        let record = AttrRecord::ai(session);
+        registry.register_record(ch, record);
+        model.mark_pending_attestation(ch, record);
     }
     for (i, &ch) in model.lines.iter().enumerate() {
         if written_chars.contains(&ch) {
             model.resolved_attrs[i] = LineAttribution::Ai;
+            model.resolved_ai_sessions[i] = Some(session);
         }
     }
     op_log.push(format!("checkpoint_ai({})", model.filename));
@@ -136,11 +149,14 @@ pub fn checkpoint_human(
         .unwrap_or_else(|e| panic!("checkpoint mock_known_human failed: {}", e));
 
     for &ch in written_chars {
-        registry.register(ch, LineAttribution::KnownHuman);
+        let record = AttrRecord::new(LineAttribution::KnownHuman);
+        registry.register_record(ch, record);
+        model.mark_pending_attestation(ch, record);
     }
     for (i, &ch) in model.lines.iter().enumerate() {
         if written_chars.contains(&ch) {
             model.resolved_attrs[i] = LineAttribution::KnownHuman;
+            model.resolved_ai_sessions[i] = None;
         }
     }
     op_log.push(format!("checkpoint_human({})", model.filename));
@@ -156,36 +172,47 @@ pub fn checkpoint_untracked(model: &FileModel, repo: &TestRepo, op_log: &mut Vec
 /// Commit: stage all and commit. Then reconcile and assert.
 pub fn commit(
     model: &mut FileModel,
+    registry: &mut AttrRegistry,
     repo: &TestRepo,
     op_log: &mut Vec<String>,
     seed: u64,
     msg: &str,
 ) {
     repo.git(&["add", "."]).unwrap();
+    let added_lines = staged_added_lines(repo, &model.filename, Some("HEAD"));
     repo.git(&["commit", "-m", msg, "--allow-empty"])
         .unwrap_or_else(|e| panic!("commit '{}' failed: {}", msg, e));
 
     op_log.push(format!("commit(\"{}\")", msg));
+    model.apply_edge_recovery_for_added_lines(registry, &added_lines);
     model.reconcile(repo);
     model.assert_blame(repo, op_log, seed);
+    model.clear_pending_attestations();
 }
 
 /// Amend the last commit. Then reconcile and assert.
 pub fn amend(
     model: &mut FileModel,
-    registry: &AttrRegistry,
+    registry: &mut AttrRegistry,
     repo: &TestRepo,
     op_log: &mut Vec<String>,
     seed: u64,
 ) {
     repo.git(&["add", "."]).unwrap();
+    let parent = repo
+        .git(&["rev-parse", "--verify", "HEAD^"])
+        .ok()
+        .map(|output| output.trim().to_string());
+    let added_lines = staged_added_lines(repo, &model.filename, parent.as_deref());
     repo.git(&["commit", "--amend", "--no-edit"])
         .unwrap_or_else(|e| panic!("amend failed: {}", e));
 
     op_log.push("amend".to_string());
     model.sync_from_disk(repo, registry);
+    model.apply_edge_recovery_for_added_lines(registry, &added_lines);
     model.reconcile(repo);
     model.assert_blame(repo, op_log, seed);
+    model.clear_pending_attestations();
 }
 
 /// Rebase: creates a side branch with commits, then rebases onto main.
@@ -207,7 +234,7 @@ pub fn rebase(
     // Create a commit on main first (so rebase has something to replay onto)
     let chars = random_edit(model, registry, repo, alloc, rng, 2);
     checkpoint_ai(model, registry, repo, &chars, op_log);
-    commit(model, repo, op_log, seed, "rebase: main advance");
+    commit(model, registry, repo, op_log, seed, "rebase: main advance");
 
     // Create side branch from parent
     let parent = repo
@@ -225,7 +252,10 @@ pub fn rebase(
     let side_chars = random_edit(model, registry, repo, alloc, rng, 2);
     checkpoint_ai(model, registry, repo, &side_chars, op_log);
     repo.git(&["add", "."]).unwrap();
+    let side_added_lines = staged_added_lines(repo, &model.filename, Some("HEAD"));
     repo.git(&["commit", "-m", "rebase: side commit"]).unwrap();
+    model.apply_edge_recovery_for_added_lines(registry, &side_added_lines);
+    model.clear_pending_attestations();
     op_log.push("commit(\"rebase: side commit\")".to_string());
 
     // Rebase side onto main
@@ -275,8 +305,11 @@ pub fn cherry_pick(
     let chars = random_edit(model, registry, repo, alloc, rng, 2);
     checkpoint_ai(model, registry, repo, &chars, op_log);
     repo.git(&["add", "."]).unwrap();
+    let side_added_lines = staged_added_lines(repo, &model.filename, Some("HEAD"));
     repo.git(&["commit", "-m", "cherry-pick: side commit"])
         .unwrap();
+    model.apply_edge_recovery_for_added_lines(registry, &side_added_lines);
+    model.clear_pending_attestations();
     let side_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Go back to main
@@ -375,5 +408,68 @@ pub fn stash_roundtrip(
 
     // Commit so blame can render the restored attribution, then assert.
     model.sync_from_disk(repo, registry);
-    commit(model, repo, op_log, seed, "stash roundtrip commit");
+    commit(
+        model,
+        registry,
+        repo,
+        op_log,
+        seed,
+        "stash roundtrip commit",
+    );
+}
+
+fn staged_added_lines(repo: &TestRepo, filename: &str, base: Option<&str>) -> Vec<u32> {
+    let mut args = vec![
+        "diff".to_string(),
+        "--cached".to_string(),
+        "--unified=0".to_string(),
+    ];
+    if let Some(base) = base {
+        args.push(base.to_string());
+    }
+    args.push("--".to_string());
+    args.push(filename.to_string());
+
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let diff = repo.git(&arg_refs).unwrap_or_default();
+    parse_diff_added_lines(&diff)
+}
+
+fn parse_diff_added_lines(diff: &str) -> Vec<u32> {
+    let mut added = Vec::new();
+    let mut next_new_line = None::<u32>;
+
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            next_new_line = parse_hunk_new_start(line);
+            continue;
+        }
+
+        let Some(current) = next_new_line else {
+            continue;
+        };
+
+        if line.starts_with("+++") || line.starts_with("\\ No newline") {
+            continue;
+        }
+
+        if line.starts_with('+') {
+            added.push(current);
+            next_new_line = Some(current + 1);
+        } else if line.starts_with('-') {
+            next_new_line = Some(current);
+        } else {
+            next_new_line = Some(current + 1);
+        }
+    }
+
+    added
+}
+
+fn parse_hunk_new_start(header: &str) -> Option<u32> {
+    let plus = header.find('+')?;
+    let after_plus = &header[plus + 1..];
+    let end = after_plus.find([' ', '@']).unwrap_or(after_plus.len());
+    let range = &after_plus[..end];
+    range.split(',').next()?.parse().ok()
 }

@@ -6,7 +6,6 @@ use crate::git::cli_parser::{
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
-use crate::git::repository::exec_git_stdin;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -436,11 +435,12 @@ impl RefCursor {
             cherry_pick_source_args(&args)
         };
         let explicit_sources = if is_continue || is_skip {
-            Vec::new()
+            Some(Vec::new())
         } else {
             resolve_cherry_pick_source_oids_from_sources(cmd, state, &source_args)?
         };
-        let unresolved_explicit_sources = !source_args.is_empty() && explicit_sources.is_empty();
+        let unresolved_explicit_sources = !source_args.is_empty() && explicit_sources.is_none();
+        let explicit_sources = explicit_sources.unwrap_or_default();
         cmd.cherry_pick_source_oids = if explicit_sources.is_empty() && !unresolved_explicit_sources
         {
             self.pending_cherry_pick_source_oids.clone()
@@ -456,7 +456,11 @@ impl RefCursor {
             return Ok(());
         }
 
-        let source_limit = cmd.cherry_pick_source_oids.len().max(1);
+        let source_limit = if unresolved_explicit_sources {
+            usize::MAX
+        } else {
+            cmd.cherry_pick_source_oids.len().max(1)
+        };
         self.consume_head_span_for_command_limited(
             cmd,
             state,
@@ -518,17 +522,22 @@ impl RefCursor {
             revert_source_args(&args)
         };
         let explicit_sources = if source_args.is_empty() {
-            Vec::new()
+            Some(Vec::new())
         } else {
             resolve_cherry_pick_source_oids_from_sources(cmd, state, &source_args)?
         };
-        cmd.revert_source_oids = explicit_sources;
+        let unresolved_explicit_sources = !source_args.is_empty() && explicit_sources.is_none();
+        cmd.revert_source_oids = explicit_sources.unwrap_or_default();
 
         if is_no_commit {
             return Ok(());
         }
 
-        let source_limit = cmd.revert_source_oids.len().max(1);
+        let source_limit = if unresolved_explicit_sources {
+            usize::MAX
+        } else {
+            cmd.revert_source_oids.len().max(1)
+        };
         self.consume_head_span_for_command_limited(
             cmd,
             state,
@@ -2222,33 +2231,23 @@ fn commit_subject(message: &str) -> Option<String> {
 }
 
 fn resolve_cherry_pick_source_oids_from_sources(
-    cmd: &NormalizedCommand,
+    _cmd: &NormalizedCommand,
     state: &FamilyState,
     sources: &[&str],
-) -> Result<Vec<String>, GitAiError> {
-    let Some(worktree) = cmd.worktree.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+) -> Result<Option<Vec<String>>, GitAiError> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    let has_range = sources
-        .iter()
-        .any(|source| cherry_pick_source_is_range(source));
-    let resolved = if has_range {
-        resolve_cherry_pick_sources_with_rev_list(&repo, sources, &state.refs)?
-    } else {
-        resolve_cherry_pick_sources_with_cat_file(&repo, sources, &state.refs)?
-    };
-
-    for oid in resolved {
+    for source in sources {
+        let Some(oid) = resolve_cherry_pick_source_from_state(source, &state.refs) else {
+            return Ok(None);
+        };
         if seen.insert(oid.clone()) {
             out.push(oid);
         }
     }
 
-    Ok(out)
+    Ok(Some(out))
 }
 
 fn cherry_pick_source_args(args: &[String]) -> Vec<&str> {
@@ -2270,7 +2269,7 @@ fn cherry_pick_source_args(args: &[String]) -> Vec<&str> {
         }
         if matches!(
             arg,
-            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy" | "--gpg-sign"
+            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy"
         ) {
             idx = idx.saturating_add(2);
             continue;
@@ -2278,6 +2277,7 @@ fn cherry_pick_source_args(args: &[String]) -> Vec<&str> {
         if arg.starts_with("--mainline=")
             || arg.starts_with("--strategy=")
             || arg.starts_with("--strategy-option=")
+            || arg == "--gpg-sign"
             || arg.starts_with("--gpg-sign=")
             || arg.starts_with("-m")
             || arg.starts_with("-X")
@@ -2315,11 +2315,14 @@ fn revert_source_args(args: &[String]) -> Vec<&str> {
         if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
             return Vec::new();
         }
-        if matches!(arg, "-m" | "--mainline" | "-S" | "--gpg-sign") {
+        if matches!(arg, "-m" | "--mainline") {
             idx = idx.saturating_add(2);
             continue;
         }
-        if arg.starts_with("--mainline=") || arg.starts_with("--gpg-sign=") || arg.starts_with("-S")
+        if arg.starts_with("--mainline=")
+            || arg == "--gpg-sign"
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-S")
         {
             idx += 1;
             continue;
@@ -2344,92 +2347,6 @@ fn cherry_pick_source_is_range(source: &str) -> bool {
     source.contains("..")
 }
 
-fn resolve_cherry_pick_sources_with_rev_list(
-    repo: &crate::git::repository::Repository,
-    sources: &[&str],
-    refs: &HashMap<String, String>,
-) -> Result<Vec<String>, GitAiError> {
-    let concretized: Vec<String> = sources
-        .iter()
-        .filter_map(|source| {
-            if cherry_pick_source_is_range(source) {
-                concretize_revision_range(source, refs)
-            } else {
-                concretize_revision_expr(source, refs)
-            }
-        })
-        .collect();
-    if concretized.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "rev-list".to_string(),
-        "--reverse".to_string(),
-        "--stdin".to_string(),
-    ]);
-    let stdin_data = concretized.join("\n") + "\n";
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| is_valid_git_oid(line))
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-fn resolve_cherry_pick_sources_with_cat_file(
-    repo: &crate::git::repository::Repository,
-    sources: &[&str],
-    refs: &HashMap<String, String>,
-) -> Result<Vec<String>, GitAiError> {
-    let specs: Vec<String> = sources
-        .iter()
-        .filter_map(|source| concretize_revision_expr(source, refs))
-        .map(|expr| format!("{expr}^{{commit}}"))
-        .collect();
-    if specs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "cat-file".to_string(),
-        "--batch-check=%(objectname) %(objecttype)".to_string(),
-    ]);
-    let stdin_data = specs.join("\n") + "\n";
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let oid = parts.next()?;
-            (parts.next() == Some("commit") && is_valid_git_oid(oid)).then(|| oid.to_string())
-        })
-        .collect())
-}
-
-fn concretize_revision_range(source: &str, refs: &HashMap<String, String>) -> Option<String> {
-    let (left, sep, right) = if let Some((left, right)) = source.split_once("...") {
-        (left, "...", right)
-    } else {
-        let (left, right) = source.split_once("..")?;
-        (left, "..", right)
-    };
-    let left = if left.is_empty() {
-        refs.get("HEAD").cloned()
-    } else {
-        concretize_revision_expr(left, refs)
-    }?;
-    let right = if right.is_empty() {
-        refs.get("HEAD").cloned()
-    } else {
-        concretize_revision_expr(right, refs)
-    }?;
-    Some(format!("{left}{sep}{right}"))
-}
-
 fn concretize_revision_expr(expr: &str, refs: &HashMap<String, String>) -> Option<String> {
     if expr.is_empty() {
         return refs.get("HEAD").cloned();
@@ -2452,6 +2369,17 @@ fn concretize_revision_expr(expr: &str, refs: &HashMap<String, String>) -> Optio
         resolve_ref_from_state(base, refs)
     }?;
     Some(format!("{base_oid}{suffix}"))
+}
+
+fn resolve_cherry_pick_source_from_state(
+    source: &str,
+    refs: &HashMap<String, String>,
+) -> Option<String> {
+    if cherry_pick_source_is_range(source) {
+        return None;
+    }
+
+    concretize_revision_expr(source, refs).filter(|oid| valid_non_zero_oid(oid))
 }
 
 fn split_revision_suffix(expr: &str) -> (&str, &str) {
@@ -3499,6 +3427,38 @@ mod tests {
     const E: &str = "5555555555555555555555555555555555555555";
     const F: &str = "6666666666666666666666666666666666666666";
     const G: &str = "7777777777777777777777777777777777777777";
+
+    #[test]
+    fn revert_source_args_do_not_treat_bare_gpg_sign_as_value_option() {
+        assert_eq!(
+            revert_source_args(&["--gpg-sign".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            revert_source_args(&["-S".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            revert_source_args(&["-Smy-key".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+    }
+
+    #[test]
+    fn cherry_pick_source_args_do_not_treat_bare_gpg_sign_as_value_option() {
+        assert_eq!(
+            cherry_pick_source_args(&["--gpg-sign".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            cherry_pick_source_args(&["-S".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            cherry_pick_source_args(&["-Smy-key".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+    }
 
     fn family_state(family: &FamilyKey) -> FamilyState {
         FamilyState {

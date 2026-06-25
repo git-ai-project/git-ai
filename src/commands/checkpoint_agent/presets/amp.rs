@@ -329,10 +329,23 @@ impl AgentPreset for AmpPreset {
             external_parent_session_id: None,
         });
 
+        let bash_command = hook_input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| {
+                tool_input
+                    .get("command")
+                    .or_else(|| tool_input.get("cmd"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -343,6 +356,7 @@ impl AgentPreset for AmpPreset {
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
                 stream_source,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {

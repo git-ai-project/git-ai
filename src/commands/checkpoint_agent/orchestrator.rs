@@ -395,17 +395,47 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<Vec<CheckpointRequest>, Gi
 }
 
 fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAiError> {
-    use crate::commands::checkpoint_agent::bash_tool;
+    use crate::commands::checkpoint_agent::bash_tool::{
+        self, BashHookAttemptPhase, BashHookAttemptSignal,
+    };
 
-    let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
-    let repo_work_dir = repo.workdir()?;
+    let started_at_ns = crate::daemon::bash_history_db::unix_time_ns();
+    let repo_work_dir = match discover_repository_in_path_no_git_exec(e.context.cwd.as_path())
+        .and_then(|repo| repo.workdir())
+    {
+        Ok(repo_work_dir) => repo_work_dir,
+        Err(error) => {
+            let error_message = error.to_string();
+            bash_tool::signal_daemon_bash_hook_attempt(
+                BashHookAttemptPhase::Start,
+                BashHookAttemptSignal {
+                    original_cwd: e.context.cwd.as_path(),
+                    discovered_repo_work_dir: None,
+                    repo_discovery_error: Some(&error_message),
+                    session_id: &e.context.external_session_id,
+                    tool_use_id: &e.tool_use_id,
+                    agent_id: &e.context.agent_id,
+                    metadata: &e.context.metadata,
+                    trace_id: &e.context.trace_id,
+                    timestamp_ns: started_at_ns,
+                    command: e.command.as_deref(),
+                },
+            );
+            return Ok(vec![]);
+        }
+    };
 
-    let dirty_paths = match bash_tool::handle_bash_pre_tool_use_with_context(
+    let dirty_paths = match bash_tool::handle_bash_pre_tool_use_with_context_and_cwd(
         &repo_work_dir,
-        &e.context.external_session_id,
-        &e.tool_use_id,
-        &e.context.agent_id,
-        Some(&e.context.metadata),
+        e.context.cwd.as_path(),
+        bash_tool::BashToolHookContext {
+            session_id: &e.context.external_session_id,
+            tool_use_id: &e.tool_use_id,
+            agent_id: &e.context.agent_id,
+            agent_metadata: Some(&e.context.metadata),
+            trace_id: &e.context.trace_id,
+            command: e.command.as_deref(),
+        },
     ) {
         Ok(result) => result.dirty_paths,
         Err(error) => {
@@ -440,15 +470,47 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
 }
 
 fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, GitAiError> {
-    use crate::commands::checkpoint_agent::bash_tool;
+    use crate::commands::checkpoint_agent::bash_tool::{
+        self, BashHookAttemptPhase, BashHookAttemptSignal,
+    };
 
-    let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
-    let repo_work_dir = repo.workdir()?;
+    let ended_at_ns = crate::daemon::bash_history_db::unix_time_ns();
+    let repo_work_dir = match discover_repository_in_path_no_git_exec(e.context.cwd.as_path())
+        .and_then(|repo| repo.workdir())
+    {
+        Ok(repo_work_dir) => repo_work_dir,
+        Err(error) => {
+            let error_message = error.to_string();
+            bash_tool::signal_daemon_bash_hook_attempt(
+                BashHookAttemptPhase::End,
+                BashHookAttemptSignal {
+                    original_cwd: e.context.cwd.as_path(),
+                    discovered_repo_work_dir: None,
+                    repo_discovery_error: Some(&error_message),
+                    session_id: &e.context.external_session_id,
+                    tool_use_id: &e.tool_use_id,
+                    agent_id: &e.context.agent_id,
+                    metadata: &e.context.metadata,
+                    trace_id: &e.context.trace_id,
+                    timestamp_ns: ended_at_ns,
+                    command: e.command.as_deref(),
+                },
+            );
+            return Ok(vec![]);
+        }
+    };
 
-    let bash_result = bash_tool::handle_bash_post_tool_use(
+    let bash_result = bash_tool::handle_bash_post_tool_use_with_cwd(
         &repo_work_dir,
-        &e.context.external_session_id,
-        &e.tool_use_id,
+        e.context.cwd.as_path(),
+        bash_tool::BashToolHookContext {
+            session_id: &e.context.external_session_id,
+            tool_use_id: &e.tool_use_id,
+            agent_id: &e.context.agent_id,
+            agent_metadata: Some(&e.context.metadata),
+            trace_id: &e.context.trace_id,
+            command: e.command.as_deref(),
+        },
     );
 
     let file_paths: Vec<PathBuf> = match &bash_result {

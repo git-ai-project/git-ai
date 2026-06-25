@@ -193,6 +193,7 @@ pub(super) fn parse_vscode_native_hooks(
 
     let tool_class = classify_copilot_tool(tool_name);
     let is_bash = tool_class == ToolClass::Bash;
+    let bash_command = parse::bash_command_from_hook_input(data);
 
     let tool_use_id = parse::optional_str_multi(data, &["tool_use_id", "toolUseId"])
         .unwrap_or("unknown")
@@ -259,6 +260,7 @@ pub(super) fn parse_vscode_native_hooks(
             return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id,
+                command: bash_command,
             })]);
         }
 
@@ -301,6 +303,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
             context,
             tool_use_id,
+            command: bash_command,
             stream_source,
         })]);
     }

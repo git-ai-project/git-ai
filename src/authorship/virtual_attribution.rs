@@ -1182,20 +1182,17 @@ pub(crate) fn committed_hunks_from_diff_result(
     pathspecs: Option<&HashSet<String>>,
 ) -> HashMap<String, Vec<LineRange>> {
     let mut committed_hunks: HashMap<String, Vec<LineRange>> = HashMap::new();
-    for (file_path, hunks) in &diff.hunks_by_file {
+    for (file_path, added_lines) in &diff.added_lines_by_file {
         if let Some(paths) = pathspecs
             && !paths.contains(file_path)
         {
             continue;
         }
-        let mut lines: Vec<u32> = Vec::new();
-        for hunk in hunks {
-            for line in hunk.new_start..hunk.new_start + hunk.new_count {
-                if line > 0 {
-                    lines.push(line);
-                }
-            }
-        }
+        let lines = added_lines
+            .iter()
+            .copied()
+            .filter(|line| *line > 0)
+            .collect::<Vec<_>>();
         if !lines.is_empty() {
             committed_hunks.insert(file_path.clone(), LineRange::compress_lines(&lines));
         }

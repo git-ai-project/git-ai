@@ -290,6 +290,12 @@ fn fetch_authorship_notes_inner(
     // Generate tracking ref for this remote
     let tracking_ref = tracking_ref_for_remote(remote_name);
 
+    tracing::info!(
+        remote = %remote_name,
+        backend = %"git_notes",
+        tracking_ref = %tracking_ref,
+        "fetching authorship notes"
+    );
     tracing::debug!(
         "fetching authorship notes for remote '{}' to tracking ref '{}'",
         remote_name,
