@@ -138,7 +138,7 @@ fn production_db_paths(internal_dir: &Path) -> [PathBuf; 4] {
         InternalDatabase::database_path_for_test().expect("authorship db path"),
         MetricsDatabase::database_path_for_test().expect("metrics db path"),
         NotesDatabase::database_path_for_test().expect("notes db path"),
-        config.internal_dir.join("transcripts-db"),
+        config.transcripts_db_path(),
     ]
 }
 
@@ -163,7 +163,7 @@ fn production_runtime_paths(internal_dir: &Path) -> Vec<PathBuf> {
         InternalDatabase::database_path_for_test().expect("authorship db path"),
         MetricsDatabase::database_path_for_test().expect("metrics db path"),
         NotesDatabase::database_path_for_test().expect("notes db path"),
-        config.internal_dir.join("transcripts-db"),
+        config.transcripts_db_path(),
     ]
 }
 
@@ -535,11 +535,20 @@ fn test_internal_dir_end_to_end_single_machine_authorship_flow() {
         internal_dir.join("transcripts-db").display()
     );
 
-    // DB-path routing under GIT_AI_INTERNAL_DIR (db / metrics-db / notes-db) is
-    // proven deterministically and hermetically by
-    // test_internal_dir_env_is_used_verbatim_for_all_runtime_paths and the per-DB
-    // unit tests; this end-to-end test focuses on the live daemon + correct
-    // authorship rather than re-proving DB routing via a command side effect.
+    // The transcripts-db check above proves the LIVE DAEMON resolves its DB under
+    // the internal dir. Also prove a real CLIENT subprocess (carrying
+    // GIT_AI_INTERNAL_DIR in its environment) routes metrics-db there: `git-ai
+    // usage` opens MetricsDatabase (via the same database_path() the verbatim/unit
+    // tests pin) before its no-data exit. The DETERMINISTIC routing proof lives in
+    // those tests; this is the end-to-end subprocess-env-propagation witness, so a
+    // regression dropping GIT_AI_INTERNAL_DIR from the client env is caught here.
+    let _ = repo.git_ai(&["usage", "--json"]);
+    assert!(
+        internal_dir.join("metrics-db").exists(),
+        "a client subprocess with GIT_AI_INTERNAL_DIR set must create metrics-db \
+         under the internal dir: {}",
+        internal_dir.join("metrics-db").display()
+    );
 }
 
 #[test]

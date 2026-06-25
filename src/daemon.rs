@@ -281,6 +281,13 @@ impl DaemonConfig {
         self.internal_dir.join("daemon").join("test-completions")
     }
 
+    /// Path to the streams/transcripts SQLite DB. Named `transcripts-db` for
+    /// backwards compatibility with existing installations. Centralized here so
+    /// the daemon's open path and tests resolve the same literal (no drift).
+    pub fn transcripts_db_path(&self) -> PathBuf {
+        self.internal_dir.join("transcripts-db")
+    }
+
     pub fn test_completion_log_path_for_family(&self, family_key: &str) -> PathBuf {
         let mut hasher = Sha256::new();
         hasher.update(family_key.as_bytes());
@@ -7272,7 +7279,7 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     {
         // Named "transcripts-db" for backwards compatibility with existing installations.
         // TODO: rename to "streams-db" with a migration that moves the file.
-        let streams_db_path = config.internal_dir.join("transcripts-db");
+        let streams_db_path = config.transcripts_db_path();
         match crate::streams::db::StreamsDatabase::open(&streams_db_path) {
             Ok(streams_db) => {
                 let streams_db = std::sync::Arc::new(streams_db);
