@@ -2,6 +2,7 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
+use std::fs;
 
 fn deterministic_commit_env(timestamp: &'static str) -> [(&'static str, &'static str); 2] {
     [
@@ -568,6 +569,64 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     );
 }
 
+#[test]
+fn test_abandoned_squash_merge_does_not_affect_later_unrelated_commit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("file.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+    let mut file = repo.filename("file.txt");
+    file.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&file_path, "base\nAI squash line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file.txt"]).unwrap();
+    repo.stage_all_and_commit("ai source").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI squash line".ai(),
+    ]);
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.git_og_with_env(&["reset", "--hard"], &[("GIT_TRACE2_EVENT", "0")])
+        .unwrap();
+
+    fs::write(&file_path, "base\nunrelated human line\n").unwrap();
+    repo.git(&["add", "file.txt"]).unwrap();
+    let unrelated_commit = repo
+        .commit("unrelated commit after abandoned squash")
+        .unwrap();
+
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "unrelated human line".unattributed_human(),
+    ]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(
+        stats.ai_additions, 0,
+        "unrelated commit must not inherit AI stats"
+    );
+    assert_eq!(
+        stats.ai_accepted, 0,
+        "unrelated commit must not inherit AI lines"
+    );
+    if let Some(note) = repo.read_authorship_note(&unrelated_commit.commit_sha) {
+        let log = AuthorshipLog::deserialize_from_string(&note).expect("parse unrelated note");
+        assert!(
+            log.metadata.sessions.is_empty(),
+            "unrelated commit must not inherit squash session metadata"
+        );
+        assert!(
+            log.metadata.prompts.is_empty(),
+            "unrelated commit must not inherit squash prompt metadata"
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_prepare_working_log_simple_squash,
     test_prepare_working_log_squash_with_main_changes,
@@ -575,4 +634,5 @@ crate::reuse_tests_in_worktree!(
     test_prepare_working_log_squash_with_mixed_additions,
     test_prepare_working_log_squash_with_main_changes_standard_human,
     test_prepare_working_log_squash_multiple_sessions_standard_human,
+    test_abandoned_squash_merge_does_not_affect_later_unrelated_commit,
 );
