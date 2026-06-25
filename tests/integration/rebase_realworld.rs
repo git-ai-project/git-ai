@@ -10188,6 +10188,13 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         "        return result".ai(),
         "    def method3(self): return 'method3'".human(),
     ]);
+    fs::write(
+        repo.path().join("processor.py"),
+        "class Processor:\n    def method1(self): return 'method1'\n    def method2(self):\n        result = []\n        for i in range(10):\n            result.append(i * 2)\n        return result\n    def method3(self): return 'method3'\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "processor.py"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C3 AI implements method2")
         .unwrap();
 
@@ -10244,6 +10251,14 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         "        return result, label".ai(),
         "    def method3(self): return 'method3'".human(),
     ]);
+    fs::write(
+        repo.path().join("processor.py"),
+        "class Processor:\n    def method1(self): return 'method1'\n    def method2(self):\n        # AI merged: combines human's return with feature's loop\n        result = []\n        for i in range(10):\n            result.append(i * 2)\n        label = 'human-method2'\n        return result, label\n    def method3(self): return 'method3'\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "processor.py"])
+        .unwrap();
+    repo.git(&["add", "processor.py"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -10620,6 +10635,13 @@ fn test_conflict_ai_resolves_on_last_commit() {
         "pub const MAX_CONNECTIONS: u32 = 100;".ai(),
         "pub const SCHEMA_VERSION: u32 = 1;".human(),
     ]);
+    fs::write(
+        repo.path().join("src/schema.rs"),
+        "pub const MAX_CONNECTIONS: u32 = 100;\npub const SCHEMA_VERSION: u32 = 1;\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/schema.rs"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C5 AI tunes MAX_CONNECTIONS to 100")
         .unwrap();
 
@@ -10637,6 +10659,14 @@ fn test_conflict_ai_resolves_on_last_commit() {
         "pub const MAX_CONNECTIONS: u32 = 75;".ai(),
         "pub const SCHEMA_VERSION: u32 = 1;".human(),
     ]);
+    fs::write(
+        repo.path().join("src/schema.rs"),
+        "pub const MAX_CONNECTIONS: u32 = 75;\npub const SCHEMA_VERSION: u32 = 1;\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/schema.rs"])
+        .unwrap();
+    repo.git(&["add", "src/schema.rs"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -11194,6 +11224,13 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "    pub metadata: std::collections::HashMap<String, String>,".ai(),
         "}".human(),
     ]);
+    fs::write(
+        repo.path().join("src/models.rs"),
+        "pub struct User {\n    pub id: u64,\n    pub name: String,\n    pub active: bool,\n    pub role: String,\n    pub score: f64,\n    pub metadata: std::collections::HashMap<String, String>,\n}\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/models.rs"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C3 AI adds active/role/score/metadata fields")
         .unwrap();
 
@@ -11249,6 +11286,14 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "    pub metadata: std::collections::HashMap<String, String>,".ai(),
         "}".human(),
     ]);
+    fs::write(
+        repo.path().join("src/models.rs"),
+        "pub struct User {\n    pub id: u64,\n    pub name: String,\n    pub email: String,\n    pub created_at: u64,\n    pub active: bool,\n    pub role: String,\n    pub score: f64,\n    pub metadata: std::collections::HashMap<String, String>,\n}\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/models.rs"])
+        .unwrap();
+    repo.git(&["add", "src/models.rs"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -11820,6 +11865,9 @@ fn test_conflict_working_log_is_sole_attribution_source() {
     // C1: AI sets TIMEOUT = 30 — WILL CONFLICT with main's = 60
     let mut cfg = repo.filename("config.py");
     cfg.set_contents(crate::lines!["TIMEOUT = 30".ai(), "RETRIES = 3",]);
+    fs::write(repo.path().join("config.py"), "TIMEOUT = 30\nRETRIES = 3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "config.py"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C1 AI sets TIMEOUT=30")
         .unwrap();
 
@@ -11846,6 +11894,10 @@ fn test_conflict_working_log_is_sole_attribution_source() {
     // AI resolves: picks 45 as a compromise.  Content differs from original (30) → content-diff
     // cannot carry attribution.  ONLY the working-log checkpoint can produce the note.
     cfg.set_contents(crate::lines!["TIMEOUT = 45".ai(), "RETRIES = 3",]);
+    fs::write(repo.path().join("config.py"), "TIMEOUT = 45\nRETRIES = 3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "config.py"])
+        .unwrap();
+    repo.git(&["add", "config.py"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -11925,6 +11977,13 @@ fn test_conflict_content_diff_wins_over_working_log() {
     // C1: AI sets MAX_RETRIES = 5 — WILL CONFLICT with main's = 10
     let mut sett = repo.filename("settings.py");
     sett.set_contents(crate::lines!["MAX_RETRIES = 5".ai(), "TIMEOUT = 10",]);
+    fs::write(
+        repo.path().join("settings.py"),
+        "MAX_RETRIES = 5\nTIMEOUT = 10\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "settings.py"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C1 AI sets MAX_RETRIES=5")
         .unwrap();
 
@@ -11949,6 +12008,14 @@ fn test_conflict_content_diff_wins_over_working_log() {
     // Also creates a working-log checkpoint via set_contents.
     // The content-diff path fires first (commit_has_attestations=true) and wins.
     sett.set_contents(crate::lines!["MAX_RETRIES = 5".ai(), "TIMEOUT = 10",]);
+    fs::write(
+        repo.path().join("settings.py"),
+        "MAX_RETRIES = 5\nTIMEOUT = 10\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "settings.py"])
+        .unwrap();
+    repo.git(&["add", "settings.py"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -12270,6 +12337,13 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
         "        return result".ai(),
         "    def method3(self): return 'method3'".unattributed_human(),
     ]);
+    fs::write(
+        repo.path().join("processor.py"),
+        "class Processor:\n    def method1(self): return 'method1'\n    def method2(self):\n        result = []\n        for i in range(10):\n            result.append(i * 2)\n        return result\n    def method3(self): return 'method3'\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "processor.py"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C3 AI implements method2")
         .unwrap();
 
@@ -12326,6 +12400,14 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
         "        return result, label".ai(),
         "    def method3(self): return 'method3'".unattributed_human(),
     ]);
+    fs::write(
+        repo.path().join("processor.py"),
+        "class Processor:\n    def method1(self): return 'method1'\n    def method2(self):\n        # AI merged: combines human's return with feature's loop\n        result = []\n        for i in range(10):\n            result.append(i * 2)\n        label = 'human-method2'\n        return result, label\n    def method3(self): return 'method3'\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "processor.py"])
+        .unwrap();
+    repo.git(&["add", "processor.py"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -12674,6 +12756,13 @@ fn test_conflict_ai_resolves_on_last_commit_standard_human() {
         "pub const MAX_CONNECTIONS: u32 = 100;".ai(),
         "pub const SCHEMA_VERSION: u32 = 1;".unattributed_human(),
     ]);
+    fs::write(
+        repo.path().join("src/schema.rs"),
+        "pub const MAX_CONNECTIONS: u32 = 100;\npub const SCHEMA_VERSION: u32 = 1;\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/schema.rs"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C5 AI tunes MAX_CONNECTIONS to 100")
         .unwrap();
 
@@ -12691,6 +12780,14 @@ fn test_conflict_ai_resolves_on_last_commit_standard_human() {
         "pub const MAX_CONNECTIONS: u32 = 75;".ai(),
         "pub const SCHEMA_VERSION: u32 = 1;".unattributed_human(),
     ]);
+    fs::write(
+        repo.path().join("src/schema.rs"),
+        "pub const MAX_CONNECTIONS: u32 = 75;\npub const SCHEMA_VERSION: u32 = 1;\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/schema.rs"])
+        .unwrap();
+    repo.git(&["add", "src/schema.rs"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
@@ -13206,6 +13303,13 @@ fn test_conflict_ai_resolves_rust_struct_fields_standard_human() {
         "    pub metadata: std::collections::HashMap<String, String>,".ai(),
         "}".unattributed_human(),
     ]);
+    fs::write(
+        repo.path().join("src/models.rs"),
+        "pub struct User {\n    pub id: u64,\n    pub name: String,\n    pub active: bool,\n    pub role: String,\n    pub score: f64,\n    pub metadata: std::collections::HashMap<String, String>,\n}\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/models.rs"])
+        .unwrap();
     repo.stage_all_and_commit("feat: C3 AI adds active/role/score/metadata fields")
         .unwrap();
 
@@ -13261,6 +13365,14 @@ fn test_conflict_ai_resolves_rust_struct_fields_standard_human() {
         "    pub metadata: std::collections::HashMap<String, String>,".ai(),
         "}".unattributed_human(),
     ]);
+    fs::write(
+        repo.path().join("src/models.rs"),
+        "pub struct User {\n    pub id: u64,\n    pub name: String,\n    pub email: String,\n    pub created_at: u64,\n    pub active: bool,\n    pub role: String,\n    pub score: f64,\n    pub metadata: std::collections::HashMap<String, String>,\n}\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/models.rs"])
+        .unwrap();
+    repo.git(&["add", "src/models.rs"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 

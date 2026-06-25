@@ -141,14 +141,17 @@ impl AgentPreset for CursorPreset {
             .unwrap_or("bash")
             .to_string();
 
+        let bash_command = parse::bash_command_from_hook_input(&data);
         let event = match (tool_class, is_pre) {
             (ToolClass::Bash, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id,
+                command: bash_command.clone(),
             }),
             (ToolClass::Bash, false) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id,
+                command: bash_command,
                 stream_source,
             }),
             (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -497,6 +500,7 @@ mod tests {
                     PathBuf::from("/Users/aidan/Desktop/test-repo")
                 );
                 assert_eq!(e.tool_use_id, "tu-shell-1");
+                assert_eq!(e.command.as_deref(), Some("date > current_time.txt"));
             }
             _ => panic!("Expected PreBashCall, got {:?}", events[0]),
         }
@@ -524,6 +528,7 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "cursor");
                 assert_eq!(e.tool_use_id, "tu-shell-2");
+                assert_eq!(e.command.as_deref(), Some("date > current_time.txt"));
             }
             _ => panic!("Expected PostBashCall, got {:?}", events[0]),
         }

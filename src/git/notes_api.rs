@@ -437,6 +437,12 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
         return Ok(());
     }
 
+    tracing::info!(
+        remote = %remote,
+        backend = %"http",
+        uncached_commits = uncached.len(),
+        "fetching authorship notes"
+    );
     tracing::debug!(
         "warm_cache_for_remote: fetching notes for {} uncached commits",
         uncached.len()

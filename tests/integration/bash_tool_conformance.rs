@@ -55,13 +55,34 @@ fn dummy_agent_id() -> AgentId {
     }
 }
 
+fn dummy_trace_id() -> &'static str {
+    "t_test123456789a"
+}
+
 fn pre_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) {
-    handle_bash_pre_tool_use_with_context(root, session_id, tool_use_id, &dummy_agent_id(), None)
-        .expect("pre-hook should succeed");
+    handle_bash_pre_tool_use_with_context(
+        root,
+        session_id,
+        tool_use_id,
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    )
+    .expect("pre-hook should succeed");
 }
 
 fn post_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) -> BashPostHookResult {
-    handle_bash_post_tool_use(root, session_id, tool_use_id).expect("post-hook should succeed")
+    handle_bash_post_tool_use(
+        root,
+        session_id,
+        tool_use_id,
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    )
+    .expect("post-hook should succeed")
 }
 
 // ===========================================================================

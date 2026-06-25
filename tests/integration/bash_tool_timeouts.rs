@@ -35,6 +35,10 @@ fn dummy_agent_id() -> AgentId {
     }
 }
 
+fn dummy_trace_id() -> &'static str {
+    "t_test123456789a"
+}
+
 // ---------------------------------------------------------------------------
 // Walk-timeout tests
 // ---------------------------------------------------------------------------
@@ -85,6 +89,8 @@ fn test_pre_hook_walk_timeout_returns_err() {
         "wt-pre-swallow",
         &dummy_agent_id(),
         None,
+        dummy_trace_id(),
+        None,
     );
     reset_timeout_overrides_for_test();
 
@@ -107,6 +113,8 @@ fn test_post_hook_walk_timeout_returns_snapshot_failed() {
         "wt-post-walk",
         &dummy_agent_id(),
         None,
+        dummy_trace_id(),
+        None,
     )
     .expect("pre-hook should succeed");
 
@@ -114,7 +122,15 @@ fn test_post_hook_walk_timeout_returns_snapshot_failed() {
     fs::write(root.join("changed.txt"), "new content").expect("file write should succeed");
 
     set_walk_timeout_ms_for_test(0);
-    let result = handle_bash_post_tool_use(&root, "wt-sess", "wt-post-walk");
+    let result = handle_bash_post_tool_use(
+        &root,
+        "wt-sess",
+        "wt-post-walk",
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    );
     reset_timeout_overrides_for_test();
 
     let r = result.expect("post-hook must not return Err on walk timeout");
@@ -137,13 +153,29 @@ fn test_post_hook_hook_timeout_returns_hook_timeout() {
     let root = repo_root(&repo);
 
     // Successful pre-hook so a snapshot exists in the daemon.
-    handle_bash_pre_tool_use_with_context(&root, "ht-sess", "ht-post", &dummy_agent_id(), None)
-        .expect("pre-hook should succeed");
+    handle_bash_pre_tool_use_with_context(
+        &root,
+        "ht-sess",
+        "ht-post",
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    )
+    .expect("pre-hook should succeed");
 
     fs::write(root.join("ht_changed.txt"), "content").expect("file write should succeed");
 
     set_hook_timeout_ms_for_test(0);
-    let result = handle_bash_post_tool_use(&root, "ht-sess", "ht-post");
+    let result = handle_bash_post_tool_use(
+        &root,
+        "ht-sess",
+        "ht-post",
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    );
     reset_timeout_overrides_for_test();
 
     let r = result.expect("post-hook must not return Err on hook timeout");
@@ -167,13 +199,29 @@ fn test_timeout_override_reset_restores_normal_operation() {
     reset_timeout_overrides_for_test();
 
     // Now a normal round-trip should detect a changed file.
-    handle_bash_pre_tool_use_with_context(&root, "reset-sess", "reset-t1", &dummy_agent_id(), None)
-        .expect("pre-hook should succeed after reset");
+    handle_bash_pre_tool_use_with_context(
+        &root,
+        "reset-sess",
+        "reset-t1",
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    )
+    .expect("pre-hook should succeed after reset");
 
     fs::write(root.join("reset_check.txt"), "hello").expect("write should succeed");
 
-    let result = handle_bash_post_tool_use(&root, "reset-sess", "reset-t1")
-        .expect("post-hook should succeed after reset");
+    let result = handle_bash_post_tool_use(
+        &root,
+        "reset-sess",
+        "reset-t1",
+        &dummy_agent_id(),
+        None,
+        dummy_trace_id(),
+        None,
+    )
+    .expect("post-hook should succeed after reset");
 
     assert!(
         matches!(

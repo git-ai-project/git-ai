@@ -338,6 +338,8 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
             &tool_use_id,
             &agent_id,
             None,
+            "t_test123456789a",
+            None,
         )
         .expect("pre-hook should succeed");
         let pre_hook_duration = pre_start.elapsed();
@@ -348,8 +350,16 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
 
         // Post-hook: daemon query + snapshot walk + in-memory diff
         let post_start = Instant::now();
-        let result = bash_tool::handle_bash_post_tool_use(repo_root, session_id, &tool_use_id)
-            .expect("post-hook should succeed");
+        let result = bash_tool::handle_bash_post_tool_use(
+            repo_root,
+            session_id,
+            &tool_use_id,
+            &agent_id,
+            None,
+            "t_test123456789a",
+            None,
+        )
+        .expect("post-hook should succeed");
         let post_hook_duration = post_start.elapsed();
 
         // Sanity: the marker file must appear as a change
@@ -622,6 +632,8 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
             &tool_use_id,
             &agent_id,
             None,
+            "t_test123456789a",
+            None,
         );
         let pre_elapsed = pre_start.elapsed();
 
@@ -656,8 +668,15 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
         fs::write(&marker, format!("xl iteration {}", i)).expect("failed to write marker");
 
         let post_start = Instant::now();
-        let post_result =
-            bash_tool::handle_bash_post_tool_use(&repo_root, session_id, &tool_use_id);
+        let post_result = bash_tool::handle_bash_post_tool_use(
+            &repo_root,
+            session_id,
+            &tool_use_id,
+            &agent_id,
+            None,
+            "t_test123456789a",
+            None,
+        );
         let post_elapsed = post_start.elapsed();
         let _ = fs::remove_file(&marker);
 

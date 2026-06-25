@@ -27,6 +27,7 @@ pub enum RewriteEvent {
 
 pub(crate) struct DiffTreeResult {
     pub hunks_by_file: HashMap<String, Vec<DiffHunk>>,
+    pub added_lines_by_file: HashMap<String, Vec<u32>>,
     pub renames: Vec<(String, String)>,
 }
 
@@ -246,6 +247,7 @@ fn post_squash_resolution_working_log(
         crate::authorship::post_commit::PostCommitOptions {
             supress_output: true,
             compute_stats: false,
+            recover_attribution: false,
         },
         move |resolution_log| {
             Ok(
@@ -914,6 +916,7 @@ fn parse_batched_diff_tree_output(
     while results.len() < tree_pair_keys.len() {
         results.push(DiffTreeResult {
             hunks_by_file: HashMap::new(),
+            added_lines_by_file: HashMap::new(),
             renames: Vec::new(),
         });
     }
@@ -934,17 +937,21 @@ fn is_tree_pair_separator(line: &str) -> bool {
 
 fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
     let mut hunks_by_file: HashMap<String, Vec<DiffHunk>> = HashMap::new();
+    let mut added_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
     let mut renames: Vec<(String, String)> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_rename_from: Option<String> = None;
+    let mut active_hunk_new_line: Option<u32> = None;
 
     for line in output.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             // Extract the b/ path from "a/old b/new"
             current_file = extract_b_path(rest);
             current_rename_from = None;
+            active_hunk_new_line = None;
         } else if let Some(from_path) = line.strip_prefix("rename from ") {
             current_rename_from = Some(from_path.to_string());
+            active_hunk_new_line = None;
         } else if let Some(to_path) = line.strip_prefix("rename to ") {
             if let Some(from_path) = current_rename_from.take() {
                 renames.push((from_path, to_path.to_string()));
@@ -953,12 +960,34 @@ fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
             && let Some(ref file) = current_file
             && let Some(hunk) = parse_hunk_header(line)
         {
+            active_hunk_new_line = Some(hunk.new_start);
             hunks_by_file.entry(file.clone()).or_default().push(hunk);
+        } else if let Some(new_line) = active_hunk_new_line.as_mut() {
+            if line.starts_with('+') {
+                if let Some(ref file) = current_file {
+                    added_lines_by_file
+                        .entry(file.clone())
+                        .or_default()
+                        .push(*new_line);
+                }
+                *new_line += 1;
+            } else if line.starts_with('-') || line.starts_with('\\') {
+                // Removed lines and "\ No newline at end of file" markers do
+                // not advance the new-file line cursor.
+            } else {
+                *new_line += 1;
+            }
         }
+    }
+
+    for lines in added_lines_by_file.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
     }
 
     DiffTreeResult {
         hunks_by_file,
+        added_lines_by_file,
         renames,
     }
 }

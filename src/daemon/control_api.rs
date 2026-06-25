@@ -29,16 +29,27 @@ pub enum ControlRequest {
     #[serde(rename = "bash_session.start")]
     BashSessionStart {
         repo_work_dir: String,
+        original_cwd: Option<String>,
         session_id: String,
         tool_use_id: String,
         agent_id: AgentId,
         metadata: HashMap<String, String>,
         stat_snapshot: Box<StatSnapshot>,
+        trace_id: String,
+        started_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "bash_session.end")]
     BashSessionEnd {
+        repo_work_dir: String,
+        original_cwd: Option<String>,
         session_id: String,
         tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        ended_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "bash_session.query")]
     BashSessionQuery { repo_work_dir: String },
@@ -46,6 +57,32 @@ pub enum ControlRequest {
     BashSnapshotQuery {
         session_id: String,
         tool_use_id: String,
+    },
+    #[serde(rename = "bash_hook_attempt.start")]
+    BashHookAttemptStart {
+        original_cwd: String,
+        discovered_repo_work_dir: Option<String>,
+        repo_discovery_error: Option<String>,
+        session_id: String,
+        tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        started_at_ns: u128,
+        command: Option<String>,
+    },
+    #[serde(rename = "bash_hook_attempt.end")]
+    BashHookAttemptEnd {
+        original_cwd: String,
+        discovered_repo_work_dir: Option<String>,
+        repo_discovery_error: Option<String>,
+        session_id: String,
+        tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        ended_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "shutdown")]
     Shutdown,

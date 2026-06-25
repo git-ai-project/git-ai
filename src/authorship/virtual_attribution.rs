@@ -1,5 +1,6 @@
 use crate::authorship::attribution_tracker::{
-    Attribution, LineAttribution, line_attributions_to_attributions,
+    Attribution, LineAttribution, attributions_to_line_attributions,
+    line_attributions_to_attributions,
 };
 use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, SessionRecord};
 use crate::authorship::hunk_shift::{DiffHunk, apply_hunk_shifts_to_line_attributions};
@@ -900,23 +901,11 @@ impl VirtualAttributions {
                 let file_content = working_log.get_file_version(&entry.blob_sha)?;
                 file_contents.insert(entry.file.clone(), file_content.clone());
 
-                if entry.line_attributions.is_empty() {
-                    let has_ai_char_attribution = entry.attributions.iter().any(|attr| {
-                        attr.author_id != CheckpointKind::Human.to_str()
-                            && !attr.author_id.starts_with("h_")
-                    });
-                    if !has_ai_char_attribution || checkpoint.line_stats.additions == 0 {
-                        attributions.remove(&entry.file);
-                        continue;
-                    }
-                    return Err(GitAiError::Generic(format!(
-                        "checkpoint entry for {} missing persisted line attributions",
-                        entry.file
-                    )));
-                }
-                let line_attrs = entry.line_attributions.clone();
-                let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
-
+                let line_attrs = if entry.line_attributions.is_empty() {
+                    attributions_to_line_attributions(&entry.attributions, &file_content)
+                } else {
+                    entry.line_attributions.clone()
+                };
                 if line_attrs.is_empty() {
                     // The entry had attribution data but no AI lines remain after
                     // filtering (e.g. human rewrote the entire file).  Clear any
@@ -925,6 +914,7 @@ impl VirtualAttributions {
                     continue;
                 }
 
+                let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
                 attributions.insert(entry.file.clone(), (char_attrs, line_attrs));
             }
         }
@@ -1192,20 +1182,17 @@ pub(crate) fn committed_hunks_from_diff_result(
     pathspecs: Option<&HashSet<String>>,
 ) -> HashMap<String, Vec<LineRange>> {
     let mut committed_hunks: HashMap<String, Vec<LineRange>> = HashMap::new();
-    for (file_path, hunks) in &diff.hunks_by_file {
+    for (file_path, added_lines) in &diff.added_lines_by_file {
         if let Some(paths) = pathspecs
             && !paths.contains(file_path)
         {
             continue;
         }
-        let mut lines: Vec<u32> = Vec::new();
-        for hunk in hunks {
-            for line in hunk.new_start..hunk.new_start + hunk.new_count {
-                if line > 0 {
-                    lines.push(line);
-                }
-            }
-        }
+        let lines = added_lines
+            .iter()
+            .copied()
+            .filter(|line| *line > 0)
+            .collect::<Vec<_>>();
         if !lines.is_empty() {
             committed_hunks.insert(file_path.clone(), LineRange::compress_lines(&lines));
         }

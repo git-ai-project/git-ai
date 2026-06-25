@@ -86,6 +86,30 @@ pub fn file_paths_from_tool_input(data: &Value, cwd: &str) -> Vec<PathBuf> {
     vec![]
 }
 
+pub fn bash_command_from_hook_input(data: &Value) -> Option<String> {
+    for (container, key) in [
+        ("tool_input", "command"),
+        ("toolInput", "command"),
+        ("tool_input", "cmd"),
+        ("toolInput", "cmd"),
+    ] {
+        if let Some(command) = data
+            .get(container)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(command.to_string());
+        }
+    }
+
+    optional_str_multi(data, &["command", "cmd"])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
 /// Extract file paths from apply_patch / `ApplyPatch` tool text format.
 ///
 /// Several presets (Codex/OpenAI-style) embed edited paths in the patch text
@@ -226,6 +250,39 @@ mod tests {
         let data = json!({"tool_input": {"command": "ls"}});
         let paths = file_paths_from_tool_input(&data, "/home/user/project");
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_bash_command_from_tool_input_command() {
+        let data = json!({"tool_input": {"command": "echo hello"}});
+        assert_eq!(
+            bash_command_from_hook_input(&data).as_deref(),
+            Some("echo hello")
+        );
+    }
+
+    #[test]
+    fn test_bash_command_from_tool_input_cmd_camel_case() {
+        let data = json!({"toolInput": {"cmd": "npm test"}});
+        assert_eq!(
+            bash_command_from_hook_input(&data).as_deref(),
+            Some("npm test")
+        );
+    }
+
+    #[test]
+    fn test_bash_command_from_top_level_command() {
+        let data = json!({"command": "cargo check"});
+        assert_eq!(
+            bash_command_from_hook_input(&data).as_deref(),
+            Some("cargo check")
+        );
+    }
+
+    #[test]
+    fn test_bash_command_missing_or_empty() {
+        let data = json!({"tool_input": {"command": "   "}});
+        assert_eq!(bash_command_from_hook_input(&data), None);
     }
 
     #[test]

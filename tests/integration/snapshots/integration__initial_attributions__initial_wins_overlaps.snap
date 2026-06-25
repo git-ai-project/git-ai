@@ -1,5 +1,5 @@
 ---
-source: tests/initial_attributions.rs
+source: tests/integration/initial_attributions.rs
 expression: normalized
 ---
-"COMMIT_SHA (override-tool TIMESTAMP 1) line 1\nCOMMIT_SHA (override-tool TIMESTAMP 2) line 2\nCOMMIT_SHA (Test User     TIMESTAMP 3) line 3 modified\n"
+"COMMIT_SHA (override-tool TIMESTAMP 1) line 1\nCOMMIT_SHA (override-tool TIMESTAMP 2) line 2\nCOMMIT_SHA (override-tool TIMESTAMP 3) line 3 modified\n"

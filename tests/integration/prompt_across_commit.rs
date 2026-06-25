@@ -65,9 +65,8 @@ fn test_change_across_commits() {
 }
 
 /// Variant of test_change_across_commits using unattributed (legacy) human checkpoints.
-/// Assertions match origin/main: with empty attribution, the file has only 1 attestation
-/// entry (the second AI commit's entry only) because the first commit's attribution is
-/// subsumed into the working log without creating a separate attestation entry.
+/// The inserted legacy/untracked line is adjacent to the new AI edit, so edge
+/// recovery attributes it to AI with a separate recovery trace.
 #[test]
 fn test_change_across_commits_standard_human() {
     let repo = TestRepo::new();
@@ -102,20 +101,21 @@ fn test_change_across_commits_standard_human() {
     let commit = repo.stage_all_and_commit("add more AI").unwrap();
 
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
-    assert_eq!(file_attestation.entries.len(), 1);
+    assert_eq!(file_attestation.entries.len(), 2);
 
-    let second_ai_session_hash = commit
-        .authorship_log
-        .metadata
-        .sessions
-        .keys()
-        .next()
-        .unwrap();
-    assert_ne!(*second_ai_session_hash, initial_ai_entry.hash);
-
-    let second_ai_entry = file_attestation.entries.first().unwrap();
-    assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
-    assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
+    let mut attested_lines = file_attestation
+        .entries
+        .iter()
+        .flat_map(|entry| entry.line_ranges.iter().flat_map(LineRange::expand))
+        .collect::<Vec<_>>();
+    attested_lines.sort_unstable();
+    assert_eq!(attested_lines, vec![5, 6]);
+    assert!(
+        file_attestation
+            .entries
+            .iter()
+            .all(|entry| entry.hash != initial_ai_entry.hash)
+    );
 }
 
 crate::reuse_tests_in_worktree!(

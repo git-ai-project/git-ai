@@ -1,7 +1,9 @@
+use crate::authorship::attribution_recovery::FileTimestampsByPath;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
+use crate::authorship::rewrite::DiffTreeResult;
 use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
@@ -83,10 +85,43 @@ pub fn post_commit_from_working_log(
     )
 }
 
+pub(crate) fn post_commit_from_working_log_with_recovery_timestamps(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    supress_output: bool,
+    recovery_file_timestamps: Option<&FileTimestampsByPath>,
+) -> Result<(String, AuthorshipLog), GitAiError> {
+    post_commit_from_working_log_with_transform_context(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        PostCommitOptions {
+            supress_output,
+            compute_stats: true,
+            recover_attribution: true,
+        },
+        PostCommitContext {
+            precomputed_parent_diff: None,
+            recovery_file_timestamps,
+        },
+        Ok,
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PostCommitOptions {
     pub supress_output: bool,
     pub compute_stats: bool,
+    pub recover_attribution: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PostCommitContext<'a> {
+    precomputed_parent_diff: Option<&'a DiffTreeResult>,
+    recovery_file_timestamps: Option<&'a FileTimestampsByPath>,
 }
 
 pub fn post_commit_from_working_log_with_transform<F>(
@@ -108,6 +143,7 @@ where
         PostCommitOptions {
             supress_output,
             compute_stats: true,
+            recover_attribution: true,
         },
         transform,
     )
@@ -147,7 +183,33 @@ pub(crate) fn post_commit_from_working_log_with_transform_options_and_diff<F>(
     commit_sha: String,
     human_author: String,
     options: PostCommitOptions,
-    precomputed_parent_diff: Option<&crate::authorship::rewrite::DiffTreeResult>,
+    precomputed_parent_diff: Option<&DiffTreeResult>,
+    transform: F,
+) -> Result<(String, AuthorshipLog), GitAiError>
+where
+    F: FnOnce(AuthorshipLog) -> Result<AuthorshipLog, GitAiError>,
+{
+    post_commit_from_working_log_with_transform_context(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        options,
+        PostCommitContext {
+            precomputed_parent_diff,
+            recovery_file_timestamps: None,
+        },
+        transform,
+    )
+}
+
+fn post_commit_from_working_log_with_transform_context<F>(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    options: PostCommitOptions,
+    context: PostCommitContext<'_>,
     transform: F,
 ) -> Result<(String, AuthorshipLog), GitAiError>
 where
@@ -197,7 +259,7 @@ where
             &commit_sha,
             Some(&pathspecs),
             Some(&observed_snapshot),
-            precomputed_parent_diff,
+            context.precomputed_parent_diff,
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -214,7 +276,7 @@ where
         // otherwise fall back to a per-commit `git diff`.
         let committed_hunks: Option<
             HashMap<String, Vec<crate::authorship::authorship_log::LineRange>>,
-        > = if let Some(diff) = precomputed_parent_diff {
+        > = if let Some(diff) = context.precomputed_parent_diff {
             Some(
                 crate::authorship::virtual_attribution::committed_hunks_from_diff_result(
                     diff, None,
@@ -254,6 +316,25 @@ where
 
     authorship_log = transform(authorship_log)?;
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
+
+    if options.recover_attribution {
+        let recovery_hunks = recovery_committed_hunks(
+            repo,
+            &parent_sha,
+            &commit_sha,
+            context.precomputed_parent_diff,
+        )?;
+        crate::authorship::attribution_recovery::recover_attribution(
+            repo,
+            &parent_sha,
+            &commit_sha,
+            &human_author,
+            &mut authorship_log,
+            &recovery_hunks,
+            context.recovery_file_timestamps,
+        )?;
+        authorship_log.metadata.base_commit_sha = commit_sha.clone();
+    }
 
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
@@ -433,6 +514,36 @@ fn commit_tree_snapshot_for_files(
     Ok(snapshot)
 }
 
+fn recovery_committed_hunks(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    precomputed_parent_diff: Option<&crate::authorship::rewrite::DiffTreeResult>,
+) -> Result<HashMap<String, Vec<crate::authorship::authorship_log::LineRange>>, GitAiError> {
+    if let Some(diff) = precomputed_parent_diff {
+        return Ok(
+            crate::authorship::virtual_attribution::committed_hunks_from_diff_result(diff, None),
+        );
+    }
+
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        parent_sha
+    };
+    let added_lines = repo.diff_added_lines(diff_base, commit_sha, None)?;
+    Ok(added_lines
+        .into_iter()
+        .filter(|(_, lines)| !lines.is_empty())
+        .map(|(path, lines)| {
+            (
+                path,
+                crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+            )
+        })
+        .collect())
+}
+
 /// Amend-specific post-commit that merges blame-sourced attributions from the
 /// original commit with persisted working-log checkpoint data.
 pub fn post_commit_amend(
@@ -440,6 +551,22 @@ pub fn post_commit_amend(
     original_commit: &str,
     amended_commit: &str,
     human_author: String,
+) -> Result<(String, AuthorshipLog), GitAiError> {
+    post_commit_amend_with_recovery_timestamps(
+        repo,
+        original_commit,
+        amended_commit,
+        human_author,
+        None,
+    )
+}
+
+pub(crate) fn post_commit_amend_with_recovery_timestamps(
+    repo: &Repository,
+    original_commit: &str,
+    amended_commit: &str,
+    human_author: String,
+    recovery_file_timestamps: Option<&FileTimestampsByPath>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
@@ -539,6 +666,18 @@ pub fn post_commit_amend(
             );
         }
     }
+
+    let recovery_hunks = recovery_committed_hunks(repo, &parent_sha, amended_commit, None)?;
+    crate::authorship::attribution_recovery::recover_attribution(
+        repo,
+        &parent_sha,
+        amended_commit,
+        &human_author,
+        &mut authorship_log,
+        &recovery_hunks,
+        recovery_file_timestamps,
+    )?;
+    authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
     // Preserve human/session metadata from the original commit's note
     if let Ok(original_log) =
