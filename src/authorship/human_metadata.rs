@@ -1,7 +1,5 @@
 use crate::authorship::authorship_log::HumanRecord;
-use crate::authorship::authorship_log_serialization::{
-    AuthorshipLog, generate_human_short_hash,
-};
+use crate::authorship::authorship_log_serialization::{AuthorshipLog, generate_human_short_hash};
 use crate::git::repository::Repository;
 
 pub(crate) fn fill_missing_current_human_metadata(repo: &Repository, log: &mut AuthorshipLog) {
