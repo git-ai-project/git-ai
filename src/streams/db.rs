@@ -118,6 +118,12 @@ const MIGRATIONS: &[&str] = &[
     INSERT INTO schema_version (version) VALUES (4);
     COMMIT;
     "#,
+    // Version 5: Track the repository-filter fingerprint that last skipped a stream.
+    r#"
+    ALTER TABLE tracked_streams ADD COLUMN last_filter_fingerprint TEXT;
+
+    INSERT INTO schema_version (version) VALUES (5);
+    "#,
 ];
 
 /// Record representing a tracked stream cursor in the database.
@@ -139,6 +145,7 @@ pub struct StreamRecord {
     pub processing_errors: i64,
     pub last_error: Option<String>,
     pub repo_work_dir: Option<String>,
+    pub last_filter_fingerprint: Option<String>,
 }
 
 /// SQLite database for transcript tracking.
@@ -251,8 +258,8 @@ impl StreamsDatabase {
                 watermark_type, watermark_value, external_session_id,
                 external_parent_session_id,
                 first_seen_at, last_processed_at, last_known_size, last_modified,
-                processing_errors, last_error, repo_work_dir
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                processing_errors, last_error, repo_work_dir, last_filter_fingerprint
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 record.session_id,
@@ -271,6 +278,7 @@ impl StreamsDatabase {
                 record.processing_errors,
                 record.last_error,
                 record.repo_work_dir,
+                record.last_filter_fingerprint,
             ],
         )
         .map_err(|e| StreamError::Fatal {
@@ -299,6 +307,7 @@ impl StreamsDatabase {
             processing_errors: row.get(13)?,
             last_error: row.get(14)?,
             repo_work_dir: row.get(15)?,
+            last_filter_fingerprint: row.get(16)?,
         })
     }
 
@@ -319,7 +328,7 @@ impl StreamsDatabase {
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
-                   processing_errors, last_error, repo_work_dir
+                   processing_errors, last_error, repo_work_dir, last_filter_fingerprint
             FROM tracked_streams WHERE session_id = ?1 AND stream_kind = ?2 AND stream_path = ?3
             "#,
             params![session_id, stream_kind, stream_path],
@@ -347,7 +356,7 @@ impl StreamsDatabase {
         let watermark_value = watermark.serialize();
 
         let rows_changed = conn.execute(
-            "UPDATE tracked_streams SET watermark_value = ?1, last_processed_at = ?2 WHERE session_id = ?3 AND stream_kind = ?4 AND stream_path = ?5",
+            "UPDATE tracked_streams SET watermark_value = ?1, last_processed_at = ?2, last_filter_fingerprint = NULL WHERE session_id = ?3 AND stream_kind = ?4 AND stream_path = ?5",
             params![watermark_value, now, session_id, stream_kind, stream_path],
         )
         .map_err(|e| StreamError::Fatal {
@@ -384,6 +393,46 @@ impl StreamsDatabase {
         )
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to update file metadata: {}", e),
+        })?;
+
+        if rows_changed == 0 {
+            return Err(StreamError::Fatal {
+                message: format!("Stream not found: {}", session_id),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Record file metadata and the repository-filter fingerprint that skipped processing.
+    pub fn record_filter_skip(
+        &self,
+        session_id: &str,
+        stream_kind: &str,
+        stream_path: &str,
+        file_size: u64,
+        modified: Option<DateTime<Utc>>,
+        filter_fingerprint: &str,
+    ) -> Result<(), StreamError> {
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let modified_ts = modified.map(|dt| dt.timestamp());
+
+        let rows_changed = conn.execute(
+            "UPDATE tracked_streams SET last_known_size = ?1, last_modified = ?2, last_filter_fingerprint = ?3 WHERE session_id = ?4 AND stream_kind = ?5 AND stream_path = ?6",
+            params![
+                file_size as i64,
+                modified_ts,
+                filter_fingerprint,
+                session_id,
+                stream_kind,
+                stream_path
+            ],
+        )
+        .map_err(|e| StreamError::Fatal {
+            message: format!("Failed to record filter skip: {}", e),
         })?;
 
         if rows_changed == 0 {
@@ -499,7 +548,7 @@ impl StreamsDatabase {
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
-                   processing_errors, last_error, repo_work_dir
+                   processing_errors, last_error, repo_work_dir, last_filter_fingerprint
             FROM tracked_streams
             "#,
             )
@@ -554,6 +603,7 @@ mod tests {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: None,
+            last_filter_fingerprint: None,
         }
     }
 
@@ -709,6 +759,7 @@ mod tests {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: None,
+            last_filter_fingerprint: None,
         };
 
         db.insert_stream(&stream).unwrap();
@@ -736,7 +787,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 4); // Current schema version
+        assert_eq!(version, 5); // Current schema version
     }
 
     #[test]

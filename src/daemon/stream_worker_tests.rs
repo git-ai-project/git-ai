@@ -1,7 +1,99 @@
-use super::stream_worker::{Priority, ProcessingTask};
+use super::stream_worker::{Priority, ProcessingTask, session_repo_allowed};
+use crate::config::Config;
 use std::collections::BinaryHeap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
+
+/// Initialize a git repo in `dir` with an `origin` remote pointing at `remote_url`.
+fn init_repo_with_remote(dir: &Path, remote_url: &str) {
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git command failed to spawn");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["init", "-q"]);
+    run(&["remote", "add", "origin", remote_url]);
+}
+
+#[test]
+fn test_session_repo_allowed_no_filters_allows_everything() {
+    // With no allow/exclude filters configured, everything is allowed even
+    // when the work_dir is unknown (the common, fast-path case).
+    let config = Config::with_repository_filters_for_test(&[], &[]);
+    assert!(session_repo_allowed(&config, None));
+    assert!(session_repo_allowed(
+        &config,
+        Some(Path::new("/nonexistent"))
+    ));
+}
+
+#[test]
+fn test_session_repo_allowed_allowlist_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_with_remote(dir.path(), "git@github.com:acme/app.git");
+
+    let config = Config::with_repository_filters_for_test(&["*github.com/acme/*"], &[]);
+    assert!(
+        session_repo_allowed(&config, Some(dir.path())),
+        "session in an allowlisted repo must be allowed"
+    );
+}
+
+#[test]
+fn test_session_repo_allowed_allowlist_excludes_non_matching() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_with_remote(dir.path(), "git@github.com:other/app.git");
+
+    let config = Config::with_repository_filters_for_test(&["*github.com/acme/*"], &[]);
+    assert!(
+        !session_repo_allowed(&config, Some(dir.path())),
+        "session in a repo outside the allowlist must be dropped"
+    );
+}
+
+#[test]
+fn test_session_repo_allowed_exclude_takes_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_with_remote(dir.path(), "git@github.com:acme/secret.git");
+
+    let config = Config::with_repository_filters_for_test(&[], &["*github.com/acme/secret*"]);
+    assert!(
+        !session_repo_allowed(&config, Some(dir.path())),
+        "session in an excluded repo must be dropped"
+    );
+}
+
+#[test]
+fn test_session_repo_allowed_fails_closed_when_repo_unknown_under_allowlist() {
+    // An active allowlist plus an undeterminable repository (shared streams,
+    // agents without cwd, or a path that isn't a git repo) must fail closed:
+    // customers set allowlists for security, so unverifiable data is dropped.
+    let config = Config::with_repository_filters_for_test(&["*github.com/acme/*"], &[]);
+    assert!(
+        !session_repo_allowed(&config, None),
+        "no work_dir under an active allowlist must be dropped"
+    );
+    assert!(
+        !session_repo_allowed(&config, Some(Path::new("/definitely/not/a/repo"))),
+        "non-repo path under an active allowlist must be dropped"
+    );
+}
+
+#[test]
+fn test_session_repo_allowed_exclude_only_passes_unknown_repo() {
+    // With only an exclude list (no allowlist), an undeterminable repository
+    // can't match any exclude pattern, so it is allowed through. This keeps
+    // shared streams (e.g. Copilot OTEL) flowing unless an allowlist is set.
+    let config = Config::with_repository_filters_for_test(&[], &["*github.com/acme/secret*"]);
+    assert!(
+        session_repo_allowed(&config, None),
+        "unknown repo with exclude-only filters must be allowed"
+    );
+}
 
 #[test]
 fn test_priority_queue_ordering_immediate_first() {

@@ -151,6 +151,9 @@ impl SweepCoordinator {
                     if Self::is_file_stale(&path, &existing)? {
                         return Ok(true);
                     }
+                    if Self::repository_filters_changed_since_skip(&existing) {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -173,6 +176,15 @@ impl SweepCoordinator {
             return Ok(None);
         };
         if !path.exists() {
+            return Ok(None);
+        }
+        if !crate::config::Config::fresh().is_allowed_repository_with_remotes(None) {
+            tracing::debug!(
+                tool,
+                stream_kind = stream.stream_kind,
+                path = %path.display(),
+                "skipping shared stream: repository cannot be verified under allow_repositories"
+            );
             return Ok(None);
         }
 
@@ -206,6 +218,24 @@ impl SweepCoordinator {
             || (modified.is_some() && modified != existing.last_modified))
     }
 
+    fn repository_filters_changed_since_skip(existing: &StreamRecord) -> bool {
+        Self::repository_filters_changed_since_skip_for_config(
+            existing,
+            &crate::config::Config::fresh(),
+        )
+    }
+
+    fn repository_filters_changed_since_skip_for_config(
+        existing: &StreamRecord,
+        config: &crate::config::Config,
+    ) -> bool {
+        let Some(last_filter_fingerprint) = existing.last_filter_fingerprint.as_deref() else {
+            return false;
+        };
+
+        config.repository_filters_fingerprint().as_deref() != Some(last_filter_fingerprint)
+    }
+
     fn canonicalize_path(path: &PathBuf) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
     }
@@ -216,5 +246,58 @@ impl SweepCoordinator {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_with_filter_fingerprint(last_filter_fingerprint: Option<String>) -> StreamRecord {
+        StreamRecord {
+            session_id: "session-1".to_string(),
+            stream_kind: "transcript".to_string(),
+            tool: "claude".to_string(),
+            stream_path: "/tmp/session.jsonl".to_string(),
+            stream_format: "ClaudeJsonl".to_string(),
+            watermark_type: "ByteOffset".to_string(),
+            watermark_value: "0".to_string(),
+            external_session_id: "external-session-1".to_string(),
+            external_parent_session_id: None,
+            first_seen_at: 1704067200,
+            last_processed_at: 1704067200,
+            last_known_size: 128,
+            last_modified: Some(1704067200),
+            processing_errors: 0,
+            last_error: None,
+            repo_work_dir: None,
+            last_filter_fingerprint,
+        }
+    }
+
+    #[test]
+    fn unchanged_filter_skip_does_not_make_stream_stale() {
+        let config =
+            crate::config::Config::with_repository_filters_for_test(&["*github.com/acme/*"], &[]);
+        let stream = stream_with_filter_fingerprint(config.repository_filters_fingerprint());
+
+        assert!(
+            !SweepCoordinator::repository_filters_changed_since_skip_for_config(&stream, &config)
+        );
+    }
+
+    #[test]
+    fn changed_filter_skip_makes_stream_stale_again() {
+        let old_config =
+            crate::config::Config::with_repository_filters_for_test(&["*github.com/acme/*"], &[]);
+        let new_config = crate::config::Config::with_repository_filters_for_test(&[], &[]);
+        let stream = stream_with_filter_fingerprint(old_config.repository_filters_fingerprint());
+
+        assert!(
+            SweepCoordinator::repository_filters_changed_since_skip_for_config(
+                &stream,
+                &new_config
+            )
+        );
     }
 }
