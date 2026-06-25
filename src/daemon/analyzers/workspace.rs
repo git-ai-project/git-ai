@@ -45,6 +45,20 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
                     });
                 }
             }
+            "restore" => {
+                // Only `git restore --source <commit> -- <files>` moves attributed
+                // content across a commit boundary. A no-source restore pulls from
+                // the index/HEAD and is not attribution-bearing, so it falls through
+                // to OpaqueCommand. `restore_source_oid` is resolved by the ref cursor.
+                let summary = crate::git::cli_parser::summarize_restore_args(&command_args(cmd));
+                if cmd.restore_source_oid.is_some() && !summary.pathspecs.is_empty() {
+                    events.push(SemanticEvent::RestorePaths {
+                        source_oid: cmd.restore_source_oid.clone(),
+                        pathspecs: summary.pathspecs,
+                        head: current_head_for_workspace_command(cmd, state.refs),
+                    });
+                }
+            }
             _ => unreachable!("registry should not route '{}' to WorkspaceAnalyzer", name),
         }
 
@@ -137,6 +151,7 @@ mod tests {
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
+            restore_source_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }
@@ -159,5 +174,104 @@ mod tests {
                 ..
             } if head == "abc123"
         )));
+    }
+
+    #[test]
+    fn restore_with_source_emits_restore_paths() {
+        let analyzer = WorkspaceAnalyzer;
+        let mut refs = std::collections::HashMap::new();
+        refs.insert("HEAD".to_string(), "head_oid".to_string());
+        let mut cmd = command(
+            "restore",
+            &[
+                "git",
+                "restore",
+                "--source",
+                "src_ref",
+                "--staged",
+                "--worktree",
+                "--",
+                "f.ts",
+            ],
+        );
+        // The ref cursor resolves --source to a full OID before analysis.
+        cmd.restore_source_oid = Some("resolved_src_oid".to_string());
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::RestorePaths { source_oid: Some(src), pathspecs, head: Some(head) }
+                if src == "resolved_src_oid" && pathspecs == &["f.ts".to_string()] && head == "head_oid"
+        )));
+    }
+
+    #[test]
+    fn restore_without_source_is_opaque() {
+        let analyzer = WorkspaceAnalyzer;
+        let mut refs = std::collections::HashMap::new();
+        refs.insert("HEAD".to_string(), "head_oid".to_string());
+        // No --source => ref cursor leaves restore_source_oid None.
+        let cmd = command("restore", &["git", "restore", "--", "f.ts"]);
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, SemanticEvent::RestorePaths { .. })),
+            "no-source restore must not emit RestorePaths"
+        );
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|event| matches!(event, SemanticEvent::OpaqueCommand)),
+            "no-source restore should fall through to OpaqueCommand"
+        );
+    }
+
+    #[test]
+    fn restore_staged_and_worktree_flags_parse_pathspecs_identically() {
+        let analyzer = WorkspaceAnalyzer;
+        let mut refs = std::collections::HashMap::new();
+        refs.insert("HEAD".to_string(), "head_oid".to_string());
+        for flags in [
+            vec!["git", "restore", "--source", "s", "--staged", "--", "f.ts"],
+            vec![
+                "git",
+                "restore",
+                "--source",
+                "s",
+                "--worktree",
+                "--",
+                "f.ts",
+            ],
+            vec![
+                "git",
+                "restore",
+                "--source",
+                "s",
+                "--staged",
+                "--worktree",
+                "--",
+                "f.ts",
+            ],
+        ] {
+            let mut cmd = command("restore", &flags);
+            cmd.restore_source_oid = Some("resolved".to_string());
+            let result = analyzer
+                .analyze(&cmd, AnalysisView { refs: &refs })
+                .unwrap();
+            assert!(
+                result.events.iter().any(|event| matches!(
+                    event,
+                    SemanticEvent::RestorePaths { pathspecs, .. }
+                        if pathspecs == &["f.ts".to_string()]
+                )),
+                "flags {flags:?} should yield pathspec f.ts"
+            );
+        }
     }
 }

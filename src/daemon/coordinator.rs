@@ -169,6 +169,7 @@ mod tests {
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
+            restore_source_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }
@@ -192,6 +193,7 @@ mod tests {
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
+            restore_source_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }

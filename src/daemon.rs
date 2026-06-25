@@ -5191,6 +5191,25 @@ impl ActorDaemonCoordinator {
                             onto.clone(),
                         )?;
                     }
+                    crate::daemon::domain::SemanticEvent::RestorePaths {
+                        source_oid,
+                        pathspecs,
+                        head,
+                    } => {
+                        if let (Some(src), Some(head_sha)) = (&source_oid, &head)
+                            && !src.is_empty()
+                            && !head_sha.is_empty()
+                            && !pathspecs.is_empty()
+                        {
+                            let repo = find_repository_in_path(&worktree)?;
+                            crate::authorship::rewrite_restore::reconstruct_working_log_after_restore(
+                                &repo,
+                                src,
+                                head_sha,
+                                pathspecs.as_slice(),
+                            )?;
+                        }
+                    }
                     crate::daemon::domain::SemanticEvent::StashOperation { kind, head } => {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
@@ -7745,6 +7764,7 @@ mod tests {
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
+            restore_source_oid: None,
             ref_changes,
             confidence: crate::daemon::domain::Confidence::High,
         }

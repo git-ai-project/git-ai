@@ -147,7 +147,7 @@ pub fn reconstruct_working_log_after_backward_reset(
     Ok(())
 }
 
-fn extract_attributions_from_log_shifted(
+pub(crate) fn extract_attributions_from_log_shifted(
     log: &AuthorshipLog,
     hunks_by_file: Option<&HashMap<String, Vec<DiffHunk>>>,
     file_attributions: &mut HashMap<String, Vec<LineAttribution>>,
