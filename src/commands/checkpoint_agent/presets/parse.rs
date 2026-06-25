@@ -86,6 +86,54 @@ pub fn file_paths_from_tool_input(data: &Value, cwd: &str) -> Vec<PathBuf> {
     vec![]
 }
 
+pub fn bash_command_from_hook_input(data: &Value) -> Option<String> {
+    for (container, key) in [
+        ("tool_input", "command"),
+        ("toolInput", "command"),
+        ("tool_input", "cmd"),
+        ("toolInput", "cmd"),
+    ] {
+        if let Some(command) = data
+            .get(container)
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(command.to_string());
+        }
+    }
+
+    optional_str_multi(data, &["command", "cmd"])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Extract file paths from apply_patch / `ApplyPatch` tool text format.
+///
+/// Several presets (Codex/OpenAI-style) embed edited paths in the patch text
+/// rather than in JSON keys. Parses `*** Update File:`, `*** Add File:`,
+/// `*** Delete File:`, and `*** Move to:` prefixes, trimming surrounding
+/// whitespace and any wrapping quotes, and appends each unique path to `out`.
+pub fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let maybe_path = trimmed
+            .strip_prefix("*** Update File: ")
+            .or_else(|| trimmed.strip_prefix("*** Add File: "))
+            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+            .or_else(|| trimmed.strip_prefix("*** Move to: "));
+
+        if let Some(path) = maybe_path {
+            let path = path.trim().trim_matches('"').trim_matches('\'');
+            if !path.is_empty() && !out.iter().any(|existing| existing == path) {
+                out.push(path.to_string());
+            }
+        }
+    }
+}
+
 pub fn dirty_files_from_value(data: &Value, cwd: &str) -> Option<HashMap<PathBuf, String>> {
     let df = data.get("dirty_files")?;
     let obj = df.as_object()?;
@@ -205,6 +253,39 @@ mod tests {
     }
 
     #[test]
+    fn test_bash_command_from_tool_input_command() {
+        let data = json!({"tool_input": {"command": "echo hello"}});
+        assert_eq!(
+            bash_command_from_hook_input(&data).as_deref(),
+            Some("echo hello")
+        );
+    }
+
+    #[test]
+    fn test_bash_command_from_tool_input_cmd_camel_case() {
+        let data = json!({"toolInput": {"cmd": "npm test"}});
+        assert_eq!(
+            bash_command_from_hook_input(&data).as_deref(),
+            Some("npm test")
+        );
+    }
+
+    #[test]
+    fn test_bash_command_from_top_level_command() {
+        let data = json!({"command": "cargo check"});
+        assert_eq!(
+            bash_command_from_hook_input(&data).as_deref(),
+            Some("cargo check")
+        );
+    }
+
+    #[test]
+    fn test_bash_command_missing_or_empty() {
+        let data = json!({"tool_input": {"command": "   "}});
+        assert_eq!(bash_command_from_hook_input(&data), None);
+    }
+
+    #[test]
     fn test_optional_str_multi_key() {
         let data = json!({"hookEventName": "PreToolUse"});
         let result = optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
@@ -216,6 +297,49 @@ mod tests {
         let data = json!({"other": "value"});
         let result = optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_collect_apply_patch_paths_from_text() {
+        let text = "\
+*** Begin Patch
+*** Update File: src/main.rs
+@@
+-old line
++new line
+*** Add File: src/new.rs
+@@
++content
+*** Delete File: src/gone.rs
+*** Move to: src/moved.rs
+*** End Patch
+";
+        let mut paths = Vec::new();
+        collect_apply_patch_paths_from_text(text, &mut paths);
+        assert_eq!(
+            paths,
+            vec![
+                "src/main.rs".to_string(),
+                "src/new.rs".to_string(),
+                "src/gone.rs".to_string(),
+                "src/moved.rs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_apply_patch_paths_dedupes_and_trims_quotes() {
+        let text = "\
+*** Update File: \"src/main.rs\"
+*** Update File: src/main.rs
+*** Add File: 'src/other.rs'
+";
+        let mut paths = Vec::new();
+        collect_apply_patch_paths_from_text(text, &mut paths);
+        assert_eq!(
+            paths,
+            vec!["src/main.rs".to_string(), "src/other.rs".to_string()]
+        );
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
     );
     operations::commit(
         &mut model,
+        &mut registry,
         &repo,
         &mut op_log,
         config.seed,
@@ -86,6 +87,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 operations::checkpoint_ai(&mut model, &mut registry, &repo, &chars, &mut op_log);
                 operations::commit(
                     &mut model,
+                    &mut registry,
                     &repo,
                     &mut op_log,
                     config.seed,
@@ -104,6 +106,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 operations::checkpoint_human(&mut model, &mut registry, &repo, &chars, &mut op_log);
                 operations::commit(
                     &mut model,
+                    &mut registry,
                     &repo,
                     &mut op_log,
                     config.seed,
@@ -122,6 +125,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 operations::checkpoint_untracked(&model, &repo, &mut op_log);
                 operations::commit(
                     &mut model,
+                    &mut registry,
                     &repo,
                     &mut op_log,
                     config.seed,
@@ -138,7 +142,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     config.max_lines_per_edit,
                 );
                 operations::checkpoint_ai(&mut model, &mut registry, &repo, &chars, &mut op_log);
-                operations::amend(&mut model, &registry, &repo, &mut op_log, config.seed);
+                operations::amend(&mut model, &mut registry, &repo, &mut op_log, config.seed);
             }
             Op::Rebase => {
                 operations::rebase(

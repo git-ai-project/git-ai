@@ -10,7 +10,22 @@ pub struct BashSession {
     pub agent_id: AgentId,
     pub metadata: HashMap<String, String>,
     pub stat_snapshot: StatSnapshot,
+    pub start_trace_id: String,
+    pub started_at_ns: u128,
+    pub command: Option<String>,
     pub started_at: Instant,
+}
+
+pub struct BashSessionStart {
+    pub session_id: String,
+    pub tool_use_id: String,
+    pub repo_work_dir: String,
+    pub agent_id: AgentId,
+    pub metadata: HashMap<String, String>,
+    pub stat_snapshot: StatSnapshot,
+    pub start_trace_id: String,
+    pub started_at_ns: u128,
+    pub command: Option<String>,
 }
 
 #[derive(Default)]
@@ -28,23 +43,18 @@ impl BashSessionState {
             .retain(|_, s| s.started_at.elapsed() < Duration::from_secs(STALE_SESSION_SECS));
     }
 
-    pub fn start_session(
-        &mut self,
-        session_id: String,
-        tool_use_id: String,
-        repo_work_dir: String,
-        agent_id: AgentId,
-        metadata: HashMap<String, String>,
-        stat_snapshot: StatSnapshot,
-    ) {
+    pub fn start_session(&mut self, session: BashSessionStart) {
         self.prune_stale_sessions();
         self.sessions.insert(
-            (session_id, tool_use_id),
+            (session.session_id, session.tool_use_id),
             BashSession {
-                repo_work_dir,
-                agent_id,
-                metadata,
-                stat_snapshot,
+                repo_work_dir: session.repo_work_dir,
+                agent_id: session.agent_id,
+                metadata: session.metadata,
+                stat_snapshot: session.stat_snapshot,
+                start_trace_id: session.start_trace_id,
+                started_at_ns: session.started_at_ns,
+                command: session.command,
                 started_at: Instant::now(),
             },
         );

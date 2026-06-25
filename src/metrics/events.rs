@@ -452,6 +452,8 @@ pub mod checkpoint_pos {
     pub const LINES_DELETED_SLOC: usize = 6; // u32 - for this file
     pub const TOOL_USE_ID: usize = 7; // String - nullable
     pub const EDIT_KIND: usize = 8; // String - nullable ("file_edit" | "bash")
+    pub const CHECKPOINT_TYPE: usize = 9; // String - nullable ("recovered_bash", etc.)
+    pub const ATTRIBUTION_RECOVERY_METADATA: usize = 10; // String - nullable JSON
 }
 
 /// Values for Event ID 4: checkpoint
@@ -471,6 +473,8 @@ pub mod checkpoint_pos {
 /// | 6 | lines_deleted_sloc | u32 |
 /// | 7 | external_tool_use_id | String (nullable) |
 /// | 8 | edit_kind | String (nullable) |
+/// | 9 | checkpoint_type | String (nullable) |
+/// | 10 | attribution_recovery_metadata | String (nullable JSON) |
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointValues {
     pub checkpoint_ts: PosField<u64>,
@@ -482,6 +486,8 @@ pub struct CheckpointValues {
     pub lines_deleted_sloc: PosField<u32>,
     pub external_tool_use_id: PosField<String>,
     pub edit_kind: PosField<String>,
+    pub checkpoint_type: PosField<String>,
+    pub attribution_recovery_metadata: PosField<String>,
 }
 
 impl CheckpointValues {
@@ -587,6 +593,28 @@ impl CheckpointValues {
         self.edit_kind = Some(None);
         self
     }
+
+    pub fn checkpoint_type(mut self, value: impl Into<String>) -> Self {
+        self.checkpoint_type = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn checkpoint_type_null(mut self) -> Self {
+        self.checkpoint_type = Some(None);
+        self
+    }
+
+    pub fn attribution_recovery_metadata(mut self, value: impl Into<String>) -> Self {
+        self.attribution_recovery_metadata = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn attribution_recovery_metadata_null(mut self) -> Self {
+        self.attribution_recovery_metadata = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CheckpointValues {
@@ -634,6 +662,16 @@ impl PosEncoded for CheckpointValues {
             checkpoint_pos::EDIT_KIND,
             string_to_json(&self.edit_kind),
         );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::CHECKPOINT_TYPE,
+            string_to_json(&self.checkpoint_type),
+        );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA,
+            string_to_json(&self.attribution_recovery_metadata),
+        );
 
         map
     }
@@ -649,6 +687,11 @@ impl PosEncoded for CheckpointValues {
             lines_deleted_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED_SLOC),
             external_tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
             edit_kind: sparse_get_string(arr, checkpoint_pos::EDIT_KIND),
+            checkpoint_type: sparse_get_string(arr, checkpoint_pos::CHECKPOINT_TYPE),
+            attribution_recovery_metadata: sparse_get_string(
+                arr,
+                checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA,
+            ),
         }
     }
 }
@@ -1178,6 +1221,35 @@ mod tests {
             .edit_kind_null();
 
         assert_eq!(values.edit_kind, Some(None));
+    }
+
+    #[test]
+    fn test_checkpoint_values_with_recovery_metadata() {
+        use super::PosEncoded;
+
+        let values = CheckpointValues::new()
+            .checkpoint_type("recovered_bash")
+            .attribution_recovery_metadata(r#"{"solver":"bash_mtime"}"#);
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(
+            sparse.get("9"),
+            Some(&Value::String("recovered_bash".to_string()))
+        );
+        assert_eq!(
+            sparse.get("10"),
+            Some(&Value::String(r#"{"solver":"bash_mtime"}"#.to_string()))
+        );
+
+        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(
+            restored.checkpoint_type,
+            Some(Some("recovered_bash".to_string()))
+        );
+        assert_eq!(
+            restored.attribution_recovery_metadata,
+            Some(Some(r#"{"solver":"bash_mtime"}"#.to_string()))
+        );
     }
 
     #[test]

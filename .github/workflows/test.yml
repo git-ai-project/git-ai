@@ -41,13 +41,13 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo 'matrix={"include":[{"os":"ubuntu-latest","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"name":"ubuntu-latest","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"full"},{"name":"macos-latest","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"full"}]}' >> "$GITHUB_OUTPUT"
           else
-            echo 'matrix={"include":[{"os":"ubuntu-latest","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"name":"ubuntu-latest","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"full"},{"name":"windows-latest core","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-core"},{"name":"windows-latest integration 1/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":0,"shard_count":6},{"name":"windows-latest integration 2/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":1,"shard_count":6},{"name":"windows-latest integration 3/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":2,"shard_count":6},{"name":"windows-latest integration 4/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":3,"shard_count":6},{"name":"windows-latest integration 5/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":4,"shard_count":6},{"name":"windows-latest integration 6/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":5,"shard_count":6},{"name":"macos-latest","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"full"}]}' >> "$GITHUB_OUTPUT"
           fi
 
   test:
-    name: Test on ${{ matrix.os }}
+    name: Test on ${{ matrix.name }}
     needs: compute-matrix
     runs-on: ${{ matrix.os }}
     strategy:
@@ -104,14 +104,108 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $gitUsrBin = "C:\Program Files\Git\usr\bin"
           if ((Test-Path $gitUsrBin) -and -not (($env:Path -split ";") -contains $gitUsrBin)) {
             $env:Path = "$gitUsrBin;$env:Path"
           }
-          task test TEST_THREADS=${{ matrix.test_threads }}
+
+          $mode = "${{ matrix.mode }}"
+          if ($mode -eq "windows-core") {
+            $testTargets = @("--lib", "--bins")
+            Get-ChildItem -Path "tests" -Filter "*.rs" -File |
+              Sort-Object Name |
+              ForEach-Object {
+                $testTargets += @("--test", $_.BaseName)
+              }
+
+            task test CARGO_TEST_ARGS="$($testTargets -join ' ')" TEST_THREADS=${{ matrix.test_threads }}
+            task test CARGO_TEST_ARGS="--doc" TEST_THREADS=${{ matrix.test_threads }}
+            exit 0
+          }
+
+          if ($mode -ne "windows-integration") {
+            throw "Unsupported Windows test mode: $mode"
+          }
+
+          $shardIndex = [int]"${{ matrix.shard_index }}"
+          $shardCount = [int]"${{ matrix.shard_count }}"
+          $moduleInfos = @()
+
+          Get-Content "tests/integration/main.rs" | ForEach-Object {
+            if ($_ -match '^mod\s+([A-Za-z0-9_]+);') {
+              $name = $Matches[1]
+              $path = Join-Path "tests/integration" "$name.rs"
+              $moduleDir = Join-Path "tests/integration" $name
+              $weight = 0
+              if (Test-Path $path) {
+                $matches = Select-String -Path $path -Pattern '#\[test\]', '#\[rstest\]', 'subdir_test_variants!', 'worktree_test_wrappers!'
+                if ($null -ne $matches) {
+                  $weight = @($matches).Count
+                }
+              }
+              if (Test-Path $moduleDir) {
+                Get-ChildItem -Path $moduleDir -Filter "*.rs" -File -Recurse |
+                  ForEach-Object {
+                    $matches = Select-String -Path $_.FullName -Pattern '#\[test\]', '#\[rstest\]', 'subdir_test_variants!', 'worktree_test_wrappers!'
+                    if ($null -ne $matches) {
+                      $weight += @($matches).Count
+                    }
+                  }
+              }
+              $moduleInfos += [PSCustomObject]@{ Name = $name; Weight = $weight }
+            }
+          }
+
+          if ($moduleInfos.Count -eq 0) {
+            throw "No integration test modules found"
+          }
+
+          $shards = for ($i = 0; $i -lt $shardCount; $i++) {
+            [PSCustomObject]@{
+              Index = $i
+              Load = 0
+              Modules = New-Object System.Collections.Generic.List[string]
+            }
+          }
+
+          foreach ($module in ($moduleInfos | Sort-Object -Property @{ Expression = "Weight"; Descending = $true }, @{ Expression = "Name"; Ascending = $true })) {
+            $targetShard = $shards | Sort-Object Load, Index | Select-Object -First 1
+            $targetShard.Modules.Add($module.Name)
+            $targetShard.Load += [int]$module.Weight
+          }
+
+          $selectedModules = @($shards[$shardIndex].Modules)
+          $skipArgs = @(
+            $moduleInfos |
+              Where-Object { $selectedModules -notcontains $_.Name } |
+              ForEach-Object { "--skip $($_.Name)::" }
+          ) -join " "
+
+          Write-Host "Running Windows integration shard $($shardIndex + 1)/$shardCount"
+          Write-Host "Estimated source-test load: $($shards[$shardIndex].Load)"
+          Write-Host "Selected modules:"
+          $selectedModules | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+          task test CARGO_TEST_ARGS="--test integration" EXTRA_TEST_BINARY_ARGS="$skipArgs" TEST_THREADS=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
+
+  windows-test-complete:
+    name: Test on windows-latest
+    needs: test
+    if: ${{ always() && github.event_name != 'merge_group' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Windows shards
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "One or more test matrix jobs failed"
+            exit 1
+          fi
+          echo "Windows test shards completed successfully"
 
   test-ignored:
     name: Test SCM e2e tests on just Ubuntu

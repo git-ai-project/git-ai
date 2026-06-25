@@ -258,8 +258,11 @@ fn test_stash_with_existing_initial_attributions() {
         .expect("commit should succeed");
 
     // Create a file and commit it (this will have some attribution)
+    let example_path = repo.path().join("example.txt");
+    fs::write(&example_path, "existing line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "example.txt"])
+        .unwrap();
     let mut example = repo.filename("example.txt");
-    example.set_contents(vec!["existing line".human()]);
     let _first_commit = repo
         .stage_all_and_commit("add example")
         .expect("commit should succeed");
@@ -784,8 +787,11 @@ fn test_stash_pop_across_branches() {
         .expect("commit should succeed");
 
     // Create a file with existing human content
+    let example_path = repo.path().join("example.txt");
+    fs::write(&example_path, "line 1\nline 2\nline 3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "example.txt"])
+        .unwrap();
     let mut example = repo.filename("example.txt");
-    example.set_contents(vec!["line 1".human(), "line 2".human(), "line 3".human()]);
     repo.stage_all_and_commit("add example file")
         .expect("commit should succeed");
 
@@ -858,8 +864,11 @@ fn test_stash_pop_across_branches_with_conflict() {
         .expect("commit should succeed");
 
     // Create a file with existing content
+    let example_path = repo.path().join("example.txt");
+    fs::write(&example_path, "line 1\nline 2\nline 3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "example.txt"])
+        .unwrap();
     let mut example = repo.filename("example.txt");
-    example.set_contents(vec!["line 1".human(), "line 2".human(), "line 3".human()]);
     repo.stage_all_and_commit("add example file")
         .expect("commit should succeed");
 

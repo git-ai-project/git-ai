@@ -83,12 +83,16 @@ pub struct UntrackedEdit {
 pub struct PreBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
+    #[serde(default)]
+    pub command: Option<String>,
     pub stream_source: Option<StreamSource>,
 }
 

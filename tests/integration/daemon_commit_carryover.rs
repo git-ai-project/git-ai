@@ -110,6 +110,7 @@ fn test_checkpointed_carryover_survives_uncheckpointed_append() {
     let mut expected = (1..=15)
         .map(|line| format!("line {line}").ai())
         .collect::<Vec<_>>();
-    expected.extend((16..=20).map(|line| format!("line {line}").human()));
+    expected.extend((16..=18).map(|line| format!("line {line}").ai()));
+    expected.extend((19..=20).map(|line| format!("line {line}").human()));
     file.assert_lines_and_blame(expected);
 }

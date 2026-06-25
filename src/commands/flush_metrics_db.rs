@@ -2,7 +2,7 @@
 //!
 //! Uploads pending metrics database rows to the API.
 
-use crate::api::{ApiClient, ApiContext, upload_metrics_with_retry};
+use crate::api::{ApiClient, ApiContext, metrics_upload_allowed, upload_metrics_with_retry};
 use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 
@@ -11,13 +11,11 @@ const MAX_BATCH_SIZE: usize = 1000;
 
 /// Handle the flush-metrics-db command
 pub fn handle_flush_metrics_db(_args: &[String]) {
-    // Check conditions: (!using_default_api) || is_logged_in() || has_api_key()
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
 
-    let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    if using_default_api && !client.is_logged_in() && !client.has_api_key() {
+    if !metrics_upload_allowed(&api_base_url, &client) {
         eprintln!("flush-metrics-db: skipping (not logged in and using default API)");
         return;
     }

@@ -63,15 +63,9 @@ impl AgentPreset for DroidPreset {
                     .or_else(|| ti.get("patch").and_then(|v| v.as_str()));
 
                 if let Some(text) = patch_text {
-                    for line in text.lines() {
-                        let trimmed = line.trim();
-                        if let Some(path) = trimmed
-                            .strip_prefix("*** Update File: ")
-                            .or_else(|| trimmed.strip_prefix("*** Add File: "))
-                        {
-                            patch_paths.push(parse::resolve_absolute(path.trim(), cwd));
-                        }
-                    }
+                    let mut raw_paths = Vec::new();
+                    parse::collect_apply_patch_paths_from_text(text, &mut raw_paths);
+                    patch_paths.extend(raw_paths.iter().map(|p| parse::resolve_absolute(p, cwd)));
                 }
             }
 
@@ -162,12 +156,15 @@ impl AgentPreset for DroidPreset {
             external_parent_session_id: None,
         });
 
+        let bash_command = parse::bash_command_from_hook_input(&data);
+
         // PreToolUse
         if hook_event_name == "PreToolUse" {
             if is_bash {
                 return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id,
+                    command: bash_command,
                 })]);
             }
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -183,6 +180,7 @@ impl AgentPreset for DroidPreset {
             return Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id,
+                command: bash_command,
                 stream_source,
             })]);
         }
