@@ -173,11 +173,19 @@ fn test_internal_dir_env_is_used_verbatim_for_all_runtime_paths() {
     assert_eq!(config.lock_path, canonical.lock_path);
     assert_eq!(config.control_socket_path, canonical.control_socket_path);
     assert_eq!(config.trace_socket_path, canonical.trace_socket_path);
-    let under_internal_or_hashed =
-        |p: &Path| p.starts_with(&machine) || p.to_string_lossy().contains("git-ai-d-");
-    assert!(under_internal_or_hashed(&config.lock_path));
-    assert!(under_internal_or_hashed(&config.control_socket_path));
-    assert!(under_internal_or_hashed(&config.trace_socket_path));
+    // Every runtime path is derived from the internal dir. The lock is always a
+    // real file under `<internal_dir>/daemon/`. The sockets are either filesystem
+    // paths under the internal dir (Unix), a short temp dir hashed from the
+    // internal dir when the AF_UNIX 104-byte path cap would be exceeded (Unix
+    // `git-ai-d-<hash>`), or a Windows named pipe whose name is hashed from the
+    // internal dir (`\\.\pipe\git-ai-<hash>-...`). Accept all three forms.
+    let derived_from_internal = |p: &Path| {
+        let s = p.to_string_lossy();
+        p.starts_with(&machine) || s.contains("git-ai-d-") || s.contains(r"\pipe\git-ai-")
+    };
+    assert!(derived_from_internal(&config.lock_path));
+    assert!(derived_from_internal(&config.control_socket_path));
+    assert!(derived_from_internal(&config.trace_socket_path));
 }
 
 #[test]
