@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>git-ai #1657 — Windows console-popups regression analysis</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#30363d; --accent:#58a6ff; --good:#3fb950; --bad:#f85149; --warn:#d29922;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:40px 24px 96px}
+  h1{font-size:30px;margin:0 0 6px;letter-spacing:-.4px}
+  h2{font-size:22px;margin:48px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:17px;margin:26px 0 10px;color:var(--accent)}
+  p{margin:12px 0}
+  a{color:var(--accent)}
+  .sub{color:var(--muted);font-size:15px;margin-top:0}
+  code,kbd{font-family:var(--mono);font-size:.92em;background:#21262d;border:1px solid var(--line);
+    border-radius:5px;padding:1px 6px}
+  pre{font-family:var(--mono);font-size:13px;line-height:1.5;background:var(--panel2);
+    border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto}
+  pre b{color:var(--good)} pre i{color:var(--bad);font-style:normal}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .verdict{border-left:4px solid var(--warn);background:linear-gradient(90deg,#221c0e,transparent 70%)}
+  .pill{display:inline-block;font-size:12px;font-weight:600;border-radius:999px;padding:3px 10px;
+    border:1px solid var(--line);color:var(--ink);background:#21262d;vertical-align:middle}
+  .pill.bad{color:#ffd7d4;background:#3d1416;border-color:#7a2b27}
+  .pill.good{color:#caface;background:#10301c;border-color:#2c6b40}
+  .pill.warn{color:#ffe7b3;background:#3a2d0d;border-color:#7a5e1f}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:#1b2230;font-weight:600}
+  td.y{color:var(--bad);font-weight:600}
+  td.n{color:var(--good);font-weight:600}
+  .muted{color:var(--muted)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin:6px 0 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  footer{margin-top:60px;color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:18px}
+  .kbd-row{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Issue #1657 — Windows console-window popups</h1>
+  <p class="sub">Regression analysis across <b>1.5.8 → 1.6.0 → 1.6.1</b> · git-ai-project/git-ai · branch <code>claude/issue-1657-investigation-ge2v0p</code></p>
+
+  <div class="card verdict">
+    <p style="margin:0"><span class="pill warn">VERDICT</span> &nbsp;<b>Partly a regression.</b>
+    The bare mechanism — a console-subsystem <code>git-ai.exe</code> launched per hook by a
+    console-less agent — is <i>pre-existing</i> and unchanged since ≤1.5.8. But <b>1.6.0
+    reworked the Windows daemon launch</b> (PR&nbsp;#1587) and that change is the most likely
+    <b>amplifier</b>: it (a) neutralizes <code>CREATE_NO_WINDOW</code> by pairing it with
+    <code>DETACHED_PROCESS</code>, and (b) sits in front of a daemon-startup path that
+    <b>fails silently on permission errors</b> — so the daemon never comes up and every hook
+    re-attempts the (visible) launch. That second defect is the concrete, fixable root cause.</p>
+  </div>
+
+  <h2>1 · Timeline of the relevant change</h2>
+  <svg viewBox="0 0 920 200" width="100%" role="img" aria-label="Release timeline">
+    <defs>
+      <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+        <path d="M0,0 L7,3 L0,6 Z" fill="#9aa7b4"/>
+      </marker>
+    </defs>
+    <line x1="60" y1="120" x2="860" y2="120" stroke="#30363d" stroke-width="2" marker-end="url(#arrow)"/>
+    <!-- 1.5.8 -->
+    <circle cx="150" cy="120" r="9" fill="#3fb950"/>
+    <text x="150" y="150" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="600">v1.5.8</text>
+    <text x="150" y="170" fill="#9aa7b4" font-size="12" text-anchor="middle">Jun 14</text>
+    <text x="150" y="92" fill="#9aa7b4" font-size="12" text-anchor="middle">daemon via</text>
+    <text x="150" y="78" fill="#9aa7b4" font-size="12" text-anchor="middle">powershell -Hidden</text>
+    <!-- 1.6.0 -->
+    <circle cx="480" cy="120" r="11" fill="#d29922"/>
+    <text x="480" y="150" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="700">v1.6.0</text>
+    <text x="480" y="170" fill="#9aa7b4" font-size="12" text-anchor="middle">Jun 24 · 170 commits</text>
+    <text x="480" y="92" fill="#d29922" font-size="12" text-anchor="middle" font-weight="600">PR #1587: CreateProcessW</text>
+    <text x="480" y="78" fill="#d29922" font-size="12" text-anchor="middle" font-weight="600">+ DETACHED_PROCESS</text>
+    <text x="480" y="64" fill="#9aa7b4" font-size="11" text-anchor="middle">(0xC0000142 respawn handling added)</text>
+    <!-- 1.6.1 -->
+    <circle cx="800" cy="120" r="9" fill="#f85149"/>
+    <text x="800" y="150" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="600">v1.6.1</text>
+    <text x="800" y="170" fill="#9aa7b4" font-size="12" text-anchor="middle">Jun 24 · 13 commits</text>
+    <text x="800" y="92" fill="#f85149" font-size="12" text-anchor="middle" font-weight="600">bug reported</text>
+    <text x="800" y="78" fill="#9aa7b4" font-size="12" text-anchor="middle">popups on Windows</text>
+  </svg>
+
+  <h2>2 · What changed vs. what didn't</h2>
+  <p>Diffing the bug-relevant surfaces between the tags shows the hook plumbing is <b>identical</b>;
+     only the Windows daemon launch moved.</p>
+  <table>
+    <thead><tr><th>Surface</th><th>1.5.8</th><th>1.6.1</th><th>Changed?</th></tr></thead>
+    <tbody>
+      <tr><td><code>git-ai.exe</code> subsystem</td><td>console (no <code>windows_subsystem</code>)</td><td>console</td><td class="n">No</td></tr>
+      <tr><td>Hook command + events (Pre/Post/Stop)</td><td colspan="2"><code>…git-ai.exe checkpoint &lt;agent&gt; --hook-input stdin</code> · <span class="muted">src/mdm/agents/ byte-identical</span></td><td class="n">No</td></tr>
+      <tr><td><code>CREATE_NO_WINDOW</code> guard on git subprocesses</td><td colspan="2">gated on <code>!is_interactive_terminal()</code> · <span class="muted">byte-identical</span></td><td class="n">No</td></tr>
+      <tr><td>Global <code>trace2.eventtarget</code> written on install</td><td>yes</td><td>yes</td><td class="n">No</td></tr>
+      <tr><td><b>Windows daemon spawn mechanism</b></td><td><code>powershell.exe … Start-Process -WindowStyle Hidden</code></td><td><code>CreateProcessW</code> direct</td><td class="y">YES (1.6.0)</td></tr>
+      <tr><td><b>Daemon spawn creation flags</b></td><td><code>CREATE_NO_WINDOW | NEW_PROCESS_GROUP | BREAKAWAY</code></td><td>+ <code>DETACHED_PROCESS</code></td><td class="y">YES (1.6.0)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The flag interaction that matters</h3>
+  <div class="card">
+    <p style="margin-top:0">Microsoft's <code>CreateProcess</code> documentation states that
+      <code>CREATE_NO_WINDOW</code> <b>“is ignored if … used with either <code>CREATE_NEW_CONSOLE</code>
+      or <code>DETACHED_PROCESS</code>.”</b></p>
+    <p style="margin-bottom:0">So from 1.6.0 onward the daemon's window suppression no longer comes
+      from <code>CREATE_NO_WINDOW</code> at all — it relies entirely on <code>DETACHED_PROCESS</code>.
+      The same <code>DETACHED_PROCESS</code> flag was added to the daemon <i>self-restart</i> path too
+      (<code>src/daemon.rs</code>). This is a real behavioral change in exactly the reworked path.</p>
+  </div>
+
+  <h2>3 · How a latent issue becomes repeated popups</h2>
+  <p>Two independent factors combine. Neither alone is new; their <i>interaction</i> in 1.6.x is.</p>
+
+  <svg viewBox="0 0 920 360" width="100%" role="img" aria-label="Causation flow">
+    <style>
+      .box{fill:#1c2330;stroke:#30363d;stroke-width:1.5;rx:10}
+      .lbl{fill:#e6edf3;font-size:13.5px}
+      .lblm{fill:#9aa7b4;font-size:12px}
+      .bad{fill:#f85149;font-size:13.5px;font-weight:600}
+      .flow{stroke:#9aa7b4;stroke-width:1.6;fill:none}
+    </style>
+    <defs>
+      <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+        <path d="M0,0 L7,3 L0,6 Z" fill="#9aa7b4"/>
+      </marker>
+    </defs>
+
+    <!-- col A: pre-existing -->
+    <rect class="box" x="30"  y="30"  width="270" height="70" rx="10"/>
+    <text class="lbl"  x="46" y="58">Agent (GUI host, no console)</text>
+    <text class="lblm" x="46" y="78">Claude/Codex fires Pre/PostToolUse hook</text>
+
+    <rect class="box" x="30"  y="140" width="270" height="84" rx="10"/>
+    <text class="lbl"  x="46" y="166">Launches console-subsystem</text>
+    <text class="lbl"  x="46" y="184"><tspan font-family="monospace">git-ai.exe checkpoint …</tspan></text>
+    <text class="lblm" x="46" y="204">Windows allocates a console → flash</text>
+
+    <line class="flow" x1="165" y1="100" x2="165" y2="140" marker-end="url(#a2)"/>
+
+    <!-- col B: amplifier -->
+    <rect class="box" x="350" y="30"  width="290" height="84" rx="10"/>
+    <text class="lbl"  x="366" y="56">checkpoint needs the daemon</text>
+    <text class="lblm" x="366" y="76">tries to ensure it is running</text>
+    <text class="lblm" x="366" y="96">(per hook invocation)</text>
+
+    <rect class="box" x="350" y="150" width="290" height="92" rx="10" style="stroke:#7a2b27"/>
+    <text class="lbl"  x="366" y="176">lock file owned by elevated user</text>
+    <text class="bad"  x="366" y="196">open() → EACCES / ACCESS_DENIED</text>
+    <text class="lblm" x="366" y="216">pre-fix: mis-reported as “lock held”</text>
+    <text class="lblm" x="366" y="232">→ daemon never starts</text>
+
+    <line class="flow" x1="495" y1="114" x2="495" y2="150" marker-end="url(#a2)"/>
+
+    <!-- merge to outcome -->
+    <rect class="box" x="690" y="92"  width="210" height="150" rx="10" style="stroke:#7a2b27;fill:#241317"/>
+    <text class="bad"  x="706" y="126">Outcome</text>
+    <text class="lbl"  x="706" y="150">Daemon down →</text>
+    <text class="lbl"  x="706" y="170">every hook re-tries</text>
+    <text class="lbl"  x="706" y="190">the visible launch &amp;</text>
+    <text class="lbl"  x="706" y="210">blocks longer on screen</text>
+    <text class="bad"  x="706" y="234">repeated popups</text>
+
+    <line class="flow" x1="300" y1="182" x2="350" y2="195" marker-end="url(#a2)"/>
+    <line class="flow" x1="640" y1="195" x2="690" y2="172" marker-end="url(#a2)"/>
+    <line class="flow" x1="300" y1="182" x2="690" y2="150" marker-end="url(#a2)" opacity="0"/>
+
+    <text class="lblm" x="30"  y="300" font-weight="600">A · pre-existing (unchanged since ≤1.5.8)</text>
+    <text class="lblm" x="350" y="300" font-weight="600" fill="#f0883e">B · amplifier (the fixable defect)</text>
+  </svg>
+
+  <h2>4 · Root cause of the daemon-startup failure</h2>
+  <p>The reporter's <code>git-ai debug</code> shows both <i>“daemon startup blocked: lock held”</i>
+     <b>and</b> <i>“Access is denied (os error 5)”</i>. Those are the same event: the lock file under
+     <code>~/.git-ai/internal/</code> was created by an elevated/other user, and the lock helper
+     <b>collapses every open error — including permission denied — into “held by another process.”</b>
+     This matches issue <b>#1287</b> (“daemon startup blocked … when installed as Administrator/Root”).</p>
+
+  <div class="grid2">
+    <div>
+      <h3 style="color:var(--bad)">Before — masking (utils.rs)</h3>
+<pre><i>// any error → None → "lock held"</i>
+fn try_lock_exclusive(path) -&gt; Option&lt;File&gt; {
+  OpenOptions::new()
+    .create(true).write(true)
+    .share_mode(0)        <i>// windows</i>
+    .open(path)
+    <i>.ok()  // EACCES looks identical</i>
+    <i>       // to a real sharing violation</i>
+}</pre>
+    </div>
+    <div>
+      <h3 style="color:var(--good)">After — classified (utils.rs)</h3>
+<pre>enum LockAttempt { Acquired, Contended,
+                   Inaccessible(io::Error) }
+
+match open(path) {
+  Ok(f)  =&gt; <b>Acquired(f)</b>,
+  Err(e) =&gt; match e.raw_os_error() {
+    Some(32|33) =&gt; <b>Contended</b>,  <i>// real lock</i>
+    _           =&gt; <b>Inaccessible(e)</b>,
+  }                          <i>// EACCES = perms</i>
+}</pre>
+    </div>
+  </div>
+
+  <p>The daemon startup path now reports the truth and tells the user how to recover, instead of
+     pointing at a process that doesn't exist:</p>
+<pre><i>- daemon startup blocked: lock held at …\daemon.lock</i>
+<b>+ daemon lock is inaccessible at …\daemon.lock (Access is denied. (os error 5)).</b>
+<b>+ This usually means the file or its parent directory was created by a different or</b>
+<b>+ elevated user (e.g. an Administrator/sudo install). Fix the ownership/permissions of</b>
+<b>+ the ~/.git-ai/internal directory (or remove it) so your normal user account can write…</b></pre>
+
+  <h2>5 · What this branch changes</h2>
+  <table>
+    <thead><tr><th>File</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/utils.rs</code></td><td>New <code>LockAttempt</code> enum + <code>try_acquire_detailed()</code>; lock helpers distinguish <b>Contended</b> (sharing/lock violation, <code>EWOULDBLOCK</code>) from <b>Inaccessible</b> (permission/IO). Adds 3 unit tests incl. the EACCES-≠-contended guard.</td></tr>
+      <tr><td><code>src/commands/daemon.rs</code></td><td><code>daemon_lock_state()</code> classifies the lock; both startup paths emit an accurate, actionable error on the permission case instead of the misleading “lock held.”</td></tr>
+      <tr><td colspan="2" class="muted">docs/investigations/issue-1657/ — this report, the Docker repro (Dockerfile + repro-daemon-lock.sh), and README.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Scope &amp; deliberately-deferred follow-ups</h3>
+  <p>This fix targets the <b>amplifier</b> (factor B) — the highest-confidence, Linux-testable defect that
+     directly explains the diagnostics. Two complementary changes remain, documented for a follow-up:</p>
+  <ul>
+    <li><b>Console flash itself (factor A).</b> A GUI-subsystem hook launcher (or making the checkpoint
+        entry point not allocate a console) is needed to fully suppress the per-hook flash, since the
+        top-level process is created by the agent and git-ai cannot set its own creation flags.</li>
+    <li><b><code>DETACHED_PROCESS</code> + <code>CREATE_NO_WINDOW</code>.</b> Re-evaluate the 1.6.0 flag
+        combo so window suppression doesn't depend on a flag the OS ignores.</li>
+  </ul>
+
+  <h2>6 · Reproduction</h2>
+  <p>The Docker harness reproduces the <i>permission-masking</i> failure on Linux (the cross-user analogue
+     of the Administrator-install case): a root-owned lock file inside an unprivileged user's home, with
+     <b>no daemon running</b>, so any “lock held” report is provably wrong.</p>
+<pre>docker build -f docs/investigations/issue-1657/Dockerfile -t gitai-1657 .
+docker run --rm gitai-1657
+
+<span class="kbd-row"># on this branch  → "✅ FIXED BEHAVIOR: … permission/ownership problem"</span>
+<span class="kbd-row"># on v1.6.1       → "❌ BUGGY BEHAVIOR: 'lock held' … no process holds the lock"</span></pre>
+
+  <footer>
+    Generated for issue <a href="https://github.com/git-ai-project/git-ai/issues/1657">#1657</a>.
+    Evidence: tag diffs v1.5.8↔v1.6.1, PR&nbsp;#1587, issues #1287/#1366, and the reporter's
+    <code>git-ai debug</code> output. Code references point at this branch.
+  </footer>
+
+</div>
+</body>
+</html>
