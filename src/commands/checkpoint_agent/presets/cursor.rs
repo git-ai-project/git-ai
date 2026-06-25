@@ -27,8 +27,7 @@ impl AgentPreset for CursorBackgroundPreset {
 
 impl AgentPreset for CursorPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
-        let data: serde_json::Value = serde_json::from_str(hook_input)
-            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+        let data = parse_cursor_payload(hook_input)?;
 
         // conversation_id is required for session_id
         let conversation_id = parse::required_str(&data, "conversation_id")?.to_string();
@@ -252,6 +251,190 @@ fn resolve_repo_cwd(file_path: &str, workspace_roots: &[String]) -> Option<Strin
     matching_workspace_root(file_path, workspace_roots).or_else(|| workspace_roots.first().cloned())
 }
 
+fn parse_cursor_payload(hook_input: &str) -> Result<serde_json::Value, GitAiError> {
+    match serde_json::from_str(hook_input) {
+        Ok(data) => Ok(data),
+        Err(parse_error) => parse_cursor_payload_lossy(hook_input).map_err(|fallback_error| {
+            GitAiError::PresetError(format!(
+                "Invalid JSON in hook_input: {}; fallback parse failed: {}",
+                parse_error, fallback_error
+            ))
+        }),
+    }
+}
+
+fn parse_cursor_payload_lossy(hook_input: &str) -> Result<serde_json::Value, String> {
+    let tool_input_start = hook_input
+        .find("\"tool_input\"")
+        .ok_or_else(|| "tool_input not found".to_string())?;
+
+    let conversation_id = find_json_string_field(hook_input, "conversation_id", 0, false)
+        .ok_or_else(|| "conversation_id not found".to_string())?;
+    let hook_event_name = find_json_string_field(hook_input, "hook_event_name", 0, true)
+        .ok_or_else(|| "hook_event_name not found".to_string())?;
+    let tool_name = find_json_string_field(hook_input, "tool_name", 0, false)
+        .ok_or_else(|| "tool_name not found".to_string())?;
+    let workspace_roots = find_json_string_array_field(hook_input, "workspace_roots", 0, true)
+        .ok_or_else(|| "workspace_roots not found".to_string())?;
+
+    let file_path = ["file_path", "path", "filePath"]
+        .iter()
+        .find_map(|key| find_json_string_field(hook_input, key, tool_input_start, false));
+    let model = find_json_string_field(hook_input, "model", 0, false);
+    let transcript_path = find_json_string_field(hook_input, "transcript_path", 0, true);
+    let tool_use_id = find_json_string_field(hook_input, "tool_use_id", 0, true);
+
+    let mut tool_input = serde_json::Map::new();
+    if let Some(path) = file_path {
+        tool_input.insert("file_path".to_string(), serde_json::Value::String(path));
+    }
+
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "conversation_id".to_string(),
+        serde_json::Value::String(conversation_id),
+    );
+    data.insert(
+        "hook_event_name".to_string(),
+        serde_json::Value::String(hook_event_name),
+    );
+    data.insert(
+        "tool_name".to_string(),
+        serde_json::Value::String(tool_name),
+    );
+    data.insert(
+        "workspace_roots".to_string(),
+        serde_json::Value::Array(
+            workspace_roots
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    data.insert(
+        "tool_input".to_string(),
+        serde_json::Value::Object(tool_input),
+    );
+    if let Some(model) = model {
+        data.insert("model".to_string(), serde_json::Value::String(model));
+    }
+    if let Some(transcript_path) = transcript_path {
+        data.insert(
+            "transcript_path".to_string(),
+            serde_json::Value::String(transcript_path),
+        );
+    }
+    if let Some(tool_use_id) = tool_use_id {
+        data.insert(
+            "tool_use_id".to_string(),
+            serde_json::Value::String(tool_use_id),
+        );
+    }
+
+    Ok(serde_json::Value::Object(data))
+}
+
+fn find_json_string_field(
+    input: &str,
+    key: &str,
+    start: usize,
+    use_last_match: bool,
+) -> Option<String> {
+    let pattern = format!("\"{}\"", key);
+    let search = input.get(start..)?;
+    let relative_index = if use_last_match {
+        search.rfind(&pattern)?
+    } else {
+        search.find(&pattern)?
+    };
+    let key_index = start + relative_index;
+    let after_key = input.get(key_index + pattern.len()..)?;
+    let colon_index = key_index + pattern.len() + after_key.find(':')?;
+    let after_colon = input.get(colon_index + 1..)?;
+    let quote_index = colon_index + 1 + after_colon.find('"')?;
+    let end_quote_index = find_json_string_end(input, quote_index)?;
+    serde_json::from_str(input.get(quote_index..=end_quote_index)?).ok()
+}
+
+fn find_json_string_array_field(
+    input: &str,
+    key: &str,
+    start: usize,
+    use_last_match: bool,
+) -> Option<Vec<String>> {
+    let pattern = format!("\"{}\"", key);
+    let search = input.get(start..)?;
+    let relative_index = if use_last_match {
+        search.rfind(&pattern)?
+    } else {
+        search.find(&pattern)?
+    };
+    let key_index = start + relative_index;
+    let after_key = input.get(key_index + pattern.len()..)?;
+    let colon_index = key_index + pattern.len() + after_key.find(':')?;
+    let after_colon = input.get(colon_index + 1..)?;
+    let array_start = colon_index + 1 + after_colon.find('[')?;
+    let array_end = find_json_array_end(input, array_start)?;
+    serde_json::from_str(input.get(array_start..=array_end)?).ok()
+}
+
+fn find_json_string_end(input: &str, quote_index: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.get(quote_index) != Some(&b'"') {
+        return None;
+    }
+
+    let mut escaped = false;
+    for (idx, &byte) in bytes.iter().enumerate().skip(quote_index + 1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_json_array_end(input: &str, array_start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.get(array_start) != Some(&b'[') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, &byte) in bytes.iter().enumerate().skip(array_start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +493,29 @@ mod tests {
                     assert_eq!(ts.session_id, generate_session_id("conv-123", "cursor"));
                     assert_eq!(ts.external_session_id, "conv-123");
                 }
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_fallback_parses_corrupted_tool_input_content() {
+        let input = r#"{"conversation_id":"conv-123","generation_id":"gen-123","model":"claude-3-5-sonnet","tool_name":"Write","tool_input":{"file_path":"src/main.rs","content":"class Example {\n    void f() {\n        text1 = text1.replaceAll(\"BROKEN", \":\");\n    }\n}\n"},"duration":84.485,"tool_use_id":"tool-write-1","session_id":"conv-123","hook_event_name":"postToolUse","cursor_version":"3.5.17","workspace_roots":["/home/user/project"],"user_email":"user@example.com","transcript_path":"/home/user/.cursor/transcripts/conv-123.jsonl"}"#;
+        assert!(serde_json::from_str::<serde_json::Value>(input).is_err());
+
+        let events = CursorPreset.parse(input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "cursor");
+                assert_eq!(e.context.external_session_id, "conv-123");
+                assert_eq!(e.context.agent_id.model, "claude-3-5-sonnet");
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+                assert_eq!(e.tool_use_id.as_deref(), Some("tool-write-1"));
+                assert!(e.transcript_source.is_some());
             }
             _ => panic!("Expected PostFileEdit"),
         }
