@@ -336,6 +336,11 @@ where
         authorship_log.metadata.base_commit_sha = commit_sha.clone();
     }
 
+    crate::authorship::human_metadata::fill_missing_current_human_metadata(
+        repo,
+        &mut authorship_log,
+    );
+
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)

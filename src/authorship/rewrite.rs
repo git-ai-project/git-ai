@@ -282,6 +282,8 @@ fn write_authorship_log(
     commit_sha: &str,
     log: &AuthorshipLog,
 ) -> Result<(), GitAiError> {
+    let mut log = log.clone();
+    crate::authorship::human_metadata::fill_missing_current_human_metadata(repo, &mut log);
     let serialized = log.serialize_to_string().map_err(|e| {
         GitAiError::Generic(format!("failed to serialize rewrite authorship log: {}", e))
     })?;
@@ -419,7 +421,8 @@ fn shift_authorship_notes_with_existing_mode(
     }
 
     let mut all_writes = verbatim_writes;
-    for (sha, log) in merged_by_target {
+    for (sha, mut log) in merged_by_target {
+        crate::authorship::human_metadata::fill_missing_current_human_metadata(repo, &mut log);
         let serialized = log.serialize_to_string().map_err(|e| {
             GitAiError::Generic(format!("failed to serialize shifted authorship log: {}", e))
         })?;
