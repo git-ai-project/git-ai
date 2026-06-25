@@ -79,9 +79,9 @@ impl Drop for HomeEnvGuard {
     }
 }
 
-/// RAII guard that clears API-key env vars (e.g. `GIT_AI_API_KEY`) for the
-/// duration of a test, restoring the prior value on drop. `Config` resolves the
-/// API key from `GIT_AI_API_KEY` ahead of the on-disk config, so tests that
+/// RAII guard that clears the `GIT_AI_API_KEY` env var for the duration of a
+/// test, restoring the prior value on drop. `Config` resolves the API key from
+/// `GIT_AI_API_KEY` ahead of the on-disk config, so tests that
 /// assert on the file-config api_key must clear any ambient value to remain
 /// hermetic (otherwise they fail on a developer machine that has the var set,
 /// while passing in CI's clean environment).

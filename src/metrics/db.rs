@@ -244,6 +244,16 @@ impl MetricsDatabase {
         Ok(internal.join("metrics-db"))
     }
 
+    /// Test-only accessor for the resolved on-disk database path, so the
+    /// integration test crate can assert `GIT_AI_INTERNAL_DIR` routing against the
+    /// real resolver. `database_path()` is a pure path computation (it creates no
+    /// files), so this has no side effects. Mirrors
+    /// `DaemonConfig::from_internal_dir_for_test`.
+    #[cfg(feature = "test-support")]
+    pub fn database_path_for_test() -> Result<PathBuf, GitAiError> {
+        Self::database_path()
+    }
+
     /// Initialize schema and handle migrations
     fn initialize_schema(&mut self) -> Result<(), GitAiError> {
         // FAST PATH: Check if database is already at current version
