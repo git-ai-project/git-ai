@@ -1389,6 +1389,10 @@ fn rebase_new_tip_from_command(
         return Some(new_tip);
     }
 
+    if !rebase_is_control_mode(cmd) {
+        return None;
+    }
+
     let branch_ref_names = cmd
         .ref_changes
         .iter()
@@ -4450,12 +4454,10 @@ impl ActorDaemonCoordinator {
         // with the branch ref update as new_tip. This handles rebase --skip/--continue
         // where HEAD can contain extra checkout/detach movement that is not the
         // rebased branch tip.
-        if let Some((original_head, stored_onto)) = pending_original_head {
-            let new_tip = rebase_new_tip_from_command(cmd, &original_head);
-            if let Some(new_tip) = new_tip
-                && original_head != new_tip
-                && !is_ancestor_commit(&repo, &original_head, &new_tip)
-            {
+        if let Some((original_head, stored_onto)) = pending_original_head
+            && let Some(new_tip) = rebase_new_tip_from_command(cmd, &original_head)
+        {
+            if original_head != new_tip && !is_ancestor_commit(&repo, &original_head, &new_tip) {
                 let command_rebase_onto =
                     rebase_onto_from_command(cmd, &repo, &original_head, &new_tip);
                 let rebase_onto = stored_onto
