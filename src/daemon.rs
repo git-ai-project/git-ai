@@ -1705,15 +1705,53 @@ pub(crate) fn remove_stale_daemon_files(_config: &DaemonConfig) {}
 
 #[cfg(not(windows))]
 fn daemon_is_test_mode() -> bool {
+    // GIT_AI_TEST_COMPLETION_LOG_DIR is a test-only signal (the integration
+    // harness drives a daemon purely via GIT_AI_INTERNAL_DIR -- no
+    // GIT_AI_TEST_DB_PATH -- and sets it so the daemon still emits the test-sync
+    // completion log and keeps stderr on the console). It is gated behind
+    // test/test-support so a production RELEASE binary cannot be coerced into
+    // test mode by an env var; the test daemon is built with --features
+    // test-support, so it still honors the signal.
+    #[cfg(any(test, feature = "test-support"))]
+    let completion_log_signal = std::env::var_os("GIT_AI_TEST_COMPLETION_LOG_DIR").is_some();
+    #[cfg(not(any(test, feature = "test-support")))]
+    let completion_log_signal = false;
+
     std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
-        // The integration harness can drive a daemon purely via
-        // GIT_AI_INTERNAL_DIR (no GIT_AI_TEST_DB_PATH, so the daemon resolves
-        // its DB from the internal dir like production). In that mode it sets
-        // GIT_AI_TEST_COMPLETION_LOG_DIR so the daemon still emits the
-        // test-sync completion log and keeps stderr on the console. This is a
-        // test-only signal; production never sets it.
-        || std::env::var_os("GIT_AI_TEST_COMPLETION_LOG_DIR").is_some()
+        || completion_log_signal
+}
+
+/// Resolve the daemon's test-sync completion-log directory.
+///
+/// Gated behind test/test-support: a production RELEASE binary (built without
+/// `test-support`) always returns `None`, so no completion log is written and the
+/// daemon cannot be coerced into emitting one by an env var. The test daemon is
+/// built with `--features test-support`, so it still resolves the dir from
+/// `GIT_AI_TEST_COMPLETION_LOG_DIR` (the internal-dir-driven harness mode) or the
+/// legacy `GIT_AI_TEST_DB_PATH`-gated location.
+fn resolve_test_completion_log_dir() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        std::env::var_os("GIT_AI_TEST_COMPLETION_LOG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("GIT_AI_TEST_DB_PATH")
+                    .ok()
+                    .or_else(|| std::env::var("GITAI_TEST_DB_PATH").ok())
+                    .map(|_| {
+                        DaemonConfig::from_env_or_default_paths()
+                            .map(|config| config.test_completion_log_dir())
+                            .unwrap_or_else(|_| {
+                                std::env::temp_dir().join("git-ai-daemon-test-completions-fallback")
+                            })
+                    })
+            })
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        None
+    }
 }
 
 fn daemon_log_dir(config: &DaemonConfig) -> PathBuf {
@@ -2097,26 +2135,9 @@ impl ActorDaemonCoordinator {
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
-            // An explicit GIT_AI_TEST_COMPLETION_LOG_DIR wins: it lets the
-            // integration harness drive a daemon purely via GIT_AI_INTERNAL_DIR
-            // (no GIT_AI_TEST_DB_PATH override) while still receiving the
-            // test-sync completion log. Otherwise fall back to the legacy
-            // GIT_AI_TEST_DB_PATH-gated location.
-            test_completion_log_dir: std::env::var_os("GIT_AI_TEST_COMPLETION_LOG_DIR")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var("GIT_AI_TEST_DB_PATH")
-                        .ok()
-                        .or_else(|| std::env::var("GITAI_TEST_DB_PATH").ok())
-                        .map(|_| {
-                            DaemonConfig::from_env_or_default_paths()
-                                .map(|config| config.test_completion_log_dir())
-                                .unwrap_or_else(|_| {
-                                    std::env::temp_dir()
-                                        .join("git-ai-daemon-test-completions-fallback")
-                                })
-                        })
-                }),
+            // Test-only; None in production release builds (see
+            // resolve_test_completion_log_dir).
+            test_completion_log_dir: resolve_test_completion_log_dir(),
             test_completion_log_lock: Mutex::new(()),
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,

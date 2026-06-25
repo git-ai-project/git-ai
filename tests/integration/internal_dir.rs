@@ -16,10 +16,15 @@
 //!      control/trace sockets, daemon.lock, daemon.pid.json) pairwise disjoint,
 //!      both daemon locks holdable simultaneously, and DB writes from one
 //!      machine invisible to the other.
-//!   3. END-TO-END concurrency: two real daemons, each with its own
-//!      `GIT_AI_INTERNAL_DIR`, drive a real commit/authorship flow concurrently
-//!      with correct line-level authorship on both -- plus the contrasting
-//!      collision case where two daemons share one internal dir.
+//!   3. END-TO-END concurrency: real daemons (two- and three-machine variants),
+//!      each with its own `GIT_AI_INTERNAL_DIR`, drive real commit/authorship
+//!      flows concurrently with correct line-level authorship on each -- plus the
+//!      contrasting collision case where two daemons share one internal dir.
+//!
+//! The path-resolution tests resolve through the real production resolvers
+//! (`internal_dir_path()`, `DaemonConfig::from_default_paths()`, and each DB's
+//! `database_path()`) under each machine's `GIT_AI_INTERNAL_DIR`, so they fail if
+//! the variable is ever ignored.
 //!
 //! Path-resolution tests mutate the process environment and so are `#[serial]`.
 //! The end-to-end tests drive out-of-process daemons via the harness opt-in
@@ -28,8 +33,11 @@
 
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, configure_test_home_env, get_binary_path};
+use git_ai::authorship::internal_db::InternalDatabase;
 use git_ai::config::internal_dir_path;
 use git_ai::daemon::{DaemonConfig, DaemonLock};
+use git_ai::metrics::db::MetricsDatabase;
+use git_ai::notes::db::NotesDatabase;
 use git_ai::utils::LockFile;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,35 +77,94 @@ impl Drop for InternalDirEnvGuard {
     }
 }
 
-/// All four SQLite database paths git-ai resolves under a given internal dir.
-/// Per spec these are always `<internal_dir>/<name>` with no fallback.
-fn db_paths(internal_dir: &Path) -> [PathBuf; 4] {
+/// RAII guard for resolving git-ai's production paths under a specific
+/// `GIT_AI_INTERNAL_DIR`. Sets that env var AND clears the per-DB test-path
+/// overrides (`GIT_AI_TEST_DB_PATH` / `GITAI_TEST_DB_PATH` /
+/// `GIT_AI_TEST_METRICS_DB_PATH` / `GIT_AI_TEST_NOTES_DB_PATH`) so the real
+/// `database_path()` resolvers exercise the `GIT_AI_INTERNAL_DIR` routing path
+/// hermetically (regardless of any ambient override), restoring everything on
+/// drop. Callers must be `#[serial(git_ai_internal_dir_env)]`.
+struct ProductionResolveEnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl ProductionResolveEnvGuard {
+    fn set(internal_dir: &Path) -> Self {
+        const KEYS: [&str; 5] = [
+            "GIT_AI_INTERNAL_DIR",
+            "GIT_AI_TEST_DB_PATH",
+            "GITAI_TEST_DB_PATH",
+            "GIT_AI_TEST_METRICS_DB_PATH",
+            "GIT_AI_TEST_NOTES_DB_PATH",
+        ];
+        let saved = KEYS
+            .iter()
+            .map(|&key| (key, std::env::var_os(key)))
+            .collect();
+        unsafe {
+            std::env::set_var("GIT_AI_INTERNAL_DIR", internal_dir);
+            std::env::remove_var("GIT_AI_TEST_DB_PATH");
+            std::env::remove_var("GITAI_TEST_DB_PATH");
+            std::env::remove_var("GIT_AI_TEST_METRICS_DB_PATH");
+            std::env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for ProductionResolveEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+/// The four SQLite database paths git-ai resolves for `internal_dir`, obtained
+/// from the PRODUCTION resolvers under a clean env: `database_path()` for the
+/// three DBs that route through `internal_dir_path()`, and the daemon config for
+/// `transcripts-db`. Asserting these equal `<internal_dir>/<name>` proves the real
+/// routing (NOT the test computing `internal_dir.join(name)` and comparing it to
+/// itself). Caller must be `#[serial(git_ai_internal_dir_env)]`.
+fn production_db_paths(internal_dir: &Path) -> [PathBuf; 4] {
+    let _guard = ProductionResolveEnvGuard::set(internal_dir);
+    let config = DaemonConfig::from_default_paths().expect("daemon config should resolve");
     [
-        internal_dir.join("db"),             // authorship
-        internal_dir.join("metrics-db"),     // metrics
-        internal_dir.join("notes-db"),       // notes
-        internal_dir.join("transcripts-db"), // streams / transcripts
+        InternalDatabase::database_path_for_test().expect("authorship db path"),
+        MetricsDatabase::database_path_for_test().expect("metrics db path"),
+        NotesDatabase::database_path_for_test().expect("notes db path"),
+        config.internal_dir.join("transcripts-db"),
     ]
 }
 
-/// Every machine-scoped runtime path git-ai resolves for an internal dir: the
-/// daemon control/trace sockets, the daemon lock, daemon.pid.json, and the four
-/// SQLite DBs. Used to assert disjointness / overlap between two internal dirs.
-fn all_runtime_paths(internal_dir: &Path) -> Vec<PathBuf> {
-    let config = DaemonConfig::from_internal_dir_for_test(internal_dir);
+/// Every machine-scoped runtime path git-ai resolves for `internal_dir`, obtained
+/// from PRODUCTION code under a clean env (daemon control/trace sockets, lock,
+/// daemon.pid.json, and the four SQLite DBs). Used to assert disjointness /
+/// overlap between internal dirs THROUGH the real env-driven resolution. Caller
+/// must be `#[serial(git_ai_internal_dir_env)]`.
+fn production_runtime_paths(internal_dir: &Path) -> Vec<PathBuf> {
+    let _guard = ProductionResolveEnvGuard::set(internal_dir);
+    let config = DaemonConfig::from_default_paths().expect("daemon config should resolve");
     let pid_meta = config
         .lock_path
         .parent()
         .expect("daemon lock path must have a parent")
         .join("daemon.pid.json");
-    let mut paths = vec![
+    vec![
         config.control_socket_path.clone(),
         config.trace_socket_path.clone(),
         config.lock_path.clone(),
         pid_meta,
-    ];
-    paths.extend(db_paths(internal_dir));
-    paths
+        InternalDatabase::database_path_for_test().expect("authorship db path"),
+        MetricsDatabase::database_path_for_test().expect("metrics db path"),
+        NotesDatabase::database_path_for_test().expect("notes db path"),
+        config.internal_dir.join("transcripts-db"),
+    ]
 }
 
 fn unique_internal_dir(label: &str) -> PathBuf {
@@ -139,8 +206,12 @@ fn test_internal_dir_env_is_used_verbatim_for_all_runtime_paths() {
         "GIT_AI_INTERNAL_DIR must be used verbatim, with no appended `internal` segment"
     );
 
-    // The 4 SQLite DBs land directly under the internal dir.
-    let [authorship, metrics, notes, transcripts] = db_paths(&machine);
+    // The 4 SQLite DBs resolve directly under the internal dir -- proven through
+    // the PRODUCTION resolvers (database_path() for the three that route via
+    // internal_dir_path(); the daemon config for transcripts-db), hermetic against
+    // any ambient per-DB test-path override. These FAIL if the env is ignored or a
+    // DB filename changes (not the test comparing its own arithmetic to itself).
+    let [authorship, metrics, notes, transcripts] = production_db_paths(&machine);
     assert_eq!(authorship, machine.join("db"));
     assert_eq!(metrics, machine.join("metrics-db"));
     assert_eq!(notes, machine.join("notes-db"));
@@ -228,8 +299,11 @@ fn test_internal_dir_distinct_machines_resolve_pairwise_disjoint_paths() {
     let machine_b = unique_internal_dir("isolation-b");
     assert_ne!(machine_a, machine_b);
 
-    let paths_a = all_runtime_paths(&machine_a);
-    let paths_b = all_runtime_paths(&machine_b);
+    // Resolve every runtime path for each machine THROUGH PRODUCTION CODE under
+    // that machine's GIT_AI_INTERNAL_DIR (env-grounded, hermetic), then assert
+    // pairwise disjointness.
+    let paths_a = production_runtime_paths(&machine_a);
+    let paths_b = production_runtime_paths(&machine_b);
 
     // ISOLATION: every runtime path for machine A is disjoint from every
     // runtime path for machine B. No socket, lock, pid file, or DB collides.
@@ -270,7 +344,7 @@ fn test_internal_dir_shared_machines_resolve_identical_colliding_paths() {
         let _guard = InternalDirEnvGuard::set(value);
         let internal = internal_dir_path().expect("internal dir should resolve");
         let config = DaemonConfig::from_default_paths().expect("daemon config should resolve");
-        let dbs = db_paths(&internal);
+        let dbs = production_db_paths(value);
         (
             internal,
             dbs,
@@ -376,19 +450,11 @@ fn test_internal_dir_distinct_db_writes_are_isolated() {
     let machine_a = unique_internal_dir("dbwrite-a");
     let machine_b = unique_internal_dir("dbwrite-b");
 
-    let db_a = {
-        let _guard = InternalDirEnvGuard::set(&machine_a);
-        internal_dir_path()
-            .expect("machine A internal dir should resolve")
-            .join("db")
-    };
-    let db_b = {
-        let _guard = InternalDirEnvGuard::set(&machine_b);
-        internal_dir_path()
-            .expect("machine B internal dir should resolve")
-            .join("db")
-    };
-    // Production resolution honored each machine's env value.
+    // Resolve each machine's authorship DB path through the PRODUCTION resolver
+    // (database_path()), hermetic against any ambient per-DB test override.
+    let [db_a, ..] = production_db_paths(&machine_a);
+    let [db_b, ..] = production_db_paths(&machine_b);
+    // Production resolution honored each machine's env value (fails if ignored).
     assert_eq!(db_a, machine_a.join("db"));
     assert_eq!(db_b, machine_b.join("db"));
     assert_ne!(db_a, db_b);
@@ -469,21 +535,11 @@ fn test_internal_dir_end_to_end_single_machine_authorship_flow() {
         internal_dir.join("transcripts-db").display()
     );
 
-    // The metrics DB is intentionally never written for a mock_ai-only flow
-    // (metrics emission is suppressed for the mock_ai test preset at every
-    // layer), so a commit flow alone does not create it. Instead exercise the
-    // production routing directly via a real client command: `git-ai usage`
-    // opens the metrics DB through `MetricsDatabase::database_path()` ->
-    // `config::internal_dir_path().join("metrics-db")` -- the exact path this
-    // feature rerouted off of `dirs::home_dir()`. The command exits non-zero
-    // because there is no recorded activity, but it creates the DB file first,
-    // proving the client resolves metrics-db from GIT_AI_INTERNAL_DIR.
-    let _ = repo.git_ai(&["usage", "--json"]);
-    assert!(
-        internal_dir.join("metrics-db").exists(),
-        "metrics DB should have been created under the internal dir: {}",
-        internal_dir.join("metrics-db").display()
-    );
+    // DB-path routing under GIT_AI_INTERNAL_DIR (db / metrics-db / notes-db) is
+    // proven deterministically and hermetically by
+    // test_internal_dir_env_is_used_verbatim_for_all_runtime_paths and the per-DB
+    // unit tests; this end-to-end test focuses on the live daemon + correct
+    // authorship rather than re-proving DB routing via a command side effect.
 }
 
 #[test]
@@ -499,9 +555,8 @@ fn test_internal_dir_end_to_end_two_machines_isolated_and_concurrent() {
     let repo_a = TestRepo::new_with_internal_dir(&internal_dir_a);
     let repo_b = TestRepo::new_with_internal_dir(&internal_dir_b);
 
-    // Run both flows concurrently in separate threads. Capture the repos by
-    // reference (not by move) so they remain usable afterwards for the
-    // client-side metrics-db routing check below.
+    // Run both flows concurrently in separate threads, capturing the repos by
+    // reference (not by move) so both daemons stay alive for the whole scope.
     let (tx, rx) = mpsc::channel();
     let repo_a_ref = &repo_a;
     let repo_b_ref = &repo_b;
@@ -535,27 +590,6 @@ fn test_internal_dir_end_to_end_two_machines_isolated_and_concurrent() {
             dir.join("transcripts-db").display()
         );
     }
-
-    // The metrics DB is not written by a mock_ai-only commit flow (metrics
-    // emission is suppressed for the mock_ai preset), so exercise the
-    // production metrics-db routing directly per machine via `git-ai usage`,
-    // which opens the DB at `config::internal_dir_path().join("metrics-db")`.
-    // Each client runs with its own GIT_AI_INTERNAL_DIR, so each must create a
-    // distinct metrics DB under its own internal dir.
-    let _ = repo_a.git_ai(&["usage", "--json"]);
-    let _ = repo_b.git_ai(&["usage", "--json"]);
-    for dir in [&internal_dir_a, &internal_dir_b] {
-        assert!(
-            dir.join("metrics-db").exists(),
-            "each machine should create its own metrics DB under its internal dir: {}",
-            dir.join("metrics-db").display()
-        );
-    }
-    assert_ne!(
-        internal_dir_a.join("metrics-db"),
-        internal_dir_b.join("metrics-db"),
-        "the two machines must not share a metrics DB"
-    );
 }
 
 #[test]
@@ -783,7 +817,10 @@ fn test_internal_dir_three_machines_resolve_globally_disjoint_paths() {
 
     // Gather every runtime path across all three machines and assert there are no
     // duplicates -- a duplicate would mean two of the three hosts share a file.
-    let mut all_paths: Vec<PathBuf> = machines.iter().flat_map(|m| all_runtime_paths(m)).collect();
+    let mut all_paths: Vec<PathBuf> = machines
+        .iter()
+        .flat_map(|m| production_runtime_paths(m))
+        .collect();
     let total = all_paths.len();
     all_paths.sort();
     all_paths.dedup();
@@ -847,27 +884,5 @@ fn test_internal_dir_end_to_end_three_machines_isolated_and_concurrent() {
              internal dir: {}",
             dir.join("transcripts-db").display()
         );
-    }
-
-    // Exercise the client-side metrics-db routing per machine, then assert all
-    // three metrics DBs are distinct files (no sharing across the three hosts).
-    for repo in &repos {
-        let _ = repo.git_ai(&["usage", "--json"]);
-    }
-    for dir in &dirs {
-        assert!(
-            dir.join("metrics-db").exists(),
-            "each of the three machines should create its own metrics DB: {}",
-            dir.join("metrics-db").display()
-        );
-    }
-    for i in 0..dirs.len() {
-        for j in (i + 1)..dirs.len() {
-            assert_ne!(
-                dirs[i].join("metrics-db"),
-                dirs[j].join("metrics-db"),
-                "the three machines must not share a metrics DB"
-            );
-        }
     }
 }

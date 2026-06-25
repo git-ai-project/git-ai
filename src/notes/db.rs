@@ -136,6 +136,16 @@ impl NotesDatabase {
         Ok(internal.join("notes-db"))
     }
 
+    /// Test-only accessor for the resolved on-disk database path, so the
+    /// integration test crate can assert `GIT_AI_INTERNAL_DIR` routing against the
+    /// real resolver. `database_path()` is a pure path computation (it creates no
+    /// files), so this has no side effects. Mirrors
+    /// `DaemonConfig::from_internal_dir_for_test`.
+    #[cfg(feature = "test-support")]
+    pub fn database_path_for_test() -> Result<PathBuf, GitAiError> {
+        Self::database_path()
+    }
+
     /// Apply schema migrations until the DB is at `SCHEMA_VERSION`.
     fn initialize_schema(&mut self) -> Result<(), GitAiError> {
         // Fast path: if the metadata table and version already match, skip migrations.
