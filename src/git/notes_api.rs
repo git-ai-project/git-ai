@@ -11,11 +11,12 @@
 //!   backend asynchronously.
 //!
 //! ## Read path
-//! - **Both backends:** check SQLite first (fast, no network).
-//! - **`git_notes`:** on miss, fall back to `refs/notes/ai` and cache the result
-//!   back into SQLite.
-//! - **`http`:** on miss, fetch from the HTTP backend (network), cache into
-//!   SQLite, then fall back to `refs/notes/ai` for anything still missing.
+//! - **`git_notes`:** first reconcile SQLite from `refs/notes/ai` when the
+//!   local notes ref tip changed, then read SQLite. On miss, fall back to
+//!   `refs/notes/ai` and cache the result back into SQLite.
+//! - **`http`:** check SQLite first (fast, no network). On miss, fetch from the
+//!   HTTP backend (network), cache into SQLite, then fall back to `refs/notes/ai`
+//!   for anything still missing.
 //!
 //! ## Sync operations (separate from reads/writes)
 //! - `sync_from_git_ref(repo)` — imports local `refs/notes/ai` into SQLite
@@ -155,7 +156,13 @@ fn read_notes_batch_for_kind(
             Ok::<HashMap<String, String>, GitAiError>(notes)
         }
         NotesBackendKind::GitNotes => {
-            // Step 1 (git_notes): check SQLite cache — fast, no subprocess.
+            // Step 1 (git_notes): refs/notes/ai is authoritative. Refresh the
+            // SQLite cache when the local notes ref tip changed so direct
+            // git-notes writes cannot be shadowed by stale cache hits. The sync
+            // is cursor-guarded and cheap when the ref is unchanged.
+            sync_from_git_ref(repo)?;
+
+            // Step 2 (git_notes): check SQLite cache.
             let mut notes = git_notes_read_from_sqlite(lookup_shas);
 
             let missing: Vec<String> = lookup_shas
@@ -165,11 +172,11 @@ fn read_notes_batch_for_kind(
                 .collect();
 
             if !missing.is_empty() {
-                // Step 2 (git_notes): fall back to git ref for misses. Errors are
+                // Step 3 (git_notes): fall back to git ref for misses. Errors are
                 // propagated — callers that detect corrupt notes rely on this.
                 let from_git = crate::git::refs::notes_for_commits(repo, &missing)?;
 
-                // Step 3 (git_notes): cache git-ref hits back into SQLite.
+                // Step 4 (git_notes): cache git-ref hits back into SQLite.
                 if !from_git.is_empty() {
                     let entries: Vec<(String, String)> = from_git
                         .iter()
@@ -1656,8 +1663,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(notes_db_env)]
-    fn git_notes_read_does_not_sync_entire_git_ref() {
-        use crate::git::repository::exec_git;
+    fn git_notes_read_refreshes_cache_when_ref_tip_changes() {
         use crate::git::test_utils::TmpRepo;
         use crate::notes::db::NotesDatabase;
         use std::env;
@@ -1672,20 +1678,6 @@ mod tests {
         let sha = repo.commit_all("initial").expect("commit");
 
         let note_content = "git-ref-content";
-        let mut args = repo.gitai_repo().global_args_for_exec();
-        args.extend([
-            "notes".to_string(),
-            "--ref=ai".to_string(),
-            "add".to_string(),
-            "-m".to_string(),
-            note_content.to_string(),
-            sha.clone(),
-        ]);
-        exec_git(&args).expect("git notes add");
-
-        let notes_tip = local_notes_ref_tip(repo.gitai_repo())
-            .expect("read notes tip")
-            .expect("notes tip");
         let sync_cursor_key = notes_ref_sync_cursor_key(repo.gitai_repo());
 
         let db = NotesDatabase::global().expect("global db");
@@ -1693,7 +1685,15 @@ mod tests {
             let mut lock = db.lock().expect("lock");
             lock.set_metadata_value(&sync_cursor_key, "stale-sync-cursor")
                 .expect("set stale cursor");
+            lock.cache_synced_notes(&[(sha.clone(), "stale-cache-content".to_string())])
+                .expect("seed stale cache");
         }
+
+        crate::git::refs::notes_add(repo.gitai_repo(), &sha, note_content)
+            .expect("write git note");
+        let notes_tip = local_notes_ref_tip(repo.gitai_repo())
+            .expect("read notes tip")
+            .expect("notes tip");
 
         let notes = read_notes_batch_for_kind(
             repo.gitai_repo(),
@@ -1703,24 +1703,26 @@ mod tests {
         .expect("read git note");
 
         assert_eq!(
-            notes.get(&sha).map(|content| content.trim_end()),
+            notes.get(&sha).map(String::as_str),
             Some(note_content),
-            "GitNotes reads should still fall back to refs/notes/ai for requested misses"
+            "GitNotes reads must refresh stale SQLite entries from refs/notes/ai"
         );
 
         let lock = db.lock().expect("lock");
+        let cached = lock.get_note(&sha).expect("get cached note");
+        assert_eq!(
+            cached.as_deref(),
+            Some(note_content),
+            "read-side sync should replace stale cached content"
+        );
+
         let cursor = lock
             .get_metadata_value(&sync_cursor_key)
             .expect("get sync cursor");
         assert_eq!(
             cursor.as_deref(),
-            Some("stale-sync-cursor"),
-            "GitNotes reads must not run full sync_from_git_ref or advance its cursor"
-        );
-        assert_ne!(
-            cursor.as_deref(),
             Some(notes_tip.as_str()),
-            "full ref sync should be reserved for explicit pull/fetch/clone sync triggers"
+            "GitNotes reads should record the notes ref tip after refreshing"
         );
 
         unsafe {
