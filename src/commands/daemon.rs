@@ -5,9 +5,7 @@ use crate::daemon::{
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
-use crate::utils::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
-};
+use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -15,6 +13,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -341,65 +341,9 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
-/// RAII guard that clears the inheritable flag on the process's standard
-/// handles (stdin/stdout/stderr) for its lifetime and restores it on drop.
-///
-/// Windows spawns every child via `CreateProcessW` with `bInheritHandles=TRUE`,
-/// so any inheritable handle in this process leaks into children regardless of
-/// the child's own stdio configuration. When we launch the detached daemon we
-/// must ensure it does not inherit our std handles -- if our stdout/stderr are
-/// pipe write-ends (because a parent captured our output), the daemon would
-/// keep them open for its entire lifetime and the parent's read would hang.
 #[cfg(windows)]
-struct NonInheritableStdHandles {
-    cleared: Vec<windows_sys::Win32::Foundation::HANDLE>,
-}
-
-#[cfg(windows)]
-impl NonInheritableStdHandles {
-    fn new() -> Self {
-        use windows_sys::Win32::Foundation::{
-            GetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-        };
-        use windows_sys::Win32::System::Console::{
-            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-        };
-
-        let mut cleared = Vec::new();
-        for std_id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-            // SAFETY: GetStdHandle/GetHandleInformation/SetHandleInformation are
-            // simple Win32 calls operating on the current process's handle table.
-            unsafe {
-                let handle = GetStdHandle(std_id);
-                if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-                    continue;
-                }
-                let mut flags: u32 = 0;
-                if GetHandleInformation(handle, &mut flags) == 0 {
-                    continue;
-                }
-                if flags & HANDLE_FLAG_INHERIT != 0
-                    && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0
-                {
-                    cleared.push(handle);
-                }
-            }
-        }
-        Self { cleared }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for NonInheritableStdHandles {
-    fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
-        for handle in self.cleared.drain(..) {
-            // SAFETY: restoring the inheritable flag on a handle we just cleared.
-            unsafe {
-                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-            }
-        }
-    }
+fn powershell_single_quote_literal(value: &OsStr) -> String {
+    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
 
 #[cfg(any(windows, not(any(test, feature = "test-support"))))]
@@ -413,20 +357,19 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        // Spawn the daemon directly via the Windows process API (CreateProcessW,
-        // which std::process::Command wraps) instead of shelling out to
-        // PowerShell's Start-Process. PowerShell is blocked in some locked-down
-        // corporate environments (issue #1366), and it was only ever used here
-        // as a detachment launcher. The creation flags below provide the same
-        // detachment: DETACHED_PROCESS gives the daemon no inherited console,
-        // CREATE_NO_WINDOW suppresses any console window, CREATE_NEW_PROCESS_GROUP
-        // isolates it from parent signals, and CREATE_BREAKAWAY_FROM_JOB lets it
-        // outlive the short-lived git command that triggered the spawn.
-        let mut child = Command::new(&exe);
+        let script = format!(
+            "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
+            powershell_single_quote_literal(exe.as_os_str()),
+            powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
+        );
+        let mut child = Command::new("powershell.exe");
         child
-            .arg("bg")
-            .arg("run")
-            .current_dir(&runtime_dir)
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-WindowStyle")
+            .arg("Hidden")
+            .arg("-Command")
+            .arg(script)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -436,25 +379,9 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
         }
         child.env_remove("GIT_AI");
 
-        let preferred_flags = CREATE_NO_WINDOW
-            | DETACHED_PROCESS
-            | CREATE_NEW_PROCESS_GROUP
-            | CREATE_BREAKAWAY_FROM_JOB;
+        let preferred_flags =
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
         child.creation_flags(preferred_flags);
-
-        // CreateProcessW (which std::process::Command wraps) is always called
-        // with bInheritHandles=TRUE, so the long-lived daemon would inherit
-        // every inheritable handle our process holds -- including the write-ends
-        // of the stdout/stderr pipes when our caller captured output (e.g. a
-        // parent that ran `git-ai bg start` via Command::output(), or the test
-        // harness). The daemon outlives us and never closes those handles, so
-        // the caller's read-end never sees EOF and its read blocks forever.
-        // PowerShell's Start-Process avoided this by launching with
-        // bInheritHandles=FALSE; replicate that guarantee by temporarily
-        // clearing the inheritable flag on our std handles across the spawn.
-        // The child uses null stdio, so it needs none of them.
-        let _no_inherit = NonInheritableStdHandles::new();
-
         match child.spawn() {
             Ok(_) => Ok(()),
             Err(preferred_err) => {
@@ -462,8 +389,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
                     "detached daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
                     preferred_err
                 );
-                child
-                    .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+                child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
                 child.spawn().map(|_| ()).map_err(|fallback_err| {
                     format!(
                         "failed to spawn detached daemon with flags {:#x}: {}; retry without CREATE_BREAKAWAY_FROM_JOB also failed: {}",

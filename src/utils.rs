@@ -346,9 +346,6 @@ pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
 /// Windows-specific flag to allow a child process to break away from the current job object
 #[cfg(windows)]
 pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
-/// Windows-specific flag to detach the child from the parent's console
-#[cfg(windows)]
-pub const DETACHED_PROCESS: u32 = 0x00000008;
 /// Unescape a git-quoted path that may contain octal escape sequences.
 ///
 /// Git quotes filenames containing non-ASCII characters (and some special characters)
@@ -1193,12 +1190,6 @@ mod tests {
     #[test]
     fn test_create_breakaway_from_job_constant() {
         assert_eq!(CREATE_BREAKAWAY_FROM_JOB, 0x01000000);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_detached_process_constant() {
-        assert_eq!(DETACHED_PROCESS, 0x00000008);
     }
 
     // =========================================================================
