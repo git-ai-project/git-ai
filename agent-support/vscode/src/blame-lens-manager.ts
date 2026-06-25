@@ -195,6 +195,21 @@ export class BlameLensManager {
         if (event.affectsConfiguration('gitai.blameMode')) {
           this.handleBlameModeChange();
         }
+        if (event.affectsConfiguration('gitai.binaryPath')) {
+          this.blameService.resetGitAiAvailability();
+          // Discard any cached results from the old binary so the next request
+          // uses the new path rather than returning stale attributions.
+          this.currentBlameResult = null;
+          this.pendingBlameRequest = null;
+          this.casFetchInProgress.clear();
+          const editor = vscode.window.activeTextEditor;
+          if (editor && this.blameMode !== 'off') {
+            if (this.blameMode === 'all') {
+              this.requestBlameForFullFile(editor);
+            }
+            this.updateStatusBar(editor);
+          }
+        }
         // Rebuild color decorations if workbench color customizations change
         if (event.affectsConfiguration('workbench.colorCustomizations')) {
           console.log('[git-ai] Color customizations changed, rebuilding color decorations');
