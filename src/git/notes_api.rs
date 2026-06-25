@@ -1689,8 +1689,7 @@ mod tests {
                 .expect("seed stale cache");
         }
 
-        crate::git::refs::notes_add(repo.gitai_repo(), &sha, note_content)
-            .expect("write git note");
+        crate::git::refs::notes_add(repo.gitai_repo(), &sha, note_content).expect("write git note");
         let notes_tip = local_notes_ref_tip(repo.gitai_repo())
             .expect("read notes tip")
             .expect("notes tip");
