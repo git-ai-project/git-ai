@@ -1181,6 +1181,181 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
 }
 
 #[test]
+fn test_stash_push_cleans_active_checkpoints_before_later_human_edit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("same_position.txt");
+
+    fs::write(&file_path, "original line\n").unwrap();
+    repo.stage_all_and_commit("base file").unwrap();
+    let mut file = repo.filename("same_position.txt");
+    file.assert_committed_lines(crate::lines!["original line".unattributed_human()]);
+
+    repo.git_ai(&["checkpoint", "human", "same_position.txt"])
+        .unwrap();
+    fs::write(&file_path, "original line\nai addition 1\nai addition 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "same_position.txt"])
+        .unwrap();
+    repo.git(&["stash", "push", "-m", "ai additions"]).unwrap();
+
+    fs::write(&file_path, "original line\nhuman same-position edit\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "same_position.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("human edit after stash").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "original line".unattributed_human(),
+        "human same-position edit".human(),
+    ]);
+}
+
+#[test]
+fn test_stash_pop_conflict_keeps_later_human_edit_human() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("conflict.txt");
+
+    fs::write(&file_path, "original line\n").unwrap();
+    repo.stage_all_and_commit("base file").unwrap();
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines!["original line".unattributed_human()]);
+
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    fs::write(
+        &file_path,
+        "original line\nai addition 1\nai addition 2\nai addition 3\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+    repo.git(&["stash", "push", "-m", "ai additions"]).unwrap();
+
+    fs::write(&file_path, "original line\nhuman edit on same file\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "conflict.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("human conflicting edit").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "original line".unattributed_human(),
+        "human edit on same file".human(),
+    ]);
+
+    let result = repo.git(&["stash", "pop"]);
+    assert!(result.is_err(), "stash pop should fail due to conflict");
+
+    fs::write(
+        &file_path,
+        "original line\nhuman edit on same file\nai addition 1\nai addition 2\nai addition 3\n",
+    )
+    .unwrap();
+    repo.git(&["add", "conflict.txt"]).unwrap();
+    repo.commit("manual conflict resolution").unwrap();
+
+    file.assert_committed_lines(crate::lines![
+        "original line".unattributed_human(),
+        "human edit on same file".human(),
+        "ai addition 1".ai(),
+        "ai addition 2".ai(),
+        "ai addition 3".ai(),
+    ]);
+}
+
+fn setup_stash_pop_conflict_with_known_human_line() -> TestRepo {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("conflict.txt");
+
+    fs::write(&file_path, "root\nbase tail\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "conflict.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("base file").unwrap();
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines!["root".human(), "base tail".human()]);
+
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    fs::write(&file_path, "root\nstashed ai line\nbase tail\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+    repo.git(&["stash", "push", "-m", "ai conflict edit"])
+        .unwrap();
+
+    fs::write(&file_path, "root\nknown human conflict line\nbase tail\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "conflict.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("known human conflict edit")
+        .unwrap();
+    file.assert_committed_lines(crate::lines![
+        "root".human(),
+        "known human conflict line".human(),
+        "base tail".human(),
+    ]);
+
+    let result = repo.git(&["stash", "pop"]);
+    assert!(result.is_err(), "stash pop should fail due to conflict");
+    let content = repo.read_file("conflict.txt").expect("file should exist");
+    assert!(
+        content.contains("<<<<<<<") || content.contains(">>>>>>>"),
+        "Expected conflict markers in file, got: {}",
+        content
+    );
+
+    repo
+}
+
+#[test]
+fn test_ai_stash_conflict_resolution_preserves_unoverwritten_human_line() {
+    let repo = setup_stash_pop_conflict_with_known_human_line();
+    let file_path = repo.path().join("conflict.txt");
+
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    fs::write(
+        &file_path,
+        "root\nknown human conflict line\nstashed ai line\nbase tail\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+
+    repo.git(&["add", "conflict.txt"]).unwrap();
+    repo.commit("ai conflict resolution preserving human line")
+        .unwrap();
+
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines![
+        "root".human(),
+        "known human conflict line".human(),
+        "stashed ai line".ai(),
+        "base tail".human(),
+    ]);
+}
+
+#[test]
+fn test_ai_stash_conflict_resolution_attributes_overwritten_human_line_to_ai() {
+    let repo = setup_stash_pop_conflict_with_known_human_line();
+    let file_path = repo.path().join("conflict.txt");
+
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    fs::write(
+        &file_path,
+        "root\nai replacement for human line\nstashed ai line\nbase tail\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+
+    repo.git(&["add", "conflict.txt"]).unwrap();
+    repo.commit("ai conflict resolution replacing human line")
+        .unwrap();
+
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines![
+        "root".human(),
+        "ai replacement for human line".ai(),
+        "stashed ai line".ai(),
+        "base tail".human(),
+    ]);
+}
+
+#[test]
 fn test_stash_apply_shift_uses_final_commit_tree_after_later_edit() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("example.txt");
@@ -1301,5 +1476,9 @@ crate::reuse_tests_in_worktree!(
     test_stash_apply_reset_apply_again,
     test_stash_branch_preserves_ai_attribution,
     test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint,
+    test_stash_push_cleans_active_checkpoints_before_later_human_edit,
+    test_stash_pop_conflict_keeps_later_human_edit_human,
+    test_ai_stash_conflict_resolution_preserves_unoverwritten_human_line,
+    test_ai_stash_conflict_resolution_attributes_overwritten_human_line_to_ai,
     test_stash_apply_shift_uses_final_commit_tree_after_later_edit,
 );
