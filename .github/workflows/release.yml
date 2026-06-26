@@ -425,7 +425,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: git-ai-linux-amd64-deb
-          path: release/*.deb
+          path: release/*_amd64.deb
           retention-days: 30
 
       - name: Upload deb arm64
@@ -771,7 +771,7 @@ jobs:
 
       - name: Move artifacts to release directory
         run: |
-          find artifacts -name "git-ai-*" -exec cp {} release/ \;
+          find artifacts -type f \( -name "git-ai-*" -o -name "git-ai_*" \) -exec cp {} release/ \;
 
       - name: List available artifacts
         run: |
@@ -781,8 +781,10 @@ jobs:
       - name: Create checksums
         run: |
           cd release
-          if ls git-ai-* git-ai_* 1> /dev/null 2>&1; then
-            sha256sum git-ai-* git-ai_* 2>/dev/null | sort > SHA256SUMS
+          shopt -s nullglob
+          artifacts=(git-ai-* git-ai_*)
+          if [ ${#artifacts[@]} -gt 0 ]; then
+            sha256sum "${artifacts[@]}" | sort > SHA256SUMS
           else
             echo "No binaries found to create checksums for"
             touch SHA256SUMS
