@@ -1,3 +1,4 @@
+use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 
@@ -119,4 +120,46 @@ fn test_post_commit_utf8_filename_with_ai_attribution() {
         log.attestations[0].file_path, chinese_filename,
         "File path should be the UTF-8 filename"
     );
+}
+
+#[test]
+fn test_post_commit_preserves_ai_attribution_for_mixed_eol_worktree() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.autocrlf", "true"]).unwrap();
+
+    let file_path = repo.path().join("eol.txt");
+    std::fs::write(&file_path, b"base one\r\nbase two\r\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.git_ai(&["checkpoint", "human", "eol.txt"]).unwrap();
+
+    // Reproduce the Windows failure mode: existing checkout lines are CRLF, but
+    // the AI append writes LF, so the working tree becomes mixed while Git stores
+    // the committed blob as LF.
+    std::fs::write(&file_path, b"base one\r\nbase two\r\nai line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "eol.txt"]).unwrap();
+
+    let commit = repo.stage_all_and_commit("AI mixed eol edit").unwrap();
+
+    let mut file = repo.filename("eol.txt");
+    file.assert_committed_lines(lines![
+        "base one".unattributed_human(),
+        "base two".unattributed_human(),
+        "ai line".ai(),
+    ]);
+
+    let initial_path = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("working_logs")
+        .join(commit.commit_sha)
+        .join("INITIAL");
+    if initial_path.exists() {
+        let initial = std::fs::read_to_string(initial_path).unwrap();
+        assert!(
+            !initial.contains("eol.txt"),
+            "mixed EOL normalization should not carry committed lines into INITIAL: {initial}"
+        );
+    }
 }
