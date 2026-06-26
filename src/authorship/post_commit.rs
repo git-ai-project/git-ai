@@ -1,4 +1,6 @@
-use crate::authorship::attribution_recovery::FileTimestampsByPath;
+use crate::authorship::attribution_recovery::{
+    AttributionRecoveryContext, FileTimestampsByPath, UnknownLinesByFile,
+};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
@@ -92,6 +94,7 @@ pub(crate) fn post_commit_from_working_log_with_recovery_timestamps(
     human_author: String,
     supress_output: bool,
     recovery_file_timestamps: Option<&FileTimestampsByPath>,
+    before_external_recovery: Option<&dyn Fn(&UnknownLinesByFile)>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
     post_commit_from_working_log_with_transform_context(
         repo,
@@ -106,6 +109,7 @@ pub(crate) fn post_commit_from_working_log_with_recovery_timestamps(
         PostCommitContext {
             precomputed_parent_diff: None,
             recovery_file_timestamps,
+            before_external_recovery,
         },
         Ok,
     )
@@ -122,6 +126,7 @@ pub(crate) struct PostCommitOptions {
 struct PostCommitContext<'a> {
     precomputed_parent_diff: Option<&'a DiffTreeResult>,
     recovery_file_timestamps: Option<&'a FileTimestampsByPath>,
+    before_external_recovery: Option<&'a dyn Fn(&UnknownLinesByFile)>,
 }
 
 pub fn post_commit_from_working_log_with_transform<F>(
@@ -198,6 +203,7 @@ where
         PostCommitContext {
             precomputed_parent_diff,
             recovery_file_timestamps: None,
+            before_external_recovery: None,
         },
         transform,
     )
@@ -331,7 +337,10 @@ where
             &human_author,
             &mut authorship_log,
             &recovery_hunks,
-            context.recovery_file_timestamps,
+            AttributionRecoveryContext {
+                file_timestamps: context.recovery_file_timestamps,
+                before_external_recovery: context.before_external_recovery,
+            },
         )?;
         authorship_log.metadata.base_commit_sha = commit_sha.clone();
     }
@@ -563,6 +572,7 @@ pub fn post_commit_amend(
         amended_commit,
         human_author,
         None,
+        None,
     )
 }
 
@@ -572,6 +582,7 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     amended_commit: &str,
     human_author: String,
     recovery_file_timestamps: Option<&FileTimestampsByPath>,
+    before_external_recovery: Option<&dyn Fn(&UnknownLinesByFile)>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
     // Reconcile the note cache with refs/notes/ai before reading the original
     // commit's note. GitNotes reads are SQLite-first and no longer run a full
@@ -687,7 +698,10 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
         &human_author,
         &mut authorship_log,
         &recovery_hunks,
-        recovery_file_timestamps,
+        AttributionRecoveryContext {
+            file_timestamps: recovery_file_timestamps,
+            before_external_recovery,
+        },
     )?;
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
