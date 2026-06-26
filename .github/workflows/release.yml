@@ -278,9 +278,492 @@ jobs:
           path: release/git-ai-macos-x64
           retention-days: 30
 
+  build-msi:
+    name: Build Windows MSI Installers
+    needs: [build]
+    runs-on: windows-latest
+    if: success()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download Windows x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-windows-x64
+          path: artifacts
+
+      - name: Download Windows ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-windows-arm64
+          path: artifacts
+
+      - name: Build MSI for x64
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build.outputs.version }}".TrimStart('v')
+          .\installer\windows\build-msi.ps1 `
+            -BinaryPath "artifacts\git-ai-windows-x64.exe" `
+            -Architecture x64 `
+            -Version $version `
+            -OutputPath "release\git-ai-windows-x64.msi"
+
+      - name: Build MSI for ARM64
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build.outputs.version }}".TrimStart('v')
+          .\installer\windows\build-msi.ps1 `
+            -BinaryPath "artifacts\git-ai-windows-arm64.exe" `
+            -Architecture arm64 `
+            -Version $version `
+            -OutputPath "release\git-ai-windows-arm64.msi"
+
+      - name: Upload MSI x64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-windows-x64-msi
+          path: release/git-ai-windows-x64.msi
+          retention-days: 30
+
+      - name: Upload MSI ARM64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-windows-arm64-msi
+          path: release/git-ai-windows-arm64.msi
+          retention-days: 30
+
+  build-pkg:
+    name: Build macOS Package Installers
+    needs: [build, build-macos-intel]
+    runs-on: macos-latest
+    if: success()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download macOS ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-macos-arm64
+          path: artifacts
+
+      - name: Download macOS x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-macos-x64
+          path: artifacts
+
+      - name: Build pkg for ARM64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          chmod +x artifacts/git-ai-macos-arm64
+          ./installer/macos/build-pkg.sh \
+            --binary artifacts/git-ai-macos-arm64 \
+            --arch arm64 \
+            --version "$VERSION" \
+            --output release/git-ai-macos-arm64.pkg
+
+      - name: Build pkg for x64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          chmod +x artifacts/git-ai-macos-x64
+          ./installer/macos/build-pkg.sh \
+            --binary artifacts/git-ai-macos-x64 \
+            --arch x64 \
+            --version "$VERSION" \
+            --output release/git-ai-macos-x64.pkg
+
+      - name: Upload pkg ARM64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-macos-arm64-pkg
+          path: release/git-ai-macos-arm64.pkg
+          retention-days: 30
+
+      - name: Upload pkg x64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-macos-x64-pkg
+          path: release/git-ai-macos-x64.pkg
+          retention-days: 30
+
+  build-linux-packages:
+    name: Build Linux Packages (deb/rpm)
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Download Linux x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-x64
+          path: artifacts
+
+      - name: Download Linux ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-arm64
+          path: artifacts
+
+      - name: Build deb for amd64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          chmod +x artifacts/git-ai-linux-x64
+          ./installer/linux/build-deb.sh \
+            --binary artifacts/git-ai-linux-x64 \
+            --arch amd64 \
+            --version "$VERSION" \
+            --output "release/git-ai_${VERSION}_amd64.deb"
+
+      - name: Build deb for arm64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          chmod +x artifacts/git-ai-linux-arm64
+          ./installer/linux/build-deb.sh \
+            --binary artifacts/git-ai-linux-arm64 \
+            --arch arm64 \
+            --version "$VERSION" \
+            --output "release/git-ai_${VERSION}_arm64.deb"
+
+      - name: Build rpm for x86_64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          ./installer/linux/build-rpm.sh \
+            --binary artifacts/git-ai-linux-x64 \
+            --arch x86_64 \
+            --version "$VERSION" \
+            --output "release/git-ai-${VERSION}-1.x86_64.rpm"
+
+      - name: Build rpm for aarch64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          ./installer/linux/build-rpm.sh \
+            --binary artifacts/git-ai-linux-arm64 \
+            --arch aarch64 \
+            --version "$VERSION" \
+            --output "release/git-ai-${VERSION}-1.aarch64.rpm"
+
+      - name: Upload deb amd64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-amd64-deb
+          path: release/*_amd64.deb
+          retention-days: 30
+
+      - name: Upload deb arm64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-arm64-deb
+          path: release/*arm64.deb
+          retention-days: 30
+
+      - name: Upload rpm x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-x86_64-rpm
+          path: release/*.x86_64.rpm
+          retention-days: 30
+
+      - name: Upload rpm aarch64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-aarch64-rpm
+          path: release/*.aarch64.rpm
+          retention-days: 30
+
+  test-msi:
+    name: Test Windows MSI Installer
+    needs: [build, build-msi]
+    runs-on: windows-latest
+    if: success()
+
+    steps:
+      - name: Download MSI x64
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-windows-x64-msi
+          path: installer
+
+      - name: Install MSI silently
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem installer\*.msi).FullName
+          Write-Host "Installing: $msi"
+          $proc = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "MSI install failed with exit code $($proc.ExitCode)"
+            exit 1
+          }
+
+      - name: Verify files installed
+        shell: pwsh
+        run: |
+          $installDir = "C:\Program Files\git-ai\bin"
+          if (-not (Test-Path "$installDir\git-ai.exe")) {
+            Write-Error "git-ai.exe not found at $installDir"
+            exit 1
+          }
+          if (-not (Test-Path "$installDir\git.exe")) {
+            Write-Error "git.exe shim not found at $installDir"
+            exit 1
+          }
+          Write-Host "Files verified at $installDir"
+          Get-ChildItem $installDir
+
+      - name: Verify PATH contains git-ai
+        shell: pwsh
+        run: |
+          $systemPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if ($systemPath -notlike "*git-ai*") {
+            Write-Error "System PATH does not contain git-ai: $systemPath"
+            exit 1
+          }
+          Write-Host "PATH verified: contains git-ai bin directory"
+
+      - name: Verify binary executes
+        shell: pwsh
+        run: |
+          $env:Path = "C:\Program Files\git-ai\bin;" + $env:Path
+          $output = & "C:\Program Files\git-ai\bin\git-ai.exe" --version 2>&1
+          Write-Host "git-ai --version: $output"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "git-ai --version exited with code $LASTEXITCODE"
+            exit 1
+          }
+
+      - name: Uninstall MSI silently
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem installer\*.msi).FullName
+          $proc = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn /norestart" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "MSI uninstall failed with exit code $($proc.ExitCode)"
+            exit 1
+          }
+
+      - name: Verify clean uninstall
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\git-ai\bin\git-ai.exe") {
+            Write-Error "git-ai.exe still exists after uninstall"
+            exit 1
+          }
+          $systemPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if ($systemPath -like "*git-ai*") {
+            Write-Error "System PATH still contains git-ai after uninstall"
+            exit 1
+          }
+          Write-Host "Clean uninstall verified"
+
+  test-pkg:
+    name: Test macOS pkg Installer
+    needs: [build, build-macos-intel, build-pkg]
+    runs-on: macos-latest
+    if: success()
+
+    steps:
+      - name: Download pkg ARM64
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-macos-arm64-pkg
+          path: installer
+
+      - name: Install pkg
+        run: |
+          PKG=$(ls installer/*.pkg | head -1)
+          echo "Installing: $PKG"
+          sudo installer -pkg "$PKG" -target /
+
+      - name: Verify files installed
+        run: |
+          INSTALL_DIR="/Library/git-ai/bin"
+          if [ ! -x "$INSTALL_DIR/git-ai" ]; then
+            echo "ERROR: git-ai not found at $INSTALL_DIR"
+            exit 1
+          fi
+          if [ ! -x "$INSTALL_DIR/git" ]; then
+            echo "ERROR: git shim not found at $INSTALL_DIR"
+            exit 1
+          fi
+          echo "Files verified:"
+          ls -la "$INSTALL_DIR"
+
+      - name: Verify PATH mechanism
+        run: |
+          if ! grep -q "/Library/git-ai/bin" /etc/paths; then
+            echo "ERROR: /etc/paths does not contain /Library/git-ai/bin"
+            cat /etc/paths
+            exit 1
+          fi
+          echo "/etc/paths verified:"
+          cat /etc/paths
+
+      - name: Verify binary executes
+        run: |
+          OUTPUT=$(/Library/git-ai/bin/git-ai --version 2>&1) || true
+          echo "git-ai --version: $OUTPUT"
+          # Verify it at least runs (exit code may vary without config)
+          /Library/git-ai/bin/git-ai --version
+
+      - name: Uninstall
+        run: |
+          sudo rm -rf /Library/git-ai
+          sudo sed -i '' '\|/Library/git-ai/bin|d' /etc/paths
+
+      - name: Verify clean uninstall
+        run: |
+          if [ -d "/Library/git-ai" ]; then
+            echo "ERROR: /Library/git-ai still exists after uninstall"
+            exit 1
+          fi
+          if grep -q "/Library/git-ai/bin" /etc/paths; then
+            echo "ERROR: /etc/paths still contains git-ai entry"
+            exit 1
+          fi
+          echo "Clean uninstall verified"
+
+  test-deb:
+    name: Test Linux deb Installer
+    needs: [build, build-linux-packages]
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Download deb amd64
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-amd64-deb
+          path: installer
+
+      - name: Install deb
+        run: |
+          DEB=$(ls installer/*amd64.deb | head -1)
+          echo "Installing: $DEB"
+          sudo dpkg -i "$DEB"
+
+      - name: Verify files installed
+        run: |
+          INSTALL_DIR="/usr/lib/git-ai/bin"
+          if [ ! -x "$INSTALL_DIR/git-ai" ]; then
+            echo "ERROR: git-ai not found at $INSTALL_DIR"
+            exit 1
+          fi
+          if [ ! -x "$INSTALL_DIR/git" ]; then
+            echo "ERROR: git shim not found at $INSTALL_DIR"
+            exit 1
+          fi
+          echo "Files verified:"
+          ls -la "$INSTALL_DIR"
+
+      - name: Verify PATH mechanism
+        run: |
+          if [ ! -f "/etc/profile.d/git-ai.sh" ]; then
+            echo "ERROR: /etc/profile.d/git-ai.sh not found"
+            exit 1
+          fi
+          if ! grep -q "/usr/lib/git-ai/bin" /etc/profile.d/git-ai.sh; then
+            echo "ERROR: profile.d script does not contain correct path"
+            cat /etc/profile.d/git-ai.sh
+            exit 1
+          fi
+          echo "PATH mechanism verified:"
+          cat /etc/profile.d/git-ai.sh
+
+      - name: Verify binary executes
+        run: |
+          export PATH="/usr/lib/git-ai/bin:$PATH"
+          OUTPUT=$(/usr/lib/git-ai/bin/git-ai --version 2>&1) || true
+          echo "git-ai --version: $OUTPUT"
+          /usr/lib/git-ai/bin/git-ai --version
+
+      - name: Verify package metadata
+        run: |
+          dpkg -s git-ai
+          echo "---"
+          dpkg -L git-ai
+
+      - name: Uninstall deb
+        run: |
+          sudo dpkg -r git-ai
+
+      - name: Verify clean uninstall
+        run: |
+          if [ -f "/usr/lib/git-ai/bin/git-ai" ]; then
+            echo "ERROR: git-ai binary still exists after uninstall"
+            exit 1
+          fi
+          if [ -f "/etc/profile.d/git-ai.sh" ]; then
+            echo "ERROR: profile.d script still exists after uninstall"
+            exit 1
+          fi
+          echo "Clean uninstall verified"
+
+  test-rpm:
+    name: Test Linux rpm Installer
+    needs: [build, build-linux-packages]
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Download rpm x86_64
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-x86_64-rpm
+          path: installer
+
+      - name: Test rpm install in Fedora container
+        run: |
+          RPM=$(ls installer/*.x86_64.rpm | head -1)
+          echo "Testing: $RPM"
+          docker run --rm -v "$(pwd)/installer:/installer" fedora:latest bash -c '
+            set -euo pipefail
+
+            echo "=== Installing git dependency ==="
+            dnf install -y git --setopt=install_weak_deps=False -q
+
+            echo "=== Installing rpm ==="
+            rpm -i /installer/*.x86_64.rpm
+
+            echo "=== Verifying files ==="
+            INSTALL_DIR="/usr/lib/git-ai/bin"
+            test -x "$INSTALL_DIR/git-ai" || { echo "ERROR: git-ai not found"; exit 1; }
+            test -x "$INSTALL_DIR/git" || { echo "ERROR: git shim not found"; exit 1; }
+            ls -la "$INSTALL_DIR"
+
+            echo "=== Verifying PATH mechanism ==="
+            test -f /etc/profile.d/git-ai.sh || { echo "ERROR: profile.d script not found"; exit 1; }
+            grep -q "/usr/lib/git-ai/bin" /etc/profile.d/git-ai.sh || { echo "ERROR: path not in script"; exit 1; }
+            cat /etc/profile.d/git-ai.sh
+
+            echo "=== Verifying binary executes ==="
+            /usr/lib/git-ai/bin/git-ai --version || true
+
+            echo "=== Verifying package metadata ==="
+            rpm -qi git-ai
+            rpm -ql git-ai
+
+            echo "=== Uninstalling rpm ==="
+            rpm -e git-ai
+
+            echo "=== Verifying clean uninstall ==="
+            test ! -f "$INSTALL_DIR/git-ai" || { echo "ERROR: binary still exists"; exit 1; }
+            test ! -f /etc/profile.d/git-ai.sh || { echo "ERROR: profile.d still exists"; exit 1; }
+            echo "Clean uninstall verified"
+          '
+
   create-release:
     name: Create Release
-    needs: [build, build-macos-intel]
+    needs: [build, build-macos-intel, build-msi, build-pkg, build-linux-packages, test-msi, test-pkg, test-deb, test-rpm]
     runs-on: ubuntu-latest
     if: success() && inputs.dry_run != true
     environment: release
@@ -327,7 +810,7 @@ jobs:
 
       - name: Move artifacts to release directory
         run: |
-          find artifacts -name "git-ai-*" -exec cp {} release/ \;
+          find artifacts -type f \( -name "git-ai-*" -o -name "git-ai_*" \) -exec cp {} release/ \;
 
       - name: List available artifacts
         run: |
@@ -337,8 +820,10 @@ jobs:
       - name: Create checksums
         run: |
           cd release
-          if ls git-ai-* 1> /dev/null 2>&1; then
-            sha256sum git-ai-* > SHA256SUMS
+          shopt -s nullglob
+          artifacts=(git-ai-* git-ai_*)
+          if [ ${#artifacts[@]} -gt 0 ]; then
+            sha256sum "${artifacts[@]}" | sort > SHA256SUMS
           else
             echo "No binaries found to create checksums for"
             touch SHA256SUMS
@@ -397,6 +882,7 @@ jobs:
         with:
           subject-path: |
             release/git-ai-*
+            release/git-ai_*
             release/install.sh
             release/install.ps1
             release/SHA256SUMS
@@ -435,10 +921,18 @@ jobs:
             ### Downloads
             - **Linux (x64)**: `git-ai-linux-x64`
             - **Linux (ARM64)**: `git-ai-linux-arm64`
+            - **Linux deb (amd64)**: `git-ai_*_amd64.deb`
+            - **Linux deb (arm64)**: `git-ai_*_arm64.deb`
+            - **Linux rpm (x86_64)**: `git-ai-*-1.x86_64.rpm`
+            - **Linux rpm (aarch64)**: `git-ai-*-1.aarch64.rpm`
             - **Windows (x64)**: `git-ai-windows-x64.exe`
             - **Windows (ARM64)**: `git-ai-windows-arm64.exe`
+            - **Windows MSI (x64)**: `git-ai-windows-x64.msi`
+            - **Windows MSI (ARM64)**: `git-ai-windows-arm64.msi`
             - **macOS (Intel)**: `git-ai-macos-x64`
             - **macOS (Apple Silicon)**: `git-ai-macos-arm64`
+            - **macOS pkg (Intel)**: `git-ai-macos-x64.pkg`
+            - **macOS pkg (Apple Silicon)**: `git-ai-macos-arm64.pkg`
 
             ### SHA256 Checksums
             ```
@@ -452,6 +946,7 @@ jobs:
             ```
           files: |
             release/git-ai-*
+            release/git-ai_*
             release/SHA256SUMS
             release/install.sh
             release/install.ps1

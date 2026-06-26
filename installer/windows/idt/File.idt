@@ -1,0 +1,5 @@
+File	Component_	FileName	FileSize	Version	Language	Attributes	Sequence
+s72	s72	l255	i4	S72	S20	i2	i2
+File	File
+GitAiExe	GitAiComponent	git-ai.exe	0			512	1
+GitShimExe	GitAiComponent	git.exe	0			512	2
