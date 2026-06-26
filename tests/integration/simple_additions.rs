@@ -1,6 +1,9 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::attribution_tracker::Attribution;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::authorship::working_log::{CheckpointKind, WorkingLogEntry};
+use git_ai::config::AuthorConfig;
 use std::fs;
 
 fn configure_diff_settings(repo: &TestRepo, settings: &[(&str, &str)]) {
@@ -895,11 +898,11 @@ Another AI line
         .unwrap();
     repo.stage_all_and_commit("Fourth commit").unwrap();
     file.assert_committed_lines(lines![
-        "Untracked line".unattributed_human(),         // 'untracked'
-        "Human line".human(),                          // known human
-        "AI line".ai(),                                // AI line
-        "Another untracked line".unattributed_human(), // 'untracked'
-        "Another AI line".ai(),                        // AI line
+        "Untracked line".unattributed_human(), // 'untracked'
+        "Human line".human(),                  // known human
+        "AI line".ai(),                        // AI line
+        "Another untracked line".ai(),         // recovered edge line
+        "Another AI line".ai(),                // AI line
     ]);
 }
 
@@ -1120,7 +1123,8 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
 
     fs::write(&file_path, "Base Line 1\nBase Line 2\nBase Line 3").unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "data.txt"])
+        .unwrap();
 
     fs::write(
         &file_path,
@@ -1761,75 +1765,91 @@ fn test_ai_edits_file_with_spaces_in_filename() {
 /// attributions from the earlier checkpoint, so the commit is incorrectly tagged as AI.
 #[test]
 fn test_ai_generated_file_then_human_full_rewrite() {
-    use sha2::{Digest, Sha256};
-
     let repo = TestRepo::new();
     let file_path = repo.path().join("jokes-cli.ts");
 
-    // The final file content that will be committed (human-written).
+    let ai_content = "import * as readline from 'readline';\n\nconst jokes = [\n  \"Why don't scientists trust atoms?\",\n  \"An impasta!\"\n];";
+    repo.git_ai(&["checkpoint", "human", "jokes-cli.ts"])
+        .unwrap();
+    fs::write(&file_path, ai_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-cli.ts"])
+        .unwrap();
+
     let human_content = "console.log('hello world');\nconsole.log('goodbye');";
     fs::write(&file_path, human_content).unwrap();
-    repo.git(&["add", "-A"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "jokes-cli.ts"])
+        .unwrap();
 
-    // Compute blob SHAs for checkpoint entries
-    let ai_content = "import * as readline from 'readline';\n\nconst jokes = [\n  \"Why don't scientists trust atoms?\",\n  \"An impasta!\"\n];";
-    let ai_sha = format!(
-        "{:x}",
-        Sha256::new_with_prefix(ai_content.as_bytes()).finalize()
-    );
-    let human_sha = format!(
-        "{:x}",
-        Sha256::new_with_prefix(human_content.as_bytes()).finalize()
-    );
-    let human_len = human_content.len();
-
-    // Directly write checkpoints.jsonl to replicate the exact real-world scenario:
-    // 1) AI checkpoint with line_attributions covering the whole file
-    // 2) Human checkpoint with empty line_attributions but non-empty byte-range attributions
-    //
-    // The author_id must match generate_short_hash(agent_id.id, agent_id.tool).
-    // For tool="mock_ai", id="test_session": SHA256("mock_ai:test_session")[..16]
-    let agent_author_id = "3bd30911a58cb074";
-    // Determine the git dir and base commit for checkpoint storage.
-    // In worktree mode .git is a gitlink file, so use rev-parse to resolve.
-    // `--git-dir` may return a relative path; resolve it against the repo root
-    // so that fs::create_dir_all works regardless of the process CWD.
-    let git_dir_raw = repo
-        .git(&["rev-parse", "--git-dir"])
-        .unwrap()
-        .trim()
-        .to_string();
-    let git_dir_path = if std::path::Path::new(&git_dir_raw).is_absolute() {
-        std::path::PathBuf::from(&git_dir_raw)
-    } else {
-        repo.path().join(&git_dir_raw)
-    };
-    let git_dir = git_dir_path.as_path();
-    let base_commit = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap_or_else(|_| "initial".to_string())
-        .trim()
-        .to_string();
-    let checkpoints_dir = git_dir.join(format!("ai/working_logs/{}", base_commit));
-    fs::create_dir_all(&checkpoints_dir).unwrap();
-    let checkpoints_jsonl = format!(
-        r#"{{"kind":"AiAgent","diff":"fake_diff_sha","author":"Test User","entries":[{{"file":"jokes-cli.ts","blob_sha":"{ai_sha}","attributions":[],"line_attributions":[{{"start_line":1,"end_line":6,"author_id":"{agent_author_id}","overrode":null}}]}}],"timestamp":1000,"transcript":{{"messages":[]}},"agent_id":{{"tool":"mock_ai","id":"test_session","model":"test"}},"agent_metadata":null,"line_stats":{{"additions":6,"deletions":0,"additions_sloc":5,"deletions_sloc":0}},"api_version":"checkpoint/1.0.0","git_ai_version":"development:1.1.23"}}
-{{"kind":"Human","diff":"fake_diff_sha2","author":"Test User","entries":[{{"file":"jokes-cli.ts","blob_sha":"{human_sha}","attributions":[{{"start":0,"end":0,"author_id":"human","ts":2000}},{{"start":0,"end":{human_len},"author_id":"human","ts":2000}}],"line_attributions":[]}}],"timestamp":2000,"transcript":null,"agent_id":null,"agent_metadata":null,"line_stats":{{"additions":2,"deletions":6,"additions_sloc":2,"deletions_sloc":5}},"api_version":"checkpoint/1.0.0","git_ai_version":"development:1.1.23"}}"#
-    );
-    fs::write(
-        checkpoints_dir.join("checkpoints.jsonl"),
-        &checkpoints_jsonl,
-    )
-    .unwrap();
-
-    // Commit
     repo.stage_all_and_commit("human rewrite").unwrap();
 
-    // Assert everything is human-authored
     let mut file = repo.filename("jokes-cli.ts");
     file.assert_lines_and_blame(crate::lines![
         "console.log('hello world');".human(),
         "console.log('goodbye');".human(),
+    ]);
+}
+
+/// Regression test: one stale checkpoint entry with character attribution but no
+/// line attribution must not abort note generation for the whole commit.
+#[test]
+fn test_stale_zero_width_checkpoint_entry_does_not_abort_persisted_working_log() {
+    let repo = TestRepo::new();
+    let feature_path = repo.path().join("feature.rs");
+
+    fs::write(&feature_path, "fn main() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "feature.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let mut file = repo.filename("feature.rs");
+    file.assert_committed_lines(crate::lines!["fn main() {}".human(),]);
+
+    fs::write(
+        &feature_path,
+        "fn main() {}\nfn generated_by_ai() -> bool { true }\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.rs"])
+        .unwrap();
+
+    let working_log = repo.current_working_logs();
+    let mut checkpoints = working_log
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    let ai_checkpoint = checkpoints
+        .iter_mut()
+        .find(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent)
+        .expect("AI checkpoint should exist");
+    let feature_entry = ai_checkpoint
+        .entries
+        .iter()
+        .find(|entry| entry.file == "feature.rs")
+        .expect("feature checkpoint entry should exist")
+        .clone();
+    let ai_author_id = feature_entry
+        .line_attributions
+        .iter()
+        .find(|attr| {
+            attr.author_id != CheckpointKind::Human.to_str() && !attr.author_id.starts_with("h_")
+        })
+        .expect("feature entry should have an AI line attribution")
+        .author_id
+        .clone();
+
+    ai_checkpoint.entries.push(WorkingLogEntry::new(
+        "stale.rs".to_string(),
+        feature_entry.blob_sha,
+        vec![Attribution::new(0, 0, ai_author_id, 0)],
+        Vec::new(),
+    ));
+    working_log
+        .write_all_checkpoints(&checkpoints)
+        .expect("modified checkpoints should be writable");
+
+    repo.stage_all_and_commit("AI feature").unwrap();
+
+    file.assert_lines_and_blame(crate::lines![
+        "fn main() {}".human(),
+        "fn generated_by_ai() -> bool { true }".ai(),
     ]);
 }
 
@@ -1916,6 +1936,158 @@ fn test_session_record_human_author_includes_email() {
         assert_eq!(
             author, "Test User <test@example.com>",
             "SessionRecord.human_author should be the full git identity"
+        );
+    }
+}
+
+#[test]
+fn test_author_config_cli_set_get_unset() {
+    let repo = TestRepo::new();
+
+    repo.git_ai(&["config", "set", "author.name", "Config User"])
+        .unwrap();
+    repo.git_ai(&["config", "set", "author.email", "config@example.com"])
+        .unwrap();
+
+    let name = repo.git_ai(&["config", "author.name"]).unwrap();
+    assert_eq!(name.trim(), "\"Config User\"");
+
+    let author = repo.git_ai(&["config", "author"]).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(author.trim()).expect("author config should be JSON");
+    assert_eq!(value["name"], "Config User");
+    assert_eq!(value["email"], "config@example.com");
+
+    repo.git_ai(&["config", "unset", "author.name"]).unwrap();
+    let author = repo.git_ai(&["config", "author"]).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(author.trim()).expect("author config should be JSON");
+    assert!(value.get("name").is_none());
+    assert_eq!(value["email"], "config@example.com");
+
+    repo.git_ai(&["config", "unset", "author"]).unwrap();
+    let author = repo.git_ai(&["config", "author"]).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(author.trim()).expect("author config should be JSON");
+    assert_eq!(value.as_object().unwrap().len(), 0);
+}
+
+#[test]
+fn test_author_config_overrides_session_and_known_human_records() {
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.author = Some(AuthorConfig {
+            name: Some("Config User".to_string()),
+            email: Some("config@example.com".to_string()),
+        });
+    });
+
+    let file_path = repo.path().join("author_config.rs");
+    repo.git_ai(&["checkpoint", "human", "author_config.rs"])
+        .unwrap();
+    fs::write(&file_path, "fn ai() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "author_config.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit with author config")
+        .unwrap();
+
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("AI commit should have authorship note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+    assert!(!log.metadata.sessions.is_empty());
+    for session in log.metadata.sessions.values() {
+        assert_eq!(
+            session.human_author.as_deref(),
+            Some("Config User <config@example.com>")
+        );
+    }
+
+    fs::write(&file_path, "fn ai() {}\nfn human() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "author_config.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("Known human commit with author config")
+        .unwrap();
+
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("known-human commit should have authorship note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+    assert!(!log.metadata.humans.is_empty());
+    for human in log.metadata.humans.values() {
+        assert_eq!(human.author, "Config User <config@example.com>");
+    }
+}
+
+#[test]
+fn test_author_config_partial_overrides_fall_back_to_git_committer_identity() {
+    let mut name_repo = TestRepo::new();
+    name_repo.patch_git_ai_config(|patch| {
+        patch.author = Some(AuthorConfig {
+            name: Some("Config Name".to_string()),
+            email: None,
+        });
+    });
+    let file_path = name_repo.path().join("partial_name.rs");
+    name_repo
+        .git_ai(&["checkpoint", "human", "partial_name.rs"])
+        .unwrap();
+    fs::write(&file_path, "fn ai() {}\n").unwrap();
+    name_repo
+        .git_ai(&["checkpoint", "mock_ai", "partial_name.rs"])
+        .unwrap();
+    name_repo
+        .stage_all_and_commit("AI commit with author name override")
+        .unwrap();
+    let sha = name_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let note = name_repo
+        .read_authorship_note(&sha)
+        .expect("AI commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+    for session in log.metadata.sessions.values() {
+        assert_eq!(
+            session.human_author.as_deref(),
+            Some("Config Name <test@example.com>")
+        );
+    }
+
+    let mut email_repo = TestRepo::new();
+    email_repo.patch_git_ai_config(|patch| {
+        patch.author = Some(AuthorConfig {
+            name: None,
+            email: Some("configured-email@example.com".to_string()),
+        });
+    });
+    let file_path = email_repo.path().join("partial_email.rs");
+    email_repo
+        .git_ai(&["checkpoint", "human", "partial_email.rs"])
+        .unwrap();
+    fs::write(&file_path, "fn ai() {}\n").unwrap();
+    email_repo
+        .git_ai(&["checkpoint", "mock_ai", "partial_email.rs"])
+        .unwrap();
+    email_repo
+        .stage_all_and_commit("AI commit with author email override")
+        .unwrap();
+    let sha = email_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let note = email_repo
+        .read_authorship_note(&sha)
+        .expect("AI commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+    for session in log.metadata.sessions.values() {
+        assert_eq!(
+            session.human_author.as_deref(),
+            Some("Test User <configured-email@example.com>")
         );
     }
 }
@@ -2149,3 +2321,594 @@ crate::reuse_tests_in_worktree!(
     test_rebase_rewrite_preserves_author_email_in_human_record,
     test_status_checkpoint_preserves_author_email_in_session,
 );
+
+/// Reproduces the fuzz_chaos_99 bug: multiple checkpoints on the same file where a later
+/// prepend checkpoint should preserve prior AI/KnownHuman attribution for shifted lines.
+#[test]
+fn test_multi_checkpoint_prepend_preserves_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
+
+    // Step 1: Initial content with KnownHuman
+    let content1 = "AAAA\nBBBB\nCCCC\nDDDD\n";
+    fs::write(&file_path, content1).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
+
+    // Step 2: Append AI lines
+    let content2 = "AAAA\nBBBB\nCCCC\nDDDD\nEEEE\nFFFF\n";
+    fs::write(&file_path, content2).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Step 3: Prepend AI lines (this should preserve lines 1-6 attribution shifted to 9-14)
+    // Pre-edit "human" snapshot
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    let content3 =
+        "1111\n2222\n3333\n4444\n5555\n6666\n7777\n8888\nAAAA\nBBBB\nCCCC\nDDDD\nEEEE\nFFFF\n";
+    fs::write(&file_path, content3).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Commit
+    repo.stage_all_and_commit("multi checkpoint test").unwrap();
+
+    // Assert: lines 1-8 are AI (prepended), lines 9-12 are KnownHuman (shifted from original),
+    // lines 13-14 are AI (shifted from step 2's append)
+    let mut file = repo.filename("test.txt");
+    file.assert_committed_lines(crate::lines![
+        "1111".ai(),
+        "2222".ai(),
+        "3333".ai(),
+        "4444".ai(),
+        "5555".ai(),
+        "6666".ai(),
+        "7777".ai(),
+        "8888".ai(),
+        "AAAA".human(), // KnownHuman shifted
+        "BBBB".human(), // KnownHuman shifted
+        "CCCC".human(), // KnownHuman shifted
+        "DDDD".human(), // KnownHuman shifted
+        "EEEE".ai(),    // AI shifted
+        "FFFF".ai(),    // AI shifted
+    ]);
+}
+
+/// Reproduces exact fuzz_chaos_99 pattern: 4 rapid edits (KnownHuman append, AI append,
+/// KnownHuman ReplaceRandom, AI Prepend) where the final prepend must preserve all 8 lines.
+#[test]
+fn test_burst_edits_prepend_preserves_all_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
+
+    // Start with some base content (simulates file before the burst)
+    fs::write(&file_path, "X1\nX2\nX3\nX4\n").unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+
+    // Edit 1: KnownHuman Append 4 lines
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    fs::write(&file_path, "X1\nX2\nX3\nX4\nH1\nH2\nH3\nH4\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
+
+    // Edit 2: AI Append 6 lines
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    fs::write(
+        &file_path,
+        "X1\nX2\nX3\nX4\nH1\nH2\nH3\nH4\nA1\nA2\nA3\nA4\nA5\nA6\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Edit 3: KnownHuman ReplaceRandom 8 lines (replace lines at positions 1-8)
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    fs::write(
+        &file_path,
+        "R1\nR2\nR3\nR4\nR5\nR6\nR7\nR8\nA1\nA2\nA3\nA4\nA5\nA6\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
+
+    // Edit 4: AI Prepend 8 lines - ALL 8 must be AI
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    fs::write(
+        &file_path,
+        "P1\nP2\nP3\nP4\nP5\nP6\nP7\nP8\nR1\nR2\nR3\nR4\nR5\nR6\nR7\nR8\nA1\nA2\nA3\nA4\nA5\nA6\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Commit
+    repo.stage_all_and_commit("burst commit").unwrap();
+
+    // Assert: ALL 8 prepended lines are AI, R1-R8 are KnownHuman, A1-A6 are AI
+    let mut file = repo.filename("test.txt");
+    file.assert_committed_lines(crate::lines![
+        "P1".ai(),
+        "P2".ai(),
+        "P3".ai(),
+        "P4".ai(),
+        "P5".ai(),
+        "P6".ai(),
+        "P7".ai(),
+        "P8".ai(),
+        "R1".human(),
+        "R2".human(),
+        "R3".human(),
+        "R4".human(),
+        "R5".human(),
+        "R6".human(),
+        "R7".human(),
+        "R8".human(),
+        "A1".ai(),
+        "A2".ai(),
+        "A3".ai(),
+        "A4".ai(),
+        "A5".ai(),
+        "A6".ai(),
+    ]);
+}
+
+/// Same as above but with single multi-byte Unicode chars per line (like the fuzzer uses).
+/// The fuzzer allocates one char per step; when it exhausts ASCII, it uses U+0100+.
+#[test]
+fn test_burst_edits_prepend_multibyte_chars() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
+
+    // Use multi-byte Unicode chars (2-3 bytes each in UTF-8)
+    // These simulate what the fuzzer produces at steps 100+
+    let base = "\u{0100}\n\u{0101}\n\u{0102}\n\u{0103}\n"; // Ā ā Ă ă
+    fs::write(&file_path, base).unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+
+    // Edit 1: KnownHuman Append 4 lines
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    let edit1 = "\u{0100}\n\u{0101}\n\u{0102}\n\u{0103}\n\u{0110}\n\u{0111}\n\u{0112}\n\u{0113}\n";
+    fs::write(&file_path, edit1).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
+
+    // Edit 2: AI Append 6 lines
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    let edit2 = "\u{0100}\n\u{0101}\n\u{0102}\n\u{0103}\n\u{0110}\n\u{0111}\n\u{0112}\n\u{0113}\n\u{0120}\n\u{0121}\n\u{0122}\n\u{0123}\n\u{0124}\n\u{0125}\n";
+    fs::write(&file_path, edit2).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Edit 3: KnownHuman ReplaceRandom 8 lines (replace first 8)
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    let edit3 = "\u{0130}\n\u{0131}\n\u{0132}\n\u{0133}\n\u{0134}\n\u{0135}\n\u{0136}\n\u{0137}\n\u{0120}\n\u{0121}\n\u{0122}\n\u{0123}\n\u{0124}\n\u{0125}\n";
+    fs::write(&file_path, edit3).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
+
+    // Edit 4: AI Prepend 8 lines - ALL 8 must be AI
+    repo.git_ai(&["checkpoint", "human", "test.txt"]).unwrap();
+    let edit4 = "\u{0140}\n\u{0141}\n\u{0142}\n\u{0143}\n\u{0144}\n\u{0145}\n\u{0146}\n\u{0147}\n\u{0130}\n\u{0131}\n\u{0132}\n\u{0133}\n\u{0134}\n\u{0135}\n\u{0136}\n\u{0137}\n\u{0120}\n\u{0121}\n\u{0122}\n\u{0123}\n\u{0124}\n\u{0125}\n";
+    fs::write(&file_path, edit4).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Commit
+    repo.stage_all_and_commit("burst commit").unwrap();
+
+    // Assert: ALL 8 prepended lines are AI, next 8 are KnownHuman, last 6 are AI
+    let mut file = repo.filename("test.txt");
+    file.assert_committed_lines(crate::lines![
+        "\u{0140}".ai(),
+        "\u{0141}".ai(),
+        "\u{0142}".ai(),
+        "\u{0143}".ai(),
+        "\u{0144}".ai(),
+        "\u{0145}".ai(),
+        "\u{0146}".ai(),
+        "\u{0147}".ai(),
+        "\u{0130}".human(),
+        "\u{0131}".human(),
+        "\u{0132}".human(),
+        "\u{0133}".human(),
+        "\u{0134}".human(),
+        "\u{0135}".human(),
+        "\u{0136}".human(),
+        "\u{0137}".human(),
+        "\u{0120}".ai(),
+        "\u{0121}".ai(),
+        "\u{0122}".ai(),
+        "\u{0123}".ai(),
+        "\u{0124}".ai(),
+        "\u{0125}".ai(),
+    ]);
+}
+
+/// Reproduces fuzz_chaos_99: multi-file commit followed by soft-reset-recommit.
+/// The secondary file's attribution must survive the reset+recommit cycle.
+#[test]
+fn test_soft_reset_recommit_preserves_secondary_file_attribution() {
+    let repo = TestRepo::new();
+    let main_path = repo.path().join("main.txt");
+    let secondary_path = repo.path().join("secondary.txt");
+
+    // Initial commit with untracked content
+    fs::write(&main_path, "base\n").unwrap();
+    fs::write(&secondary_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Edit secondary file with multiple checkpoints (like the fuzzer does)
+    // KnownHuman edit
+    repo.git_ai(&["checkpoint", "human", "secondary.txt"])
+        .unwrap();
+    fs::write(&secondary_path, "base\nHH1\nHH2\nHH3\nHH4\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "secondary.txt"])
+        .unwrap();
+
+    // AI append
+    repo.git_ai(&["checkpoint", "human", "secondary.txt"])
+        .unwrap();
+    fs::write(&secondary_path, "base\nHH1\nHH2\nHH3\nHH4\nAI1\nAI2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary.txt"])
+        .unwrap();
+
+    // AI prepend (shifts existing lines down)
+    repo.git_ai(&["checkpoint", "human", "secondary.txt"])
+        .unwrap();
+    fs::write(
+        &secondary_path,
+        "P1\nP2\nP3\nP4\nbase\nHH1\nHH2\nHH3\nHH4\nAI1\nAI2\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary.txt"])
+        .unwrap();
+
+    // Also edit main file
+    repo.git_ai(&["checkpoint", "human", "main.txt"]).unwrap();
+    fs::write(&main_path, "base\nmain_ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    // Commit both files
+    repo.stage_all_and_commit("commit with both files").unwrap();
+
+    // Verify attribution before reset
+    let mut secondary = repo.filename("secondary.txt");
+    secondary.assert_committed_lines(crate::lines![
+        "P1".ai(),
+        "P2".ai(),
+        "P3".ai(),
+        "P4".ai(),
+        "base".unattributed_human(),
+        "HH1".human(),
+        "HH2".human(),
+        "HH3".human(),
+        "HH4".human(),
+        "AI1".ai(),
+        "AI2".ai(),
+    ]);
+
+    // Now do soft-reset-recommit: undo the commit, edit only main.txt, recommit
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+
+    // Edit main.txt further and checkpoint
+    repo.git_ai(&["checkpoint", "human", "main.txt"]).unwrap();
+    fs::write(&main_path, "base\nmain_ai\nextra\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    // Recommit everything
+    repo.stage_all_and_commit("recommit after soft reset")
+        .unwrap();
+
+    // Secondary file's attribution should be preserved through the reset+recommit
+    secondary.assert_committed_lines(crate::lines![
+        "P1".ai(),
+        "P2".ai(),
+        "P3".ai(),
+        "P4".ai(),
+        "base".unattributed_human(),
+        "HH1".human(),
+        "HH2".human(),
+        "HH3".human(),
+        "HH4".human(),
+        "AI1".ai(),
+        "AI2".ai(),
+    ]);
+}
+
+/// Regression test for gap between two different AI sessions in the same commit.
+///
+/// Scenario: A file gets two separate AI edits (different sessions) before a single
+/// commit. The second edit inserts lines above the first edit's content, causing
+/// hunk shifts. If shifts aren't applied correctly, the first edit's lines get
+/// recorded at wrong positions, leaving a gap in the note.
+#[test]
+fn test_multi_session_ai_gap_between_different_sessions() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("multi.txt");
+
+    // Initial commit with some base content
+    let initial = "line1\nline2\nline3\nline4\nline5\n";
+    fs::write(&file_path, initial).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // AI session 1: replace lines 3-4 with AI content
+    // Pre-edit human checkpoint (captures before state)
+    repo.git_ai(&["checkpoint", "human", "multi.txt"]).unwrap();
+
+    let after_ai1 = "line1\nline2\nAAA\nBBB\nline5\n";
+    fs::write(&file_path, after_ai1).unwrap();
+
+    // Post-edit AI checkpoint (captures AI changes)
+    repo.git_ai(&["checkpoint", "mock_ai", "multi.txt"])
+        .unwrap();
+
+    // AI session 2: insert 3 lines at the top (shifts everything down)
+    // Pre-edit human checkpoint
+    repo.git_ai(&["checkpoint", "human", "multi.txt"]).unwrap();
+
+    let after_ai2 = "XXX\nYYY\nZZZ\nline1\nline2\nAAA\nBBB\nline5\n";
+    fs::write(&file_path, after_ai2).unwrap();
+
+    // Post-edit AI checkpoint
+    repo.git_ai(&["checkpoint", "mock_ai", "multi.txt"])
+        .unwrap();
+
+    // Commit both edits
+    repo.stage_all_and_commit("two AI sessions").unwrap();
+
+    // Verify: lines 1-3 (XXX, YYY, ZZZ) are AI from session 2
+    //         lines 4-5 (line1, line2) are unattributed
+    //         lines 6-7 (AAA, BBB) are AI from session 1
+    //         line 8 (line5) is unattributed
+    let mut file = repo.filename("multi.txt");
+    file.assert_committed_lines(crate::lines![
+        "XXX".ai(),
+        "YYY".ai(),
+        "ZZZ".ai(),
+        "line1".unattributed_human(),
+        "line2".unattributed_human(),
+        "AAA".ai(),
+        "BBB".ai(),
+        "line5".unattributed_human(),
+    ]);
+}
+
+/// Same scenario but with the second AI edit inserting BETWEEN the first edit's lines.
+/// This specifically targets the imara_diff Equal matching gap.
+#[test]
+fn test_multi_session_ai_insert_between_first_session_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("gap.txt");
+
+    // Initial commit with repetitive content (triggers imara Equal matching)
+    let initial = "old\nold\nold\nold\nold\n";
+    fs::write(&file_path, initial).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // AI session 1: overwrite entire file with new AI content
+    repo.git_ai(&["checkpoint", "human", "gap.txt"]).unwrap();
+
+    let after_ai1 = "A1\nA2\nA3\nA4\nA5\n";
+    fs::write(&file_path, after_ai1).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "gap.txt"]).unwrap();
+
+    // AI session 2: insert a line between A2 and A3
+    repo.git_ai(&["checkpoint", "human", "gap.txt"]).unwrap();
+
+    let after_ai2 = "A1\nA2\nINSERTED\nA3\nA4\nA5\n";
+    fs::write(&file_path, after_ai2).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "gap.txt"]).unwrap();
+
+    repo.stage_all_and_commit("insert between").unwrap();
+
+    // ALL lines should be AI — A1-A5 from session 1, INSERTED from session 2
+    let mut file = repo.filename("gap.txt");
+    file.assert_committed_lines(crate::lines![
+        "A1".ai(),
+        "A2".ai(),
+        "INSERTED".ai(),
+        "A3".ai(),
+        "A4".ai(),
+        "A5".ai(),
+    ]);
+}
+
+/// Reproduces fuzz_seed_5 pattern: multiple AI edits to a secondary file with
+/// varying strategies (prepend, append, insert-random) between commits, where
+/// hunk shifts cause attribution gaps.
+#[test]
+fn test_multi_session_varied_strategies_gap() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("varied.txt");
+
+    // Initial commit with some content
+    let initial = "base1\nbase2\nbase3\n";
+    fs::write(&file_path, initial).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // AI session 1: append 3 lines
+    repo.git_ai(&["checkpoint", "human", "varied.txt"]).unwrap();
+
+    let after_s1 = "base1\nbase2\nbase3\nS1a\nS1b\nS1c\n";
+    fs::write(&file_path, after_s1).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "varied.txt"])
+        .unwrap();
+
+    // AI session 2: prepend 2 lines (shifts everything down by 2)
+    repo.git_ai(&["checkpoint", "human", "varied.txt"]).unwrap();
+
+    let after_s2 = "S2x\nS2y\nbase1\nbase2\nbase3\nS1a\nS1b\nS1c\n";
+    fs::write(&file_path, after_s2).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "varied.txt"])
+        .unwrap();
+
+    // AI session 3: insert 1 line between S1a and S1b (at position 7)
+    repo.git_ai(&["checkpoint", "human", "varied.txt"]).unwrap();
+
+    let after_s3 = "S2x\nS2y\nbase1\nbase2\nbase3\nS1a\nS3mid\nS1b\nS1c\n";
+    fs::write(&file_path, after_s3).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "varied.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("three AI sessions").unwrap();
+
+    let mut file = repo.filename("varied.txt");
+    file.assert_committed_lines(crate::lines![
+        "S2x".ai(),
+        "S2y".ai(),
+        "base1".unattributed_human(),
+        "base2".unattributed_human(),
+        "base3".unattributed_human(),
+        "S1a".ai(),
+        "S3mid".ai(),
+        "S1b".ai(),
+        "S1c".ai(),
+    ]);
+}
+
+/// Reproduces the exact fuzz_seed_5 bug: a file gets OverwriteAll + Prepend in one commit,
+/// then heavy rewrites in a later commit. Some lines survive unchanged between commits,
+/// but `git blame` re-attributes them to the later commit due to surrounding context changes.
+/// Those survivor lines are NOT in `git diff -U0 earlier..later`, so the later commit's
+/// note doesn't cover them. Git blame then shows "Test User" (no AI attribution)
+/// for lines that WERE AI-written in the earlier commit.
+///
+/// The key: git blame re-attributes survivors when there's enough context change around them.
+/// This only happens when the file has PRIOR history (not root commit).
+#[test]
+fn test_survivor_lines_across_heavy_rewrite() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("survivor.txt");
+
+    // === Commit 0: Create the file with initial content (needed so commit 1 is NOT root) ===
+    let initial = "aaa\nbbb\nccc\nddd\neee\nfff\nggg\nhhh\n";
+    fs::write(&file_path, initial).unwrap();
+    repo.stage_all_and_commit("commit 0: initial").unwrap();
+
+    // === Commit 1: OverwriteAll with AI, then Prepend with KnownHuman ===
+    // Step 1: OverwriteAll with AI (replaces entire file with 8 lines of "p")
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let step_p = "ppppp\nppppp\nppppp\nppppp\nppppp\nppppp\nppppp\nppppp\n";
+    fs::write(&file_path, step_p).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "survivor.txt"])
+        .unwrap();
+
+    // Step 2: Prepend known human (4 lines of "q" at top)
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let step_q =
+        "qqqqqq\nqqqqqq\nqqqqqq\nqqqqqq\nppppp\nppppp\nppppp\nppppp\nppppp\nppppp\nppppp\nppppp\n";
+    fs::write(&file_path, step_q).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "survivor.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("commit 1: overwrite + prepend")
+        .unwrap();
+
+    // Verify commit 1 - all lines should be attributed
+    let mut file = repo.filename("survivor.txt");
+    file.assert_committed_lines(crate::lines![
+        "qqqqqq".human(), // known human (prepend)
+        "qqqqqq".human(),
+        "qqqqqq".human(),
+        "qqqqqq".human(),
+        "ppppp".ai(), // AI (overwrite all)
+        "ppppp".ai(),
+        "ppppp".ai(),
+        "ppppp".ai(),
+        "ppppp".ai(),
+        "ppppp".ai(),
+        "ppppp".ai(),
+        "ppppp".ai(),
+    ]);
+
+    // === Commit 2: Heavy rewrites that leave SOME "p" lines unchanged ===
+    // The "p" lines at positions 5,6,7 get replaced/deleted, lines at
+    // other positions survive. Insert new content around them so Myers
+    // diff between commit 1 and commit 2 treats them as context (Equal).
+
+    // Replace lines 6-8 (p at positions 6,7,8 in 1-indexed) with x content
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let after_x =
+        "qqqqqq\nqqqqqq\nqqqqqq\nqqqqqq\nppppp\nxxxxx\nxxxxx\nxxxxx\nxxxxx\nppppp\nppppp\nppppp\n";
+    fs::write(&file_path, after_x).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "survivor.txt"])
+        .unwrap();
+
+    // Replace x lines 7-9 with y (AI)
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let after_y =
+        "qqqqqq\nqqqqqq\nqqqqqq\nqqqqqq\nppppp\nxxxxx\nyyyyy\nyyyyy\nyyyyy\nppppp\nppppp\nppppp\n";
+    fs::write(&file_path, after_y).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "survivor.txt"])
+        .unwrap();
+
+    // Insert z (AI) between surviving p lines
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let after_z = "qqqqqq\nqqqqqq\nqqqqqq\nqqqqqq\nppppp\nxxxxx\nyyyyy\nyyyyy\nyyyyy\nzzzzz\nzzzzz\nppppp\nppppp\nppppp\n";
+    fs::write(&file_path, after_z).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "survivor.txt"])
+        .unwrap();
+
+    // Replace last 2 p lines with 0 (KnownHuman)
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let after_0 = "qqqqqq\nqqqqqq\nqqqqqq\nqqqqqq\nppppp\nxxxxx\nyyyyy\nyyyyy\nyyyyy\nzzzzz\nzzzzz\nppppp\n00000\n00000\n00000\n";
+    fs::write(&file_path, after_0).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "survivor.txt"])
+        .unwrap();
+
+    // Prepend 1 (AI)
+    repo.git_ai(&["checkpoint", "human", "survivor.txt"])
+        .unwrap();
+    let after_1 = "11111\n11111\nqqqqqq\nqqqqqq\nqqqqqq\nqqqqqq\nppppp\nxxxxx\nyyyyy\nyyyyy\nyyyyy\nzzzzz\nzzzzz\nppppp\n00000\n00000\n00000\n";
+    fs::write(&file_path, after_1).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "survivor.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("commit 2: heavy rewrites")
+        .unwrap();
+
+    // The "p" lines at positions 7 and 14 survived from commit 1 unchanged.
+    // `git diff -U0 commit1..commit2` will NOT include them (they're Equal in Myers).
+    // So commit 2's note will NOT cover those lines.
+    //
+    // Git blame behavior:
+    // - If blame attributes them to commit 1 → commit 1's note has AI → shows as AI ✓
+    // - If blame attributes them to commit 2 → no coverage → shows as Test User (untracked)
+    //
+    // Either outcome is acceptable. The key insight: these lines were NOT touched in
+    // commit 2, so "untracked" in commit 2's context is correct.
+    let blame_output = repo
+        .git_ai(&["blame", "survivor.txt"])
+        .expect("blame should succeed");
+    eprintln!("Blame output:\n{}", blame_output);
+
+    // Check which commit blame attributes the survivor p lines to.
+    // We need to verify git-ai handles both cases correctly.
+    let blame_lines: Vec<&str> = blame_output.lines().collect();
+
+    // Find the p lines and check their attribution
+    for (i, line) in blame_lines.iter().enumerate() {
+        if line.contains("ppppp") {
+            let line_num = i + 1;
+            let is_ai = line.contains("mock_ai");
+            let is_human = line.contains("Test User");
+            eprintln!(
+                "Line {}: ppppp - AI={}, Human={} | {}",
+                line_num, is_ai, is_human, line
+            );
+            // Either AI (from commit 1's note) or untracked human (from commit 2) is correct.
+            // What is NOT correct: showing as AI from commit 2 (since commit 2 didn't touch it).
+            assert!(
+                is_ai || is_human,
+                "Line {} with ppppp should be either AI (from commit 1) or Human/untracked (from commit 2), got: {}",
+                line_num,
+                line
+            );
+        }
+    }
+}

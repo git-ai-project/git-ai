@@ -15,8 +15,23 @@ fn print_ci_result(result: &CiRunResult, prefix: &str) {
         CiRunResult::SkippedSimpleMerge => {
             println!("{}: skipped simple merge (authorship preserved)", prefix);
         }
+        CiRunResult::ForkNotesPreserved => {
+            println!("{}: fork notes preserved", prefix);
+        }
         CiRunResult::SkippedFastForward => {
             println!("{}: skipped fast-forward merge", prefix);
+        }
+        CiRunResult::SyncAuthorshipRewritten { commit_count } => {
+            println!(
+                "{}: authorship rewritten successfully for {} rebased commits",
+                prefix, commit_count
+            );
+        }
+        CiRunResult::SkippedNonRebaseSync => {
+            println!("{}: skipped non-rebase PR sync", prefix);
+        }
+        CiRunResult::SkippedExistingSyncNotes => {
+            println!("{}: skipped PR sync with existing authorship", prefix);
         }
         CiRunResult::NoAuthorshipAvailable => {
             println!(
@@ -87,8 +102,11 @@ fn handle_ci_github(args: &[String]) {
                     std::process::exit(1);
                 }
                 Ok(None) => {
-                    eprintln!("No GitHub CI context found");
-                    std::process::exit(1);
+                    // Not an actionable event (e.g. a `synchronize` that is not a
+                    // rebased-PR-head sync). With the workflow now firing on every
+                    // `synchronize`, this must be a graceful no-op, not a failure.
+                    println!("No GitHub CI context found; nothing to do");
+                    std::process::exit(0);
                 }
             }
         }
@@ -203,6 +221,7 @@ fn handle_ci_local(args: &[String]) {
             let skip_fetch_all = has_bool_flag("--skip-fetch");
             let skip_fetch_notes = skip_fetch_all || has_bool_flag("--skip-fetch-notes");
             let skip_fetch_base = skip_fetch_all || has_bool_flag("--skip-fetch-base");
+            let skip_fetch_fork_notes = skip_fetch_all || has_bool_flag("--skip-fetch-fork-notes");
             let skip_push = has_bool_flag("--skip-push");
 
             // Required inputs for merge
@@ -246,6 +265,7 @@ fn handle_ci_local(args: &[String]) {
                     std::process::exit(1);
                 }
             };
+            let fork_clone_url = flag("--fork-clone-url");
 
             let ctx = CiContext {
                 repo,
@@ -255,6 +275,7 @@ fn handle_ci_local(args: &[String]) {
                     head_sha,
                     base_ref,
                     base_sha,
+                    fork_clone_url,
                 },
                 // Not used for local runs; teardown not invoked
                 temp_dir: std::path::PathBuf::from("."),
@@ -264,11 +285,87 @@ fn handle_ci_local(args: &[String]) {
             match ctx.run_with_options(CiRunOptions {
                 skip_fetch_notes,
                 skip_fetch_base,
+                skip_fetch_fork_notes,
+                skip_fetch_sync_refs: false,
                 skip_push,
             }) {
                 Ok(result) => {
                     tracing::debug!("Local CI result: {:?}", result);
                     print_ci_result(&result, "Local CI (merge)");
+                }
+                Err(e) => {
+                    eprintln!("Error running local CI: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        "sync" | "rebase" => {
+            let skip_fetch_all = has_bool_flag("--skip-fetch");
+            let skip_fetch_notes = skip_fetch_all || has_bool_flag("--skip-fetch-notes");
+            let skip_fetch_sync_refs = skip_fetch_all || has_bool_flag("--skip-fetch-sync-refs");
+            let skip_push = has_bool_flag("--skip-push");
+
+            let previous_head_sha = match flag("--previous-head-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--previous-head-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let previous_base_sha = flag("--previous-base-sha");
+
+            let head_sha = match flag("--head-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--head-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let base_sha = flag("--base-sha").unwrap_or_default();
+
+            let base_ref = match flag("--base-ref") {
+                Some(v) => v,
+                None => {
+                    if !base_sha.is_empty() {
+                        base_sha.clone()
+                    } else {
+                        eprintln!("--base-ref is required");
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            let previous_head_fetch_remote =
+                flag("--previous-head-fetch-remote").or_else(|| flag("--remote"));
+
+            let ctx = CiContext {
+                repo,
+                event: CiEvent::Sync {
+                    previous_head_sha,
+                    head_sha,
+                    base_ref,
+                    base_sha,
+                    previous_base_sha,
+                    previous_head_fetch_remote,
+                },
+                // Not used for local runs; teardown not invoked
+                temp_dir: std::path::PathBuf::from("."),
+            };
+
+            tracing::debug!("Local CI context: {:?}", ctx);
+            match ctx.run_with_options(CiRunOptions {
+                skip_fetch_notes,
+                skip_fetch_base: true,
+                skip_fetch_fork_notes: false,
+                skip_fetch_sync_refs,
+                skip_push,
+            }) {
+                Ok(result) => {
+                    tracing::debug!("Local CI result: {:?}", result);
+                    print_ci_result(&result, "Local CI (sync)");
                 }
                 Err(e) => {
                     eprintln!("Error running local CI: {}", e);
@@ -300,10 +397,16 @@ fn print_ci_help_and_exit() -> ! {
     eprintln!("                   Usage: git-ai ci local <event> [flags]");
     eprintln!("                   Events:");
     eprintln!(
-        "                     merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
+        "                     merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha> [--fork-clone-url <url>]"
     );
     eprintln!(
-        "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch] [--skip-push]"
+        "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch-fork-notes] [--skip-fetch] [--skip-push]"
+    );
+    eprintln!(
+        "                     sync   --previous-head-sha <sha> --head-sha <sha> --base-ref <ref> [--base-sha <sha>]"
+    );
+    eprintln!(
+        "                            [--remote <name-or-url>] [--skip-fetch-notes] [--skip-fetch-sync-refs] [--skip-fetch] [--skip-push]"
     );
     std::process::exit(1);
 }
@@ -315,9 +418,17 @@ fn print_ci_local_help_and_exit() -> ! {
     eprintln!();
     eprintln!("Events:");
     eprintln!(
-        "  merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
+        "  merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha> [--fork-clone-url <url>]"
     );
-    eprintln!("         [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch] [--skip-push]");
+    eprintln!(
+        "         [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch-fork-notes] [--skip-fetch] [--skip-push]"
+    );
+    eprintln!(
+        "  sync   --previous-head-sha <sha> --head-sha <sha> --base-ref <ref> [--base-sha <sha>]"
+    );
+    eprintln!(
+        "         [--remote <name-or-url>] [--skip-fetch-notes] [--skip-fetch-sync-refs] [--skip-fetch] [--skip-push]"
+    );
     std::process::exit(1);
 }
 

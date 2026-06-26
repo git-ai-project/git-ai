@@ -69,12 +69,15 @@ fn test_squash_merge_single_parent_not_on_base_ref() {
         head_sha: feature_sha.clone(),
         base_ref: "refs/worker/pr/test/base".to_string(),
         base_sha: feature_sha.clone(),
+        fork_clone_url: None,
     };
 
     let ctx = CiContext::with_repository(git_ai_repo, event);
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_fetch_fork_notes: true,
+        skip_fetch_sync_refs: false,
         skip_push: false,
     });
 
@@ -136,12 +139,15 @@ fn test_single_commit_rebase_parent_on_base_ref() {
         head_sha: feature_sha.clone(),
         base_ref: "refs/worker/pr/test/base".to_string(),
         base_sha: init_sha,
+        fork_clone_url: None,
     };
 
     let ctx = CiContext::with_repository(git_ai_repo, event);
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_fetch_fork_notes: true,
+        skip_fetch_sync_refs: false,
         skip_push: false,
     });
 
@@ -214,12 +220,15 @@ fn test_multi_commit_squash_merge_single_parent() {
         head_sha: feature_head_sha.clone(),
         base_ref: "refs/worker/pr/test/base".to_string(),
         base_sha: init_sha,
+        fork_clone_url: None,
     };
 
     let ctx = CiContext::with_repository(git_ai_repo, event);
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_fetch_fork_notes: true,
+        skip_fetch_sync_refs: false,
         skip_push: false,
     });
 
@@ -302,12 +311,15 @@ fn test_regular_two_parent_merge_skipped() {
         head_sha: feature_sha.clone(),
         base_ref: "refs/heads/master".to_string(),
         base_sha: adv_sha,
+        fork_clone_url: None,
     };
 
     let ctx = CiContext::with_repository(git_ai_repo, event);
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_fetch_fork_notes: true,
+        skip_fetch_sync_refs: false,
         skip_push: false,
     });
 

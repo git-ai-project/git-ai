@@ -8,7 +8,9 @@ use crate::authorship::diff_ai_accepted::diff_ai_accepted_stats;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_authorship_log};
 use crate::error::GitAiError;
-use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
+use crate::git::notes_api::{
+    CommitAuthorship, filter_commits_with_notes as get_commits_with_notes_from_list,
+};
 use crate::git::repository::{CommitRange, InternalGitProfile, Repository, exec_git_with_profile};
 use std::io::IsTerminal;
 
@@ -167,7 +169,6 @@ pub fn range_authorship(
 }
 
 /// Create an in-memory authorship log for a commit range by treating it as a squash
-/// Similar to rewrite_authorship_after_squash_or_rebase but tailored for ranges
 fn create_authorship_log_for_range(
     repo: &Repository,
     start_sha: &str,
@@ -225,7 +226,7 @@ fn create_authorship_log_for_range(
         tracing::debug!("Start is empty tree - using only end commit attributions");
 
         let repo_clone = repo.clone();
-        let mut end_va = smol::block_on(async {
+        let mut end_va = crate::tokio_runtime::block_on(async {
             VirtualAttributions::new_for_base_commit(
                 repo_clone,
                 end_sha.to_string(),
@@ -257,7 +258,7 @@ fn create_authorship_log_for_range(
     // avoiding expensive traversal of the entire repository history
     let repo_clone = repo.clone();
     let start_sha_limit = Some(start_sha.to_string());
-    let mut start_va = smol::block_on(async {
+    let mut start_va = crate::tokio_runtime::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             start_sha.to_string(),
@@ -271,7 +272,7 @@ fn create_authorship_log_for_range(
     // Pass start_sha as blame_start_commit to limit blame scope to the range
     let repo_clone = repo.clone();
     let start_sha_limit = Some(start_sha.to_string());
-    let mut end_va = smol::block_on(async {
+    let mut end_va = crate::tokio_runtime::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             end_sha.to_string(),

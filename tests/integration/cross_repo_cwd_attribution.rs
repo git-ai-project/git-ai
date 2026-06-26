@@ -937,6 +937,11 @@ fn test_nested_subrepo_mixed_edits_mock_ai() {
         )
         .expect("mixed checkpoint (parent + nested subrepo) should succeed");
 
+    // The mixed checkpoint fans out to both repo families; drain both before
+    // committing so this test does not race delegated checkpoint processing.
+    parent.sync_daemon();
+    subrepo.sync_daemon();
+
     // Verify parent repo has attestation
     let parent_commit = parent.stage_all_and_commit("AI edits in parent").unwrap();
     assert!(
@@ -994,6 +999,11 @@ fn test_nested_multiple_subrepos_mock_ai() {
             ],
         )
         .expect("checkpoint across multiple nested subrepos should succeed");
+
+    // The checkpoint spans two nested repo families; drain both before either
+    // commit so each repo sees its delegated checkpoint.
+    sub1.sync_daemon();
+    sub2.sync_daemon();
 
     let commit_s1 = sub1.stage_all_and_commit("AI in sub1").unwrap();
     assert!(

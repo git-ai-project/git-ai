@@ -1,6 +1,6 @@
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -48,24 +48,6 @@ impl OpenCodePreset {
         normalized_paths
     }
 
-    fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            let maybe_path = trimmed
-                .strip_prefix("*** Update File: ")
-                .or_else(|| trimmed.strip_prefix("*** Add File: "))
-                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-                .or_else(|| trimmed.strip_prefix("*** Move to: "));
-
-            if let Some(path) = maybe_path {
-                let path = path.trim().trim_matches('"').trim_matches('\'');
-                if !path.is_empty() && !out.iter().any(|existing| existing == path) {
-                    out.push(path.to_string());
-                }
-            }
-        }
-    }
-
     fn collect_tool_paths(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {
             serde_json::Value::Object(map) => {
@@ -110,7 +92,7 @@ impl OpenCodePreset {
                 if s.starts_with("file://") {
                     out.push(s.to_string());
                 }
-                Self::collect_apply_patch_paths_from_text(s, out);
+                super::parse::collect_apply_patch_paths_from_text(s, out);
             }
             _ => {}
         }
@@ -144,7 +126,7 @@ impl OpenCodePreset {
         Some(joined.to_string_lossy().replace('\\', "/"))
     }
 
-    fn resolve_transcript_source(session_id: &str) -> Option<(TranscriptSource, PathBuf)> {
+    fn resolve_stream_source(session_id: &str) -> Option<(StreamSource, PathBuf)> {
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
             PathBuf::from(test_path)
         } else {
@@ -156,9 +138,9 @@ impl OpenCodePreset {
         if let Some(db_path) = db_path {
             let parent_id = Self::lookup_parent_session(&db_path, session_id);
             return Some((
-                TranscriptSource {
+                StreamSource {
                     path: db_path,
-                    format: TranscriptFormat::OpenCodeSqlite,
+                    format: StreamFormat::OpenCodeSqlite,
                     session_id: generate_session_id(session_id, "opencode"),
                     external_session_id: session_id.to_string(),
                     external_parent_session_id: parent_id,
@@ -171,7 +153,7 @@ impl OpenCodePreset {
     }
 
     fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
-        let conn = crate::transcripts::agents::opencode::open_sqlite_readonly(db_path).ok()?;
+        let conn = crate::streams::agents::opencode::open_sqlite_readonly(db_path).ok()?;
         conn.query_row(
             "SELECT parent_id FROM session WHERE id = ?",
             [session_id],
@@ -279,6 +261,17 @@ impl AgentPreset for OpenCodePreset {
         } = hook_input;
 
         let file_paths = Self::extract_filepaths_from_tool_input(tool_input.as_ref(), &cwd);
+        let bash_command = tool_input
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .get("command")
+                    .or_else(|| value.get("cmd"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
         let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
 
         // Build metadata
@@ -289,12 +282,12 @@ impl AgentPreset for OpenCodePreset {
         }
 
         // Resolve transcript source
-        let transcript_result = Self::resolve_transcript_source(&session_id);
+        let transcript_result = Self::resolve_stream_source(&session_id);
 
         let extracted_model = transcript_result.as_ref().and_then(|(ts, _)| {
-            crate::transcripts::model_extraction::extract_model(
+            crate::streams::model_extraction::extract_model(
                 &ts.path,
-                crate::transcripts::sweep::TranscriptFormat::OpenCodeSqlite,
+                crate::streams::sweep::StreamFormat::OpenCodeSqlite,
                 Some(session_id.as_str()),
             )
             .ok()
@@ -313,12 +306,13 @@ impl AgentPreset for OpenCodePreset {
             metadata,
         };
 
-        let transcript_source = transcript_result.map(|(source, _)| source);
+        let stream_source = transcript_result.map(|(source, _)| source);
 
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -329,13 +323,14 @@ impl AgentPreset for OpenCodePreset {
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                transcript_source,
+                command: bash_command,
+                stream_source,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
-                transcript_source,
+                stream_source,
                 tool_use_id: Some(tool_use_id_str),
             }),
         };
@@ -478,7 +473,7 @@ mod tests {
     #[test]
     fn test_opencode_collect_apply_patch_paths() {
         let mut out = Vec::new();
-        OpenCodePreset::collect_apply_patch_paths_from_text(
+        super::super::parse::collect_apply_patch_paths_from_text(
             "*** Update File: src/main.rs\n*** Add File: src/new.rs",
             &mut out,
         );

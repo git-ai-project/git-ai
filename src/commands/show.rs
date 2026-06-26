@@ -1,6 +1,8 @@
 use crate::error::GitAiError;
 use crate::git::find_repository;
-use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
+use crate::git::notes_api::{
+    CommitAuthorship, filter_commits_with_notes as get_commits_with_notes_from_list,
+};
 use crate::git::repository::{CommitRange, Repository};
 
 const NO_AUTHORSHIP_DATA_MESSAGE: &str = "No authorship data found for this revision";

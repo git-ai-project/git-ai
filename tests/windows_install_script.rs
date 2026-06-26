@@ -4,9 +4,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use repos::test_repo::{
-    DaemonTestScope, GitTestMode, TestRepo, get_binary_path, real_git_executable,
-};
+use repos::test_repo::{DaemonTestScope, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs::{self, OpenOptions};
@@ -328,8 +326,7 @@ fn wait_for_child_exit(repo: &TestRepo, child: &mut Child, timeout: Duration) {
 #[test]
 #[serial]
 fn windows_install_script_reinstall_stops_running_daemon() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -373,8 +370,7 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 #[test]
 #[serial]
 fn windows_daemon_creates_log_file() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -394,11 +390,21 @@ fn windows_daemon_creates_log_file() {
     let _ = daemon.wait();
 }
 
+fn seed_existing_wrapper(repo: &TestRepo) {
+    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create install dir");
+    fs::write(bin_dir.join("git-ai.exe"), b"").expect("failed to create git-ai.exe stub");
+    fs::write(bin_dir.join("git.exe"), b"").expect("failed to create git.exe stub");
+}
+
 #[test]
 #[serial]
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    // Pre-seed wrapper state so the installer treats this as an existing-user
+    // upgrade and refreshes git.exe — this test exercises wrapper behavior.
+    seed_existing_wrapper(&repo);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -430,6 +436,57 @@ fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
         combined.contains("git-ai upgrade"),
         "expected direct command hint, got:\n{}",
         combined
+    );
+}
+
+#[test]
+#[serial]
+fn windows_install_script_skips_wrapper_for_new_users() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    let install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        install.status.success(),
+        "fresh install should succeed\nstdout:\n{}\nstderr:\n{}",
+        install.stdout,
+        install.stderr
+    );
+
+    assert!(
+        installed_git_ai_path(&repo).exists(),
+        "git-ai.exe should be installed at {}",
+        installed_git_ai_path(&repo).display()
+    );
+
+    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
+    assert!(
+        !bin_dir.join("git.exe").exists(),
+        "fresh install should NOT create the git.exe wrapper"
+    );
+    assert!(
+        !bin_dir.join("git-og.cmd").exists(),
+        "fresh install should NOT create git-og.cmd"
+    );
+}
+
+#[test]
+#[serial]
+fn windows_install_script_refreshes_wrapper_for_existing_users() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    seed_existing_wrapper(&repo);
+
+    let install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        install.status.success(),
+        "existing-wrapper install should succeed\nstdout:\n{}\nstderr:\n{}",
+        install.stdout,
+        install.stderr
+    );
+
+    assert!(
+        installed_git_wrapper_path(&repo).exists(),
+        "git.exe wrapper should be refreshed for existing users"
     );
 }
 

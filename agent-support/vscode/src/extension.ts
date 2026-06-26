@@ -20,6 +20,17 @@ function getDistinctId(): string {
   }
 }
 
+function isTelemetryOssDisabled(): boolean {
+  try {
+    const configPath = path.join(os.homedir(), ".git-ai", "config.json");
+    const raw = fs.readFileSync(configPath, "utf-8");
+    const config = JSON.parse(raw);
+    return config.telemetry_oss === "off";
+  } catch {
+    return false;
+  }
+}
+
 export function activate(context: vscode.ExtensionContext) {
 
   // In dev mode, resolve git-ai binary via login shell (debug host has stripped PATH)
@@ -27,21 +38,23 @@ export function activate(context: vscode.ExtensionContext) {
 
   const ideHostCfg = detectIDEHost();
 
-  // Initialize PostHog and emit startup event
-  const posthog = new PostHog("phc_XANaHNpDXBERPosyM8Bp0INVoGsgW8Gk92HsB090r6A", { host: "https://us.i.posthog.com" });
-  posthog.capture({
-    distinctId: getDistinctId(),
-    event: "vscode_extension_startup",
-    properties: {
-      ide_host: ideHostCfg.kind,
-      app_name: ideHostCfg.appName,
-      uri_scheme: ideHostCfg.uriScheme,
-      extension_version: context.extension.packageJSON.version,
-    },
-  });
-  context.subscriptions.push({
-    dispose: () => posthog.shutdown(),
-  });
+  // Initialize PostHog and emit startup event (respects telemetry_oss config)
+  if (!isTelemetryOssDisabled()) {
+    const posthog = new PostHog("phc_XANaHNpDXBERPosyM8Bp0INVoGsgW8Gk92HsB090r6A", { host: "https://us.i.posthog.com" });
+    posthog.capture({
+      distinctId: getDistinctId(),
+      event: "vscode_extension_startup",
+      properties: {
+        ide_host: ideHostCfg.kind,
+        app_name: ideHostCfg.appName,
+        uri_scheme: ideHostCfg.uriScheme,
+        extension_version: context.extension.packageJSON.version,
+      },
+    });
+    context.subscriptions.push({
+      dispose: () => posthog.shutdown(),
+    });
+  }
 
   const aiEditManager = new AIEditManager(context);
 

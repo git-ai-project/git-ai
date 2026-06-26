@@ -2,8 +2,8 @@ use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
     MIN_CLAUDE_VERSION, binary_exists, claude_config_dir, generate_diff, get_binary_version,
-    is_git_ai_checkpoint_command, parse_version, to_git_bash_path, version_meets_requirement,
-    write_atomic,
+    is_git_ai_checkpoint_command, normalize_windows_path_for_shell, parse_version,
+    version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -89,7 +89,7 @@ impl ClaudeCodeInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&params.binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
@@ -376,7 +376,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mdm::utils::{clean_path, to_git_bash_path};
+    use crate::mdm::utils::{clean_path, normalize_windows_path_for_shell};
     use std::fs;
     use tempfile::TempDir;
 
@@ -1182,7 +1182,7 @@ mod tests {
         let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
-        let binary_path_str = to_git_bash_path(&binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
@@ -1203,28 +1203,28 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_hook_commands_use_git_bash_path_on_windows() {
+    fn test_claude_hook_commands_use_forward_slash_path_on_windows() {
         let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
-        let binary_path_str = to_git_bash_path(&binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
         assert_eq!(
             pre_tool_cmd,
-            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
-            "PreToolUse command should use git bash path format"
+            "C:/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "PreToolUse command should use forward-slash path format"
         );
         assert_eq!(
             post_tool_cmd,
-            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
-            "PostToolUse command should use git bash path format"
+            "C:/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "PostToolUse command should use forward-slash path format"
         );
     }
 
     #[test]
     fn test_claude_hook_commands_preserve_unix_path() {
         let binary_path = PathBuf::from("/usr/local/bin/git-ai");
-        let binary_path_str = to_git_bash_path(&binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
 
         assert_eq!(

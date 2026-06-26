@@ -199,6 +199,24 @@ index 0000000..abc1234 100644
 }
 
 #[test]
+fn test_parse_diff_added_lines_with_insertions_replacement_uses_plus_lines_only() {
+    let diff = r#"diff --git a/test.txt b/test.txt
+index 0000000..abc1234 100644
+--- a/test.txt
++++ b/test.txt
+@@ -10,3 +10,4 @@
+ unchanged
+-old line
++new line
+ context
++added tail"#;
+
+    let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
+    assert_eq!(added_lines.get("test.txt"), Some(&vec![11, 13]));
+    assert_eq!(insertion_lines.get("test.txt"), None);
+}
+
+#[test]
 fn worktree_storage_ai_dir_keeps_full_relative_worktree_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let common_dir = temp.path().join("repo.git");

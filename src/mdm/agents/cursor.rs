@@ -377,53 +377,12 @@ impl HookInstaller for CursorInstaller {
                 }
             }
         } else {
-            results.push(InstallResult {
-                changed: false,
-                diff: None,
-                message: "Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)".to_string(),
-            });
-        }
-
-        // Configure git.path
-        {
-            use crate::mdm::utils::{git_shim_path_string, update_git_path_setting};
-
-            let git_path = git_shim_path_string();
-            for settings_path in Self::settings_targets() {
-                if !should_process_settings_target(&settings_path) {
-                    continue;
-                }
-
-                match update_git_path_setting(&settings_path, &git_path, dry_run) {
-                    Ok(Some(diff)) => {
-                        results.push(InstallResult {
-                            changed: true,
-                            diff: Some(diff),
-                            message: format!(
-                                "Cursor: git.path updated in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Ok(None) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!(
-                                "Cursor: git.path already configured in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Err(e) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!("Cursor: Failed to configure git.path: {}", e),
-                        });
-                    }
-                }
-            }
+            // resolve_editor_cli returned None -- the only way to reach this
+            // branch. Cursor was detected only from its config dotfiles
+            // (~/.cursor) and isn't actually installed, so there's nothing to
+            // install the extension into. Don't emit a misleading "unable to
+            // install" nag here; genuine install/check failures are already
+            // reported by the match arms above.
         }
 
         Ok(results)
@@ -445,6 +404,28 @@ mod tests {
 
     fn create_test_binary_path() -> PathBuf {
         PathBuf::from("/usr/local/bin/git-ai")
+    }
+
+    #[test]
+    fn test_install_extras_does_not_nag_when_cli_absent() {
+        // Regression: when the Cursor app/CLI isn't resolvable (e.g. only the
+        // ~/.cursor dotfiles exist), install_extras must not emit the misleading
+        // "Unable to automatically install extension" message. dry_run=true means
+        // a real install is never attempted, so this never spawns an editor.
+        let params = HookInstallerParams {
+            binary_path: create_test_binary_path(),
+        };
+        let results = CursorInstaller.install_extras(&params, true).unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| !r.message.contains("Unable to automatically install")),
+            "unexpected extension nag: {:?}",
+            results
+                .iter()
+                .map(|r| r.message.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::daemon::domain::{
     WatermarkState,
 };
 use crate::daemon::reducer;
+use crate::daemon::ref_cursor::RefCursor;
 use crate::error::GitAiError;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
@@ -103,12 +104,23 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             applied_seq: 0,
             watermarks: WatermarkState::default(),
         };
+        let mut ref_cursor = RefCursor::new(family_key.clone());
 
         while let Some(msg) = rx.recv().await {
             match msg {
                 FamilyMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_family_command(&mut state, *cmd, &analyzers)
-                        .map(|(applied, _)| applied);
+                    let mut cmd = *cmd;
+                    let result = ref_cursor.enrich_command(&mut cmd, &state).and_then(
+                        |command_start_refs| {
+                            reducer::reduce_family_command_with_ref_snapshot(
+                                &mut state,
+                                cmd,
+                                &analyzers,
+                                &command_start_refs,
+                            )
+                            .map(|(applied, _)| applied)
+                        },
+                    );
                     let _ = respond_to.send(result);
                 }
                 FamilyMsg::ApplyCheckpoint(respond_to) => {
@@ -175,15 +187,12 @@ mod tests {
             exit_code: 0,
             started_at_ns: seq,
             finished_at_ns: seq + 1,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
+            reflog_start_offsets: std::collections::HashMap::new(),
             stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 

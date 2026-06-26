@@ -2,6 +2,7 @@ use dirs;
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::config::{AuthorConfig, CodexHooksFormat, NotesBackendKind};
 use crate::git::repository::find_repository_in_path;
 
 /// Determines the type of pattern value provided
@@ -106,12 +107,26 @@ fn print_config_help() {
     println!("  disable_auto_updates         Disable auto updates (bool)");
     println!("  update_channel               Update channel (latest/next)");
     println!("  feature_flags                Feature flags (object)");
+    println!("  api_base_url                 API base URL (default: https://usegitai.com)");
     println!("  api_key                      API key for X-API-Key header");
+    println!("  author.name                  git-ai author display name override");
+    println!("  author.email                 git-ai author email override");
     println!("  prompt_storage               Prompt storage mode (default/notes/local)");
     println!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
     println!("  default_prompt_storage       Fallback storage mode for non-included repos");
     println!("  quiet                        Suppress chart output after commits (bool)");
     println!("  git_ai_hooks                 Hook name -> shell commands map (object)");
+    println!("  codex_hooks_format           Codex hook install format (config_toml/hooks_json)");
+    println!("  notes_backend.kind           Notes backend kind (git_notes/http)");
+    println!("  notes_backend.backend_url    Notes backend base URL. Required when kind=http.");
+    println!(
+        "                               May include a path prefix; endpoints are appended to it."
+    );
+    println!(
+        "                               e.g. \"https://app.example.com/api/gitai\" -> requests are"
+    );
+    println!("                               sent to \"<base>/worker/notes/upload\" and");
+    println!("                               \"<base>/worker/notes/?commits=...\".");
     println!();
     println!("Repository Patterns:");
     println!("  For exclude/allow/exclude_prompts_in_repositories, you can provide:");
@@ -122,12 +137,15 @@ fn print_config_help() {
     println!("Examples:");
     println!("  git-ai config exclude_repositories");
     println!("  git-ai config set disable_auto_updates true");
+    println!("  git-ai config set author.name \"Alice Example\"");
+    println!("  git-ai config set author.email alice@example.com");
     println!("  git-ai config set exclude_repositories \"private/*\"");
     println!("  git-ai config set exclude_repositories .         # Uses current repo's remotes");
     println!("  git-ai config --add exclude_repositories \"temp/*\"");
     println!("  git-ai config --add allow_repositories ~/projects/my-repo");
     println!("  git-ai config --add feature_flags.my_flag true");
     println!("  git-ai config --add git_ai_hooks.post_notes_updated \"./my-hook.sh\"");
+    println!("  git-ai config set codex_hooks_format hooks_json");
     println!("  git-ai config unset exclude_repositories");
     println!();
     std::process::exit(0);
@@ -313,9 +331,20 @@ fn show_all_config() -> Result<(), String> {
     effective_config.insert("quiet".to_string(), Value::Bool(runtime_config.is_quiet()));
 
     effective_config.insert(
+        "author".to_string(),
+        serde_json::to_value(runtime_config.author())
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+
+    effective_config.insert(
         "git_ai_hooks".to_string(),
         serde_json::to_value(runtime_config.git_ai_hooks())
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+
+    effective_config.insert(
+        "codex_hooks_format".to_string(),
+        Value::String(runtime_config.codex_hooks_format().as_str().to_string()),
     );
 
     // Feature flags - show effective flags with defaults applied
@@ -323,10 +352,30 @@ fn show_all_config() -> Result<(), String> {
         .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
     effective_config.insert("feature_flags".to_string(), flags_value);
 
+    // API base URL
+    effective_config.insert(
+        "api_base_url".to_string(),
+        Value::String(runtime_config.api_base_url().to_string()),
+    );
+
     // API key - show masked value if set
     if let Some(ref key) = file_config.api_key {
         let masked = mask_api_key(key);
         effective_config.insert("api_key".to_string(), Value::String(masked));
+    }
+
+    // notes_backend
+    {
+        let nb = runtime_config.notes_backend();
+        let mut nb_map = serde_json::Map::new();
+        nb_map.insert(
+            "kind".to_string(),
+            Value::String(nb.kind.as_str().to_string()),
+        );
+        if let Some(ref url) = nb.backend_url {
+            nb_map.insert("backend_url".to_string(), Value::String(url.clone()));
+        }
+        effective_config.insert("notes_backend".to_string(), Value::Object(nb_map));
     }
 
     let json = serde_json::to_string_pretty(&effective_config)
@@ -383,6 +432,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 serde_json::to_value(runtime_config.get_feature_flags())
                     .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
             }
+            "api_base_url" => Value::String(runtime_config.api_base_url().to_string()),
             "api_key" => {
                 if let Some(ref key) = file_config.api_key {
                     Value::String(mask_api_key(key))
@@ -406,8 +456,25 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 }
             }
             "quiet" => Value::Bool(runtime_config.is_quiet()),
+            "author" => serde_json::to_value(runtime_config.author())
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "git_ai_hooks" => serde_json::to_value(runtime_config.git_ai_hooks())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            "codex_hooks_format" => {
+                Value::String(runtime_config.codex_hooks_format().as_str().to_string())
+            }
+            "notes_backend" => {
+                let nb = runtime_config.notes_backend();
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "kind".to_string(),
+                    Value::String(nb.kind.as_str().to_string()),
+                );
+                if let Some(ref url) = nb.backend_url {
+                    map.insert("backend_url".to_string(), Value::String(url.clone()));
+                }
+                Value::Object(map)
+            }
             _ => return Err(format!("Unknown config key: {}", key)),
         };
 
@@ -440,7 +507,57 @@ fn get_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    Err("Nested keys are only supported for feature_flags and git_ai_hooks".to_string())
+    if key_path[0] == "notes_backend" {
+        if key_path.len() != 2 {
+            return Err(
+                "notes_backend requires a field name (notes_backend.kind or notes_backend.backend_url)"
+                    .to_string(),
+            );
+        }
+        let nb = runtime_config.notes_backend();
+        let value = match key_path[1].as_str() {
+            "kind" => Value::String(nb.kind.as_str().to_string()),
+            "backend_url" => nb
+                .backend_url
+                .as_ref()
+                .map(|u| Value::String(u.clone()))
+                .unwrap_or(Value::Null),
+            other => return Err(format!("Unknown notes_backend field: {}", other)),
+        };
+        let json = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("Failed to serialize value: {}", e))?;
+        println!("{}", json);
+        return Ok(());
+    }
+
+    if key_path[0] == "author" {
+        if key_path.len() != 2 {
+            return Err("author requires a field name (author.name or author.email)".to_string());
+        }
+        let author = runtime_config.author();
+        let value = match key_path[1].as_str() {
+            "name" => author
+                .name
+                .as_ref()
+                .map(|name| Value::String(name.clone()))
+                .unwrap_or(Value::Null),
+            "email" => author
+                .email
+                .as_ref()
+                .map(|email| Value::String(email.clone()))
+                .unwrap_or(Value::Null),
+            other => return Err(format!("Unknown author field: {}", other)),
+        };
+        let json = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("Failed to serialize value: {}", e))?;
+        println!("{}", json);
+        return Ok(());
+    }
+
+    Err(
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, and author"
+            .to_string(),
+    )
 }
 
 fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String> {
@@ -529,6 +646,11 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 crate::config::save_file_config(&file_config)?;
                 println!("[feature_flags]: {}", value);
             }
+            "api_base_url" => {
+                file_config.api_base_url = Some(value.to_string());
+                crate::config::save_file_config(&file_config)?;
+                println!("[api_base_url]: {}", value);
+            }
             "api_key" => {
                 file_config.api_key = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
@@ -573,6 +695,26 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 crate::config::save_file_config(&file_config)?;
                 println!("[quiet]: {}", bool_value);
             }
+            "author" => {
+                if add_mode {
+                    return Err(
+                        "Cannot use --add with author. Use author.name or author.email."
+                            .to_string(),
+                    );
+                }
+                let author = parse_author_config_object(value)?;
+                file_config.author = if author.is_empty() {
+                    None
+                } else {
+                    Some(author.clone())
+                };
+                crate::config::save_file_config(&file_config)?;
+                println!(
+                    "[author]: {}",
+                    serde_json::to_string(&author)
+                        .map_err(|e| format!("Failed to serialize author: {}", e))?
+                );
+            }
             "git_ai_hooks" => {
                 if add_mode {
                     return Err("Cannot use --add with git_ai_hooks at top level. Use dot notation: git_ai_hooks.post_notes_updated".to_string());
@@ -580,6 +722,12 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.git_ai_hooks = Some(parse_git_ai_hooks_object(value)?);
                 crate::config::save_file_config(&file_config)?;
                 println!("[git_ai_hooks]: {}", value);
+            }
+            "codex_hooks_format" => {
+                let format = parse_codex_hooks_format(value)?;
+                file_config.codex_hooks_format = Some(format.as_str().to_string());
+                crate::config::save_file_config(&file_config)?;
+                println!("[codex_hooks_format]: {}", format.as_str());
             }
             _ => return Err(format!("Unknown config key: {}", key)),
         }
@@ -671,7 +819,63 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
         return Ok(());
     }
 
-    Err("Nested keys are only supported for feature_flags and git_ai_hooks".to_string())
+    if key_path[0] == "notes_backend" {
+        if key_path.len() != 2 {
+            return Err(
+                "notes_backend requires a field name (notes_backend.kind or notes_backend.backend_url)"
+                    .to_string(),
+            );
+        }
+        let field = key_path[1].as_str();
+        let mut backend = file_config.notes_backend.clone().unwrap_or_default();
+        match field {
+            "kind" => {
+                let kind = parse_notes_backend_kind(value)?;
+                backend.kind = kind;
+                file_config.notes_backend = Some(backend);
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("[notes_backend.kind]: {}", kind.as_str());
+            }
+            "backend_url" => {
+                backend.backend_url = Some(value.to_string());
+                file_config.notes_backend = Some(backend);
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("[notes_backend.backend_url]: {}", value);
+            }
+            other => return Err(format!("Unknown notes_backend field: {}", other)),
+        }
+        return Ok(());
+    }
+
+    if key_path[0] == "author" {
+        if add_mode {
+            return Err("Cannot use --add with author fields".to_string());
+        }
+        if key_path.len() != 2 {
+            return Err("author requires a field name (author.name or author.email)".to_string());
+        }
+
+        let mut author = file_config.author.clone().unwrap_or_default().normalized();
+        let normalized_value = value.trim().to_string();
+        if normalized_value.is_empty() {
+            return Err(format!("author.{} cannot be empty", key_path[1]));
+        }
+        match key_path[1].as_str() {
+            "name" => author.name = Some(normalized_value.clone()),
+            "email" => author.email = Some(normalized_value.clone()),
+            other => return Err(format!("Unknown author field: {}", other)),
+        }
+
+        file_config.author = Some(author);
+        crate::config::save_file_config(&file_config)?;
+        println!("[author.{}]: {}", key_path[1], normalized_value);
+        return Ok(());
+    }
+
+    Err(
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, and author"
+            .to_string(),
+    )
 }
 
 fn unset_config_value(key: &str) -> Result<(), String> {
@@ -751,6 +955,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     println!("- [feature_flags]: {}", v);
                 }
             }
+            "api_base_url" => {
+                let old_value = file_config.api_base_url.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [api_base_url]: {}", v);
+                }
+            }
             "api_key" => {
                 let old_value = file_config.api_key.take();
                 crate::config::save_file_config(&file_config)?;
@@ -786,11 +997,29 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     println!("- [quiet]: {}", v);
                 }
             }
+            "author" => {
+                let old_value = file_config.author.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!(
+                        "- [author]: {}",
+                        serde_json::to_string(&v)
+                            .map_err(|e| format!("Failed to serialize author: {}", e))?
+                    );
+                }
+            }
             "git_ai_hooks" => {
                 let old_value = file_config.git_ai_hooks.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [git_ai_hooks]: {:?}", v);
+                }
+            }
+            "codex_hooks_format" => {
+                let old_value = file_config.codex_hooks_format.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [codex_hooks_format]: {}", v);
                 }
             }
             _ => return Err(format!("Unknown config key: {}", key)),
@@ -881,7 +1110,67 @@ fn unset_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    Err("Nested keys are only supported for feature_flags and git_ai_hooks".to_string())
+    if key_path[0] == "notes_backend" {
+        if key_path.len() != 2 {
+            return Err(
+                "notes_backend requires a field name (notes_backend.kind or notes_backend.backend_url)"
+                    .to_string(),
+            );
+        }
+        let field = key_path[1].as_str();
+        let mut backend = file_config.notes_backend.clone().unwrap_or_default();
+        match field {
+            "kind" => {
+                let old = backend.kind;
+                backend.kind = NotesBackendKind::GitNotes; // reset to default
+                file_config.notes_backend = Some(backend);
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("- [notes_backend.kind]: {}", old.as_str());
+            }
+            "backend_url" => {
+                if let Some(old_url) = backend.backend_url.take() {
+                    file_config.notes_backend = if backend.kind == NotesBackendKind::GitNotes {
+                        None // whole object is back to defaults, omit from file
+                    } else {
+                        Some(backend)
+                    };
+                    crate::config::save_file_config(&file_config)?;
+                    eprintln!("- [notes_backend.backend_url]: {}", old_url);
+                }
+            }
+            other => return Err(format!("Unknown notes_backend field: {}", other)),
+        }
+        return Ok(());
+    }
+
+    if key_path[0] == "author" {
+        if key_path.len() != 2 {
+            return Err("author requires a field name (author.name or author.email)".to_string());
+        }
+
+        let mut author = file_config.author.clone().unwrap_or_default().normalized();
+        let old_value = match key_path[1].as_str() {
+            "name" => author.name.take(),
+            "email" => author.email.take(),
+            other => return Err(format!("Unknown author field: {}", other)),
+        };
+
+        file_config.author = if author.is_empty() {
+            None
+        } else {
+            Some(author)
+        };
+        crate::config::save_file_config(&file_config)?;
+        if let Some(v) = old_value {
+            println!("- [author.{}]: {}", key_path[1], v);
+        }
+        return Ok(());
+    }
+
+    Err(
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, and author"
+            .to_string(),
+    )
 }
 
 fn parse_key_path(key: &str) -> Vec<String> {
@@ -1062,12 +1351,47 @@ fn parse_value(value: &str) -> Result<Value, String> {
     Ok(Value::String(value.to_string()))
 }
 
+fn parse_author_config_object(value: &str) -> Result<AuthorConfig, String> {
+    let parsed: Value =
+        serde_json::from_str(value).map_err(|e| format!("Invalid JSON for author: {}", e))?;
+    if !parsed.is_object() {
+        return Err("author must be a JSON object".to_string());
+    }
+
+    serde_json::from_value::<AuthorConfig>(parsed)
+        .map(AuthorConfig::normalized)
+        .map_err(|e| format!("Invalid author config: {}", e))
+}
+
 /// Mask an API key for display (show first 4 and last 4 chars if long enough)
 fn mask_api_key(key: &str) -> String {
     if key.len() > 8 {
         format!("{}...{}", &key[..4], &key[key.len() - 4..])
     } else {
         "****".to_string()
+    }
+}
+
+/// Parse notes backend kind from a string value
+fn parse_notes_backend_kind(value: &str) -> Result<NotesBackendKind, String> {
+    match value.trim().to_lowercase().as_str() {
+        "git_notes" | "git-notes" => Ok(NotesBackendKind::GitNotes),
+        "http" => Ok(NotesBackendKind::Http),
+        _ => Err(format!(
+            "Invalid notes_backend.kind '{}'. Expected 'git_notes' or 'http'",
+            value
+        )),
+    }
+}
+
+fn parse_codex_hooks_format(value: &str) -> Result<CodexHooksFormat, String> {
+    match value.trim().to_lowercase().as_str() {
+        "config_toml" | "config-toml" => Ok(CodexHooksFormat::ConfigToml),
+        "hooks_json" | "hooks-json" => Ok(CodexHooksFormat::HooksJson),
+        _ => Err(format!(
+            "Invalid codex_hooks_format '{}'. Expected 'config_toml' or 'hooks_json'",
+            value
+        )),
     }
 }
 
@@ -1111,6 +1435,27 @@ mod tests {
         assert!(err.contains("default"));
         assert!(err.contains("notes"));
         assert!(err.contains("local"));
+    }
+
+    #[test]
+    fn test_codex_hooks_format_valid_values() {
+        assert_eq!(
+            parse_codex_hooks_format("config_toml").unwrap(),
+            CodexHooksFormat::ConfigToml
+        );
+        assert_eq!(
+            parse_codex_hooks_format("hooks_json").unwrap(),
+            CodexHooksFormat::HooksJson
+        );
+    }
+
+    #[test]
+    fn test_codex_hooks_format_invalid_value() {
+        let result = parse_codex_hooks_format("json");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("config_toml"));
+        assert!(err.contains("hooks_json"));
     }
 
     #[test]
@@ -1207,6 +1552,21 @@ mod tests {
     fn test_parse_value_plain_string() {
         let result = parse_value("plain text").unwrap();
         assert_eq!(result, Value::String("plain text".to_string()));
+    }
+
+    #[test]
+    fn test_parse_author_config_object() {
+        let author =
+            parse_author_config_object(r#"{"name":"  Alice Example  ","email":"a@example.com"}"#)
+                .unwrap();
+        assert_eq!(author.name.as_deref(), Some("Alice Example"));
+        assert_eq!(author.email.as_deref(), Some("a@example.com"));
+    }
+
+    #[test]
+    fn test_parse_author_config_object_rejects_non_object() {
+        let err = parse_author_config_object(r#""Alice""#).unwrap_err();
+        assert!(err.contains("author must be a JSON object"));
     }
 
     #[test]

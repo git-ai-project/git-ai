@@ -1,0 +1,5 @@
+[
+  {"id":"claude-sonnet-4","name":"Claude Sonnet 4","is_chat_default":false,"vendor":"Anthropic"},
+  {"id":"gpt-4.1","name":"GPT-4.1","is_chat_default":true,"is_chat_fallback":true,"vendor":"Azure OpenAI","version":"gpt-4.1-2025-04-14"},
+  {"id":"o3-mini","name":"o3-mini","is_chat_default":false,"vendor":"Azure OpenAI"}
+]

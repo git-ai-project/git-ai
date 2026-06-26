@@ -1,8 +1,8 @@
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::ClaudeAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::ClaudeAgent;
+use git_ai::streams::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -326,7 +326,7 @@ fn test_claude_subagent_checkpoint_sets_parent_session_id() {
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
             let ts = e
-                .transcript_source
+                .stream_source
                 .as_ref()
                 .expect("should have transcript source");
             assert_eq!(
@@ -367,7 +367,7 @@ fn test_claude_normal_session_checkpoint_has_no_parent() {
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
             let ts = e
-                .transcript_source
+                .stream_source
                 .as_ref()
                 .expect("should have transcript source");
             assert_eq!(

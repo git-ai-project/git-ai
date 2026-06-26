@@ -3,19 +3,25 @@
 //! Runs inside the daemon process using tokio. Accumulates telemetry envelopes
 //! and CAS payloads, then flushes them to their destinations every 3 seconds.
 
+use crate::api::metrics::{MetricsUploadResponse, metrics_upload_allowed};
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
-use crate::metrics::db::MetricsDatabase;
+use crate::error::GitAiError;
+use crate::metrics::db::{METADATA_BACKFILL_BATCH_SIZE, MetricRecord, MetricsDatabase};
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
+
+static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Accumulated telemetry events waiting to be flushed.
 struct TelemetryBuffer {
@@ -137,9 +143,30 @@ pub struct DaemonTelemetryWorkerHandle {
 }
 
 impl DaemonTelemetryWorkerHandle {
+    #[cfg(test)]
+    pub fn new_noop() -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(TelemetryBuffer::new())),
+        }
+    }
+
     /// Submit telemetry envelopes for batched processing.
     pub async fn submit_telemetry(&self, envelopes: Vec<TelemetryEnvelope>) {
-        self.buffer.lock().await.ingest_envelopes(envelopes);
+        let (buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
+        if !buffered_envelopes.is_empty() {
+            self.buffer
+                .lock()
+                .await
+                .ingest_envelopes(buffered_envelopes);
+        }
+
+        if !metric_events.is_empty() {
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                if let Err(e) = store_metrics_in_db(&metric_events) {
+                    tracing::warn!(%e, "telemetry: failed to persist metrics locally");
+                }
+            }));
+        }
     }
 
     /// Submit CAS records for batched upload.
@@ -147,17 +174,34 @@ impl DaemonTelemetryWorkerHandle {
         self.buffer.lock().await.ingest_cas(records);
     }
 
-    /// Returns the current number of buffered metric events.
+    /// Returns the current number of metrics waiting for upload.
     ///
-    /// Used by the transcript worker for backpressure: if the buffer is
-    /// above a threshold, the worker yields to let the flush loop drain it.
-    /// Returns `usize::MAX` when the lock is contended, so callers default
-    /// to "wait" rather than "push more".
+    /// Used by the transcript worker for backpressure: if SQLite pending rows
+    /// or the legacy in-memory buffer are above a threshold, the worker yields
+    /// to let the flush loop drain them. Returns `usize::MAX` when the buffer
+    /// lock is contended, so callers default to "wait" rather than "push more".
     pub fn metrics_buffer_len(&self) -> usize {
-        self.buffer
+        let buffered = self
+            .buffer
             .try_lock()
             .map(|buf| buf.metrics.len())
-            .unwrap_or(usize::MAX)
+            .unwrap_or(usize::MAX);
+        if buffered == usize::MAX {
+            return usize::MAX;
+        }
+
+        if !METRICS_UPLOAD_AVAILABLE.load(Ordering::Relaxed) {
+            return buffered;
+        }
+
+        let pending = match MetricsDatabase::global() {
+            Ok(db) => match db.try_lock() {
+                Ok(db) => db.count_retryable().unwrap_or(usize::MAX),
+                Err(_) => usize::MAX,
+            },
+            Err(_) => 0,
+        };
+        buffered.saturating_add(pending)
     }
 
     /// Submit telemetry envelopes synchronously (best-effort, non-blocking).
@@ -166,8 +210,17 @@ impl DaemonTelemetryWorkerHandle {
     /// cannot go through the control socket (the daemon can't connect to itself).
     /// Uses `try_lock()` to avoid blocking the caller if the buffer is contested.
     pub fn submit_telemetry_sync(&self, envelopes: Vec<TelemetryEnvelope>) {
-        if let Ok(mut buf) = self.buffer.try_lock() {
-            buf.ingest_envelopes(envelopes);
+        let (buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
+        if !buffered_envelopes.is_empty()
+            && let Ok(mut buf) = self.buffer.try_lock()
+        {
+            buf.ingest_envelopes(buffered_envelopes);
+        }
+
+        if !metric_events.is_empty()
+            && let Err(e) = store_metrics_in_db(&metric_events)
+        {
+            tracing::warn!(%e, "telemetry: failed to persist daemon metrics locally");
         }
     }
 
@@ -196,15 +249,44 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
     let _ = DAEMON_INTERNAL_TELEMETRY.set(handle);
 }
 
-/// Submit telemetry from within the daemon process (sync, best-effort).
+/// Submit telemetry from within the daemon process.
 /// Returns true if the handle was available and envelopes were submitted.
 pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
-        handle.submit_telemetry_sync(envelopes);
+        submit_daemon_internal_telemetry_with_handle(handle.clone(), envelopes);
         true
     } else {
         false
     }
+}
+
+fn submit_daemon_internal_telemetry_with_handle(
+    handle: DaemonTelemetryWorkerHandle,
+    envelopes: Vec<TelemetryEnvelope>,
+) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            handle.submit_telemetry(envelopes).await;
+        });
+    } else {
+        handle.submit_telemetry_sync(envelopes);
+    }
+}
+
+fn split_metric_envelopes(
+    envelopes: Vec<TelemetryEnvelope>,
+) -> (Vec<TelemetryEnvelope>, Vec<MetricEvent>) {
+    let mut buffered_envelopes = Vec::new();
+    let mut metric_events = Vec::new();
+
+    for envelope in envelopes {
+        match envelope {
+            TelemetryEnvelope::Metrics { events } => metric_events.extend(events),
+            other => buffered_envelopes.push(other),
+        }
+    }
+
+    (buffered_envelopes, metric_events)
 }
 
 /// Submit CAS records from within the daemon process (sync, best-effort).
@@ -235,11 +317,50 @@ pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
     };
 
+    spawn_metrics_metadata_backfill();
+
     tokio::spawn(async move {
         telemetry_flush_loop(buffer).await;
     });
 
     handle
+}
+
+fn spawn_metrics_metadata_backfill() {
+    if METRICS_METADATA_BACKFILL_STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    std::mem::drop(tokio::task::spawn_blocking(|| {
+        if let Err(e) = backfill_metrics_event_metadata() {
+            tracing::warn!(%e, "telemetry: failed to backfill metrics event metadata");
+        }
+    }));
+}
+
+fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let mut after_id = 0;
+
+    loop {
+        let (summary, last_id) = {
+            let mut db_lock = db
+                .lock()
+                .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+            db_lock.backfill_event_metadata_batch_after(after_id, METADATA_BACKFILL_BATCH_SIZE)?
+        };
+
+        let Some(id) = last_id else {
+            break;
+        };
+        after_id = id;
+
+        if summary.scanned < METADATA_BACKFILL_BATCH_SIZE {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
@@ -253,14 +374,18 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
         let snapshot = {
             let mut buf = buffer.lock().await;
             if buf.is_empty() {
-                continue;
+                None
+            } else {
+                Some(buf.take())
             }
-            buf.take()
         };
 
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
         tokio::task::spawn_blocking(move || {
-            flush_telemetry_batch(snapshot);
+            if let Some(snapshot) = snapshot {
+                flush_telemetry_batch(snapshot);
+            }
+            flush_pending_metrics();
         })
         .await
         .unwrap_or_else(|e| {
@@ -296,6 +421,9 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
     if !batch.cas_records.is_empty() {
         flush_cas(batch.cas_records);
     }
+
+    // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
+    flush_notes();
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
@@ -303,43 +431,252 @@ fn flush_metrics(events: &[MetricEvent]) {
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
 
-    let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    let should_upload = !using_default_api || client.is_logged_in() || client.has_api_key();
+    let should_upload = metrics_upload_allowed(&api_base_url, &client);
+    METRICS_UPLOAD_AVAILABLE.store(should_upload, Ordering::Relaxed);
 
     let mut upload_failed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-        if should_upload && !upload_failed && std::time::Instant::now() < deadline {
-            let batch = MetricsBatch::new(chunk.to_vec());
-            if client.upload_metrics(&batch).is_ok() {
-                continue;
-            }
-            upload_failed = true;
+        if let Err(e) = store_metrics_in_db(chunk) {
+            tracing::warn!(%e, "telemetry: failed to persist metrics before upload");
+            continue;
         }
-        store_metrics_in_db(chunk);
+
+        if should_upload && !upload_failed && std::time::Instant::now() < deadline {
+            match flush_pending_metrics_from_db(&client, deadline) {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(%e, "telemetry: failed to upload pending metrics");
+                    upload_failed = true;
+                }
+            }
+        }
     }
 }
 
-fn store_metrics_in_db(events: &[MetricEvent]) {
-    if events.is_empty() {
+fn flush_pending_metrics() {
+    let context = ApiContext::new(None);
+    let api_base_url = context.base_url.clone();
+    let client = ApiClient::new(context);
+
+    let should_upload = metrics_upload_allowed(&api_base_url, &client);
+    METRICS_UPLOAD_AVAILABLE.store(should_upload, Ordering::Relaxed);
+    if !should_upload {
         return;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    if let Err(e) = flush_pending_metrics_from_db(&client, deadline) {
+        tracing::warn!(%e, "telemetry: failed to upload pending metrics");
+    }
+}
+
+fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
+    if events.is_empty() {
+        return Ok(Vec::new());
     }
 
     let event_jsons: Vec<String> = events
         .iter()
-        .filter_map(|e| serde_json::to_string(e).ok())
-        .collect();
+        .map(serde_json::to_string)
+        .collect::<Result<_, _>>()?;
 
     if event_jsons.is_empty() {
-        return;
+        return Ok(Vec::new());
     }
 
-    if let Ok(db) = MetricsDatabase::global()
-        && let Ok(mut db_lock) = db.lock()
-    {
-        let _ = db_lock.insert_events(&event_jsons);
+    let db = MetricsDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.insert_events(&event_jsons)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PendingMetricsFlushResult {
+    uploaded_events: usize,
+    uploaded_batches: usize,
+    invalid_records: usize,
+}
+
+fn flush_pending_metrics_from_db(
+    client: &ApiClient,
+    deadline: std::time::Instant,
+) -> Result<PendingMetricsFlushResult, GitAiError> {
+    flush_pending_metric_records_with(
+        read_pending_metrics_batch,
+        mark_metric_records_delivered,
+        mark_metric_records_failed,
+        mark_metric_records_undeliverable,
+        |batch| client.upload_metrics(batch),
+        deadline,
+        MAX_METRICS_PER_ENVELOPE,
+    )
+}
+
+fn read_pending_metrics_batch(limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.dequeue_pending_batch(limit)
+}
+
+fn mark_metric_records_delivered(ids: &[i64]) -> Result<(), GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.mark_records_delivered(ids, current_unix_ts())
+}
+
+fn mark_metric_records_failed(ids: &[i64], error: &GitAiError) -> Result<(), GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    let now = current_unix_ts();
+    db_lock.mark_records_failed(ids, &error.to_string(), now)
+}
+
+fn mark_metric_records_undeliverable(records: &[(i64, String)]) -> Result<(), GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.mark_records_undeliverable(records, current_unix_ts())
+}
+
+fn flush_pending_metric_records_with<
+    DequeueBatch,
+    MarkDelivered,
+    MarkFailed,
+    MarkUndeliverable,
+    UploadBatch,
+>(
+    mut dequeue_batch: DequeueBatch,
+    mut mark_delivered: MarkDelivered,
+    mut mark_failed: MarkFailed,
+    mut mark_undeliverable: MarkUndeliverable,
+    mut upload_batch: UploadBatch,
+    deadline: std::time::Instant,
+    max_batch_size: usize,
+) -> Result<PendingMetricsFlushResult, GitAiError>
+where
+    DequeueBatch: FnMut(usize) -> Result<Vec<MetricRecord>, GitAiError>,
+    MarkDelivered: FnMut(&[i64]) -> Result<(), GitAiError>,
+    MarkFailed: FnMut(&[i64], &GitAiError) -> Result<(), GitAiError>,
+    MarkUndeliverable: FnMut(&[(i64, String)]) -> Result<(), GitAiError>,
+    UploadBatch: FnMut(&MetricsBatch) -> Result<MetricsUploadResponse, GitAiError>,
+{
+    let mut result = PendingMetricsFlushResult::default();
+
+    while std::time::Instant::now() < deadline {
+        let batch = dequeue_batch(max_batch_size)?;
+        if batch.is_empty() {
+            break;
+        }
+
+        let mut events = Vec::new();
+        let mut record_ids = Vec::new();
+        let mut invalid_ids = Vec::new();
+
+        for record in &batch {
+            match serde_json::from_str::<MetricEvent>(&record.event_json) {
+                Ok(event) => {
+                    events.push(event);
+                    record_ids.push(record.id);
+                }
+                Err(_) => {
+                    invalid_ids.push(record.id);
+                }
+            }
+        }
+
+        let batch_min_id = record_ids.iter().chain(invalid_ids.iter()).min().copied();
+        let batch_max_id = record_ids.iter().chain(invalid_ids.iter()).max().copied();
+
+        if !invalid_ids.is_empty() {
+            result.invalid_records += invalid_ids.len();
+            mark_delivered(&invalid_ids)?;
+        }
+
+        if events.is_empty() {
+            continue;
+        }
+
+        let metrics_batch = MetricsBatch::new(events);
+        tracing::info!(
+            min_id = ?batch_min_id,
+            max_id = ?batch_max_id,
+            events = record_ids.len(),
+            invalid_records = invalid_ids.len(),
+            "metrics upload batch sending"
+        );
+        let response = match upload_batch(&metrics_batch) {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::info!(
+                    min_id = ?batch_min_id,
+                    max_id = ?batch_max_id,
+                    events = record_ids.len(),
+                    error = %e,
+                    "metrics upload batch failed"
+                );
+                mark_failed(&record_ids, &e)?;
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = response.validate_error_indices(record_ids.len()) {
+            tracing::info!(
+                min_id = ?batch_min_id,
+                max_id = ?batch_max_id,
+                events = record_ids.len(),
+                error = %e,
+                "metrics upload batch returned invalid response"
+            );
+            mark_failed(&record_ids, &e)?;
+            return Err(e);
+        }
+
+        let successful_ids: Vec<i64> = response
+            .successful_indices(record_ids.len())
+            .into_iter()
+            .map(|index| record_ids[index])
+            .collect();
+        let undeliverable_records: Vec<(i64, String)> = response
+            .errors
+            .iter()
+            .map(|error| (record_ids[error.index], error.error.clone()))
+            .collect();
+
+        tracing::info!(
+            min_id = ?batch_min_id,
+            max_id = ?batch_max_id,
+            events = record_ids.len(),
+            delivered_events = successful_ids.len(),
+            errored_events = undeliverable_records.len(),
+            errors = ?response.errors,
+            "metrics upload batch result"
+        );
+
+        mark_delivered(&successful_ids)?;
+        mark_undeliverable(&undeliverable_records)?;
+
+        result.uploaded_events += successful_ids.len();
+        result.uploaded_batches += 1;
     }
+
+    Ok(result)
+}
+
+fn current_unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn flush_sentry_and_posthog(
@@ -528,6 +865,123 @@ fn flush_sentry_and_posthog(
     }
 }
 
+/// Flush pending notes from `notes-db` to the remote HTTP backend.
+///
+/// Skips silently when:
+/// - `notes_backend.kind != Http`
+/// - Not authenticated (no API key and not logged in)
+pub fn flush_notes() {
+    use crate::api::types::{NoteEntry, NotesUploadRequest};
+    use crate::config::NotesBackendKind;
+
+    let cfg = Config::fresh();
+    if cfg.notes_backend_kind() != NotesBackendKind::Http {
+        tracing::debug!("notes: skipping flush, backend is not Http");
+        return;
+    }
+
+    let backend_url = match cfg.notes_backend_url() {
+        Some(url) => url.to_string(),
+        None => {
+            tracing::debug!("notes: skipping flush, notes_backend.backend_url is not configured");
+            return;
+        }
+    };
+    let context = ApiContext::new(Some(backend_url));
+    let client = ApiClient::new(context);
+
+    if !client.is_logged_in() && !client.has_api_key() {
+        tracing::debug!("notes: skipping flush, not authenticated");
+        return;
+    }
+
+    // Dequeue up to 50 pending notes.
+    let pending = match crate::notes::db::NotesDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(mut lock) => match lock.dequeue_pending(50) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(%e, "notes: failed to dequeue pending rows");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!("notes: DB lock poisoned: {}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!(%e, "notes: failed to get notes DB");
+            return;
+        }
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    let commit_shas: Vec<String> = pending.iter().map(|p| p.commit_sha.clone()).collect();
+
+    let entries: Vec<NoteEntry> = pending
+        .iter()
+        .map(|p| NoteEntry {
+            commit_sha: p.commit_sha.clone(),
+            content: p.content.clone(),
+        })
+        .collect();
+
+    let request = NotesUploadRequest { entries };
+
+    match client.upload_notes(request) {
+        Ok(resp) => {
+            tracing::debug!(
+                success = resp.success_count,
+                failure = resp.failure_count,
+                "notes: uploaded batch"
+            );
+            if let Ok(db) = crate::notes::db::NotesDatabase::global()
+                && let Ok(mut lock) = db.lock()
+            {
+                if resp.failure_count == 0 {
+                    let _ = lock.mark_synced(&commit_shas);
+                } else {
+                    // Server reported partial failures but doesn't identify which
+                    // entries failed. Mark the entire batch as failed so all entries
+                    // are retried on the next flush cycle.
+                    let _ = lock.mark_failed(
+                        &commit_shas,
+                        &format!(
+                            "partial failure: {}/{} entries failed",
+                            resp.failure_count,
+                            commit_shas.len()
+                        ),
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(%e, "notes: upload error");
+            if let Ok(db) = crate::notes::db::NotesDatabase::global()
+                && let Ok(mut lock) = db.lock()
+            {
+                let _ = lock.mark_failed(&commit_shas, &e.to_string());
+            }
+        }
+    }
+
+    // Opportunistic cache eviction (~every 5 minutes at 3s flush interval).
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FLUSH_COUNT: AtomicU32 = AtomicU32::new(0);
+    if FLUSH_COUNT
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(100)
+        && let Ok(db) = crate::notes::db::NotesDatabase::global()
+        && let Ok(mut lock) = db.lock()
+    {
+        let _ = lock.evict_stale_cache(10_000, 90 * 24 * 3600);
+    }
+}
+
 fn flush_cas(records: Vec<CasSyncPayload>) {
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
@@ -630,5 +1084,557 @@ impl SentryClient {
         } else {
             Err(format!("Sentry returned status {}", status).into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::metrics::MetricsUploadError;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn event_json(ts: u32) -> String {
+        format!(r#"{{"t":{ts},"e":1,"v":{{}},"a":{{}}}}"#)
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn now_ts() -> u32 {
+        unix_now().min(u32::MAX as u64) as u32
+    }
+
+    fn test_message_envelope(message: &str) -> TelemetryEnvelope {
+        TelemetryEnvelope::Message {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            message: message.to_string(),
+            level: "info".to_string(),
+            context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_daemon_internal_telemetry_spawns_when_runtime_exists() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+        let guard = handle.buffer.lock().await;
+
+        submit_daemon_internal_telemetry_with_handle(
+            handle.clone(),
+            vec![test_message_envelope("runtime")],
+        );
+
+        assert!(guard.messages.is_empty());
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if handle.buffer.lock().await.messages.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn submit_daemon_internal_telemetry_waits_without_runtime() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+
+        submit_daemon_internal_telemetry_with_handle(
+            handle.clone(),
+            vec![test_message_envelope("sync")],
+        );
+
+        let guard = handle.buffer.try_lock().unwrap();
+        assert_eq!(guard.messages.len(), 1);
+    }
+
+    #[test]
+    fn flush_pending_metric_records_uploads_from_db_and_marks_delivered() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let ts1 = now_ts().saturating_sub(2);
+        let ts2 = now_ts().saturating_sub(1);
+        db.borrow_mut()
+            .insert_events(&[event_json(ts1), event_json(ts2)])
+            .unwrap();
+
+        let uploaded = Rc::new(RefCell::new(Vec::<Vec<u32>>::new()));
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            {
+                let uploaded = Rc::clone(&uploaded);
+                move |batch| {
+                    uploaded
+                        .borrow_mut()
+                        .push(batch.events.iter().map(|event| event.timestamp).collect());
+                    Ok(MetricsUploadResponse { errors: vec![] })
+                }
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            PendingMetricsFlushResult {
+                uploaded_events: 2,
+                uploaded_batches: 2,
+                invalid_records: 0,
+            }
+        );
+        assert_eq!(*uploaded.borrow(), vec![vec![ts2], vec![ts1]]);
+        assert_eq!(db.borrow().count().unwrap(), 0);
+        assert_eq!(
+            db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn flush_pending_metric_records_marks_invalid_rows_delivered() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let ts = now_ts();
+        db.borrow_mut()
+            .insert_events(&["not-json".to_string(), event_json(ts)])
+            .unwrap();
+
+        let uploaded = Rc::new(RefCell::new(Vec::<u32>::new()));
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            {
+                let uploaded = Rc::clone(&uploaded);
+                move |batch| {
+                    uploaded
+                        .borrow_mut()
+                        .extend(batch.events.iter().map(|event| event.timestamp));
+                    Ok(MetricsUploadResponse { errors: vec![] })
+                }
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            PendingMetricsFlushResult {
+                uploaded_events: 1,
+                uploaded_batches: 1,
+                invalid_records: 1,
+            }
+        );
+        assert_eq!(*uploaded.borrow(), vec![ts]);
+        assert_eq!(db.borrow().count().unwrap(), 0);
+        assert_eq!(
+            db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn flush_pending_metric_records_marks_partial_server_errors_undeliverable() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let ts1 = now_ts().saturating_sub(3);
+        let ts2 = now_ts().saturating_sub(2);
+        let ts3 = now_ts().saturating_sub(1);
+        db.borrow_mut()
+            .insert_events(&[event_json(ts1), event_json(ts2), event_json(ts3)])
+            .unwrap();
+
+        let uploaded = Rc::new(RefCell::new(Vec::<u32>::new()));
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            {
+                let uploaded = Rc::clone(&uploaded);
+                move |batch| {
+                    uploaded
+                        .borrow_mut()
+                        .extend(batch.events.iter().map(|event| event.timestamp));
+                    Ok(MetricsUploadResponse {
+                        errors: vec![MetricsUploadError {
+                            index: 1,
+                            error: "validation failed".to_string(),
+                        }],
+                    })
+                }
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            PendingMetricsFlushResult {
+                uploaded_events: 2,
+                uploaded_batches: 1,
+                invalid_records: 0,
+            }
+        );
+        assert_eq!(*uploaded.borrow(), vec![ts3, ts2, ts1]);
+        assert_eq!(db.borrow().count().unwrap(), 1);
+        assert_eq!(db.borrow().count_retryable().unwrap(), 0);
+        assert!(
+            db.borrow_mut()
+                .dequeue_pending_batch(10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn flush_pending_metric_records_marks_all_server_errors_undeliverable() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let ts1 = now_ts().saturating_sub(2);
+        let ts2 = now_ts().saturating_sub(1);
+        db.borrow_mut()
+            .insert_events(&[event_json(ts1), event_json(ts2)])
+            .unwrap();
+
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            |_batch| {
+                Ok(MetricsUploadResponse {
+                    errors: vec![
+                        MetricsUploadError {
+                            index: 0,
+                            error: "first failed".to_string(),
+                        },
+                        MetricsUploadError {
+                            index: 1,
+                            error: "second failed".to_string(),
+                        },
+                    ],
+                })
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            PendingMetricsFlushResult {
+                uploaded_events: 0,
+                uploaded_batches: 1,
+                invalid_records: 0,
+            }
+        );
+        assert_eq!(db.borrow().count().unwrap(), 2);
+        assert_eq!(db.borrow().count_retryable().unwrap(), 0);
+        assert!(
+            db.borrow_mut()
+                .dequeue_pending_batch(10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn flush_pending_metric_records_retries_batch_for_invalid_server_error_index() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        db.borrow_mut()
+            .insert_events(&[event_json(now_ts().saturating_sub(1))])
+            .unwrap();
+
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            |_batch| {
+                Ok(MetricsUploadResponse {
+                    errors: vec![MetricsUploadError {
+                        index: 1,
+                        error: "out of bounds".to_string(),
+                    }],
+                })
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            10,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(db.borrow().count().unwrap(), 1);
+        assert_eq!(db.borrow().count_retryable().unwrap(), 0);
+        assert_eq!(
+            db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn flush_pending_metric_records_keeps_rows_pending_after_upload_failure() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let ts = now_ts();
+        db.borrow_mut().insert_events(&[event_json(ts)]).unwrap();
+
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            |_batch| Err(GitAiError::Generic("upload failed".to_string())),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            10,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(db.borrow().count().unwrap(), 1);
+        assert_eq!(db.borrow().count_retryable().unwrap(), 0);
+    }
+
+    #[test]
+    fn flush_pending_metric_records_uploads_new_rows_after_old_failure() {
+        let db = Rc::new(RefCell::new(
+            MetricsDatabase::new_in_memory_for_tests().unwrap(),
+        ));
+        let old_ts = now_ts().saturating_sub(10);
+        db.borrow_mut()
+            .insert_events(&[event_json(old_ts)])
+            .unwrap();
+
+        let failed = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            |_batch| Err(GitAiError::Generic("upload failed".to_string())),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            1,
+        );
+        assert!(failed.is_err());
+        assert_eq!(db.borrow().count_retryable().unwrap(), 0);
+
+        let new_ts = now_ts();
+        db.borrow_mut()
+            .insert_events(&[event_json(new_ts)])
+            .unwrap();
+        assert_eq!(db.borrow().count_retryable().unwrap(), 1);
+
+        let uploaded = Rc::new(RefCell::new(Vec::<Vec<u32>>::new()));
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            {
+                let uploaded = Rc::clone(&uploaded);
+                move |batch| {
+                    uploaded
+                        .borrow_mut()
+                        .push(batch.events.iter().map(|event| event.timestamp).collect());
+                    Ok(MetricsUploadResponse { errors: vec![] })
+                }
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            PendingMetricsFlushResult {
+                uploaded_events: 1,
+                uploaded_batches: 1,
+                invalid_records: 0,
+            }
+        );
+        assert_eq!(*uploaded.borrow(), vec![vec![new_ts]]);
+        assert_eq!(db.borrow().count().unwrap(), 1);
+        let history = db.borrow().get_metric_history(0, None, &[1]).unwrap();
+        assert!(history.iter().any(|record| record.ts == old_ts));
     }
 }

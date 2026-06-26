@@ -1,8 +1,8 @@
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::{ClaudeAgent, GeminiAgent};
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::{ClaudeAgent, GeminiAgent};
+use git_ai::streams::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
 
@@ -111,7 +111,7 @@ fn test_claude_preset_invalid_transcript_path() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            assert!(e.transcript_source.is_some());
+            assert!(e.stream_source.is_some());
         }
         _ => panic!("Expected PostFileEdit for PostToolUse"),
     }
@@ -131,7 +131,7 @@ fn test_claude_transcript_parsing_empty_file() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    // TranscriptBatch no longer has a model field
+    // StreamBatch no longer has a model field
 
     fs::remove_file(temp_file).ok();
 }
@@ -172,7 +172,7 @@ fn test_claude_transcript_parsing_with_empty_lines() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert_eq!(batch.events.len(), 2);
-    // Model is in the raw event data, not on TranscriptBatch
+    // Model is in the raw event data, not on StreamBatch
     let model = batch
         .events
         .iter()
@@ -347,7 +347,7 @@ fn test_gemini_transcript_parsing_invalid_path() {
 
     assert!(result.is_err());
     match result {
-        Err(git_ai::transcripts::TranscriptError::Fatal { .. }) => {}
+        Err(git_ai::streams::StreamError::Fatal { .. }) => {}
         _ => panic!("Expected Fatal error for nonexistent path"),
     }
 }
@@ -548,7 +548,7 @@ fn test_codex_preset_invalid_transcript_path() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            assert!(e.transcript_source.is_some());
+            assert!(e.stream_source.is_some());
             assert_eq!(e.context.agent_id.model, "unknown");
             assert_eq!(e.context.agent_id.id, "test-session-12345");
         }
@@ -808,7 +808,7 @@ fn test_aitab_preset_after_edit_checkpoint() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            assert!(e.transcript_source.is_none());
+            assert!(e.stream_source.is_none());
             assert_eq!(e.file_paths, vec![std::path::PathBuf::from("/file1.rs")]);
         }
         _ => panic!("Expected PostFileEdit for after_edit"),

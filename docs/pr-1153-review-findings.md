@@ -231,13 +231,13 @@ different trace IDs exist for the same logical checkpoint call.
 
 ---
 
-### M6: `smol::block_on` nested inside tokio async context
+### M6: Secondary runtime blocking nested inside tokio async context
 
 **File**: `src/daemon/checkpoint.rs:240, 409`
 
-Checkpoint execution uses `smol::block_on` for concurrent file processing. This blocks
-the tokio worker thread. The daemon serializes checkpoints per-family so only one is
-blocked at a time per repo, but multiple repos can saturate the thread pool.
+Checkpoint execution used a secondary runtime for concurrent file processing. This
+blocked the tokio worker thread. The daemon serializes checkpoints per-family so only
+one is blocked at a time per repo, but multiple repos can saturate the thread pool.
 
 ---
 

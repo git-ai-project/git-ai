@@ -663,42 +663,30 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
     path
 }
 
-/// Convert a Windows path to a forward-slash path suitable for native Windows apps.
-/// e.g. `C:\Users\Administrator\.git-ai\bin\git.exe` → `C:/Users/Administrator/.git-ai/bin/git.exe`
-/// Also strips the `\\?\` extended-length prefix if present (via `clean_path`).
-/// This is needed because native GUI apps like Fork and Sublime Merge store paths
-/// with forward slashes in their JSON settings files.
-/// Non-Windows paths are returned unchanged.
-pub fn to_windows_git_bash_style_path(path: &Path) -> String {
-    clean_path(path.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-/// Convert a Windows path to git bash (MSYS/MinGW) style path.
-/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `/c/Users/Administrator/.git-ai/bin/git-ai.exe`
-/// This is needed because Claude Code runs hooks in git bash shell on Windows.
+/// Normalize a Windows path to use forward slashes while preserving the drive letter.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `C:/Users/Administrator/.git-ai/bin/git-ai.exe`
+/// Forward-slash paths work in both git bash and PowerShell on Windows.
 /// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
-pub fn to_git_bash_path(path: &Path) -> String {
+pub fn normalize_windows_path_for_shell(path: &Path) -> String {
     let s = path.to_string_lossy();
-    // Match a Windows absolute path like "C:\..." or "D:\..."
     let bytes = s.as_bytes();
+    // Match a Windows absolute path like "C:\..." or "D:\..."
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let drive_letter = (bytes[0] as char).to_ascii_uppercase();
         let rest = &s[2..]; // skip "C:"
-        let rest_unix = rest.replace('\\', "/");
-        return format!("/{}{}", drive_letter, rest_unix);
+        let rest_fwd = rest.replace('\\', "/");
+        return format!("{}:{}", drive_letter, rest_fwd);
     }
-    // Also handle the case where the path has no separator after the drive letter (e.g. C:foo)
+    // Handle drive-relative path (e.g. C:foo)
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let drive_letter = (bytes[0] as char).to_ascii_uppercase();
         let rest = &s[2..];
-        let rest_unix = rest.replace('\\', "/");
-        return format!("/{}/{}", drive_letter, rest_unix);
+        let rest_fwd = rest.replace('\\', "/");
+        return format!("{}:/{}", drive_letter, rest_fwd);
     }
     // For non-Windows paths, just return as-is
     s.into_owned()
@@ -712,108 +700,6 @@ pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     let canonical = path.canonicalize()?;
 
     Ok(clean_path(canonical))
-}
-
-/// Path to the git shim that git clients should use
-/// This is in the same directory as the git-ai executable, but named "git"
-pub fn git_shim_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("git")))
-        .unwrap_or_else(|| {
-            #[cfg(windows)]
-            {
-                home_dir().join(".git-ai").join("bin").join("git")
-            }
-            #[cfg(not(windows))]
-            {
-                home_dir().join(".local").join("bin").join("git")
-            }
-        })
-}
-
-/// Get the git shim path as a string (for use in settings files)
-pub fn git_shim_path_string() -> String {
-    git_shim_path().to_string_lossy().to_string()
-}
-
-/// Update the git.path setting in a VS Code/Cursor settings file
-pub fn update_git_path_setting(
-    settings_path: &Path,
-    git_path: &str,
-    dry_run: bool,
-) -> Result<Option<String>, GitAiError> {
-    let original = if settings_path.exists() {
-        fs::read_to_string(settings_path)?
-    } else {
-        String::new()
-    };
-
-    let parse_input = if original.trim().is_empty() {
-        "{}".to_string()
-    } else {
-        original.clone()
-    };
-
-    let parse_options = ParseOptions::default();
-
-    let root = CstRootNode::parse(&parse_input, &parse_options).map_err(|err| {
-        GitAiError::Generic(format!(
-            "Failed to parse {}: {}",
-            settings_path.display(),
-            err
-        ))
-    })?;
-
-    let object = root.object_value_or_set();
-    let mut changed = false;
-    let serialized_git_path = git_path.replace('\\', "\\\\");
-
-    match object.get("git.path") {
-        Some(prop) => {
-            let should_update = match prop.value() {
-                Some(node) => match node.as_string_lit() {
-                    Some(string_node) => match string_node.decoded_value() {
-                        Ok(existing_value) => existing_value != git_path,
-                        Err(_) => true,
-                    },
-                    None => true,
-                },
-                None => true,
-            };
-
-            if should_update {
-                prop.set_value(jsonc_parser::json!(serialized_git_path.as_str()));
-                changed = true;
-            }
-        }
-        None => {
-            object.append(
-                "git.path",
-                jsonc_parser::json!(serialized_git_path.as_str()),
-            );
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return Ok(None);
-    }
-
-    let new_content = root.to_string();
-
-    let diff_output = generate_diff(settings_path, &original, &new_content);
-
-    if !dry_run {
-        if let Some(parent) = settings_path.parent()
-            && !parent.exists()
-        {
-            fs::create_dir_all(parent)?;
-        }
-        write_atomic(settings_path, new_content.as_bytes())?;
-    }
-
-    Ok(Some(diff_output))
 }
 
 /// Update VS Code chat hook settings in a settings.json/jsonc file.
@@ -1028,72 +914,6 @@ mod tests {
                 None => std::env::remove_var("CODESPACES"),
             }
         }
-    }
-
-    #[test]
-    fn test_update_git_path_setting_appends_with_comments() {
-        let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join("settings.json");
-        let initial = r#"{
-    // comment
-    "editor.tabSize": 4
-}
-"#;
-        fs::write(&settings_path, initial).unwrap();
-
-        let git_path = r"C:\Users\Test\.git-ai\bin\git";
-
-        // Dry-run should produce a diff without modifying the file
-        let dry_run_result = update_git_path_setting(&settings_path, git_path, true).unwrap();
-        assert!(dry_run_result.is_some());
-        let after_dry_run = fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(after_dry_run, initial);
-
-        // Apply the change
-        let apply_result = update_git_path_setting(&settings_path, git_path, false).unwrap();
-        assert!(apply_result.is_some());
-
-        let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert!(final_content.contains("// comment"));
-        let tab_index = final_content.find("\"editor.tabSize\"").unwrap();
-        let git_index = final_content.find("\"git.path\"").unwrap();
-        assert!(tab_index < git_index);
-        let verify = update_git_path_setting(&settings_path, git_path, true).unwrap();
-        assert!(verify.is_none());
-    }
-
-    #[test]
-    fn test_update_git_path_setting_updates_existing_value_in_place() {
-        let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join("settings.json");
-        let initial = r#"{
-    "git.path": "old-path",
-    "editor.tabSize": 2
-}
-"#;
-        fs::write(&settings_path, initial).unwrap();
-
-        let result = update_git_path_setting(&settings_path, "new-path", false).unwrap();
-        assert!(result.is_some());
-
-        let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert!(final_content.contains("\"git.path\": \"new-path\""));
-        assert_eq!(final_content.matches("git.path").count(), 1);
-        assert!(final_content.contains("\"editor.tabSize\": 2"));
-    }
-
-    #[test]
-    fn test_update_git_path_setting_detects_no_change() {
-        let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join("settings.json");
-        let initial = "{\n    \"git.path\": \"same\"\n}\n";
-        fs::write(&settings_path, initial).unwrap();
-
-        let result = update_git_path_setting(&settings_path, "same", false).unwrap();
-        assert!(result.is_none());
-
-        let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(final_content, initial);
     }
 
     #[test]
@@ -1396,29 +1216,30 @@ mod tests {
     }
 
     #[test]
-    fn test_to_git_bash_path_converts_windows_path() {
+    fn test_normalize_windows_path_for_shell_converts_windows_path() {
+        // Fixes #1413: use forward-slash Windows paths that work in both git bash AND PowerShell
         let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/c/Users/Administrator/.git-ai/bin/git-ai.exe",
-            "should convert Windows path to git bash format"
+            result, "C:/Users/Administrator/.git-ai/bin/git-ai.exe",
+            "should convert Windows path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_converts_different_drive_letter() {
+    fn test_normalize_windows_path_for_shell_converts_different_drive_letter() {
         let path = PathBuf::from(r"D:\Projects\code\app.exe");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/d/Projects/code/app.exe",
-            "should convert D: drive path to git bash format"
+            result, "D:/Projects/code/app.exe",
+            "should convert D: drive path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_preserves_unix_path() {
+    fn test_normalize_windows_path_for_shell_preserves_unix_path() {
         let path = PathBuf::from("/usr/local/bin/git-ai");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
             result, "/usr/local/bin/git-ai",
             "should preserve unix paths unchanged"
@@ -1426,24 +1247,24 @@ mod tests {
     }
 
     #[test]
-    fn test_to_git_bash_path_handles_extended_prefix_after_clean() {
+    fn test_normalize_windows_path_for_shell_handles_extended_prefix_after_clean() {
         // After clean_path strips \\?\ prefix, the path looks like C:\...
         let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let cleaned = clean_path(raw);
-        let result = to_git_bash_path(&cleaned);
+        let result = normalize_windows_path_for_shell(&cleaned);
         assert_eq!(
-            result, "/c/Users/USERNAME/.git-ai/bin/git-ai.exe",
-            "should convert cleaned Windows path to git bash format"
+            result, "C:/Users/USERNAME/.git-ai/bin/git-ai.exe",
+            "should convert cleaned Windows path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_handles_drive_relative_path() {
+    fn test_normalize_windows_path_for_shell_handles_drive_relative_path() {
         // Drive-relative path like C:foo (no separator after colon)
         let path = PathBuf::from("C:foo");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/c/foo",
+            result, "C:/foo",
             "should insert separator between drive letter and relative path"
         );
     }
@@ -1477,20 +1298,6 @@ mod tests {
         let path = PathBuf::from("/usr/local/bin/git-ai");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
-    }
-
-    #[test]
-    fn test_to_windows_git_bash_style_path_converts_backslashes() {
-        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
-        let result = to_windows_git_bash_style_path(&path);
-        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
-    }
-
-    #[test]
-    fn test_to_windows_git_bash_style_path_preserves_unix_path() {
-        let path = PathBuf::from("/usr/local/bin/git");
-        let result = to_windows_git_bash_style_path(&path);
-        assert_eq!(result, "/usr/local/bin/git");
     }
 
     #[test]

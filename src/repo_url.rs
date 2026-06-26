@@ -78,6 +78,28 @@ fn normalize_ssh_url(host: &str, path: &str) -> Result<String, String> {
     Ok(canonical)
 }
 
+/// Resolve a normalized repo URL from an already-opened Repository.
+///
+/// Finds the default remote and normalizes its URL to canonical HTTPS format.
+/// Returns None if there is no remote or the URL cannot be normalized.
+pub fn resolve_repo_url_from_repo(repo: &crate::git::repository::Repository) -> Option<String> {
+    let remote_name = repo.get_default_remote().ok()??;
+    let remotes = repo.remotes_with_urls().ok()?;
+    let (_, url) = remotes.into_iter().find(|(n, _)| n == &remote_name)?;
+    normalize_repo_url(&url).ok()
+}
+
+/// Resolve a normalized repo URL from a filesystem path.
+///
+/// Opens the git repository at `work_dir` (or discovers it by walking up),
+/// finds the default remote, and normalizes its URL to canonical HTTPS format.
+/// Returns None if the path is not in a git repo, has no remote, or the URL
+/// cannot be normalized.
+pub fn resolve_repo_url_from_path(work_dir: &std::path::Path) -> Option<String> {
+    let repo = crate::git::repository::discover_repository_in_path_no_git_exec(work_dir).ok()?;
+    resolve_repo_url_from_repo(&repo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_repo_url;

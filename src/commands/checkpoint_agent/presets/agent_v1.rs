@@ -48,8 +48,11 @@ impl AgentPreset for AgentV1Preset {
                     .into_iter()
                     .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
-                let dirty = dirty_files
-                    .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
+                let dirty = dirty_files.map(|df| {
+                    df.into_iter()
+                        .map(|(k, v)| (super::parse::resolve_absolute(&k, &repo_working_dir), v))
+                        .collect()
+                });
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context: PresetContext {
                         agent_id: AgentId {
@@ -81,8 +84,11 @@ impl AgentPreset for AgentV1Preset {
                     .into_iter()
                     .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
-                let dirty = dirty_files
-                    .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
+                let dirty = dirty_files.map(|df| {
+                    df.into_iter()
+                        .map(|(k, v)| (super::parse::resolve_absolute(&k, &repo_working_dir), v))
+                        .collect()
+                });
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context: PresetContext {
                         agent_id: AgentId {
@@ -97,7 +103,7 @@ impl AgentPreset for AgentV1Preset {
                     },
                     file_paths,
                     dirty_files: dirty,
-                    transcript_source: None,
+                    stream_source: None,
                     tool_use_id: None,
                 })
             }
@@ -164,7 +170,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/lib.rs")]
                 );
-                assert!(e.transcript_source.is_none());
+                assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostFileEdit"),
         }

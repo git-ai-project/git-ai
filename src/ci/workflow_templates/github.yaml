@@ -2,11 +2,11 @@ name: Git AI
 
 on:
   pull_request:
-    types: [closed]
+    types: [closed, synchronize]
 
 jobs:
   git-ai:
-    if: github.event.pull_request.merged == true
+    if: github.event.pull_request.merged == true || github.event.action == 'synchronize'
     runs-on: ubuntu-latest
     permissions:
       contents: write

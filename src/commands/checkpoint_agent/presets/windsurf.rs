@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -110,9 +110,9 @@ impl AgentPreset for WindsurfPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.clone())]),
         };
 
-        let transcript_source = Some(TranscriptSource {
+        let stream_source = Some(StreamSource {
             path: PathBuf::from(&transcript_path),
-            format: TranscriptFormat::WindsurfJsonl,
+            format: StreamFormat::WindsurfJsonl,
             session_id: generate_session_id(&context.external_session_id, "windsurf"),
             external_session_id: context.external_session_id.clone(),
             external_parent_session_id: None,
@@ -131,18 +131,27 @@ impl AgentPreset for WindsurfPreset {
             .or_else(|| parse::optional_str(&data, "execution_id"))
             .unwrap_or("bash")
             .to_string();
+        let bash_command = tool_info
+            .and_then(|ti| ti.get("command"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| parse::bash_command_from_hook_input(&data));
 
         let event = if is_bash {
             if is_pre_bash {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id: execution_id,
+                    command: bash_command,
                 })
             } else {
                 ParsedHookEvent::PostBashCall(PostBashCall {
                     context,
                     tool_use_id: execution_id,
-                    transcript_source,
+                    command: bash_command,
+                    stream_source,
                 })
             }
         } else if is_pre_write {
@@ -169,7 +178,7 @@ impl AgentPreset for WindsurfPreset {
                 context,
                 file_paths: file_path,
                 dirty_files: None,
-                transcript_source,
+                stream_source,
                 tool_use_id: Some(execution_id),
             })
         };
@@ -237,9 +246,9 @@ mod tests {
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
                 assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource {
-                        format: TranscriptFormat::WindsurfJsonl,
+                    e.stream_source,
+                    Some(StreamSource {
+                        format: StreamFormat::WindsurfJsonl,
                         ..
                     })
                 ));

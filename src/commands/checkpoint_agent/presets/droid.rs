@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -63,15 +63,9 @@ impl AgentPreset for DroidPreset {
                     .or_else(|| ti.get("patch").and_then(|v| v.as_str()));
 
                 if let Some(text) = patch_text {
-                    for line in text.lines() {
-                        let trimmed = line.trim();
-                        if let Some(path) = trimmed
-                            .strip_prefix("*** Update File: ")
-                            .or_else(|| trimmed.strip_prefix("*** Add File: "))
-                        {
-                            patch_paths.push(parse::resolve_absolute(path.trim(), cwd));
-                        }
-                    }
+                    let mut raw_paths = Vec::new();
+                    parse::collect_apply_patch_paths_from_text(text, &mut raw_paths);
+                    patch_paths.extend(raw_paths.iter().map(|p| parse::resolve_absolute(p, cwd)));
                 }
             }
 
@@ -125,13 +119,12 @@ impl AgentPreset for DroidPreset {
             .to_string();
 
         // Build metadata
-        let extracted_model =
-            crate::transcripts::model_extraction::extract_model_from_droid_settings(Path::new(
-                &resolved_settings_path,
-            ))
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "unknown".to_string());
+        let extracted_model = crate::streams::model_extraction::extract_model_from_droid_settings(
+            Path::new(&resolved_settings_path),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "unknown".to_string());
 
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -155,13 +148,15 @@ impl AgentPreset for DroidPreset {
             metadata,
         };
 
-        let transcript_source = Some(TranscriptSource {
+        let stream_source = Some(StreamSource {
             path: PathBuf::from(&resolved_transcript_path),
-            format: TranscriptFormat::DroidJsonl,
+            format: StreamFormat::DroidJsonl,
             session_id: generate_session_id(&context.external_session_id, "droid"),
             external_session_id: context.external_session_id.clone(),
             external_parent_session_id: None,
         });
+
+        let bash_command = parse::bash_command_from_hook_input(&data);
 
         // PreToolUse
         if hook_event_name == "PreToolUse" {
@@ -169,6 +164,7 @@ impl AgentPreset for DroidPreset {
                 return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id,
+                    command: bash_command,
                 })]);
             }
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -184,7 +180,8 @@ impl AgentPreset for DroidPreset {
             return Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id,
-                transcript_source,
+                command: bash_command,
+                stream_source,
             })]);
         }
 
@@ -192,7 +189,7 @@ impl AgentPreset for DroidPreset {
             context,
             file_paths,
             dirty_files: None,
-            transcript_source,
+            stream_source,
             tool_use_id: Some(tool_use_id.clone()),
         })])
     }
@@ -264,9 +261,9 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.transcript_source.is_some());
-                if let Some(ts) = &e.transcript_source {
-                    assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
+                assert!(e.stream_source.is_some());
+                if let Some(ts) = &e.stream_source {
+                    assert_eq!(ts.format, StreamFormat::DroidJsonl);
                 }
             }
             _ => panic!("Expected PostFileEdit"),
@@ -296,9 +293,9 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "droid");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert!(e.transcript_source.is_some());
-                if let Some(ts) = &e.transcript_source {
-                    assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
+                assert!(e.stream_source.is_some());
+                if let Some(ts) = &e.stream_source {
+                    assert_eq!(ts.format, StreamFormat::DroidJsonl);
                 }
             }
             _ => panic!("Expected PostBashCall"),

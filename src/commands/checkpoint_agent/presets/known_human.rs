@@ -35,18 +35,27 @@ impl AgentPreset for KnownHumanPreset {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
 
+                let cwd_str = cwd.to_str().unwrap_or(".");
+
                 let file_paths = data["edited_filepaths"]
                     .as_array()
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|x| x.as_str().map(PathBuf::from))
+                            .filter_map(|x| {
+                                x.as_str()
+                                    .map(|s| super::parse::resolve_absolute(s, cwd_str))
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
 
                 let dirty_files = data["dirty_files"].as_object().map(|obj| {
                     obj.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (PathBuf::from(k), s.to_string())))
+                        .filter_map(|(k, v)| {
+                            v.as_str().map(|s| {
+                                (super::parse::resolve_absolute(k, cwd_str), s.to_string())
+                            })
+                        })
                         .collect::<HashMap<PathBuf, String>>()
                 });
 

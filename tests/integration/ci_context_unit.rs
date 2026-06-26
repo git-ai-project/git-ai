@@ -14,6 +14,7 @@ fn test_ci_context_with_repository() {
         head_sha: "def".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi".to_string(),
+        fork_clone_url: None,
     };
 
     let context = CiContext::with_repository(gitai_repo, event);
@@ -31,6 +32,7 @@ fn test_ci_context_teardown_empty_temp_dir() {
         head_sha: "def".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi".to_string(),
+        fork_clone_url: None,
     };
 
     let context = CiContext::with_repository(gitai_repo, event);
@@ -54,6 +56,7 @@ fn test_ci_context_teardown_with_temp_dir() {
         head_sha: "def".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi".to_string(),
+        fork_clone_url: None,
     };
 
     let context = CiContext {
@@ -113,6 +116,7 @@ fn test_get_rebased_commits_linear_history() {
         head_sha: commit3.clone(),
         base_ref: "main".to_string(),
         base_sha: commit1.clone(),
+        fork_clone_url: None,
     };
     let context = CiContext::with_repository(gitai_repo, event);
 
@@ -144,6 +148,7 @@ fn test_get_rebased_commits_more_than_available() {
         head_sha: commit.clone(),
         base_ref: "main".to_string(),
         base_sha: "base".to_string(),
+        fork_clone_url: None,
     };
     let context = CiContext::with_repository(gitai_repo, event);
 
@@ -164,6 +169,7 @@ fn test_ci_context_debug() {
         head_sha: "def".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi".to_string(),
+        fork_clone_url: None,
     };
 
     let context = CiContext::with_repository(gitai_repo, event);

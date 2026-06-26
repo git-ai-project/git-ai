@@ -25,32 +25,39 @@ struct CheckpointInfo {
 #[derive(Serialize)]
 struct StatusOutput {
     stats: CommitStats,
-    checkpoints: Vec<CheckpointInfo>,
+    /// Per-checkpoint session breakdown. Omitted entirely when `--diff-only`
+    /// is requested, so consumers that only care about the current diff scope
+    /// get just the diff-scoped `stats`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoints: Option<Vec<CheckpointInfo>>,
 }
 
 pub fn handle_status(args: &[String]) {
     let mut json_output = false;
+    let mut diff_only = false;
 
     let mut i = 0;
     while i < args.len() {
-        if args[i].as_str() == "--json" {
-            json_output = true;
+        match args[i].as_str() {
+            "--json" => json_output = true,
+            "--diff-only" => diff_only = true,
+            _ => {}
         }
         i += 1;
     }
 
-    if let Err(e) = run_status(json_output) {
+    if let Err(e) = run_status(json_output, diff_only) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run_status(json: bool) -> Result<(), GitAiError> {
+fn run_status(json: bool, diff_only: bool) -> Result<(), GitAiError> {
     let repo = find_repository(&[])?;
     let ignore_patterns = effective_ignore_patterns(&repo, &[], &[]);
     let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
-    let default_user_name = repo.git_author_identity().formatted_or_unknown();
+    let default_user_name = repo.effective_author_identity().formatted_or_unknown();
 
     let head = repo.head()?;
     let head_sha = head.target()?;
@@ -66,7 +73,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         if json {
             let output = StatusOutput {
                 stats: CommitStats::default(),
-                checkpoints: vec![],
+                checkpoints: if diff_only { None } else { Some(vec![]) },
             };
             let json_str = serde_json::to_string(&output)?;
             println!("{}", json_str);
@@ -87,28 +94,31 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         return Ok(());
     }
 
+    // The per-checkpoint breakdown is only needed for the default (non-diff-only)
+    // output, so skip building it entirely when `--diff-only` is requested.
     let mut checkpoint_infos = Vec::new();
+    if !diff_only {
+        for checkpoint in checkpoints.iter().rev() {
+            let (additions, deletions) = (
+                checkpoint.line_stats.additions,
+                checkpoint.line_stats.deletions,
+            );
 
-    for checkpoint in checkpoints.iter().rev() {
-        let (additions, deletions) = (
-            checkpoint.line_stats.additions,
-            checkpoint.line_stats.deletions,
-        );
+            let tool_model = checkpoint
+                .agent_id
+                .as_ref()
+                .map(|a| format!("{} {}", capitalize(&a.tool), &a.model))
+                .unwrap_or_else(|| default_user_name.clone());
 
-        let tool_model = checkpoint
-            .agent_id
-            .as_ref()
-            .map(|a| format!("{} {}", capitalize(&a.tool), &a.model))
-            .unwrap_or_else(|| default_user_name.clone());
-
-        let is_human = checkpoint.kind == CheckpointKind::Human;
-        checkpoint_infos.push(CheckpointInfo {
-            time_ago: format_time_ago(checkpoint.timestamp),
-            additions,
-            deletions,
-            tool_model,
-            is_human,
-        });
+            let is_human = checkpoint.kind == CheckpointKind::Human;
+            checkpoint_infos.push(CheckpointInfo {
+                time_ago: format_time_ago(checkpoint.timestamp),
+                additions,
+                deletions,
+                tool_model,
+                is_human,
+            });
+        }
     }
 
     let working_va = VirtualAttributions::from_just_working_log(
@@ -128,7 +138,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         }
     }
 
-    let (authorship_log, initial) = working_va.to_authorship_log_and_initial_working_log(
+    let (authorship_log, initial, _) = working_va.to_authorship_log_and_initial_working_log(
         &repo,
         &head_sha,
         &head_sha,
@@ -157,7 +167,11 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     if json {
         let output = StatusOutput {
             stats,
-            checkpoints: checkpoint_infos,
+            checkpoints: if diff_only {
+                None
+            } else {
+                Some(checkpoint_infos)
+            },
         };
         let json_str = serde_json::to_string(&output)?;
         println!("{}", json_str);
@@ -165,6 +179,10 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     }
 
     write_stats_to_terminal(&stats, true);
+
+    if diff_only {
+        return Ok(());
+    }
 
     println!();
     for cp in &checkpoint_infos {

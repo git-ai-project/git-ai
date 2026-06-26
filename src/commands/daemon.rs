@@ -1,7 +1,7 @@
 use crate::daemon::daemon_log_file_path;
 use crate::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
-    send_control_request,
+    remove_stale_daemon_files, send_control_request, send_control_request_with_timeout,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
@@ -105,6 +105,8 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
     if daemon_is_up(&config) {
         return Ok(config);
     }
+
+    remove_stale_daemon_files(&config);
 
     if daemon_startup_is_blocked(&config) {
         return Err(format!(
@@ -268,13 +270,21 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
 }
 
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
-    if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
-        return false;
+    #[cfg(not(windows))]
+    {
+        if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
+            return false;
+        }
     }
-    local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
-        .is_ok()
-        && local_socket_connects_with_timeout(&config.trace_socket_path, Duration::from_millis(100))
-            .is_ok()
+    let probe_timeout = Duration::from_millis(100);
+    let control_ok = send_control_request_with_timeout(
+        &config.control_socket_path,
+        &ControlRequest::Ping,
+        probe_timeout,
+    )
+    .is_ok();
+    control_ok
+        && local_socket_connects_with_timeout(&config.trace_socket_path, probe_timeout).is_ok()
 }
 
 #[cfg(any(windows, not(any(test, feature = "test-support"))))]
@@ -299,6 +309,8 @@ fn start_daemon_detached_with_config(
     if daemon_is_up(&config) {
         return Ok(config);
     }
+
+    remove_stale_daemon_files(&config);
 
     if daemon_startup_is_blocked(&config) {
         return Err(format!(
@@ -579,6 +591,9 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     // Only attempt shutdown if daemon appears to be running.
     let was_running = daemon_is_up(&config) || daemon_startup_is_blocked(&config);
     if was_running {
+        // Read the PID before shutdown so we can verify the process actually dies.
+        let old_pid = read_daemon_pid(&config).ok();
+
         if hard {
             hard_kill_daemon(&config)?;
         } else {
@@ -588,6 +603,12 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
                 eprintln!("graceful shutdown timed out, force-killing daemon");
                 hard_kill_daemon(&config)?;
             }
+        }
+
+        // Even after lock+sockets are gone, the process may still be alive
+        // (e.g. tokio runtime draining blocking tasks). Verify and force-kill.
+        if let Some(pid) = old_pid {
+            wait_for_process_exit(pid, Duration::from_secs(2));
         }
     }
 
@@ -662,6 +683,35 @@ fn wait_for_daemon_dead(config: &DaemonConfig, timeout: Duration) -> bool {
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Wait for a process to exit, force-killing it if it doesn't die within timeout.
+/// This handles the case where the daemon lock/sockets are gone but the process
+/// is still alive (e.g. tokio runtime draining blocking tasks).
+///
+/// Note: relies on PID liveness only. Theoretically susceptible to PID reuse if
+/// the process is reaped and the PID recycled within the timeout window, but on
+/// macOS/Linux with ~100k PID space this is not a realistic concern.
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if ret != 0 {
+            return; // Process is dead
+        }
+        if Instant::now() >= deadline {
+            // Process still alive after timeout — force kill
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_process_exit(_pid: u32, _timeout: Duration) {
+    // On Windows, hard_kill_daemon uses taskkill /F which is synchronous.
 }
 
 /// Shut down the running daemon (soft then hard) and wait for it to fully exit.

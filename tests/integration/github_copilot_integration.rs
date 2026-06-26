@@ -97,17 +97,19 @@ fn test_github_copilot_human_checkpoint_scoped_to_files() {
 #[test]
 fn test_github_copilot_human_then_ai_checkpoint() {
     let repo = TestRepo::new();
-    let mut file = repo.filename("test.ts");
 
     // Create initial file
-    file.set_contents(crate::lines!["const x = 1;"]);
+    let file_path = repo.path().join("test.ts");
+    std::fs::write(&file_path, "const x = 1;\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.ts"])
+        .unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = crate::repos::test_file::TestFile::from_existing_file(file_path.clone(), &repo);
 
     // Human makes a change
     file.insert_at(1, crate::lines!["const y = 2;"]);
 
     // Human checkpoint
-    let file_path = repo.path().join("test.ts");
     let human_hook_input = json!({
         "hook_event_name": "before_edit",
         "workspaceFolder": repo.path().to_str().unwrap(),

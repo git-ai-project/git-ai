@@ -2,9 +2,9 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::ContinueAgent;
-use git_ai::transcripts::watermark::RecordIndexWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::ContinueAgent;
+use git_ai::streams::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
 
@@ -177,7 +177,7 @@ fn test_continue_cli_preset_ai_checkpoint() {
 
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            assert!(e.transcript_source.is_some());
+            assert!(e.stream_source.is_some());
             assert!(!e.file_paths.is_empty());
         }
         _ => panic!("Expected PostFileEdit for AI checkpoint"),
@@ -255,7 +255,7 @@ fn test_continue_cli_preset_handles_missing_file() {
     })
     .to_string();
 
-    // The new parse() API succeeds (transcript is lazy via TranscriptSource::Path)
+    // The new parse() API succeeds (transcript is lazy via StreamSource::Path)
     let events = parse_continue(&hook_input).expect("Parse should succeed with lazy transcript");
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {

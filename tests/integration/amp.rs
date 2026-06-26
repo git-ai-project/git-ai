@@ -1,8 +1,8 @@
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::AmpAgent;
-use git_ai::transcripts::watermark::RecordIndexWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::AmpAgent;
+use git_ai::streams::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -141,9 +141,9 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
                 vec![PathBuf::from("/Users/test/project/jokes.csv")]
             );
             // Transcript should be a path reference (lazy loading)
-            assert!(e.transcript_source.is_some());
+            assert!(e.stream_source.is_some());
             let transcript_path_str = e
-                .transcript_source
+                .stream_source
                 .as_ref()
                 .map(|ts| ts.path.to_string_lossy().to_string())
                 .unwrap();

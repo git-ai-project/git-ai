@@ -9,7 +9,7 @@ plugins {
     alias(libs.plugins.changelog) // Gradle Changelog Plugin
     alias(libs.plugins.qodana) // Gradle Qodana Plugin
     alias(libs.plugins.kover) // Gradle Kover Plugin
-    id("io.sentry.jvm.gradle") version "6.5.0" // Sentry for error reporting
+    id("io.sentry.jvm.gradle") version "6.11.0" // Sentry for error reporting
 }
 
 group = providers.gradleProperty("pluginGroup").get()
@@ -51,7 +51,7 @@ dependencies {
         plugins(providers.gradleProperty("platformPlugins").map { it.split(',') })
 
         // Development-only plugins for testing (not release dependencies)
-        plugin("com.github.copilot", "1.6.1-243")
+        plugin("com.github.copilot", "1.9.1-251")
         plugin("org.jetbrains.junie", "253.819.54")
 
         // Module Dependencies. Uses `platformBundledModules` property from the gradle.properties file for bundled IntelliJ Platform modules.

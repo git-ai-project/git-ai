@@ -3,9 +3,9 @@ use crate::repos::test_repo::{TestRepo, real_git_executable};
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::CursorAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::CursorAgent;
+use git_ai::streams::watermark::ByteOffsetWatermark;
 use std::path::PathBuf;
 
 const TEST_CONVERSATION_ID: &str = "de751938-f32b-4441-8239-a31d60aa4cf0";

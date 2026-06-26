@@ -38,13 +38,6 @@ pub struct RefChange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepoContext {
-    pub head: Option<String>,
-    pub branch: Option<String>,
-    pub detached: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedCommand {
     pub scope: CommandScope,
     pub family_key: Option<FamilyKey>,
@@ -58,16 +51,13 @@ pub struct NormalizedCommand {
     pub exit_code: i32,
     pub started_at_ns: u128,
     pub finished_at_ns: u128,
-    pub pre_repo: Option<RepoContext>,
-    pub post_repo: Option<RepoContext>,
-    pub inflight_rebase_original_head: Option<String>,
-    pub merge_squash_source_head: Option<String>,
-    pub carryover_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub reflog_start_offsets: HashMap<String, u64>,
     pub stash_target_oid: Option<String>,
+    pub cherry_pick_source_oids: Vec<String>,
+    pub revert_source_oids: Vec<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wrapper_invocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,18 +125,22 @@ pub enum SemanticEvent {
     RebaseAbort {
         head: String,
     },
+    MergeSquash {
+        source_head: String,
+        onto: String,
+    },
     CherryPickComplete {
         original_head: String,
         new_head: String,
+        source_commits: Vec<String>,
+        new_commits: Vec<String>,
+    },
+    CherryPickNoCommit {
+        source_commits: Vec<String>,
+        head: String,
     },
     CherryPickAbort {
         head: String,
-    },
-    MergeSquash {
-        base_branch: Option<String>,
-        base_head: String,
-        source_ref: String,
-        source_head: String,
     },
     RefUpdated {
         reference: String,
@@ -186,7 +180,6 @@ pub enum SemanticEvent {
     CleanedWorkspace,
     StashOperation {
         kind: StashOpKind,
-        stash_ref: Option<String>,
         head: Option<String>,
     },
     FetchCompleted {

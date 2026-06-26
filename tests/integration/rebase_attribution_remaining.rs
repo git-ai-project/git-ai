@@ -13,8 +13,12 @@ fn test_pull_rebase_autostash_ff_preserves_uncommitted_ai_attribution() {
     let (local, _upstream) = TestRepo::new_with_remote();
 
     // Initial commit: push to remote so both sides share a base
-    let mut base_file = local.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content".human()]);
+    let base_path = local.path().join("base.txt");
+    std::fs::write(&base_path, "base content\n").unwrap();
+    local
+        .git_ai(&["checkpoint", "mock_known_human", "base.txt"])
+        .unwrap();
+    let mut base_file = crate::repos::test_file::TestFile::from_existing_file(base_path, &local);
     local.stage_all_and_commit("initial").unwrap();
     local.git(&["push", "-u", "origin", "HEAD"]).unwrap();
 

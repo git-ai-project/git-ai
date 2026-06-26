@@ -36,7 +36,7 @@
         # Build the git-ai binary using the pinned Rust toolchain
         git-ai-unwrapped = rustPlatform.buildRustPackage {
           pname = "git-ai";
-          version = "1.4.6";
+          version = "1.6.4";
 
           src = ./.;
 
@@ -391,6 +391,8 @@ GITOGEOF
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
                   git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
                   git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
+                  transcript_streaming = cfg.settings.featureFlags.transcriptStreaming;
+                  transcript_sweep = cfg.settings.featureFlags.transcriptSweep;
                 };
                 merged = cfg.settings.featureFlags.extraFlags // knownFlags;
               in
@@ -437,6 +439,42 @@ GITOGEOF
                 description = ''
                   Path to the git binary. If not specified, defaults to the
                   git package from nixpkgs.
+                '';
+              };
+
+              apiKey = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = ''
+                  The git-ai API key as a plain string. Sets GIT_AI_API_KEY at
+                  shell startup. The value is stored in /nix/store (world-readable);
+                  prefer apiKeyFile or apiKeyCommand for better security.
+                '';
+              };
+
+              apiKeyFile = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "$HOME/.secrets/git-ai-api-key";
+                description = ''
+                  Path to a file containing the git-ai API key. The file is read
+                  at shell startup via cat; only the path is stored in /nix/store,
+                  not the key itself. Shell variables in the path (e.g. $HOME) are
+                  expanded at runtime.
+                '';
+              };
+
+              apiKeyCommand = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "pass show git-ai/api-key";
+                description = ''
+                  Shell command that prints the git-ai API key to stdout. Run at
+                  shell startup to set GIT_AI_API_KEY. The command string is stored
+                  in /nix/store but the key value never is. Works with pass,
+                  1Password CLI, Bitwarden CLI, and similar tools.
+                  If multiple apiKey* options are set, precedence is:
+                  apiKeyCommand > apiKeyFile > apiKey.
                 '';
               };
 
@@ -594,6 +632,24 @@ GITOGEOF
                   '';
                 };
 
+                transcriptStreaming = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable transcript streaming for real-time AI session transcript
+                    capture. Defaults to enabled in both debug and release builds.
+                  '';
+                };
+
+                transcriptSweep = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable periodic sweeping of old transcript data to reclaim
+                    storage. Defaults to enabled in debug builds only.
+                  '';
+                };
+
                 extraFlags = mkOption {
                   type = types.attrsOf types.bool;
                   default = { };
@@ -609,6 +665,20 @@ GITOGEOF
           config = mkIf cfg.enable {
             # Add git-ai to system packages
             environment.systemPackages = [ cfg.package ];
+
+            # Set GIT_AI_API_KEY at shell startup. Precedence: command > file > key.
+            environment.interactiveShellInit =
+              let
+                snippet =
+                  if cfg.settings.apiKeyCommand != null then
+                    ''export GIT_AI_API_KEY="$(${cfg.settings.apiKeyCommand})"''
+                  else if cfg.settings.apiKeyFile != null then
+                    ''export GIT_AI_API_KEY="$(cat "${cfg.settings.apiKeyFile}")"''
+                  else if cfg.settings.apiKey != null then
+                    ''export GIT_AI_API_KEY="${cfg.settings.apiKey}"''
+                  else "";
+              in
+              mkIf (snippet != "") snippet;
 
             # Set up system-wide configuration on activation
             system.activationScripts.git-ai = mkIf cfg.installHooks (
@@ -677,6 +747,8 @@ GITOGEOF
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
                   git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
                   git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
+                  transcript_streaming = cfg.settings.featureFlags.transcriptStreaming;
+                  transcript_sweep = cfg.settings.featureFlags.transcriptSweep;
                 };
                 merged = cfg.settings.featureFlags.extraFlags // knownFlags;
               in
@@ -710,6 +782,42 @@ GITOGEOF
                 description = ''
                   Path to the git binary. If not specified, defaults to the
                   git package from nixpkgs.
+                '';
+              };
+
+              apiKey = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = ''
+                  The git-ai API key as a plain string. Sets GIT_AI_API_KEY at
+                  shell startup. The value is stored in /nix/store (world-readable);
+                  prefer apiKeyFile or apiKeyCommand for better security.
+                '';
+              };
+
+              apiKeyFile = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "$HOME/.secrets/git-ai-api-key";
+                description = ''
+                  Path to a file containing the git-ai API key. The file is read
+                  at shell startup via cat; only the path is stored in /nix/store,
+                  not the key itself. Shell variables in the path (e.g. $HOME) are
+                  expanded at runtime.
+                '';
+              };
+
+              apiKeyCommand = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "pass show git-ai/api-key";
+                description = ''
+                  Shell command that prints the git-ai API key to stdout. Run at
+                  shell startup to set GIT_AI_API_KEY. The command string is stored
+                  in /nix/store but the key value never is. Works with pass,
+                  1Password CLI, Bitwarden CLI, and similar tools.
+                  If multiple apiKey* options are set, precedence is:
+                  apiKeyCommand > apiKeyFile > apiKey.
                 '';
               };
 
@@ -867,6 +975,24 @@ GITOGEOF
                   '';
                 };
 
+                transcriptStreaming = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable transcript streaming for real-time AI session transcript
+                    capture. Defaults to enabled in both debug and release builds.
+                  '';
+                };
+
+                transcriptSweep = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable periodic sweeping of old transcript data to reclaim
+                    storage. Defaults to enabled in debug builds only.
+                  '';
+                };
+
                 extraFlags = mkOption {
                   type = types.attrsOf types.bool;
                   default = { };
@@ -883,10 +1009,36 @@ GITOGEOF
             # Add git-ai to user packages
             home.packages = [ cfg.package ];
 
-            # Create config directory and file
+            # Config file contains no secrets; served directly from the Nix store.
             home.file.".git-ai/config.json" = {
               source = jsonFormat.generate "git-ai-config.json" configFile;
             };
+
+            # Set GIT_AI_API_KEY at shell startup. Precedence: command > file > key.
+            programs.bash.initExtra =
+              let
+                snippet =
+                  if cfg.settings.apiKeyCommand != null then
+                    ''export GIT_AI_API_KEY="$(${cfg.settings.apiKeyCommand})"''
+                  else if cfg.settings.apiKeyFile != null then
+                    ''export GIT_AI_API_KEY="$(cat "${cfg.settings.apiKeyFile}")"''
+                  else if cfg.settings.apiKey != null then
+                    ''export GIT_AI_API_KEY="${cfg.settings.apiKey}"''
+                  else "";
+              in
+              mkIf (snippet != "") snippet;
+            programs.zsh.initExtra =
+              let
+                snippet =
+                  if cfg.settings.apiKeyCommand != null then
+                    ''export GIT_AI_API_KEY="$(${cfg.settings.apiKeyCommand})"''
+                  else if cfg.settings.apiKeyFile != null then
+                    ''export GIT_AI_API_KEY="$(cat "${cfg.settings.apiKeyFile}")"''
+                  else if cfg.settings.apiKey != null then
+                    ''export GIT_AI_API_KEY="${cfg.settings.apiKey}"''
+                  else "";
+              in
+              mkIf (snippet != "") snippet;
 
             # Run install-hooks on activation
             home.activation.git-ai-install-hooks = mkIf cfg.installHooks (

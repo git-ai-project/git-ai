@@ -1,10 +1,11 @@
 use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, SessionRecord};
+use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
-use crate::git::refs::{get_authorship, show_authorship_note};
+use crate::git::notes_api::{read_authorship as get_authorship, read_note as show_authorship_note};
 use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -184,15 +185,15 @@ struct LineAttributionDetail {
 }
 
 #[derive(Debug)]
-struct DiffBuildArtifacts {
-    attributions: HashMap<DiffLineKey, Attribution>,
-    annotations_by_file: BTreeMap<String, BTreeMap<String, Vec<LineRange>>>,
-    prompts: BTreeMap<String, PromptRecord>,
-    sessions: BTreeMap<String, SessionRecord>,
-    humans: BTreeMap<String, HumanRecord>,
-    json_hunks: Vec<DiffJsonHunk>,
-    commits: BTreeMap<String, DiffCommitMetadata>,
-    included_files: HashSet<String>,
+pub struct DiffBuildArtifacts {
+    pub attributions: HashMap<DiffLineKey, Attribution>,
+    pub annotations_by_file: BTreeMap<String, BTreeMap<String, Vec<LineRange>>>,
+    pub prompts: BTreeMap<String, PromptRecord>,
+    pub sessions: BTreeMap<String, SessionRecord>,
+    pub humans: BTreeMap<String, HumanRecord>,
+    pub json_hunks: Vec<DiffJsonHunk>,
+    pub commits: BTreeMap<String, DiffCommitMetadata>,
+    pub included_files: HashSet<String>,
 }
 
 // ============================================================================
@@ -760,12 +761,29 @@ pub fn overlay_diff_attributions(
     Ok(attributions)
 }
 
-fn build_diff_artifacts(
+pub fn build_diff_artifacts(
     repo: &Repository,
     from_commit: &str,
     to_commit: &str,
     options: &DiffCommandOptions,
 ) -> Result<DiffBuildArtifacts, GitAiError> {
+    build_diff_artifacts_with_note(repo, from_commit, to_commit, options, None)
+}
+
+pub fn build_diff_artifacts_with_note(
+    repo: &Repository,
+    from_commit: &str,
+    to_commit: &str,
+    options: &DiffCommandOptions,
+    authorship_log: Option<&AuthorshipLog>,
+) -> Result<DiffBuildArtifacts, GitAiError> {
+    let hunks = get_diff_with_line_numbers(repo, from_commit, to_commit)?;
+
+    if let Some(note) = authorship_log {
+        return build_diff_artifacts_from_hunks(repo, hunks, to_commit, Some(note));
+    }
+
+    // Slow path: no authorship log, needs blame
     let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
     let ignore_matcher = build_ignore_matcher(&effective_patterns);
     let diff_sections = get_diff_sections_by_file(repo, from_commit, to_commit)?;
@@ -777,7 +795,7 @@ fn build_diff_artifacts(
         })
         .collect();
 
-    let mut hunks = get_diff_with_line_numbers(repo, from_commit, to_commit)?;
+    let mut hunks = hunks;
     hunks.retain(|hunk| {
         !hunk.file_path.is_empty()
             && !should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher)
@@ -787,6 +805,63 @@ fn build_diff_artifacts(
 
     let (annotations_by_file, attributions, line_details, prompts, sessions, humans, mut commits) =
         build_line_attribution_data(repo, from_commit, to_commit, &hunks, options)?;
+
+    let json_hunks = build_json_hunks(
+        repo,
+        &hunks,
+        &line_details,
+        &line_contents,
+        to_commit,
+        &mut commits,
+    )?;
+
+    Ok(DiffBuildArtifacts {
+        attributions,
+        annotations_by_file,
+        prompts,
+        sessions,
+        humans,
+        json_hunks,
+        commits,
+        included_files,
+    })
+}
+
+/// Build diff artifacts from pre-computed hunks, avoiding redundant git subprocess calls.
+/// Used by the post-commit hook path where the caller already has the hunks from a single
+/// `get_diff_with_line_numbers` call.
+pub fn build_diff_artifacts_from_hunks(
+    repo: &Repository,
+    hunks: Vec<DiffHunk>,
+    to_commit: &str,
+    authorship_log: Option<&AuthorshipLog>,
+) -> Result<DiffBuildArtifacts, GitAiError> {
+    let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&effective_patterns);
+
+    let mut hunks = hunks;
+    hunks.retain(|hunk| {
+        !hunk.file_path.is_empty()
+            && !should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher)
+    });
+
+    let included_files: HashSet<String> = hunks.iter().map(|h| h.file_path.clone()).collect();
+    let line_contents = build_line_content_map(&hunks);
+
+    let (annotations_by_file, attributions, line_details, prompts, sessions, humans, mut commits) =
+        if let Some(note) = authorship_log {
+            build_line_attribution_from_note(to_commit, &hunks, note)
+        } else {
+            (
+                BTreeMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+        };
 
     let json_hunks = build_json_hunks(
         repo,
@@ -890,6 +965,147 @@ fn build_line_attribution_data(
         humans,
         commits,
     ))
+}
+
+#[allow(clippy::type_complexity)]
+fn build_line_attribution_from_note(
+    to_commit: &str,
+    hunks: &[DiffHunk],
+    note: &AuthorshipLog,
+) -> (
+    BTreeMap<String, BTreeMap<String, Vec<LineRange>>>,
+    HashMap<DiffLineKey, Attribution>,
+    HashMap<DiffLineKey, LineAttributionDetail>,
+    BTreeMap<String, PromptRecord>,
+    BTreeMap<String, SessionRecord>,
+    BTreeMap<String, HumanRecord>,
+    BTreeMap<String, DiffCommitMetadata>,
+) {
+    let mut annotations_by_file: BTreeMap<String, BTreeMap<String, Vec<LineRange>>> =
+        BTreeMap::new();
+    let mut attributions: HashMap<DiffLineKey, Attribution> = HashMap::new();
+    let mut line_details: HashMap<DiffLineKey, LineAttributionDetail> = HashMap::new();
+    let prompts: BTreeMap<String, PromptRecord> = note.metadata.prompts.clone();
+    let sessions: BTreeMap<String, SessionRecord> = note.metadata.sessions.clone();
+    let humans: BTreeMap<String, HumanRecord> = note.metadata.humans.clone();
+    let commits: BTreeMap<String, DiffCommitMetadata> = BTreeMap::new();
+
+    let added_lines_by_file = collect_lines_by_file(hunks, LineSide::New);
+    for (file_path, lines) in &added_lines_by_file {
+        let file_attestation = note
+            .attestations
+            .iter()
+            .find(|fa| &fa.file_path == file_path);
+
+        let mut file_annotations: BTreeMap<String, Vec<LineRange>> = BTreeMap::new();
+
+        for line in lines {
+            let key = DiffLineKey {
+                file: file_path.clone(),
+                line: *line,
+                side: LineSide::New,
+            };
+
+            let mut found_hash: Option<&str> = None;
+            if let Some(fa) = file_attestation {
+                for entry in &fa.entries {
+                    if entry.line_ranges.iter().any(|r| r.contains(*line)) {
+                        found_hash = Some(&entry.hash);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(hash) = found_hash {
+                let is_prompt = prompts.contains_key(hash) || hash.starts_with("s_");
+                let is_human = hash.starts_with("h_");
+
+                let (prompt_id, human_id, attribution) = if is_prompt {
+                    let tool = prompts
+                        .get(hash)
+                        .map(|p| p.agent_id.tool.clone())
+                        .unwrap_or_else(|| {
+                            let session_key = extract_session_id(hash);
+                            sessions
+                                .get(session_key)
+                                .map(|s| s.agent_id.tool.clone())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        });
+                    (Some(hash.to_string()), None, Attribution::Ai(tool))
+                } else if is_human {
+                    (
+                        None,
+                        Some(hash.to_string()),
+                        Attribution::Human(hash.to_string()),
+                    )
+                } else {
+                    (None, None, Attribution::NoData)
+                };
+
+                if let Some(ref pid) = prompt_id {
+                    file_annotations
+                        .entry(pid.clone())
+                        .or_default()
+                        .push(LineRange::Single(*line));
+                }
+
+                attributions.insert(key.clone(), attribution);
+                line_details.insert(
+                    key,
+                    LineAttributionDetail {
+                        commit_sha: Some(to_commit.to_string()),
+                        prompt_id,
+                        human_id,
+                    },
+                );
+            } else {
+                attributions.insert(key.clone(), Attribution::NoData);
+                line_details.insert(
+                    key,
+                    LineAttributionDetail {
+                        commit_sha: Some(to_commit.to_string()),
+                        prompt_id: None,
+                        human_id: None,
+                    },
+                );
+            }
+        }
+
+        if !file_annotations.is_empty() {
+            annotations_by_file.insert(file_path.clone(), file_annotations);
+        }
+    }
+
+    // Deleted lines: include with NoData attribution (no blame)
+    // Use file_path (new name) for DiffLineKey to match build_json_hunk_segments lookup
+    for hunk in hunks {
+        for line in &hunk.deleted_lines {
+            let key = DiffLineKey {
+                file: hunk.file_path.clone(),
+                line: *line,
+                side: LineSide::Old,
+            };
+            attributions.insert(key.clone(), Attribution::NoData);
+            line_details.insert(
+                key,
+                LineAttributionDetail {
+                    commit_sha: None,
+                    prompt_id: None,
+                    human_id: None,
+                },
+            );
+        }
+    }
+
+    (
+        annotations_by_file,
+        attributions,
+        line_details,
+        prompts,
+        sessions,
+        humans,
+        commits,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

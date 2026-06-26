@@ -256,47 +256,9 @@ function Get-Architecture {
     }
 }
 
-function Get-StdGitPath {
-    $cmd = Get-Command git.exe -ErrorAction SilentlyContinue
-    $gitPath = $null
-    if ($cmd -and $cmd.Path) {
-        # Ensure we never return a path for git that contains git-ai (recursive)
-        if ($cmd.Path -notmatch "git-ai") {
-            $gitPath = $cmd.Path
-        }
-    }
-
-    # If detection failed or was our own shim, try to recover from saved config
-    if (-not $gitPath) {
-        try {
-            $cfgPath = Join-Path $HOME ".git-ai\config.json"
-            if (Test-Path -LiteralPath $cfgPath) {
-                $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
-                if ($cfg -and $cfg.git_path -and ($cfg.git_path -notmatch 'git-ai') -and (Test-Path -LiteralPath $cfg.git_path)) {
-                    $gitPath = $cfg.git_path
-                }
-            }
-        } catch { }
-    }
-
-    # If still not found, fail with a clear message
-    if (-not $gitPath) {
-        Write-ErrorAndExit "Could not detect a standard git binary on PATH. Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/git-ai-project/git-ai/issues."
-    }
-
-    try {
-        & $gitPath --version | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'bad' }
-    } catch {
-        Write-ErrorAndExit "Detected git at $gitPath is not usable (--version failed). Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/git-ai-project/git-ai/issues."
-    }
-
-    return $gitPath
-}
-
-# Ensure $PathToAdd is inserted before any PATH entry that contains "git" (case-insensitive)
-# Updates Machine (system) PATH; if not elevated, emits a prominent error with instructions
-function Set-PathPrependBeforeGit {
+# Ensure $PathToAdd is on the User PATH (appended if absent). No Machine PATH,
+# no admin required, no positioning logic.
+function Set-PathEnsureContains {
     param(
         [Parameter(Mandatory = $true)][string]$PathToAdd
     )
@@ -310,92 +272,43 @@ function Set-PathPrependBeforeGit {
 
     $normalizedAdd = NormalizePath $PathToAdd
 
-    # Helper to build new PATH string with PathToAdd inserted before first 'git' entry
-    function BuildPathWithInsert([string]$existingPath, [string]$toInsert) {
-        $entries = @()
-        if ($existingPath) { $entries = ($existingPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
-
-        # De-duplicate and remove any existing instance of $toInsert
-        $list = New-Object System.Collections.Generic.List[string]
-        $seen = New-Object 'System.Collections.Generic.HashSet[string]'
-        foreach ($e in $entries) {
-            $n = NormalizePath $e
-            if (-not $seen.Contains($n) -and $n -ne $normalizedAdd) {
-                $seen.Add($n) | Out-Null
-                $list.Add($e) | Out-Null
-            }
-        }
-
-        # Find first index that matches 'git' anywhere (case-insensitive)
-        $insertIndex = 0
-        for ($i = 0; $i -lt $list.Count; $i++) {
-            if ($list[$i] -match '(?i)git') { $insertIndex = $i; break }
-        }
-
-        $list.Insert($insertIndex, $toInsert)
-        return ($list -join $sep)
-    }
-
-    $userStatus = 'Skipped'
     try {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        $newUserPath = BuildPathWithInsert -existingPath $userPath -toInsert $PathToAdd
-        if ($newUserPath -ne $userPath) {
+        $entries = @()
+        if ($userPath) { $entries = ($userPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
+        $alreadyPresent = $false
+        foreach ($e in $entries) {
+            if ((NormalizePath $e) -eq $normalizedAdd) { $alreadyPresent = $true; break }
+        }
+        if ($alreadyPresent) {
+            $userStatus = 'AlreadyPresent'
+        } else {
+            $newUserPath = if ($userPath) { "$userPath$sep$PathToAdd" } else { $PathToAdd }
             [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
             $userStatus = 'Updated'
-        } else {
-            $userStatus = 'AlreadyPresent'
         }
     } catch {
         $userStatus = 'Error'
     }
 
-    # Try to update Machine PATH
-    $machineStatus = 'Skipped'
-    try {
-        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-        $newMachinePath = BuildPathWithInsert -existingPath $machinePath -toInsert $PathToAdd
-        if ($newMachinePath -ne $machinePath) {
-            [Environment]::SetEnvironmentVariable('Path', $newMachinePath, 'Machine')
-            $machineStatus = 'Updated'
-        } else {
-            # Nothing changed at Machine scope; still treat as Machine for reporting
-            $machineStatus = 'AlreadyPresent'
-        }
-    } catch {
-        # Access denied or not elevated; do NOT modify User PATH. Print big red error with instructions.
-        $origGit = $null
-        try { $origGit = Get-StdGitPath } catch { }
-        $origGitDir = if ($origGit) { (Split-Path $origGit -Parent) } else { 'your Git installation directory' }
-        Write-Host ''
-        Write-Host 'ERROR: Unable to update the SYSTEM PATH (administrator rights required).' -ForegroundColor Red
-        Write-Host 'Your PATH was NOT changed. To ensure git-ai takes precedence over Git:' -ForegroundColor Red
-        Write-Host ("  1) Run PowerShell as Administrator and re-run this installer; OR") -ForegroundColor Red
-        Write-Host ("  2) Manually edit the SYSTEM Path and move '{0}' before any entries containing 'Git' (e.g. '{1}')." -f $PathToAdd, $origGitDir) -ForegroundColor Red
-        Write-Host "     Steps: Start -> type 'Environment Variables' -> 'Edit the system environment variables' -> Environment Variables ->" -ForegroundColor Red
-        Write-Host ("            Under 'System variables', select 'Path' -> Edit -> Move '{0}' to the top (before Git) -> OK." -f $PathToAdd) -ForegroundColor Red
-        Write-Host ''
-        if ($userStatus -eq 'Updated' -or $userStatus -eq 'AlreadyPresent') {
-            Write-Host 'User PATH was updated successfully, so git-ai will still take precedence for this account.' -ForegroundColor Yellow
-        }
-        $machineStatus = 'Error'
-    }
-
     # Update current process PATH immediately for this session
     try {
         $procPath = $env:PATH
-        $newProcPath = BuildPathWithInsert -existingPath $procPath -toInsert $PathToAdd
-        if ($newProcPath -ne $procPath) { $env:PATH = $newProcPath }
+        $procEntries = @()
+        if ($procPath) { $procEntries = ($procPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
+        $procHas = $false
+        foreach ($e in $procEntries) {
+            if ((NormalizePath $e) -eq $normalizedAdd) { $procHas = $true; break }
+        }
+        if (-not $procHas) {
+            $env:PATH = if ($procPath) { "$procPath$sep$PathToAdd" } else { $PathToAdd }
+        }
     } catch { }
 
     return [PSCustomObject]@{
-        UserStatus    = $userStatus
-        MachineStatus = $machineStatus
+        UserStatus = $userStatus
     }
 }
-
-# Detect standard Git early and validate (fail-fast behavior)
-$stdGitPath = Get-StdGitPath
 
 # Detect architecture and OS
 $arch = Get-Architecture
@@ -424,6 +337,70 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
     $releaseTag = 'latest'
     $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
     $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
+}
+
+# ============================================================
+# Warn when installing as Administrator (not recommended).
+# Running elevated creates files that normal-user processes
+# cannot access, causing persistent daemon lock failures.
+# ============================================================
+$isElevated = $false
+try {
+    # Detect explicit UAC elevation ("Run as Administrator") via TokenElevationType.
+    # Type 1 (Default) = no split token (UAC disabled or built-in Admin) -> no warn
+    # Type 2 (Full)    = elevated half of a split token -> WARN (this is the danger case)
+    # Type 3 (Limited) = non-elevated half of a split token -> no warn
+    # We only warn on type 2: user explicitly elevated, so files will be admin-owned
+    # but normal processes won't be, causing the daemon.lock mismatch from issue #1287.
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class GitAiElevation {
+    [DllImport("advapi32.dll", SetLastError=true)]
+    static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    static extern bool GetTokenInformation(IntPtr token, int cls, ref int info, int len, out int ret);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+    public static bool IsElevated() {
+        IntPtr tok;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x0008, out tok)) return false;
+        try {
+            int elevType = 0; int sz;
+            // TokenElevationType = class 18; returns 1/2/3
+            if (!GetTokenInformation(tok, 18, ref elevType, 4, out sz)) return false;
+            return elevType == 2; // TokenElevationTypeFull
+        } finally { CloseHandle(tok); }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    $isElevated = [GitAiElevation]::IsElevated()
+} catch { }
+
+if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
+    # Auto-allow in CI environments and daemon-triggered self-updates
+    $isCi = $env:CI -or $env:GITHUB_ACTIONS -or $env:GITLAB_CI -or $env:JENKINS_URL `
+        -or $env:BUILDKITE -or $env:CIRCLECI -or $env:CODEBUILD_BUILD_ID `
+        -or $env:AGENT_OS -or $env:KUBERNETES_SERVICE_HOST `
+        -or $env:GIT_AI_DAEMON_UPGRADE -or $env:container
+
+    if (-not $isCi) {
+        Write-Host ''
+        Write-Host 'Warning: installing git-ai as Administrator is not recommended.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host 'Running with elevated privileges creates files owned by Administrator that'
+        Write-Host 'become inaccessible to your normal user account, causing persistent daemon'
+        Write-Host 'lock failures. A future version may refuse to install in this configuration.'
+        Write-Host ''
+        Write-Host 'To suppress this warning, either:'
+        Write-Host '  - Run this installer from a normal (non-elevated) PowerShell window (recommended), or'
+        Write-Host '  - Set $env:GIT_AI_ALLOW_SUPERUSER = "1"' -ForegroundColor Yellow
+        Write-Host ''
+    }
+    # Propagate to child git-ai invocations (install-hooks, exchange-nonce, login)
+    $env:GIT_AI_ALLOW_SUPERUSER = '1'
 }
 
 # Install directory: %USERPROFILE%\.git-ai\bin
@@ -499,24 +476,15 @@ if (Test-Path -LiteralPath $finalExe) {
 Move-Item -Force -Path $tmpFile -Destination $finalExe
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
-# Create a shim so calling `git` goes through git-ai by PATH precedence
+# Refresh git.exe for existing wrapper users (it's a copy, not a symlink on Windows)
 $gitShim = Join-Path $installDir 'git.exe'
-
-# Wait for git.exe shim to be available if it exists and is in use
 if (Test-Path -LiteralPath $gitShim) {
     if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
         Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
     }
+    Copy-Item -Force -Path $finalExe -Destination $gitShim
+    try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
 }
-
-Copy-Item -Force -Path $finalExe -Destination $gitShim
-try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
-
-# Create a shim so calling `git-og` invokes the standard Git
-$gitOgShim = Join-Path $installDir 'git-og.cmd'
-$gitOgShimContent = "@echo off$([Environment]::NewLine)`"$stdGitPath`" %*$([Environment]::NewLine)"
-Set-Content -Path $gitOgShim -Value $gitOgShimContent -Encoding ASCII -Force
-try { Unblock-File -Path $gitOgShim -ErrorAction SilentlyContinue } catch { }
 
 # Login user with install token if provided
 $needLogin = $false
@@ -543,16 +511,14 @@ try {
 # Best-effort restart only for daemon-initiated self-updates.
 Start-DaemonIfRequested
 
-# Update PATH so our shim takes precedence over any Git entries
 $skipPathUpdate = $env:GIT_AI_SKIP_PATH_UPDATE -eq '1'
 if ($skipPathUpdate) {
     Write-Warning 'Skipping PATH updates because GIT_AI_SKIP_PATH_UPDATE=1'
     $pathUpdate = [PSCustomObject]@{
-        UserStatus    = 'Skipped'
-        MachineStatus = 'Skipped'
+        UserStatus = 'Skipped'
     }
 } else {
-    $pathUpdate = Set-PathPrependBeforeGit -PathToAdd $installDir
+    $pathUpdate = Set-PathEnsureContains -PathToAdd $installDir
 }
 if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'Successfully added git-ai to the user PATH.'
@@ -560,14 +526,6 @@ if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'git-ai already present in the user PATH.'
 } elseif ($pathUpdate.UserStatus -eq 'Error') {
     Write-Host 'Failed to update the user PATH.' -ForegroundColor Red
-}
-
-if ($pathUpdate.MachineStatus -eq 'Updated') {
-    Write-Success 'Successfully added git-ai to the system PATH.'
-} elseif ($pathUpdate.MachineStatus -eq 'AlreadyPresent') {
-    Write-Success 'git-ai already present in the system PATH.'
-} elseif ($pathUpdate.MachineStatus -eq 'Error') {
-    Write-Host 'PATH update failed: system PATH unchanged.' -ForegroundColor Red
 }
 
 Write-Success "Successfully installed git-ai into $installDir"
@@ -637,26 +595,6 @@ if ($gitBashConfigured) {
     Write-Success "Successfully configured Git Bash ($targetBashConfig)"
 } elseif ($gitBashAlreadyConfigured) {
     Write-Success "Git Bash already configured ($targetBashConfig)"
-}
-
-# Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
-try {
-    $configDir = Join-Path $HOME '.git-ai'
-    $configJsonPath = Join-Path $configDir 'config.json'
-    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-
-    if (-not (Test-Path -LiteralPath $configJsonPath)) {
-        $cfg = @{
-            git_path = $stdGitPath
-            feature_flags = @{
-                async_mode = $true
-            }
-        } | ConvertTo-Json -Depth 3 -Compress
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
-    }
-} catch {
-    Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow

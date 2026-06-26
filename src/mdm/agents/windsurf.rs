@@ -379,11 +379,12 @@ impl HookInstaller for WindsurfInstaller {
                 }
             }
         } else {
-            results.push(InstallResult {
-                changed: false,
-                diff: None,
-                message: "Windsurf: Unable to automatically install extension. Please cmd+click on the following link to install: windsurf:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Windsurf extensions tab)".to_string(),
-            });
+            // resolve_editor_cli returned None -- the only way to reach this
+            // branch. Windsurf was detected only from its config dotfiles
+            // (~/.codeium) and isn't actually installed, so there's nothing to
+            // install the extension into. Don't emit a misleading "unable to
+            // install" nag here; genuine install/check failures are already
+            // reported by the match arms above.
         }
 
         Ok(results)
@@ -400,5 +401,32 @@ impl HookInstaller for WindsurfInstaller {
             message: "Windsurf: Extension must be uninstalled manually through the editor"
                 .to_string(),
         }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_install_extras_does_not_nag_when_cli_absent() {
+        // Regression: when the Windsurf app/CLI isn't resolvable (e.g. only the
+        // ~/.codeium dotfiles exist), install_extras must not emit the misleading
+        // "Unable to automatically install extension" message. dry_run=true means
+        // a real install is never attempted, so this never spawns an editor.
+        let params = HookInstallerParams {
+            binary_path: std::path::PathBuf::from("/usr/local/bin/git-ai"),
+        };
+        let results = WindsurfInstaller.install_extras(&params, true).unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| !r.message.contains("Unable to automatically install")),
+            "unexpected extension nag: {:?}",
+            results
+                .iter()
+                .map(|r| r.message.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

@@ -1,5 +1,8 @@
 name: Install Scripts (Nightly)
 
+permissions:
+  contents: read
+
 on:
   schedule:
     - cron: "0 3 * * *"

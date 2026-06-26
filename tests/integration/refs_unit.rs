@@ -1,13 +1,15 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::error::GitAiError;
+use git_ai::git::notes_api;
 use git_ai::git::refs::{
-    CommitAuthorship, commits_with_authorship_notes, copy_ref, get_commits_with_notes_from_list,
+    AI_AUTHORSHIP_FORK_TRACKING_REF, CommitAuthorship, commits_with_authorship_notes,
+    copy_missing_notes_for_commits_from_ref, copy_ref, get_commits_with_notes_from_list,
     get_reference_as_authorship_log_v3, get_reference_as_working_log, grep_ai_notes,
-    merge_notes_from_ref, note_blob_oids_for_commits, notes_add, notes_add_batch,
-    notes_add_blob_batch, ref_exists, show_authorship_note,
+    merge_notes_from_ref, note_blob_oids_for_commits, note_blob_oids_for_commits_from_ref,
+    notes_add, notes_add_batch, notes_add_blob_batch, ref_exists, show_authorship_note,
 };
-use git_ai::git::repository::{exec_git, find_repository_in_path};
+use git_ai::git::repository::{exec_git, exec_git_stdin, find_repository_in_path};
 use std::fs;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +28,20 @@ fn repo_with_handle() -> (TestRepo, git_ai::git::repository::Repository) {
 fn head_sha(repo: &TestRepo) -> String {
     repo.git_og(&["rev-parse", "HEAD"])
         .expect("rev-parse HEAD")
+        .trim()
+        .to_string()
+}
+
+fn git_stdin_stdout(
+    repo: &git_ai::git::repository::Repository,
+    args: &[&str],
+    stdin: &[u8],
+) -> String {
+    let mut git_args = repo.global_args_for_exec();
+    git_args.extend(args.iter().map(|arg| arg.to_string()));
+    let output = exec_git_stdin(&git_args, stdin).expect("git stdin command");
+    String::from_utf8(output.stdout)
+        .expect("git stdout utf8")
         .trim()
         .to_string()
 }
@@ -119,6 +135,100 @@ fn test_notes_add_blob_batch_reuses_existing_note_blob() {
     let parsed_note_b =
         get_reference_as_authorship_log_v3(&gitai_repo, &commit_b).expect("parse B");
     assert_eq!(parsed_note_b.metadata.base_commit_sha, commit_b);
+}
+
+#[test]
+fn test_copy_missing_notes_for_commits_from_ref_copies_only_requested_commits() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    repo.git_og(&["add", "."]).expect("add A");
+    repo.git_og(&["commit", "-m", "Commit A"])
+        .expect("commit A");
+    let commit_a = head_sha(&repo);
+
+    fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    repo.git_og(&["add", "."]).expect("add B");
+    repo.git_og(&["commit", "-m", "Commit B"])
+        .expect("commit B");
+    let commit_b = head_sha(&repo);
+
+    for (commit, note) in [(&commit_a, "fork-note-a"), (&commit_b, "fork-note-b")] {
+        let mut args = gitai_repo.global_args_for_exec();
+        args.extend_from_slice(&[
+            "notes".to_string(),
+            "--ref=ai-remote/fork".to_string(),
+            "add".to_string(),
+            "-f".to_string(),
+            "-m".to_string(),
+            note.to_string(),
+            commit.clone(),
+        ]);
+        exec_git(&args).expect("add source note");
+    }
+
+    let source_notes = note_blob_oids_for_commits_from_ref(
+        &gitai_repo,
+        AI_AUTHORSHIP_FORK_TRACKING_REF,
+        &[commit_a.clone(), commit_b.clone()],
+    )
+    .expect("source note oids");
+    assert_eq!(source_notes.len(), 2);
+
+    let copied = copy_missing_notes_for_commits_from_ref(
+        &gitai_repo,
+        AI_AUTHORSHIP_FORK_TRACKING_REF,
+        std::slice::from_ref(&commit_a),
+    )
+    .expect("copy scoped notes");
+
+    assert_eq!(copied, 1);
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &commit_a).as_deref(),
+        Some("fork-note-a")
+    );
+    assert!(
+        show_authorship_note(&gitai_repo, &commit_b).is_none(),
+        "note for unrequested commit must not be copied"
+    );
+}
+
+#[test]
+fn test_copy_missing_notes_for_commits_from_ref_keeps_existing_local_note() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    repo.git_og(&["add", "."]).expect("add A");
+    repo.git_og(&["commit", "-m", "Commit A"])
+        .expect("commit A");
+    let commit_a = head_sha(&repo);
+
+    let mut args = gitai_repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "notes".to_string(),
+        "--ref=ai-remote/fork".to_string(),
+        "add".to_string(),
+        "-f".to_string(),
+        "-m".to_string(),
+        "fork-note".to_string(),
+        commit_a.clone(),
+    ]);
+    exec_git(&args).expect("add source note");
+
+    notes_add(&gitai_repo, &commit_a, "local-note").expect("add local note");
+
+    let copied = copy_missing_notes_for_commits_from_ref(
+        &gitai_repo,
+        AI_AUTHORSHIP_FORK_TRACKING_REF,
+        std::slice::from_ref(&commit_a),
+    )
+    .expect("copy scoped notes");
+
+    assert_eq!(copied, 0);
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &commit_a).as_deref(),
+        Some("local-note")
+    );
 }
 
 #[test]
@@ -401,6 +511,77 @@ fn test_note_blob_oids_for_commits_no_notes() {
     // Commit exists but has no note
     let result = note_blob_oids_for_commits(&gitai_repo, &[commit_sha]).expect("no notes");
     assert!(result.is_empty());
+}
+
+#[test]
+fn test_read_notes_batch_errors_on_dangling_note_blob() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("dangling.txt"), "dangling\n").unwrap();
+    repo.git_og(&["add", "."]).expect("add dangling");
+    repo.git_og(&["commit", "-m", "Dangling note target"])
+        .expect("commit dangling target");
+    let commit_sha = head_sha(&repo);
+    let missing_blob = "2222222222222222222222222222222222222222";
+    let prefix = &commit_sha[..2];
+    let suffix = &commit_sha[2..];
+
+    let leaf_tree = git_stdin_stdout(
+        &gitai_repo,
+        &["mktree", "--missing"],
+        format!("100644 blob {missing_blob}\t{suffix}\n").as_bytes(),
+    );
+
+    let root_tree = git_stdin_stdout(
+        &gitai_repo,
+        &["mktree"],
+        format!("040000 tree {leaf_tree}\t{prefix}\n").as_bytes(),
+    );
+    repo.git_og(&["update-ref", "refs/notes/ai", &root_tree])
+        .expect("install dangling notes tree");
+
+    let result = notes_api::read_notes_batch(&gitai_repo, &[commit_sha]);
+    assert!(
+        result.is_err(),
+        "a notes tree entry pointing at a missing blob must be reported as corruption, not as no note"
+    );
+}
+
+#[test]
+fn test_read_notes_batch_prefers_flat_note_in_mixed_fanout_tree() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("mixed.txt"), "mixed\n").unwrap();
+    repo.git_og(&["add", "."]).expect("add mixed");
+    repo.git_og(&["commit", "-m", "Mixed note target"])
+        .expect("commit mixed target");
+    let commit_sha = head_sha(&repo);
+    let prefix = &commit_sha[..2];
+    let suffix = &commit_sha[2..];
+
+    let flat_blob = git_stdin_stdout(&gitai_repo, &["hash-object", "-w", "--stdin"], b"flat");
+    let fanout_blob = git_stdin_stdout(&gitai_repo, &["hash-object", "-w", "--stdin"], b"fanout");
+    let leaf_tree = git_stdin_stdout(
+        &gitai_repo,
+        &["mktree"],
+        format!("100644 blob {fanout_blob}\t{suffix}\n").as_bytes(),
+    );
+    let root_tree = git_stdin_stdout(
+        &gitai_repo,
+        &["mktree"],
+        format!("100644 blob {flat_blob}\t{commit_sha}\n040000 tree {leaf_tree}\t{prefix}\n")
+            .as_bytes(),
+    );
+    repo.git_og(&["update-ref", "refs/notes/ai", &root_tree])
+        .expect("install mixed notes tree");
+
+    let notes =
+        notes_api::read_notes_batch(&gitai_repo, std::slice::from_ref(&commit_sha)).unwrap();
+    assert_eq!(
+        notes.get(&commit_sha).map(String::as_str),
+        Some("flat"),
+        "mixed flat/fanout notes must preserve the historical flat-path preference"
+    );
 }
 
 #[test]

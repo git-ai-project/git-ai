@@ -1,3 +1,4 @@
+use crate::config::NotesBackendKind;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes};
@@ -90,6 +91,40 @@ pub fn handle_fetch_notes(args: &[String]) {
     }
 
     let start = Instant::now();
+
+    // When the HTTP notes backend is enabled, warm the local notes-db cache
+    // from the HTTP backend instead of fetching refs/notes/ai.
+    if crate::config::Config::get().notes_backend_kind() == NotesBackendKind::Http {
+        match crate::git::notes_api::warm_cache_for_remote(&repo, &remote_name) {
+            Ok(()) => {
+                let elapsed = start.elapsed();
+                if json_output {
+                    let output = FetchNotesJsonOutput {
+                        remote: remote_name,
+                        status: "warmed".to_string(),
+                        error: None,
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string(&output).expect("failed to serialize JSON")
+                    );
+                } else {
+                    eprintln!(" cache warmed ({:.2}s).", elapsed.as_secs_f64());
+                }
+                return;
+            }
+            Err(e) => {
+                if json_output {
+                    print_json_error("warm_failed", &e.to_string(), Some(&remote_name));
+                } else {
+                    eprintln!(" failed.");
+                    eprintln!("Error: {}", e);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
     match fetch_authorship_notes(&repo, &remote_name) {
         Ok(notes_existence) => {
             let elapsed = start.elapsed();

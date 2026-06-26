@@ -36,7 +36,7 @@ fn build_scoped_human_checkpoint_request(
             })
             .collect(),
         path_role: PreparedPathRole::WillEdit,
-        transcript_source: None,
+        stream_source: None,
         metadata: HashMap::new(),
     }
 }
@@ -148,7 +148,7 @@ fn test_apply_default_checkpoint_scope_preserves_existing_explicit_scope() {
             base_commit: BaseCommit::Sha("0000000000000000000000000000000000000000".to_string()),
         }],
         path_role: PreparedPathRole::WillEdit,
-        transcript_source: None,
+        stream_source: None,
         metadata: HashMap::new(),
     };
 

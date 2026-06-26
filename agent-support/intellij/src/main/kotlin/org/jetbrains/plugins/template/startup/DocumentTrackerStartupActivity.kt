@@ -16,7 +16,7 @@ class DocumentTrackerStartupActivity : ProjectActivity {
         // Request the service to trigger its initialization
         ApplicationManager.getApplication().getService(DocumentChangeTrackerService::class.java)
 
-        // Capture startup event for analytics
-        TelemetryService.getInstance().captureStartupEvent()
+        // Capture startup event for analytics (non-critical, must never throw)
+        TelemetryService.getInstanceOrNull()?.captureStartupEvent()
     }
 }

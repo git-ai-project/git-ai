@@ -1,5 +1,8 @@
 name: E2E Tests
 
+permissions:
+  contents: read
+
 on:
   schedule:
     - cron: '0 2 * * *'  # 2 AM UTC nightly
@@ -21,18 +24,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
-          override: true
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -52,7 +54,7 @@ jobs:
           sudo apt-get install -y jq
 
       - name: Install Task
-        uses: go-task/setup-task@v2
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2
 
       - name: Configure Git
         run: |

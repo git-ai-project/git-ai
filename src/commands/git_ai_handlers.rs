@@ -53,6 +53,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "install-hooks"
             | "install"
             | "uninstall-hooks"
+            | "usage"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -61,11 +62,13 @@ pub fn handle_git_ai(args: &[String]) {
         match init_daemon_telemetry_handle() {
             DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
             DaemonTelemetryInitResult::Failed(err) => {
-                // Hard error for git-ai commands: the background service must be reachable.
                 eprintln!(
                     "error: failed to connect to git-ai background service: {}",
                     err
                 );
+                if args[0].as_str() == "checkpoint" {
+                    std::process::exit(0);
+                }
                 std::process::exit(1);
             }
         }
@@ -105,6 +108,9 @@ pub fn handle_git_ai(args: &[String]) {
                 log_message("stats", "info", None)
             }
             handle_stats(&args[1..]);
+        }
+        "usage" => {
+            commands::usage::handle_usage(&args[1..]);
         }
         "status" => {
             commands::status::handle_status(&args[1..]);
@@ -170,9 +176,6 @@ pub fn handle_git_ai(args: &[String]) {
         "git-hooks" => {
             handle_git_hooks(&args[1..]);
         }
-        "squash-authorship" => {
-            commands::squash_authorship::handle_squash_authorship(&args[1..]);
-        }
         "ci" => {
             commands::ci_handlers::handle_ci(&args[1..]);
         }
@@ -215,10 +218,88 @@ pub fn handle_git_ai(args: &[String]) {
         "push-authorship-notes" | "push_authorship_notes" => {
             handle_push_authorship_notes_internal(&args[1..]);
         }
+        "notes" => {
+            handle_notes_subcommand(&args[1..]);
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
         }
+    }
+}
+
+/// Dispatch `git-ai notes <subcommand>` commands.
+pub(crate) fn handle_notes_subcommand(args: &[String]) {
+    let subcommand = args.first().map(|s| s.as_str()).unwrap_or("--help");
+    match subcommand {
+        "migrate" => {
+            commands::notes_migrate::handle_notes_migrate(&args[1..]);
+        }
+        // Hidden: in-memory reference implementation of the notes backend HTTP
+        // contract. Intentionally not advertised in `--help`; it is for
+        // developers, tests, and benchmarks, not end users.
+        "serve" => {
+            handle_notes_serve(&args[1..]);
+        }
+        "--help" | "-h" | "help" => {
+            eprintln!("git ai notes - Notes backend management commands");
+            eprintln!();
+            eprintln!("Usage: git ai notes <subcommand> [options]");
+            eprintln!();
+            eprintln!("Subcommands:");
+            eprintln!("  migrate    Bulk-upload existing git notes to the HTTP backend");
+            eprintln!();
+            eprintln!("Run 'git ai notes <subcommand> --help' for details.");
+        }
+        other => {
+            eprintln!("Unknown git-ai notes subcommand: {}", other);
+            eprintln!("Run 'git ai notes --help' for usage.");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `git-ai notes serve` — run the in-memory reference notes backend.
+///
+/// This is a developer/test tool. The server stores everything in process
+/// memory and accepts any auth header. See
+/// `crate::notes::reference_server` for the wire contract.
+fn handle_notes_serve(args: &[String]) {
+    let mut bind: String = "127.0.0.1:0".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bind" if i + 1 < args.len() => {
+                bind = args[i + 1].clone();
+                i += 2;
+            }
+            "--port" if i + 1 < args.len() => {
+                bind = format!("127.0.0.1:{}", args[i + 1]);
+                i += 2;
+            }
+            "--help" | "-h" => {
+                eprintln!(
+                    "git ai notes serve - Run the in-memory notes backend reference server\n\
+                     \n\
+                     Usage: git ai notes serve [--bind <addr:port>] [--port <port>]\n\
+                     \n\
+                     This is a reference implementation. All notes are stored in process\n\
+                     memory; auth headers are accepted but not validated. It exists to\n\
+                     document the HTTP wire contract and to enable local testing of the\n\
+                     `notes_backend.kind = http` code path without a real backend."
+                );
+                return;
+            }
+            other => {
+                eprintln!("Unknown argument to `git ai notes serve`: {}", other);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Err(e) = crate::notes::reference_server::run_blocking(&bind) {
+        eprintln!("notes reference server failed: {}", e);
+        std::process::exit(1);
     }
 }
 
@@ -238,10 +319,8 @@ fn print_help() {
     eprintln!("    human [pathspecs...]             Untracked/legacy human checkpoint");
     eprintln!("    mock_ai [pathspecs...]           Test preset accepting optional file pathspecs");
     eprintln!("    mock_known_human [pathspecs...]  Test preset for KnownHuman checkpoints");
-    eprintln!("  log [args...]      Show commit log with AI authorship notes");
-    eprintln!(
-        "                        Proxies git log --notes=ai with all standard git log options"
-    );
+    eprintln!("  log [args...]      Show commit log with AI authorship stats");
+    eprintln!("                        Use --raw or --notes to include raw authorship note data");
     eprintln!("  blame <file>       Git blame with AI authorship overlay");
     eprintln!("  diff <commit|range>  Show diff with AI authorship annotations");
     eprintln!("    <commit>              Diff from commit's parent to commit");
@@ -255,8 +334,14 @@ fn print_help() {
     );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!("  usage              Show local AI usage statistics");
+    eprintln!("    --period <1d|3d|7d|30d>  Time window (default: 30d)");
+    eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!(
+        "    --diff-only            Report only current-diff stats, omitting the per-checkpoint breakdown"
+    );
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
     eprintln!("  show-prompt <id>   Display a prompt record by its ID");
     eprintln!("    --commit <rev>        Look in a specific commit only");
@@ -273,14 +358,11 @@ fn print_help() {
     eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("    --skills               Also install agent skill files");
+    eprintln!("    --visual-studio-extension");
+    eprintln!("                           Also install the Visual Studio extension on Windows");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
-    eprintln!("  squash-authorship  Generate authorship log for squashed commits");
-    eprintln!(
-        "    <base_branch> <new_sha> <old_sha>  Required: base branch, new commit SHA, old commit SHA"
-    );
-    eprintln!("    --dry-run             Show what would be done without making changes");
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
@@ -457,10 +539,8 @@ fn handle_checkpoint(args: &[String]) {
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        let send_result = crate::daemon::send_control_request_fire_and_forget(
-            &config.control_socket_path,
-            &control_request,
-        );
+        let send_result =
+            crate::daemon::send_control_request(&config.control_socket_path, &control_request);
         if perf {
             eprintln!(
                 "[perf] checkpoint: ipc_send={:.1}ms",
@@ -596,7 +676,7 @@ fn notes_existence_label(existence: NotesExistence) -> &'static str {
     }
 }
 
-fn handle_effective_ignore_patterns_internal(args: &[String]) {
+pub(crate) fn handle_effective_ignore_patterns_internal(args: &[String]) {
     let payload = parse_machine_json_arg(args, "effective-ignore-patterns")
         .unwrap_or_else(|msg| emit_machine_json_error(msg));
 
@@ -616,7 +696,7 @@ fn handle_effective_ignore_patterns_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_blame_analysis_internal(args: &[String]) {
+pub(crate) fn handle_blame_analysis_internal(args: &[String]) {
     let payload = parse_machine_json_arg(args, "blame-analysis")
         .unwrap_or_else(|msg| emit_machine_json_error(msg));
 
@@ -640,7 +720,7 @@ fn handle_blame_analysis_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_fetch_authorship_notes_internal(args: &[String]) {
+pub(crate) fn handle_fetch_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "fetch-authorship-notes");
 
@@ -657,7 +737,7 @@ fn handle_fetch_authorship_notes_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_push_authorship_notes_internal(args: &[String]) {
+pub(crate) fn handle_push_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "push-authorship-notes");
 
@@ -772,7 +852,6 @@ fn handle_ai_diff(args: &[String]) {
             std::process::exit(1);
         }
     };
-
     if let Err(e) = commands::diff::handle_diff(&repo, args) {
         eprintln!("Diff failed: {}", e);
         std::process::exit(1);

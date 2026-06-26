@@ -383,34 +383,39 @@ fn is_secret_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-' | b'.' | b'~')
 }
 
-/// Extract potential secret tokens from text.
-/// Returns a vector of (start_index, end_index) pairs to avoid string allocations.
-pub fn extract_tokens(text: &str) -> Vec<(usize, usize)> {
-    let mut tokens = Vec::new();
+/// Scan text for potential secret tokens (contiguous runs of secret chars in the
+/// valid length range) and invoke `f` for each. Returns `true` if `f` ever
+/// returns `true` (short-circuit). This is the single token-scanning loop shared
+/// by both `extract_tokens` and `text_contains_secrets`.
+#[inline]
+fn scan_tokens(text: &str, mut f: impl FnMut(usize, usize) -> bool) -> bool {
     let bytes = text.as_bytes();
     let mut i = 0;
-
     while i < bytes.len() {
-        // Skip non-secret characters
         if !is_secret_char(bytes[i]) {
             i += 1;
             continue;
         }
-
-        // Found start of potential token
         let start = i;
         while i < bytes.len() && is_secret_char(bytes[i]) {
             i += 1;
         }
-
         let len = i - start;
-
-        // Only consider tokens in the right length range
-        if (MIN_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&len) {
-            tokens.push((start, i));
+        if (MIN_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&len) && f(start, i) {
+            return true;
         }
     }
+    false
+}
 
+/// Extract potential secret tokens from text.
+/// Returns a vector of (start_index, end_index) pairs to avoid string allocations.
+pub fn extract_tokens(text: &str) -> Vec<(usize, usize)> {
+    let mut tokens = Vec::new();
+    scan_tokens(text, |start, end| {
+        tokens.push((start, end));
+        false // never short-circuit, collect all
+    });
     tokens
 }
 
@@ -426,6 +431,13 @@ pub fn redact_secret(secret: &str) -> String {
     let prefix = &secret[..REDACT_VISIBLE_CHARS];
     let suffix = &secret[len - REDACT_VISIBLE_CHARS..];
     format!("{}********{}", prefix, suffix)
+}
+
+/// Returns true if the text contains at least one high-entropy token that looks
+/// like a secret. Performs no heap allocations — scans inline and short-circuits
+/// on the first match.
+pub fn text_contains_secrets(text: &str) -> bool {
+    scan_tokens(text, |start, end| is_random(&text.as_bytes()[start..end]))
 }
 
 /// Redact all detected secrets in a text string.

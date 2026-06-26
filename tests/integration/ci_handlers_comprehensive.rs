@@ -1,4 +1,29 @@
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{TestRepo, real_git_executable};
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+
+fn run_real_git(args: &[&str]) -> String {
+    let output = Command::new(real_git_executable())
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {:?}: {}", args, e));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "git {:?} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        args,
+        output.status.code(),
+        stdout,
+        stderr
+    );
+    stdout.trim().to_string()
+}
+
+fn path_str(path: &Path) -> &str {
+    path.to_str().expect("test path must be valid UTF-8")
+}
 
 // ==============================================================================
 // CI Handlers Tests - Module Structure and Types
@@ -30,6 +55,8 @@ fn test_ci_result_types_coverage() {
     let result3 = CiRunResult::SkippedSimpleMerge;
     let result4 = CiRunResult::SkippedFastForward;
     let result5 = CiRunResult::NoAuthorshipAvailable;
+    let result6 = CiRunResult::SyncAuthorshipRewritten { commit_count: 2 };
+    let result7 = CiRunResult::SkippedExistingSyncNotes;
 
     // Verify variants can be constructed
     match result1 {
@@ -56,6 +83,165 @@ fn test_ci_result_types_coverage() {
         CiRunResult::NoAuthorshipAvailable => {}
         _ => panic!("Expected NoAuthorshipAvailable"),
     }
+
+    match result6 {
+        CiRunResult::SyncAuthorshipRewritten { commit_count } => assert_eq!(commit_count, 2),
+        _ => panic!("Expected SyncAuthorshipRewritten"),
+    }
+
+    match result7 {
+        CiRunResult::SkippedExistingSyncNotes => {}
+        _ => panic!("Expected SkippedExistingSyncNotes"),
+    }
+}
+
+#[test]
+fn test_ci_github_run_noops_when_synchronize_has_no_previous_head() {
+    let repo = TestRepo::new();
+    let mut event_file = tempfile::NamedTempFile::new().expect("event file");
+    write!(
+        event_file,
+        r#"{{
+          "action": "synchronize",
+          "before": "0000000000000000000000000000000000000000",
+          "after": "2222222222222222222222222222222222222222",
+          "pull_request": {{
+            "number": 42,
+            "merged": false,
+            "merge_commit_sha": null,
+            "base": {{
+              "ref": "main",
+              "sha": "1111111111111111111111111111111111111111",
+              "repo": {{ "clone_url": "https://github.com/acme/repo.git" }}
+            }},
+            "head": {{
+              "ref": "feature",
+              "sha": "2222222222222222222222222222222222222222",
+              "repo": {{ "clone_url": "https://github.com/acme/repo.git" }}
+            }}
+          }}
+        }}"#
+    )
+    .expect("write event");
+
+    let output = repo
+        .git_ai_with_env(
+            &["ci", "github", "run", "--no-cleanup"],
+            &[
+                ("GITHUB_EVENT_NAME", "pull_request"),
+                (
+                    "GITHUB_EVENT_PATH",
+                    event_file.path().to_str().expect("event path"),
+                ),
+            ],
+        )
+        .expect("github ci run should no-op successfully");
+
+    assert!(
+        output.contains("No GitHub CI context found; nothing to do"),
+        "Expected no-op output, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_ci_github_run_fetches_missing_previous_head_after_force_push() {
+    let ci_repo = TestRepo::new();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote_path = tmp.path().join("origin.git");
+    let work_path = tmp.path().join("work");
+    let remote = path_str(&remote_path);
+    let work = path_str(&work_path);
+
+    run_real_git(&["init", "--bare", "--initial-branch=main", remote]);
+    run_real_git(&[
+        "-C",
+        remote,
+        "config",
+        "uploadpack.allowAnySHA1InWant",
+        "true",
+    ]);
+    run_real_git(&["init", "--initial-branch=main", work]);
+    run_real_git(&["-C", work, "config", "user.name", "Test User"]);
+    run_real_git(&["-C", work, "config", "user.email", "test@example.com"]);
+
+    std::fs::write(work_path.join("file.txt"), "base\n").expect("write base");
+    run_real_git(&["-C", work, "add", "file.txt"]);
+    run_real_git(&["-C", work, "commit", "-m", "base"]);
+    let base_sha = run_real_git(&["-C", work, "rev-parse", "HEAD"]);
+    run_real_git(&["-C", work, "remote", "add", "origin", remote]);
+    run_real_git(&["-C", work, "push", "origin", "main"]);
+
+    run_real_git(&["-C", work, "checkout", "-b", "feature"]);
+    std::fs::write(work_path.join("file.txt"), "old PR head\n").expect("write old head");
+    run_real_git(&["-C", work, "commit", "-am", "old pr head"]);
+    let previous_head_sha = run_real_git(&["-C", work, "rev-parse", "HEAD"]);
+    run_real_git(&["-C", work, "push", "origin", "HEAD:refs/pull/42/head"]);
+
+    run_real_git(&["-C", work, "checkout", "-B", "feature", "main"]);
+    std::fs::write(work_path.join("file.txt"), "new PR head\n").expect("write new head");
+    run_real_git(&["-C", work, "commit", "-am", "new pr head"]);
+    let current_head_sha = run_real_git(&["-C", work, "rev-parse", "HEAD"]);
+    run_real_git(&[
+        "-C",
+        work,
+        "push",
+        "--force",
+        "origin",
+        "HEAD:refs/pull/42/head",
+    ]);
+
+    let remote_url =
+        url::Url::from_directory_path(&remote_path).expect("remote path should be file URL");
+    let mut event_file = tempfile::NamedTempFile::new().expect("event file");
+    let event = serde_json::json!({
+        "action": "synchronize",
+        "before": previous_head_sha,
+        "after": current_head_sha,
+        "pull_request": {
+            "number": 42,
+            "merged": false,
+            "merge_commit_sha": null,
+            "base": {
+                "ref": "main",
+                "sha": base_sha,
+                "repo": { "clone_url": remote_url.as_str() }
+            },
+            "head": {
+                "ref": "feature",
+                "sha": current_head_sha,
+                "repo": { "clone_url": remote_url.as_str() }
+            }
+        }
+    });
+    serde_json::to_writer(&mut event_file, &event).expect("write event");
+    event_file.flush().expect("flush event");
+
+    let output = ci_repo
+        .git_ai_with_env(
+            &["ci", "github", "run", "--no-cleanup"],
+            &[
+                ("GITHUB_EVENT_NAME", "pull_request"),
+                (
+                    "GITHUB_EVENT_PATH",
+                    event_file.path().to_str().expect("event path"),
+                ),
+            ],
+        )
+        .expect("github ci run should fetch the missing previous head");
+
+    assert!(
+        output.contains("GitHub CI: skipped non-rebase PR sync"),
+        "expected successful non-rebase sync skip, got:\n{}",
+        output
+    );
+
+    let clone_path = ci_repo.path().join("git-ai-ci-clone");
+    let clone = path_str(&clone_path);
+    let previous_commit = format!("{}^{{commit}}", previous_head_sha);
+    let resolved_previous_head =
+        run_real_git(&["-C", clone, "rev-parse", "--verify", &previous_commit]);
+    assert_eq!(resolved_previous_head, previous_head_sha);
 }
 
 // ==============================================================================
@@ -72,6 +258,7 @@ fn test_ci_event_merge_structure() {
         head_sha: "def456".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi789".to_string(),
+        fork_clone_url: Some("https://example.com/fork.git".to_string()),
     };
 
     match event {
@@ -81,13 +268,19 @@ fn test_ci_event_merge_structure() {
             head_sha,
             base_ref,
             base_sha,
+            fork_clone_url,
         } => {
             assert_eq!(merge_commit_sha, "abc123");
             assert_eq!(head_ref, "feature");
             assert_eq!(head_sha, "def456");
             assert_eq!(base_ref, "main");
             assert_eq!(base_sha, "ghi789");
+            assert_eq!(
+                fork_clone_url,
+                Some("https://example.com/fork.git".to_string())
+            );
         }
+        CiEvent::Sync { .. } => panic!("Expected Merge"),
     }
 }
 
@@ -194,11 +387,17 @@ fn test_ci_required_flags_for_merge() {
 
 #[test]
 fn test_ci_optional_skip_fetch_flags_for_merge() {
-    let optional_flags = ["--skip-fetch-notes", "--skip-fetch-base", "--skip-fetch"];
+    let optional_flags = [
+        "--skip-fetch-notes",
+        "--skip-fetch-base",
+        "--skip-fetch-fork-notes",
+        "--skip-fetch",
+    ];
 
-    assert_eq!(optional_flags.len(), 3);
+    assert_eq!(optional_flags.len(), 4);
     assert!(optional_flags.contains(&"--skip-fetch-notes"));
     assert!(optional_flags.contains(&"--skip-fetch-base"));
+    assert!(optional_flags.contains(&"--skip-fetch-fork-notes"));
     assert!(optional_flags.contains(&"--skip-fetch"));
 }
 
@@ -331,6 +530,7 @@ fn test_ci_context_with_temp_dir() {
         head_sha: sha.clone(),
         base_ref: "main".to_string(),
         base_sha: sha.clone(),
+        fork_clone_url: None,
     };
 
     let ctx = CiContext {

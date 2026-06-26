@@ -1,8 +1,8 @@
 //! Handle flush-metrics-db command (kept for manual human use).
 //!
-//! Drains the metrics database queue by uploading batches to the API.
+//! Uploads pending metrics database rows to the API.
 
-use crate::api::{ApiClient, ApiContext, upload_metrics_with_retry};
+use crate::api::{ApiClient, ApiContext, metrics_upload_allowed, upload_metrics_with_retry};
 use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 
@@ -11,13 +11,11 @@ const MAX_BATCH_SIZE: usize = 1000;
 
 /// Handle the flush-metrics-db command
 pub fn handle_flush_metrics_db(_args: &[String]) {
-    // Check conditions: (!using_default_api) || is_logged_in() || has_api_key()
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
 
-    let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    if using_default_api && !client.is_logged_in() && !client.has_api_key() {
+    if !metrics_upload_allowed(&api_base_url, &client) {
         eprintln!("flush-metrics-db: skipping (not logged in and using default API)");
         return;
     }
@@ -34,18 +32,19 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
     let mut total_uploaded = 0usize;
     let mut total_batches = 0usize;
     let mut total_invalid = 0usize;
+    let mut total_undeliverable = 0usize;
 
     loop {
         // Get batch from DB
         let batch = {
-            let db_lock = match db.lock() {
+            let mut db_lock = match db.lock() {
                 Ok(lock) => lock,
                 Err(e) => {
                     eprintln!("flush-metrics-db: failed to acquire db lock: {}", e);
                     break;
                 }
             };
-            match db_lock.get_batch(MAX_BATCH_SIZE) {
+            match db_lock.dequeue_pending_batch(MAX_BATCH_SIZE) {
                 Ok(batch) => batch,
                 Err(e) => {
                     eprintln!("flush-metrics-db: failed to read batch: {}", e);
@@ -69,9 +68,10 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                 record_ids.push(record.id);
             } else {
                 total_invalid += 1;
-                // Invalid JSON - delete the record
+                // Invalid JSON cannot upload successfully. Mark it delivered so
+                // future flushes can continue past the malformed historical row.
                 if let Ok(mut db_lock) = db.lock() {
-                    let _ = db_lock.delete_records(&[record.id]);
+                    let _ = db_lock.mark_records_delivered(&[record.id], current_unix_ts());
                 }
             }
         }
@@ -83,27 +83,65 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         let event_count = events.len();
         let metrics_batch = MetricsBatch::new(events);
 
-        // Upload with retry logic (15s, 60s, 3min backoff)
+        // Upload with the HTTP helper's short retry, then persist DB backoff on failure.
         match upload_metrics_with_retry(&client, &metrics_batch, "flush_metrics_db") {
-            Ok(()) => {
-                total_uploaded += event_count;
+            Ok(response) => {
+                if let Err(e) = response.validate_error_indices(record_ids.len()) {
+                    eprintln!(
+                        "  ✗ batch upload response invalid ({} events kept for retry): {}",
+                        event_count, e
+                    );
+                    if let Ok(mut db_lock) = db.lock() {
+                        let now = current_unix_ts();
+                        let error = e.to_string();
+                        let _ = db_lock.mark_records_failed(&record_ids, &error, now);
+                    }
+                    break;
+                }
+
+                let successful_ids: Vec<i64> = response
+                    .successful_indices(record_ids.len())
+                    .into_iter()
+                    .map(|index| record_ids[index])
+                    .collect();
+                let undeliverable_records: Vec<(i64, String)> = response
+                    .errors
+                    .iter()
+                    .map(|error| (record_ids[error.index], error.error.clone()))
+                    .collect();
+
+                total_uploaded += successful_ids.len();
                 total_batches += 1;
+                total_undeliverable += undeliverable_records.len();
                 eprintln!(
-                    "  ✓ batch {} - uploaded {} events",
-                    total_batches, event_count
+                    "  ✓ batch {} - uploaded {} events{}",
+                    total_batches,
+                    successful_ids.len(),
+                    if undeliverable_records.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} marked undeliverable)", undeliverable_records.len())
+                    }
                 );
-                // Success - delete ALL records from this batch
-                // Validation errors are logged to Sentry and won't succeed on retry
+                // Keep rows as history: mark successful rows delivered and
+                // server-rejected rows permanently undeliverable.
                 if let Ok(mut db_lock) = db.lock() {
-                    let _ = db_lock.delete_records(&record_ids);
+                    let now = current_unix_ts();
+                    let _ = db_lock.mark_records_delivered(&successful_ids, now);
+                    let _ = db_lock.mark_records_undeliverable(&undeliverable_records, now);
                 }
             }
             Err(e) => {
-                // All retries failed - keep records in DB for next time
+                // All retries failed - keep records in DB for a later queued retry.
                 eprintln!(
                     "  ✗ batch upload failed ({} events kept for retry): {}",
                     event_count, e
                 );
+                if let Ok(mut db_lock) = db.lock() {
+                    let now = current_unix_ts();
+                    let error = e.to_string();
+                    let _ = db_lock.mark_records_failed(&record_ids, &error, now);
+                }
                 break;
             }
         }
@@ -111,8 +149,14 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
 
     if total_invalid > 0 {
         eprintln!(
-            "flush-metrics-db: discarded {} invalid record(s)",
+            "flush-metrics-db: marked {} invalid record(s) delivered",
             total_invalid
+        );
+    }
+    if total_undeliverable > 0 {
+        eprintln!(
+            "flush-metrics-db: marked {} server-rejected record(s) undeliverable",
+            total_undeliverable
         );
     }
 
@@ -120,4 +164,11 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         "flush-metrics-db: uploaded {} events in {} batch(es)",
         total_uploaded, total_batches
     );
+}
+
+fn current_unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

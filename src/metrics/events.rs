@@ -27,6 +27,8 @@ pub mod committed_pos {
     pub const FIRST_CHECKPOINT_TS: usize = 10; // u64 (null if no checkpoints)
     pub const COMMIT_SUBJECT: usize = 11; // String
     pub const COMMIT_BODY: usize = 12; // String (null if empty)
+    pub const AUTHORSHIP_NOTE: usize = 13; // String (full serialized authorship note)
+    pub const HUNKS: usize = 14; // String (JSON array of DiffJsonHunk)
 }
 
 /// Values for Event ID 1: committed
@@ -53,6 +55,8 @@ pub mod committed_pos {
 /// | 10 | first_checkpoint_ts | u64 |
 /// | 11 | commit_subject | String |
 /// | 12 | commit_body | String |
+/// | 13 | authorship_note | String |
+/// | 14 | hunks | String |
 #[derive(Debug, Clone, Default)]
 pub struct CommittedValues {
     // Scalar fields
@@ -69,6 +73,8 @@ pub struct CommittedValues {
     pub first_checkpoint_ts: PosField<u64>,
     pub commit_subject: PosField<String>,
     pub commit_body: PosField<String>,
+    pub authorship_note: PosField<String>,
+    pub hunks: PosField<String>,
 }
 
 impl CommittedValues {
@@ -177,6 +183,26 @@ impl CommittedValues {
         self.commit_body = Some(None);
         self
     }
+
+    pub fn authorship_note(mut self, value: impl Into<String>) -> Self {
+        self.authorship_note = Some(Some(value.into()));
+        self
+    }
+
+    pub fn authorship_note_null(mut self) -> Self {
+        self.authorship_note = Some(None);
+        self
+    }
+
+    pub fn hunks(mut self, value: impl Into<String>) -> Self {
+        self.hunks = Some(Some(value.into()));
+        self
+    }
+
+    pub fn hunks_null(mut self) -> Self {
+        self.hunks = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CommittedValues {
@@ -233,6 +259,12 @@ impl PosEncoded for CommittedValues {
             committed_pos::COMMIT_BODY,
             string_to_json(&self.commit_body),
         );
+        sparse_set(
+            &mut map,
+            committed_pos::AUTHORSHIP_NOTE,
+            string_to_json(&self.authorship_note),
+        );
+        sparse_set(&mut map, committed_pos::HUNKS, string_to_json(&self.hunks));
 
         map
     }
@@ -253,6 +285,8 @@ impl PosEncoded for CommittedValues {
             first_checkpoint_ts: sparse_get_u64(arr, committed_pos::FIRST_CHECKPOINT_TS),
             commit_subject: sparse_get_string(arr, committed_pos::COMMIT_SUBJECT),
             commit_body: sparse_get_string(arr, committed_pos::COMMIT_BODY),
+            authorship_note: sparse_get_string(arr, committed_pos::AUTHORSHIP_NOTE),
+            hunks: sparse_get_string(arr, committed_pos::HUNKS),
         }
     }
 }
@@ -311,7 +345,7 @@ impl EventValues for AgentUsageValues {
 /// Value positions for "install_hooks" event.
 /// One event per tool attempted during install-hooks.
 pub mod install_hooks_pos {
-    pub const TOOL_ID: usize = 0; // String - tool id (e.g., "cursor", "fork")
+    pub const TOOL_ID: usize = 0; // String - tool id (e.g., "cursor", "vscode")
     pub const STATUS: usize = 1; // String - "not_found", "installed", "already_installed", "failed"
     pub const MESSAGE: usize = 2; // Option<String> - error message or warnings
 }
@@ -417,6 +451,9 @@ pub mod checkpoint_pos {
     pub const LINES_ADDED_SLOC: usize = 5; // u32 - for this file
     pub const LINES_DELETED_SLOC: usize = 6; // u32 - for this file
     pub const TOOL_USE_ID: usize = 7; // String - nullable
+    pub const EDIT_KIND: usize = 8; // String - nullable ("file_edit" | "bash")
+    pub const CHECKPOINT_TYPE: usize = 9; // String - nullable ("recovered_bash", etc.)
+    pub const ATTRIBUTION_RECOVERY_METADATA: usize = 10; // String - nullable JSON
 }
 
 /// Values for Event ID 4: checkpoint
@@ -435,6 +472,9 @@ pub mod checkpoint_pos {
 /// | 5 | lines_added_sloc | u32 |
 /// | 6 | lines_deleted_sloc | u32 |
 /// | 7 | external_tool_use_id | String (nullable) |
+/// | 8 | edit_kind | String (nullable) |
+/// | 9 | checkpoint_type | String (nullable) |
+/// | 10 | attribution_recovery_metadata | String (nullable JSON) |
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointValues {
     pub checkpoint_ts: PosField<u64>,
@@ -445,6 +485,9 @@ pub struct CheckpointValues {
     pub lines_added_sloc: PosField<u32>,
     pub lines_deleted_sloc: PosField<u32>,
     pub external_tool_use_id: PosField<String>,
+    pub edit_kind: PosField<String>,
+    pub checkpoint_type: PosField<String>,
+    pub attribution_recovery_metadata: PosField<String>,
 }
 
 impl CheckpointValues {
@@ -539,6 +582,39 @@ impl CheckpointValues {
         self.external_tool_use_id = Some(None);
         self
     }
+
+    pub fn edit_kind(mut self, value: impl Into<String>) -> Self {
+        self.edit_kind = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn edit_kind_null(mut self) -> Self {
+        self.edit_kind = Some(None);
+        self
+    }
+
+    pub fn checkpoint_type(mut self, value: impl Into<String>) -> Self {
+        self.checkpoint_type = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn checkpoint_type_null(mut self) -> Self {
+        self.checkpoint_type = Some(None);
+        self
+    }
+
+    pub fn attribution_recovery_metadata(mut self, value: impl Into<String>) -> Self {
+        self.attribution_recovery_metadata = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn attribution_recovery_metadata_null(mut self) -> Self {
+        self.attribution_recovery_metadata = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CheckpointValues {
@@ -581,6 +657,21 @@ impl PosEncoded for CheckpointValues {
             checkpoint_pos::TOOL_USE_ID,
             string_to_json(&self.external_tool_use_id),
         );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::EDIT_KIND,
+            string_to_json(&self.edit_kind),
+        );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::CHECKPOINT_TYPE,
+            string_to_json(&self.checkpoint_type),
+        );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA,
+            string_to_json(&self.attribution_recovery_metadata),
+        );
 
         map
     }
@@ -595,6 +686,12 @@ impl PosEncoded for CheckpointValues {
             lines_added_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_ADDED_SLOC),
             lines_deleted_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED_SLOC),
             external_tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
+            edit_kind: sparse_get_string(arr, checkpoint_pos::EDIT_KIND),
+            checkpoint_type: sparse_get_string(arr, checkpoint_pos::CHECKPOINT_TYPE),
+            attribution_recovery_metadata: sparse_get_string(
+                arr,
+                checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA,
+            ),
         }
     }
 }
@@ -762,6 +859,37 @@ mod tests {
     }
 
     #[test]
+    fn test_committed_values_with_hunks() {
+        let hunks_json = r#"[{"commit_sha":"abc123","content_hash":"def456","hunk_kind":"addition","start_line":1,"end_line":5,"file_path":"src/main.rs"}]"#;
+        let values = CommittedValues::new().human_additions(10).hunks(hunks_json);
+
+        assert_eq!(values.hunks, Some(Some(hunks_json.to_string())));
+    }
+
+    #[test]
+    fn test_committed_values_hunks_null() {
+        let values = CommittedValues::new().hunks_null();
+        assert_eq!(values.hunks, Some(None));
+    }
+
+    #[test]
+    fn test_committed_values_hunks_roundtrip() {
+        use super::PosEncoded;
+
+        let hunks_json = r#"[{"commit_sha":"abc","content_hash":"def","hunk_kind":"addition","start_line":1,"end_line":3,"file_path":"test.rs"}]"#;
+        let original = CommittedValues::new().human_additions(5).hunks(hunks_json);
+
+        let sparse = PosEncoded::to_sparse(&original);
+        assert_eq!(
+            sparse.get("14"),
+            Some(&Value::String(hunks_json.to_string()))
+        );
+
+        let restored = <CommittedValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.hunks, Some(Some(hunks_json.to_string())));
+    }
+
+    #[test]
     fn test_agent_usage_values() {
         let values = AgentUsageValues::new();
         assert_eq!(AgentUsageValues::event_id(), MetricEventId::AgentUsage);
@@ -802,7 +930,7 @@ mod tests {
     #[test]
     fn test_install_hooks_values_with_null_message() {
         let values = InstallHooksValues::new()
-            .tool_id("fork".to_string())
+            .tool_id("vscode".to_string())
             .status("not_found".to_string())
             .message_null();
 
@@ -1073,6 +1201,127 @@ mod tests {
 
         assert_eq!(values.external_tool_use_id, None); // not set
     }
+
+    #[test]
+    fn test_checkpoint_values_with_edit_kind() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("ai_agent")
+            .file_path("src/main.rs")
+            .edit_kind("file_edit");
+
+        assert_eq!(values.edit_kind, Some(Some("file_edit".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_edit_kind_null() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("ai_agent")
+            .edit_kind_null();
+
+        assert_eq!(values.edit_kind, Some(None));
+    }
+
+    #[test]
+    fn test_checkpoint_values_with_recovery_metadata() {
+        use super::PosEncoded;
+
+        let values = CheckpointValues::new()
+            .checkpoint_type("recovered_bash")
+            .attribution_recovery_metadata(r#"{"solver":"bash_mtime"}"#);
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(
+            sparse.get("9"),
+            Some(&Value::String("recovered_bash".to_string()))
+        );
+        assert_eq!(
+            sparse.get("10"),
+            Some(&Value::String(r#"{"solver":"bash_mtime"}"#.to_string()))
+        );
+
+        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(
+            restored.checkpoint_type,
+            Some(Some("recovered_bash".to_string()))
+        );
+        assert_eq!(
+            restored.attribution_recovery_metadata,
+            Some(Some(r#"{"solver":"bash_mtime"}"#.to_string()))
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_values_to_sparse_with_edit_kind() {
+        use super::PosEncoded;
+
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("ai_agent")
+            .file_path("tests/test.rs")
+            .edit_kind("bash");
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(sparse.get("0"), Some(&Value::Number(1700000000.into())));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&Value::String("ai_agent".to_string()))
+        );
+        assert_eq!(sparse.get("8"), Some(&Value::String("bash".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_from_sparse_with_edit_kind() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1704067200.into()));
+        sparse.insert("1".to_string(), Value::String("ai_agent".to_string()));
+        sparse.insert("2".to_string(), Value::String("lib.rs".to_string()));
+        sparse.insert("8".to_string(), Value::String("file_edit".to_string()));
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.checkpoint_ts, Some(Some(1704067200)));
+        assert_eq!(values.kind, Some(Some("ai_agent".to_string())));
+        assert_eq!(values.edit_kind, Some(Some("file_edit".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_roundtrip_with_edit_kind() {
+        use super::PosEncoded;
+
+        let original = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("ai_agent")
+            .file_path("src/lib.rs")
+            .lines_added(50)
+            .edit_kind("bash");
+
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.checkpoint_ts, Some(Some(1700000000)));
+        assert_eq!(restored.kind, Some(Some("ai_agent".to_string())));
+        assert_eq!(restored.file_path, Some(Some("src/lib.rs".to_string())));
+        assert_eq!(restored.lines_added, Some(Some(50)));
+        assert_eq!(restored.edit_kind, Some(Some("bash".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_edit_kind_not_set() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1700000000.into()));
+        sparse.insert("1".to_string(), Value::String("human".to_string()));
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.edit_kind, None);
+    }
 }
 
 /// Value positions for "session_event" event.
@@ -1212,6 +1461,139 @@ impl EventValues for SessionEventValues {
     }
 }
 
+pub mod otel_trace_pos {
+    pub const RAW_JSON: usize = 0;
+    pub const EXTERNAL_EVENT_ID: usize = 1;
+    pub const EXTERNAL_PARENT_EVENT_ID: usize = 2;
+    pub const EXTERNAL_TOOL_USE_ID: usize = 3;
+}
+
+/// Values for Event ID 6: otel_trace
+///
+/// Each event is an OTEL span from a Copilot traces SQLite DB, stored as JSON at position 0.
+/// Uses EventAttributes for session_id, trace_id, tool metadata.
+#[derive(Debug, Clone, Default)]
+pub struct OtelTraceValues {
+    pub raw_json: serde_json::Value,
+    pub external_event_id: Option<String>,
+    pub external_parent_event_id: Option<String>,
+    pub external_tool_use_id: Option<String>,
+}
+
+impl OtelTraceValues {
+    pub fn new(raw_json: serde_json::Value) -> Self {
+        Self {
+            raw_json,
+            external_event_id: None,
+            external_parent_event_id: None,
+            external_tool_use_id: None,
+        }
+    }
+
+    pub fn with_ids(
+        raw_json: serde_json::Value,
+        external_event_id: Option<String>,
+        external_parent_event_id: Option<String>,
+        external_tool_use_id: Option<String>,
+    ) -> Self {
+        Self {
+            raw_json,
+            external_event_id,
+            external_parent_event_id,
+            external_tool_use_id,
+        }
+    }
+}
+
+impl PosEncoded for OtelTraceValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        map.insert(otel_trace_pos::RAW_JSON.to_string(), self.raw_json.clone());
+        if let Some(ref id) = self.external_event_id {
+            map.insert(
+                otel_trace_pos::EXTERNAL_EVENT_ID.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        if let Some(ref id) = self.external_parent_event_id {
+            map.insert(
+                otel_trace_pos::EXTERNAL_PARENT_EVENT_ID.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        if let Some(ref id) = self.external_tool_use_id {
+            map.insert(
+                otel_trace_pos::EXTERNAL_TOOL_USE_ID.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        let raw_json = arr
+            .get(&otel_trace_pos::RAW_JSON.to_string())
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let external_event_id = arr
+            .get(&otel_trace_pos::EXTERNAL_EVENT_ID.to_string())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let external_parent_event_id = arr
+            .get(&otel_trace_pos::EXTERNAL_PARENT_EVENT_ID.to_string())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let external_tool_use_id = arr
+            .get(&otel_trace_pos::EXTERNAL_TOOL_USE_ID.to_string())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Self {
+            raw_json,
+            external_event_id,
+            external_parent_event_id,
+            external_tool_use_id,
+        }
+    }
+}
+
+impl EventValues for OtelTraceValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::OtelTrace
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn into_sparse(self) -> SparseArray {
+        let mut map = SparseArray::new();
+        map.insert(otel_trace_pos::RAW_JSON.to_string(), self.raw_json);
+        if let Some(id) = self.external_event_id {
+            map.insert(
+                otel_trace_pos::EXTERNAL_EVENT_ID.to_string(),
+                serde_json::Value::String(id),
+            );
+        }
+        if let Some(id) = self.external_parent_event_id {
+            map.insert(
+                otel_trace_pos::EXTERNAL_PARENT_EVENT_ID.to_string(),
+                serde_json::Value::String(id),
+            );
+        }
+        if let Some(id) = self.external_tool_use_id {
+            map.insert(
+                otel_trace_pos::EXTERNAL_TOOL_USE_ID.to_string(),
+                serde_json::Value::String(id),
+            );
+        }
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
 #[cfg(test)]
 mod session_event_tests {
     use super::*;
@@ -1316,5 +1698,113 @@ mod session_event_tests {
             sparse.get("3"),
             Some(&serde_json::Value::String("tid".to_string()))
         );
+    }
+
+    #[test]
+    fn test_otel_trace_values_new() {
+        let raw = serde_json::json!({"span": {"span_id": "abc", "trace_id": "t1"}});
+        let values = OtelTraceValues::new(raw.clone());
+        assert_eq!(values.raw_json, raw);
+        assert_eq!(values.external_event_id, None);
+        assert_eq!(values.external_parent_event_id, None);
+        assert_eq!(values.external_tool_use_id, None);
+    }
+
+    #[test]
+    fn test_otel_trace_values_with_ids() {
+        let raw = serde_json::json!({"span": {"span_id": "s1", "trace_id": "t1"}});
+        let values = OtelTraceValues::with_ids(
+            raw.clone(),
+            Some("span-123".to_string()),
+            Some("parent-456".to_string()),
+            Some("call-789".to_string()),
+        );
+
+        assert_eq!(values.raw_json, raw);
+        assert_eq!(values.external_event_id, Some("span-123".to_string()));
+        assert_eq!(
+            values.external_parent_event_id,
+            Some("parent-456".to_string())
+        );
+        assert_eq!(values.external_tool_use_id, Some("call-789".to_string()));
+    }
+
+    #[test]
+    fn test_otel_trace_values_sparse_roundtrip_with_ids() {
+        let raw = serde_json::json!({"span": {"span_id": "s1", "trace_id": "t1"}, "attributes": {"key": "val"}});
+        let values = OtelTraceValues::with_ids(
+            raw.clone(),
+            Some("span-id".to_string()),
+            Some("parent-id".to_string()),
+            Some("tool-call-id".to_string()),
+        );
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&raw));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&serde_json::Value::String("span-id".to_string()))
+        );
+        assert_eq!(
+            sparse.get("2"),
+            Some(&serde_json::Value::String("parent-id".to_string()))
+        );
+        assert_eq!(
+            sparse.get("3"),
+            Some(&serde_json::Value::String("tool-call-id".to_string()))
+        );
+
+        let restored = <OtelTraceValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.raw_json, raw);
+        assert_eq!(restored.external_event_id, Some("span-id".to_string()));
+        assert_eq!(
+            restored.external_parent_event_id,
+            Some("parent-id".to_string())
+        );
+        assert_eq!(
+            restored.external_tool_use_id,
+            Some("tool-call-id".to_string())
+        );
+    }
+
+    #[test]
+    fn test_otel_trace_values_sparse_none_ids_omitted() {
+        let raw = serde_json::json!({"span": {"span_id": "s1"}});
+        let values = OtelTraceValues::new(raw.clone());
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&raw));
+        assert_eq!(sparse.get("1"), None);
+        assert_eq!(sparse.get("2"), None);
+        assert_eq!(sparse.get("3"), None);
+    }
+
+    #[test]
+    fn test_otel_trace_values_into_sparse_with_ids() {
+        let raw = serde_json::json!({"data": "test"});
+        let values = OtelTraceValues::with_ids(
+            raw.clone(),
+            Some("eid".to_string()),
+            None,
+            Some("tid".to_string()),
+        );
+
+        let sparse = EventValues::into_sparse(values);
+        assert_eq!(sparse.get("0"), Some(&raw));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&serde_json::Value::String("eid".to_string()))
+        );
+        assert_eq!(sparse.get("2"), None);
+        assert_eq!(
+            sparse.get("3"),
+            Some(&serde_json::Value::String("tid".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_otel_trace_values_event_id() {
+        assert_eq!(OtelTraceValues::event_id(), MetricEventId::OtelTrace);
+        assert_eq!(OtelTraceValues::event_id() as u16, 6);
     }
 }

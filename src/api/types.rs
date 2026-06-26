@@ -118,6 +118,32 @@ pub struct CasMessagesObject {
     pub messages: Vec<crate::authorship::transcript::Message>,
 }
 
+/// A single authorship note entry (commit SHA + content).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NoteEntry {
+    pub commit_sha: String,
+    pub content: String,
+}
+
+/// Request body for uploading notes to the HTTP backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotesUploadRequest {
+    pub entries: Vec<NoteEntry>,
+}
+
+/// Response from a notes upload request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotesUploadResponse {
+    pub success_count: usize,
+    pub failure_count: usize,
+}
+
+/// Response from a notes read request — maps commit_sha → note content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotesReadResponse {
+    pub notes: std::collections::HashMap<String, String>,
+}
+
 /// Single result from CA prompt store batch read
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CAPromptStoreReadResult {

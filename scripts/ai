@@ -4,8 +4,14 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
+
+
+DEFAULT_HARNESS = "codex"
+HARNESS_CHOICES = ("codex", "claude")
 
 
 def run(cmd, **kwargs):
@@ -25,15 +31,33 @@ def get_repo_root():
     ).stdout.strip()
 
 
-def open_worktree(worktree_dir, branch_name, resume_session=False):
-    """Open Claude in the specified worktree."""
+def open_worktree(worktree_dir, branch_name, harness=DEFAULT_HARNESS, resume_session=False, prompt=None):
+    """Open the selected AI harness in the specified worktree."""
     set_tmux_window_name(branch_name)
-    print(f"Launching claude in {worktree_dir}...")
+    print(f"Launching {harness} in {worktree_dir}...")
     os.chdir(worktree_dir)
-    claude_args = ["claude", "--dangerously-skip-permissions"]
-    if resume_session:
-        claude_args.append("--resume")
-    os.execvp("claude", claude_args)
+
+    if harness == "codex":
+        if resume_session:
+            codex_args = ["codex", "resume", "--dangerously-bypass-approvals-and-sandbox"]
+            if prompt:
+                codex_args.append(prompt)
+        else:
+            codex_args = ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+            if prompt:
+                codex_args.append(prompt)
+        os.execvp("codex", codex_args)
+
+    if harness == "claude":
+        claude_args = ["claude", "--dangerously-skip-permissions"]
+        if resume_session:
+            claude_args.append("--resume")
+        if prompt:
+            claude_args.append(prompt)
+        os.execvp("claude", claude_args)
+
+    print(f"Error: Unknown harness '{harness}'", file=sys.stderr)
+    sys.exit(1)
 
 
 def check_local_branch_exists(branch):
@@ -72,6 +96,85 @@ def get_pr_info(pr_number):
     }
 
 
+def build_fix_prompt(issue_number):
+    """Build the autonomous fix prompt."""
+    return f"""\
+Fix GitHub issue #{issue_number} in this repository.
+
+Follow this workflow:
+
+1. UNDERSTAND THE ISSUE
+   - Run: gh issue view {issue_number}
+   - Read the full issue description, comments, and any linked context
+   - Identify the root cause and affected components
+
+2. VERIFY/REPRODUCE
+   - If the issue describes a bug, reproduce it or identify the failing code path
+   - If it's a feature request, understand the expected behavior
+
+3. FIX USING TDD
+   - Write a failing test that captures the issue
+   - Run `task test` to confirm it fails
+   - Implement the fix
+   - Run `task test` to confirm the test passes
+
+4. LINT AND FORMAT
+   - Run `task lint` and fix any issues
+   - Run `task fmt` and fix any issues
+
+5. COMMIT AND PUSH
+   - Stage and commit with a descriptive message referencing #{issue_number}
+   - Push the branch to origin
+
+6. CREATE A PR
+   - Run: gh pr create --title "<concise title>" --body "Fixes #{issue_number}\\n\\n<description>"
+   - Include a clear summary of the fix and test coverage
+
+7. MONITOR CI AND ITERATE
+   - Watch Ubuntu-based CI jobs (~15 mins): gh pr checks <pr_number> --watch
+   - If checks fail: read the logs, fix issues, push again
+   - Check for Devin (automated reviewer) feedback: gh api repos/{{owner}}/{{repo}}/pulls/<pr_number>/comments
+   - Address all review feedback: fix if valid, or reply with reasoning if not
+   - Repeat until all Ubuntu CI checks pass and all review feedback is addressed
+   - You do NOT need to wait for Mac (~35min) or Windows (~3.5hr) checks unless the issue is OS-specific
+
+Refer to CLAUDE.md for project conventions (test commands, architecture, PR workflow)."""
+
+
+def cmd_fix(args):
+    """Fix a GitHub issue: create branch, worktree, and launch Claude with fix prompt."""
+    issue_number = args.issue_number
+    repo_root = get_repo_root()
+
+    if not shutil.which("gh"):
+        print("Error: 'gh' CLI is not installed or not in PATH", file=sys.stderr)
+        sys.exit(1)
+
+    result = subprocess.run(
+        ["gh", "issue", "view", str(issue_number), "--json", "number,title"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"Error: Could not fetch issue #{issue_number}. Does it exist?", file=sys.stderr)
+        sys.exit(1)
+
+    issue_data = json.loads(result.stdout)
+    print(f"Fixing issue #{issue_number}: {issue_data['title']}")
+
+    timestamp = int(time.time())
+    branch = f"fix/{issue_number}-{timestamp}"
+    worktree_name = f"fix-{issue_number}-{timestamp}"
+    worktree_dir = os.path.join(repo_root, ".worktrees", worktree_name)
+
+    print("Fetching origin/main...")
+    run(["git", "fetch", "origin", "main"])
+
+    print(f"Creating worktree at {worktree_dir} on branch {branch} from origin/main...")
+    run(["git", "worktree", "add", "-b", branch, worktree_dir, "origin/main"])
+
+    open_worktree(worktree_dir, branch, harness=args.harness, prompt=build_fix_prompt(issue_number))
+
+
 def cmd_resume(args):
     """Resume work on an existing branch."""
     branch = args.branch
@@ -81,7 +184,7 @@ def cmd_resume(args):
     # 1. Check if worktree already exists
     if os.path.exists(worktree_dir):
         print(f"Using existing worktree: {worktree_dir}")
-        open_worktree(worktree_dir, branch, resume_session=True)
+        open_worktree(worktree_dir, branch, harness=args.harness, resume_session=True)
         return
 
     # 2. Check if local branch exists
@@ -109,8 +212,8 @@ def cmd_resume(args):
     print(f"Creating worktree at {worktree_dir} for branch {branch}...")
     run(["git", "worktree", "add", worktree_dir, branch])
 
-    # 6. Launch Claude with resume
-    open_worktree(worktree_dir, branch, resume_session=True)
+    # 6. Launch the selected harness with resume
+    open_worktree(worktree_dir, branch, harness=args.harness, resume_session=True)
 
 
 def cmd_pr(args):
@@ -134,7 +237,7 @@ def cmd_pr(args):
     # 3. Check if worktree already exists
     if os.path.exists(worktree_dir):
         print(f"Using existing worktree for PR #{pr_number}")
-        open_worktree(worktree_dir, branch_name, resume_session=False)
+        open_worktree(worktree_dir, branch_name, harness=args.harness, resume_session=False)
         return
 
     # 4. Checkout PR using gh CLI (handles fetching)
@@ -166,12 +269,12 @@ def cmd_pr(args):
     print(f"Creating worktree at {worktree_dir}...")
     run(["git", "worktree", "add", worktree_dir, branch_name])
 
-    # 7. Launch Claude without resume
-    open_worktree(worktree_dir, branch_name, resume_session=False)
+    # 7. Launch the selected harness without resume
+    open_worktree(worktree_dir, branch_name, harness=args.harness, resume_session=False)
 
 
 def cmd_new(args):
-    """Create a new worktree from origin/main and open claude in it."""
+    """Create a new worktree and open the selected AI harness in it."""
     branch = args.branch
     repo_root = get_repo_root()
 
@@ -192,7 +295,16 @@ def cmd_new(args):
     print(f"Creating worktree at {worktree_dir} on branch {branch} from {base}...")
     run(["git", "worktree", "add", "-b", branch, worktree_dir, base])
 
-    open_worktree(worktree_dir, branch, resume_session=False)
+    open_worktree(worktree_dir, branch, harness=args.harness, resume_session=False)
+
+
+def add_harness_argument(parser, default=argparse.SUPPRESS):
+    parser.add_argument(
+        "--harness",
+        choices=HARNESS_CHOICES,
+        default=default,
+        help=f"AI harness to launch (default: {DEFAULT_HARNESS})",
+    )
 
 
 def build_parser():
@@ -200,19 +312,28 @@ def build_parser():
         prog="ai",
         description="CLI for git-ai development workflows.",
     )
+    add_harness_argument(parser, default=DEFAULT_HARNESS)
     subparsers = parser.add_subparsers(dest="command")
 
-    p_new = subparsers.add_parser("new", help="Create a worktree and open claude")
+    p_new = subparsers.add_parser("new", help="Create a worktree and open an AI harness")
     p_new.add_argument("branch", help="Branch name for the new worktree")
     p_new.add_argument("--base", default="origin/main", help="Base ref for the new worktree (default: origin/main)")
+    add_harness_argument(p_new)
     p_new.set_defaults(func=cmd_new)
+
+    p_fix = subparsers.add_parser("fix", help="Fix a GitHub issue (automated TDD workflow)")
+    p_fix.add_argument("issue_number", type=int, help="GitHub issue number to fix")
+    add_harness_argument(p_fix)
+    p_fix.set_defaults(func=cmd_fix)
 
     p_resume = subparsers.add_parser("resume", help="Resume work on an existing branch")
     p_resume.add_argument("branch", help="Branch name to resume")
+    add_harness_argument(p_resume)
     p_resume.set_defaults(func=cmd_resume)
 
-    p_pr = subparsers.add_parser("pr", help="Check out a PR and open claude")
+    p_pr = subparsers.add_parser("pr", help="Check out a PR and open an AI harness")
     p_pr.add_argument("pr_number", type=int, help="PR number to check out")
+    add_harness_argument(p_pr)
     p_pr.set_defaults(func=cmd_pr)
 
     return parser

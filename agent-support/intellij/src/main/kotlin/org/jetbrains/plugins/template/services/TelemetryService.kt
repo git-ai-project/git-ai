@@ -1,19 +1,23 @@
 package org.jetbrains.plugins.template.services
 
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
-import com.intellij.openapi.extensions.PluginId
+import com.posthog.java.HttpSender
 import com.posthog.java.PostHog as PostHogClient
+import com.posthog.java.PostHogLogger
+import com.posthog.java.QueueManager
+import com.posthog.java.Sender
+import com.posthog.java.shaded.org.json.JSONObject
 import io.sentry.Hint
 import io.sentry.Sentry
 import io.sentry.SentryEvent
 import io.sentry.SentryLevel
 import io.sentry.SentryOptions
 import io.sentry.protocol.Message
+import com.google.gson.JsonParser
 import java.io.File
 
 /**
@@ -49,11 +53,35 @@ class TelemetryService : Disposable {
         private const val PLUGIN_EVENT_TAG = "git_ai_plugin_event"
 
         fun getInstance(): TelemetryService = service()
+
+        /**
+         * Returns the TelemetryService instance or null if service instantiation fails.
+         * Use this from call sites where telemetry failures must never propagate.
+         */
+        fun getInstanceOrNull(): TelemetryService? {
+            return try {
+                service()
+            } catch (_: Throwable) {
+                null
+            }
+        }
     }
 
     init {
-        initializePostHog()
-        initializeSentry()
+        if (!isOssTelemetryDisabled()) {
+            try {
+                initializePostHog()
+            } catch (_: Throwable) {
+                // Silently ignore – telemetry must never surface errors to the user
+            }
+            try {
+                initializeSentry()
+            } catch (_: Throwable) {
+                // Silently ignore – telemetry must never surface errors to the user
+            }
+        } else {
+            logger.info("OSS telemetry disabled by user config")
+        }
     }
 
     private fun initializePostHog() {
@@ -64,8 +92,18 @@ class TelemetryService : Disposable {
                 return
             }
 
-            posthog = PostHogClient.Builder(POSTHOG_API_KEY)
+            // Silence PostHog's JUL logger as a safety net — prevents any
+            // SEVERE-level log from reaching IntelliJ's error dialog bridge.
+            silencePostHogJulLogger()
+
+            val httpSender = HttpSender.Builder(POSTHOG_API_KEY)
                 .host(POSTHOG_HOST)
+                .logger(SilentPostHogLogger)
+                .build()
+            val safeSender = SafeSender(httpSender)
+            val queueManager = QueueManager.Builder(safeSender).build()
+
+            posthog = PostHogClient.BuilderWithCustomQueueManager(queueManager, safeSender)
                 .build()
 
             logger.info("PostHog initialized with distinct_id: $distinctId")
@@ -74,11 +112,69 @@ class TelemetryService : Disposable {
         }
     }
 
+    /**
+     * No-op PostHogLogger that replaces DefaultPostHogLogger to prevent
+     * PostHog's internal error logging from triggering IntelliJ's IDE
+     * Internal Errors dialog.
+     *
+     * Root cause: HttpSender.send() catches IOException internally and logs
+     * via DefaultPostHogLogger → java.util.logging.Logger.log(Level.SEVERE, ...)
+     * IntelliJ bridges JUL SEVERE to Logger.error() which shows the error
+     * dialog. The SafeSender wrapper never sees these exceptions because
+     * they are caught and logged inside HttpSender before reaching it.
+     */
+    private object SilentPostHogLogger : PostHogLogger {
+        override fun debug(message: String) {}
+        override fun info(message: String) {}
+        override fun warn(message: String) {}
+        override fun error(message: String) {}
+        override fun error(message: String, throwable: Throwable) {}
+    }
+
+    /**
+     * Silences the JUL logger used by PostHog's DefaultPostHogLogger as
+     * a belt-and-suspenders safety net alongside SilentPostHogLogger.
+     */
+    private fun silencePostHogJulLogger() {
+        try {
+            java.util.logging.Logger.getLogger("com.posthog.java.PostHog").level =
+                java.util.logging.Level.OFF
+        } catch (_: Throwable) {
+            // Best effort — ignore if JUL manipulation fails
+        }
+    }
+
+    /**
+     * Wraps a PostHog Sender to prevent network exceptions from propagating
+     * as uncaught exceptions on the QueueManager background thread.
+     */
+    private class SafeSender(private val delegate: Sender) : Sender {
+        private val logger = com.intellij.openapi.diagnostic.Logger.getInstance(SafeSender::class.java)
+
+        override fun send(messages: List<JSONObject>): Boolean? {
+            return try {
+                delegate.send(messages)
+            } catch (e: Exception) {
+                logger.info("PostHog send failed (non-critical): ${e.javaClass.simpleName}")
+                null
+            }
+        }
+
+        override fun post(url: String, body: String): JSONObject? {
+            return try {
+                delegate.post(url, body)
+            } catch (e: Exception) {
+                logger.info("PostHog post failed (non-critical): ${e.javaClass.simpleName}")
+                null
+            }
+        }
+    }
+
     private fun initializeSentry() {
         try {
             Sentry.init { options ->
                 options.dsn = SENTRY_DSN
-                options.release = getPluginVersion()
+                options.release = pluginVersion
                 options.environment = "production"
                 options.tracesSampleRate = 0.3
                 options.setTag("ide", "intellij")
@@ -116,6 +212,19 @@ class TelemetryService : Disposable {
         }
     }
 
+    private fun isOssTelemetryDisabled(): Boolean {
+        return try {
+            val homeDir = System.getProperty("user.home")
+            val configFile = File(homeDir, ".git-ai/config.json")
+            if (!configFile.exists()) return false
+            val content = configFile.readText()
+            val json = JsonParser.parseString(content).asJsonObject
+            json.get("telemetry_oss")?.asString == "off"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun readDistinctId(): String? {
         return try {
             val homeDir = System.getProperty("user.home")
@@ -131,15 +240,14 @@ class TelemetryService : Disposable {
         }
     }
 
-    private fun getPluginVersion(): String {
-        return try {
-            // Use reflection to call PluginId.getId() to avoid Kotlin companion object
-            // bytecode that doesn't exist in older IntelliJ versions (pre-252)
-            val pluginIdClass = Class.forName("com.intellij.openapi.extensions.PluginId")
-            val getIdMethod = pluginIdClass.getMethod("getId", String::class.java)
-            val pluginId = getIdMethod.invoke(null, PLUGIN_ID) as? PluginId
-            pluginId?.let { PluginManagerCore.getPlugin(it)?.version } ?: "unknown"
-        } catch (e: Exception) {
+    private val pluginVersion: String by lazy {
+        try {
+            val xml = this::class.java.classLoader
+                .getResourceAsStream("META-INF/plugin.xml")
+                ?.bufferedReader()?.use { it.readText() } ?: return@lazy "unknown"
+            Regex("<version>(.+?)</version>").find(xml)
+                ?.groupValues?.get(1) ?: "unknown"
+        } catch (_: Exception) {
             "unknown"
         }
     }
@@ -149,7 +257,7 @@ class TelemetryService : Disposable {
             "ide" to "intellij",
             "ide_version" to ApplicationInfo.getInstance().fullVersion,
             "ide_build" to ApplicationInfo.getInstance().build.asString(),
-            "plugin_version" to getPluginVersion(),
+            "plugin_version" to pluginVersion,
             "os" to (System.getProperty("os.name") ?: "unknown"),
             "arch" to (System.getProperty("os.arch") ?: "unknown")
         )
@@ -159,7 +267,11 @@ class TelemetryService : Disposable {
      * Captures the plugin startup event.
      */
     fun captureStartupEvent() {
-        captureEvent("intellij_plugin_startup", getCommonProperties())
+        try {
+            captureEvent("intellij_plugin_startup", getCommonProperties())
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
@@ -178,89 +290,105 @@ class TelemetryService : Disposable {
         searchedPaths: List<String>,
         currentPath: String?
     ) {
-        val context = mutableMapOf<String, Any>(
-            "error_type" to "git_ai_not_found"
-        )
-        exitCode?.let { context["exit_code"] = it }
-        output?.let { context["output"] = it.take(500) }
-        if (searchedPaths.isNotEmpty()) {
-            context["searched_paths"] = searchedPaths.joinToString(",")
-        }
-        currentPath?.let { context["path_env"] = it.take(500) }
-
-        captureEvent("git_ai_error", getCommonProperties() + context)
-
-        val message = buildString {
-            append("git-ai CLI not found")
-            exitCode?.let { append(" (exit code: $it)") }
+        try {
+            val context = mutableMapOf<String, Any>(
+                "error_type" to "git_ai_not_found"
+            )
+            exitCode?.let { context["exit_code"] = it }
+            output?.let { context["output"] = it.take(500) }
             if (searchedPaths.isNotEmpty()) {
-                append(". Searched: ${searchedPaths.joinToString(", ")}")
+                context["searched_paths"] = searchedPaths.joinToString(",")
             }
+            currentPath?.let { context["path_env"] = it.take(500) }
+
+            captureEvent("git_ai_error", getCommonProperties() + context)
+
+            val message = buildString {
+                append("git-ai CLI not found")
+                exitCode?.let { append(" (exit code: $it)") }
+                if (searchedPaths.isNotEmpty()) {
+                    append(". Searched: ${searchedPaths.joinToString(", ")}")
+                }
+            }
+            captureSentryMessage(message, SentryLevel.WARNING, context)
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
         }
-        captureSentryMessage(message, SentryLevel.WARNING, context)
     }
 
     /**
      * Reports a version mismatch where git-ai is below minimum required version.
      */
     fun reportVersionMismatch(foundVersion: String, requiredVersion: String) {
-        val context = mapOf(
-            "error_type" to "version_mismatch",
-            "found_version" to foundVersion,
-            "required_version" to requiredVersion
-        )
-        captureEvent("git_ai_error", getCommonProperties() + context)
-        captureSentryMessage(
-            "git-ai version mismatch: found $foundVersion, required $requiredVersion",
-            SentryLevel.WARNING,
-            context
-        )
+        try {
+            val context = mapOf(
+                "error_type" to "version_mismatch",
+                "found_version" to foundVersion,
+                "required_version" to requiredVersion
+            )
+            captureEvent("git_ai_error", getCommonProperties() + context)
+            captureSentryMessage(
+                "git-ai version mismatch: found $foundVersion, required $requiredVersion",
+                SentryLevel.WARNING,
+                context
+            )
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
      * Reports a checkpoint failure.
      */
     fun reportCheckpointFailure(exitCode: Int, output: String) {
-        val context = mapOf(
-            "error_type" to "checkpoint_failure",
-            "exit_code" to exitCode.toString(),
-            "output" to output.take(500) // Limit output size
-        )
-        captureEvent("git_ai_error", getCommonProperties() + context)
-        captureSentryMessage(
-            "git-ai checkpoint failed with exit code $exitCode",
-            SentryLevel.ERROR,
-            context
-        )
+        try {
+            val context = mapOf(
+                "error_type" to "checkpoint_failure",
+                "exit_code" to exitCode.toString(),
+                "output" to output.take(500) // Limit output size
+            )
+            captureEvent("git_ai_error", getCommonProperties() + context)
+            captureSentryMessage(
+                "git-ai checkpoint failed with exit code $exitCode",
+                SentryLevel.ERROR,
+                context
+            )
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
      * Reports a checkpoint timeout (exceeded 30s).
      */
     fun reportCheckpointTimeout() {
-        val context = mapOf("error_type" to "checkpoint_timeout")
-        captureEvent("git_ai_error", getCommonProperties() + context)
-        captureSentryMessage("git-ai checkpoint timed out after 30 seconds", SentryLevel.ERROR, context)
+        try {
+            val context = mapOf("error_type" to "checkpoint_timeout")
+            captureEvent("git_ai_error", getCommonProperties() + context)
+            captureSentryMessage("git-ai checkpoint timed out after 30 seconds", SentryLevel.ERROR, context)
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
      * Captures a general error/exception.
      */
     fun captureError(throwable: Throwable, context: Map<String, String> = emptyMap()) {
-        val eventContext = mapOf("error_type" to "exception") + context
-        captureEvent("git_ai_error", getCommonProperties() + eventContext)
+        try {
+            val eventContext = mapOf("error_type" to "exception") + context
+            captureEvent("git_ai_error", getCommonProperties() + eventContext)
 
-        if (sentryInitialized) {
-            try {
+            if (sentryInitialized) {
                 Sentry.captureException(throwable) { scope ->
                     scope.setTag(PLUGIN_EVENT_TAG, "true")
                     context.forEach { (key, value) ->
                         scope.setExtra(key, value)
                     }
                 }
-            } catch (e: Exception) {
-                logger.warn("Failed to capture exception in Sentry: ${e.message}")
             }
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
         }
     }
 
@@ -298,18 +426,16 @@ class TelemetryService : Disposable {
     override fun dispose() {
         try {
             posthog?.shutdown()
-            logger.info("PostHog shut down")
-        } catch (e: Exception) {
-            logger.warn("Error shutting down PostHog: ${e.message}")
+        } catch (_: Throwable) {
+            // Silently ignore – shutdown errors are non-critical
         }
 
         try {
             if (sentryInitialized) {
                 Sentry.close()
-                logger.info("Sentry closed")
             }
-        } catch (e: Exception) {
-            logger.warn("Error closing Sentry: ${e.message}")
+        } catch (_: Throwable) {
+            // Silently ignore – shutdown errors are non-critical
         }
     }
 }

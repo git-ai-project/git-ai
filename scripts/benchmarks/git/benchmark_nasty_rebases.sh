@@ -149,6 +149,139 @@ strip_ansi_file() {
   perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$src" > "$dst"
 }
 
+# Extract data.latest_seq from a `daemon status` JSON blob passed as $1; prints
+# the integer, or "" if the blob is missing/unparseable. The JSON is passed as
+# an argv parameter (not piped) so it does not collide with the heredoc that
+# python reads as its program on stdin.
+parse_latest_seq() {
+  python3 - "$1" <<'PY'
+import sys, json
+try:
+    data = (json.loads(sys.argv[1]).get("data") or {})
+    print(int(data.get("latest_seq") or 0))
+except Exception:
+    print("")
+PY
+}
+
+# Current applied-command counter for this repo's daemon family, or empty on
+# error. The daemon applies attribution asynchronously; latest_seq advances once
+# per applied command, so it is the signal we use to detect quiescence.
+# Robust under `set -euo pipefail`: a failing `daemon status` is swallowed so the
+# function always exits 0 and prints "" (callers treat empty as "unavailable").
+daemon_latest_seq() {
+  local out
+  out="$(GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon status --repo "$REPO_DIR" 2>/dev/null || true)"
+  parse_latest_seq "$out"
+}
+
+# Block until the daemon has finished applying side effects for this repo.
+#
+# The daemon processes attribution asynchronously after the foreground git
+# command returns, so a real timing/validation pass MUST wait for it to go
+# quiescent. We poll daemon status and watch latest_seq: once it has advanced
+# past the supplied baseline and then held steady across several polls, every
+# queued command -- and its synchronous refs/notes/ai write -- has been applied.
+#
+# Arg 1 (optional): baseline seq that latest_seq must exceed before we accept
+# stability. Omit (or pass empty) to just wait for stability without requiring
+# advancement -- used to drain leftover setup/checkout work before timing.
+#
+# This is the only sync primitive available on BOTH binaries under test: the
+# removed `daemon barrier` subcommand and the `sync.family` control method do
+# not exist on the main-branch daemon, but `daemon status` does.
+DAEMON_QUIESCE_TIMEOUT_S=300
+DAEMON_QUIESCE_STABLE_POLLS=8
+DAEMON_QUIESCE_POLL_S=0.05
+wait_for_daemon_quiescence() {
+  local require_past="${1:-}"
+  local last_seq=-1
+  local stable=0
+  local elapsed_ms=0
+  local timeout_ms=$(( DAEMON_QUIESCE_TIMEOUT_S * 1000 ))
+  local poll_ms=50
+  while (( elapsed_ms < timeout_ms )); do
+    local seq
+    seq="$(daemon_latest_seq)"
+    if [[ -z "$seq" ]]; then
+      echo "warning: daemon status unavailable while waiting for quiescence" >&2
+      return 1
+    fi
+    if [[ "$seq" == "$last_seq" ]]; then
+      stable=$(( stable + 1 ))
+      local advanced=1
+      if [[ -n "$require_past" ]] && (( seq <= require_past )); then
+        advanced=0
+      fi
+      if (( advanced == 1 )) && (( stable >= DAEMON_QUIESCE_STABLE_POLLS )); then
+        return 0
+      fi
+    else
+      stable=0
+      last_seq="$seq"
+    fi
+    sleep "$DAEMON_QUIESCE_POLL_S"
+    elapsed_ms=$(( elapsed_ms + poll_ms ))
+  done
+  echo "warning: daemon did not go quiescent within ${DAEMON_QUIESCE_TIMEOUT_S}s (latest_seq=$last_seq, require_past=${require_past:-none})" >&2
+  return 1
+}
+
+# Validate that the daemon produced correct AI authorship for a rewritten branch.
+# Picks the oldest rewritten non-merge commit (an AI feature/side commit) and
+# asserts (1) it carries a refs/notes/ai note (daemon ran to completion) and
+# (2) it reports AI-attributed additions (the AI provenance survived the rewrite
+# rather than being dropped to untracked). Sets VALIDATION_FAILED=1 on failure
+# instead of exiting, so the full scenario report is still produced; the script
+# exits non-zero at the end.
+VALIDATION_FAILED=0
+validate_scenario_attribution() {
+  local scenario="$1"
+  local branch="$2"
+  local branch_tip="$3"
+
+  # Validate on the oldest rewritten NON-MERGE commit -- an AI feature/side
+  # commit in every scenario (all generated commits run an AI checkpoint). We
+  # deliberately do NOT require a note on the branch tip: in the rebase-merges
+  # scenario the tip is a merge commit, which introduces no added content and so
+  # legitimately carries no authorship note. The non-merge AI commits are where
+  # attribution must land.
+  local sample rev_list_out
+  rev_list_out="$(g rev-list --reverse --no-merges "bench-main..${branch}" 2>/dev/null || true)"
+  sample="$(printf '%s\n' "$rev_list_out" | head -n 1)"
+  if [[ -z "$sample" ]]; then
+    echo "VALIDATION FAIL [$scenario]: no rewritten non-merge commits found in bench-main..${branch}" >&2
+    VALIDATION_FAILED=1
+    return
+  fi
+
+  if ! g notes --ref=ai show "$sample" >/dev/null 2>&1; then
+    echo "VALIDATION FAIL [$scenario]: rewritten AI commit $sample has no refs/notes/ai note after daemon sync" >&2
+    VALIDATION_FAILED=1
+    return
+  fi
+
+  # git-ai has no `-C` flag; it resolves the repo from the working directory.
+  # JSON is passed via argv (not piped) so it does not collide with the python
+  # heredoc on stdin.
+  local ai_additions stats_out
+  stats_out="$( ( cd "$REPO_DIR" && GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" stats "$sample" --json 2>/dev/null ) || true )"
+  ai_additions="$(python3 - "$stats_out" <<'PY'
+import sys, json
+try:
+    print(int(json.loads(sys.argv[1]).get("ai_additions") or 0))
+except Exception:
+    print(0)
+PY
+)"
+  if [[ -z "$ai_additions" ]] || (( ai_additions <= 0 )); then
+    echo "VALIDATION FAIL [$scenario]: rewritten AI commit ${sample} reports ai_additions=${ai_additions:-0} (expected > 0)" >&2
+    VALIDATION_FAILED=1
+    return
+  fi
+  echo "validation: [$scenario] tip=${branch_tip:0:12} sample AI commit ${sample:0:12} note present; ai_additions=${ai_additions}"
+}
+
 g() {
   GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_BIN" -C "$REPO_DIR" "$@"
 }
@@ -213,6 +346,15 @@ run_rebase_scenario() {
   ensure_clean_rebase_state
   g checkout "$branch" >/dev/null
 
+  # In daemon mode, drain any leftover work from the checkout/setup above so the
+  # baseline below reflects a quiescent daemon. Then capture latest_seq as the
+  # baseline the post-rebase wait must advance past.
+  local baseline_seq=""
+  if [[ "$HOOK_MODE" == "daemon" ]]; then
+    wait_for_daemon_quiescence "" || true
+    baseline_seq="$(daemon_latest_seq)"
+  fi
+
   local start_ns
   local end_ns
   local duration_s
@@ -221,6 +363,13 @@ run_rebase_scenario() {
     status="ok"
   else
     status="fail"
+  fi
+  # The daemon attributes asynchronously after the foreground command returns;
+  # include the quiescence wait in the timed window so the duration reflects the
+  # real end-to-end cost (foreground passthrough + daemon attribution), not just
+  # passthrough -- which is near-identical between two daemon builds.
+  if [[ "$HOOK_MODE" == "daemon" && "$status" == "ok" ]]; then
+    wait_for_daemon_quiescence "$baseline_seq" || true
   fi
   end_ns="$(now_ns)"
   duration_s="$(seconds_from_ns_delta "$start_ns" "$end_ns")"
@@ -237,6 +386,10 @@ run_rebase_scenario() {
   local note_state
   local branch_tip
 
+  # NOTE: in daemon mode these markers are emitted to the daemon log, not the
+  # foreground command output, so mapping/processing/saved_count are wrapper-mode
+  # diagnostics only. Correctness in daemon mode is enforced by
+  # validate_scenario_attribution below (note presence + AI additions).
   mapping_line="$(grep -m1 'Commit mapping:' "$clean_log" || true)"
   processing_line="$(grep -m1 'Processing rebase:' "$clean_log" || true)"
   saved_count="$(grep -c 'Saved authorship log for commit' "$clean_log" || true)"
@@ -246,6 +399,11 @@ run_rebase_scenario() {
     note_state="yes"
   else
     note_state="no"
+  fi
+
+  # Validate the daemon actually produced correct AI authorship for this rewrite.
+  if [[ "$HOOK_MODE" == "daemon" && "$status" == "ok" ]]; then
+    validate_scenario_attribution "$scenario" "$branch" "$branch_tip"
   fi
 
   printf "%s\t%s\t%s\t%s\t%s\n" \
@@ -432,3 +590,9 @@ echo "Results TSV: $RESULTS_TSV"
 echo "Logs dir: $LOG_DIR"
 
 column -t -s $'\t' "$RESULTS_TSV" || cat "$RESULTS_TSV"
+
+if (( VALIDATION_FAILED != 0 )); then
+  echo
+  echo "ERROR: daemon attribution validation failed for one or more scenarios (see VALIDATION FAIL lines above)" >&2
+  exit 1
+fi

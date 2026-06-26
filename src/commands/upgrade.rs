@@ -52,6 +52,7 @@ const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
 #[cfg(windows)]
 const GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV: &str = "GIT_AI_RESTART_DAEMON_AFTER_INSTALL";
+const GIT_AI_DAEMON_UPGRADE_ENV: &str = "GIT_AI_DAEMON_UPGRADE";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
 
@@ -568,6 +569,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
 
             if silent {
                 cmd.env(GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, "1");
+                cmd.env(GIT_AI_DAEMON_UPGRADE_ENV, "1");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }
 
@@ -626,6 +628,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         cmd.arg(&script_path_str).env(GIT_AI_RELEASE_ENV, tag);
 
         if silent {
+            cmd.env(GIT_AI_DAEMON_UPGRADE_ENV, "1");
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
 

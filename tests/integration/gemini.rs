@@ -3,9 +3,9 @@ use crate::repos::test_repo::TestRepo;
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::GeminiAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::GeminiAgent;
+use git_ai::streams::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
 
@@ -130,7 +130,7 @@ fn test_gemini_preset_ai_checkpoint() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            assert!(e.transcript_source.is_some(), "Should have transcript");
+            assert!(e.stream_source.is_some(), "Should have transcript");
             assert!(!e.file_paths.is_empty(), "Should have edited_filepaths");
         }
         _ => panic!("Expected PostFileEdit for AfterTool"),

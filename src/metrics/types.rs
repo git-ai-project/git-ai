@@ -21,6 +21,7 @@ pub enum MetricEventId {
     InstallHooks = 3,
     Checkpoint = 4,
     SessionEvent = 5,
+    OtelTrace = 6,
 }
 
 /// Trait for event-specific values.
@@ -70,6 +71,26 @@ impl MetricEvent {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as u32,
+            event_id: V::event_id() as u16,
+            values: values.into_sparse(),
+            attrs,
+        }
+    }
+
+    /// Create a new metric event by consuming the values, with an optional explicit timestamp.
+    /// Falls back to SystemTime::now() when event_ts is None.
+    pub fn from_values_with_timestamp<V: EventValues>(
+        values: V,
+        attrs: SparseArray,
+        event_ts: Option<u32>,
+    ) -> Self {
+        Self {
+            timestamp: event_ts.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as u32
+            }),
             event_id: V::event_id() as u16,
             values: values.into_sparse(),
             attrs,

@@ -31,7 +31,7 @@ fn test_virtual_attributions() {
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     // Create VirtualAttributions using the temp repo
-    let virtual_attributions = smol::block_on(async {
+    let virtual_attributions = git_ai::tokio_runtime::block_on(async {
         VirtualAttributions::new_for_base_commit(
             gitai_repo.clone(),
             commit_sha.clone(),

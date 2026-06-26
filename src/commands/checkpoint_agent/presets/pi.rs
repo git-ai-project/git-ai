@@ -1,6 +1,6 @@
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -30,6 +30,10 @@ struct PiHookInput {
     dirty_files: Option<HashMap<String, String>>,
     #[serde(default)]
     tool_use_id: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    cmd: Option<String>,
 }
 
 #[derive(Debug)]
@@ -93,6 +97,8 @@ impl AgentPreset for PiPreset {
             edited_filepaths,
             dirty_files,
             tool_use_id,
+            command,
+            cmd,
         } = hook_input;
 
         let hook_event = PiHookEvent::parse(&hook_event_name)?;
@@ -132,6 +138,10 @@ impl AgentPreset for PiPreset {
         }
 
         let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
+        let bash_command = command
+            .or(cmd)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let context = PresetContext {
             agent_id: AgentId {
@@ -145,11 +155,11 @@ impl AgentPreset for PiPreset {
             metadata,
         };
 
-        let transcript_source = {
+        let stream_source = {
             let path = PathBuf::from(&session_path);
-            Some(TranscriptSource {
+            Some(StreamSource {
                 path,
-                format: TranscriptFormat::PiJsonl,
+                format: StreamFormat::PiJsonl,
                 session_id: generate_session_id(&context.external_session_id, "pi"),
                 external_session_id: context.external_session_id.clone(),
                 external_parent_session_id: None,
@@ -183,18 +193,20 @@ impl AgentPreset for PiPreset {
                     context,
                     file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
                     dirty_files: dirty,
-                    transcript_source,
+                    stream_source,
                     tool_use_id,
                 })
             }
             PiHookEvent::BeforeCommand => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             PiHookEvent::AfterCommand => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                transcript_source,
+                command: bash_command,
+                stream_source,
             }),
         };
 
@@ -278,9 +290,9 @@ mod tests {
                     vec![PathBuf::from("/tmp/project/src/main.rs")]
                 );
                 assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource {
-                        format: TranscriptFormat::PiJsonl,
+                    e.stream_source,
+                    Some(StreamSource {
+                        format: StreamFormat::PiJsonl,
                         ..
                     })
                 ));
@@ -332,9 +344,9 @@ mod tests {
                 assert_eq!(e.context.agent_id.tool, "pi");
                 assert_eq!(e.tool_use_id, "tu-def456");
                 assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource {
-                        format: TranscriptFormat::PiJsonl,
+                    e.stream_source,
+                    Some(StreamSource {
+                        format: StreamFormat::PiJsonl,
                         ..
                     })
                 ));

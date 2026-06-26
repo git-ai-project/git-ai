@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -42,9 +42,9 @@ impl AgentPreset for ContinueCliPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
-        let transcript_source = Some(TranscriptSource {
+        let stream_source = Some(StreamSource {
             path: PathBuf::from(transcript_path),
-            format: TranscriptFormat::ContinueJson,
+            format: StreamFormat::ContinueJson,
             session_id: generate_session_id(&session_id, "continue-cli"),
             external_session_id: session_id.clone(),
             external_parent_session_id: None,
@@ -52,10 +52,12 @@ impl AgentPreset for ContinueCliPreset {
 
         let is_pre = hook_event == Some("PreToolUse");
 
+        let bash_command = parse::bash_command_from_hook_input(&data);
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
+                command: bash_command,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -66,13 +68,14 @@ impl AgentPreset for ContinueCliPreset {
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
-                transcript_source,
+                command: bash_command,
+                stream_source,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
-                transcript_source,
+                stream_source,
                 tool_use_id: Some(tool_use_id.to_string()),
             }),
         };
@@ -128,9 +131,9 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "continue-cli");
-                assert!(e.transcript_source.is_some());
-                if let Some(ts) = &e.transcript_source {
-                    assert_eq!(ts.format, TranscriptFormat::ContinueJson);
+                assert!(e.stream_source.is_some());
+                if let Some(ts) = &e.stream_source {
+                    assert_eq!(ts.format, StreamFormat::ContinueJson);
                     assert_eq!(
                         ts.session_id,
                         generate_session_id("cont-sess-1", "continue-cli")

@@ -3,13 +3,8 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, ResetKind, SemanticEvent,
 };
 use crate::error::GitAiError;
-use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
-use crate::git::repo_state::{
-    is_valid_git_oid, resolve_reflog_old_oid_for_ref_new_oid_in_worktree,
-    resolve_worktree_head_reflog_old_oid_for_new_head,
-};
-#[cfg(test)]
-use std::fs;
+use crate::git::cli_parser::explicit_rebase_branch_arg;
+use crate::git::repo_state::is_valid_git_oid;
 
 #[derive(Default)]
 pub struct HistoryAnalyzer;
@@ -25,46 +20,17 @@ impl CommandAnalyzer for HistoryAnalyzer {
 
         let mut events = Vec::new();
         match name {
-            "commit" => {
+            "commit" | "revert" => {
                 let amend = args.iter().any(|arg| arg == "--amend");
-                let post_head =
-                    non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
-                if let Some((mut old_head, new_head)) = head_change(cmd, state.refs) {
-                    if amend
-                        && (!is_valid_git_oid(&old_head) || is_zero_oid(&old_head))
-                        && let Some(pre_head) =
-                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
-                        && is_valid_git_oid(&pre_head)
-                        && !is_zero_oid(&pre_head)
-                        && pre_head != new_head
-                    {
-                        old_head = pre_head;
-                    }
-                    if amend {
+                if amend {
+                    if let Some((old_head, new_head)) = amend_head_change(cmd) {
                         events.push(SemanticEvent::CommitAmended { old_head, new_head });
-                    } else {
-                        events.push(SemanticEvent::CommitCreated {
-                            base: sanitize_base(Some(old_head), &new_head),
-                            new_head,
-                        });
                     }
-                } else if cmd.exit_code == 0
-                    && let Some(new_head) = post_head
-                {
-                    if amend {
-                        let old_head = commit_base_hint(cmd, state.refs, &new_head);
-                        if let Some(old_head) = old_head {
-                            events.push(SemanticEvent::CommitAmended { old_head, new_head });
-                        } else {
-                            events.push(SemanticEvent::CommitCreated {
-                                base: None,
-                                new_head,
-                            });
-                        }
-                    } else {
-                        let base = commit_base_hint(cmd, state.refs, &new_head);
-                        events.push(SemanticEvent::CommitCreated { base, new_head });
-                    }
+                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
+                    events.push(SemanticEvent::CommitCreated {
+                        base: sanitize_base(Some(old_head), &new_head),
+                        new_head,
+                    });
                 }
             }
             "reset" => {
@@ -79,11 +45,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
             "rebase" => {
                 if args.iter().any(|arg| arg == "--abort") {
                     events.push(SemanticEvent::RebaseAbort {
-                        head: cmd
-                            .post_repo
-                            .as_ref()
-                            .and_then(|repo| repo.head.clone())
-                            .unwrap_or_default(),
+                        head: current_head_from_ref_data(cmd, state.refs).unwrap_or_default(),
                     });
                 } else if let Some((old_head, new_head)) = rebase_change(cmd, state.refs) {
                     events.push(SemanticEvent::RebaseComplete {
@@ -96,34 +58,29 @@ impl CommandAnalyzer for HistoryAnalyzer {
             "cherry-pick" => {
                 if args.iter().any(|arg| arg == "--abort") {
                     events.push(SemanticEvent::CherryPickAbort {
-                        head: cmd
-                            .post_repo
-                            .as_ref()
-                            .and_then(|repo| repo.head.clone())
-                            .unwrap_or_default(),
+                        head: current_head_from_ref_data(cmd, state.refs).unwrap_or_default(),
+                    });
+                } else if args.iter().any(|arg| arg == "--no-commit" || arg == "-n") {
+                    events.push(SemanticEvent::CherryPickNoCommit {
+                        source_commits: cmd.cherry_pick_source_oids.clone(),
+                        head: current_head_from_ref_data(cmd, state.refs).unwrap_or_default(),
                     });
                 } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::CherryPickComplete {
                         original_head: old_head,
                         new_head,
+                        source_commits: cmd.cherry_pick_source_oids.clone(),
+                        new_commits: cherry_pick_new_commits(cmd),
                     });
                 }
             }
             "merge" => {
                 if args.iter().any(|arg| arg == "--squash") {
-                    let source_ref = merge_source_ref(&args).ok_or_else(|| {
-                        GitAiError::Generic("merge --squash missing source ref".to_string())
-                    })?;
-                    events.push(SemanticEvent::MergeSquash {
-                        base_branch: cmd.pre_repo.as_ref().and_then(|repo| repo.branch.clone()),
-                        base_head: cmd
-                            .pre_repo
-                            .as_ref()
-                            .and_then(|repo| repo.head.clone())
-                            .unwrap_or_default(),
-                        source_ref,
-                        source_head: cmd.merge_squash_source_head.clone().unwrap_or_default(),
-                    });
+                    if let Some(source_head) = squash_source_head(&args, state.refs)
+                        && let Some(onto) = current_head_from_ref_data(cmd, state.refs)
+                    {
+                        events.push(SemanticEvent::MergeSquash { source_head, onto });
+                    }
                 } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::RefUpdated {
                         reference: "HEAD".to_string(),
@@ -133,13 +90,14 @@ impl CommandAnalyzer for HistoryAnalyzer {
                 }
             }
             "update-ref" => {
-                if let Some((ref_name, old_oid, new_oid)) =
-                    parse_update_ref_heads(cmd, &args, state.refs)
-                {
+                for change in cmd.ref_changes.iter().filter(|change| {
+                    (change.reference == "HEAD" || change.reference.starts_with("refs/heads/"))
+                        && change.old.trim() != change.new.trim()
+                }) {
                     events.push(SemanticEvent::RefUpdated {
-                        reference: ref_name,
-                        old: old_oid,
-                        new: new_oid,
+                        reference: change.reference.clone(),
+                        old: change.old.clone(),
+                        new: change.new.clone(),
                     });
                 }
             }
@@ -162,24 +120,6 @@ impl CommandAnalyzer for HistoryAnalyzer {
     }
 }
 
-fn merge_source_ref(args: &[String]) -> Option<String> {
-    let mut invocation = vec!["merge".to_string()];
-    invocation.extend(args.iter().cloned());
-    parse_git_cli_args(&invocation).pos_command(0)
-}
-
-fn non_empty(value: String) -> Option<String> {
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn non_empty_opt(value: Option<String>) -> Option<String> {
-    value.and_then(non_empty)
-}
-
 fn is_zero_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.chars().all(|c| c == '0')
 }
@@ -188,26 +128,135 @@ fn sanitize_base(base: Option<String>, new_head: &str) -> Option<String> {
     base.filter(|candidate| candidate != new_head && !is_zero_oid(candidate))
 }
 
-fn head_change(
-    cmd: &NormalizedCommand,
+fn valid_non_zero_oid(value: &str) -> bool {
+    is_valid_git_oid(value) && !is_zero_oid(value)
+}
+
+fn squash_source_head(
+    args: &[String],
     refs: &std::collections::HashMap<String, String>,
-) -> Option<(String, String)> {
-    if let Some(branch_ref) = branch_ref_hint(cmd) {
-        let branch_specific_span = cmd
-            .ref_changes
-            .iter()
-            .filter(|change| {
-                change.reference == branch_ref
-                    && !change.new.trim().is_empty()
-                    && change.old.trim() != change.new.trim()
-            })
-            .collect::<Vec<_>>();
-        if let Some((old_head, new_head)) = change_span(&branch_specific_span) {
-            return Some((old_head, new_head));
+) -> Option<String> {
+    let source = merge_source_args(args).into_iter().next()?;
+    resolve_revision_from_ref_state(source, refs)
+}
+
+fn merge_source_args(args: &[String]) -> Vec<&str> {
+    let mut sources = Vec::new();
+    let mut iter = args.iter().map(String::as_str).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            sources.extend(iter.filter(|value| !value.is_empty()));
+            break;
+        }
+        if arg == "-m"
+            || arg == "--message"
+            || arg == "-s"
+            || arg == "--strategy"
+            || arg == "-X"
+            || arg == "--strategy-option"
+        {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--message=")
+            || arg.starts_with("--strategy=")
+            || arg.starts_with("--strategy-option=")
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-m")
+            || arg.starts_with("-s")
+            || arg.starts_with("-X")
+            || arg.starts_with("-S")
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        sources.push(arg);
+    }
+    sources
+}
+
+fn resolve_revision_from_ref_state(
+    revision: &str,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if valid_non_zero_oid(revision) {
+        return Some(revision.to_string());
+    }
+    if revision == "HEAD" {
+        return refs
+            .get("HEAD")
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned();
+    }
+    if revision.starts_with("refs/") {
+        return refs
+            .get(revision)
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned();
+    }
+
+    for reference in [
+        format!("refs/heads/{}", revision),
+        format!("refs/remotes/{}", revision),
+        format!("refs/tags/{}", revision),
+    ] {
+        if let Some(oid) = refs.get(&reference)
+            && valid_non_zero_oid(oid)
+        {
+            return Some(oid.clone());
         }
     }
 
-    let preferred_span = cmd
+    None
+}
+
+fn valid_ref_transition(change: &crate::daemon::domain::RefChange) -> Option<(String, String)> {
+    let old = change.old.trim();
+    let new = change.new.trim();
+    if old == new || !valid_non_zero_oid(old) || !valid_non_zero_oid(new) {
+        return None;
+    }
+    Some((old.to_string(), new.to_string()))
+}
+
+fn first_ref_transition_for(cmd: &NormalizedCommand, reference: &str) -> Option<(String, String)> {
+    cmd.ref_changes
+        .iter()
+        .filter(|change| change.reference == reference)
+        .find_map(valid_ref_transition)
+}
+
+fn current_head_from_ref_data(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    cmd.ref_changes
+        .iter()
+        .rev()
+        .find(|change| change.reference == "HEAD")
+        .map(|change| change.new.clone())
+        .or_else(|| refs.get("HEAD").cloned())
+        .filter(|head| valid_non_zero_oid(head))
+}
+
+fn amend_head_change(cmd: &NormalizedCommand) -> Option<(String, String)> {
+    // Amend is defined by the HEAD transition made by `git commit --amend`.
+    // Prefer that exact transition over branch hints: branch context is not
+    // part of stock trace2 and can be stale if it was read after the command.
+    if let Some(change) = first_ref_transition_for(cmd, "HEAD") {
+        return Some(change);
+    }
+
+    single_branch_ref_change(cmd)
+}
+
+fn head_change(
+    cmd: &NormalizedCommand,
+    _refs: &std::collections::HashMap<String, String>,
+) -> Option<(String, String)> {
+    let head_span = cmd
         .ref_changes
         .iter()
         .filter(|change| {
@@ -216,11 +265,15 @@ fn head_change(
                 && change.old.trim() != change.new.trim()
         })
         .collect::<Vec<_>>();
-    if let Some((old_head, new_head)) = change_span(&preferred_span) {
+    if let Some((old_head, new_head)) = change_span(&head_span) {
         return Some((old_head, new_head));
     }
 
-    let branch_span = cmd
+    single_branch_ref_change(cmd)
+}
+
+fn single_branch_ref_change(cmd: &NormalizedCommand) -> Option<(String, String)> {
+    let mut branch_refs = cmd
         .ref_changes
         .iter()
         .filter(|change| {
@@ -229,128 +282,28 @@ fn head_change(
                 && change.old.trim() != change.new.trim()
         })
         .collect::<Vec<_>>();
-    if let Some((old_head, new_head)) = change_span(&branch_span) {
-        return Some((old_head, new_head));
+    if branch_refs.is_empty() {
+        return None;
     }
-
-    let any_span = cmd
-        .ref_changes
+    branch_refs.sort_by(|a, b| a.reference.cmp(&b.reference));
+    branch_refs.dedup_by(|a, b| a.reference == b.reference && a.old == b.old && a.new == b.new);
+    let first_ref = branch_refs.first()?.reference.as_str();
+    if branch_refs
         .iter()
-        .filter(|change| !change.new.trim().is_empty() && change.old.trim() != change.new.trim())
-        .collect::<Vec<_>>();
-    if let Some((old_head, new_head)) = change_span(&any_span) {
-        return Some((old_head, new_head));
-    }
-
-    let new_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))?;
-
-    if let Some(orig_head) = cmd
-        .ref_changes
-        .iter()
-        .find(|change| change.reference == "ORIG_HEAD")
-        .and_then(|change| non_empty(change.new.clone()))
-        && orig_head != new_head
+        .any(|change| change.reference.as_str() != first_ref)
     {
-        return Some((orig_head, new_head));
-    }
-
-    if let Some(old_head) = old_head_from_worktree_head_reflog(cmd, &new_head) {
-        return Some((old_head, new_head));
-    }
-
-    let old_head = non_empty_opt(
-        cmd.pre_repo
-            .as_ref()
-            .and_then(|repo| repo.head.clone())
-            .or_else(|| {
-                cmd.pre_repo
-                    .as_ref()
-                    .and_then(|repo| repo.branch.as_deref())
-                    .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-            })
-            .or_else(|| {
-                cmd.post_repo
-                    .as_ref()
-                    .and_then(|repo| repo.branch.as_deref())
-                    .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-            }),
-    );
-    let old_head = old_head?;
-
-    if old_head == new_head {
-        if let Some(alternate_old_head) = old_head_from_refs(cmd, refs)
-            && alternate_old_head != new_head
-        {
-            return Some((alternate_old_head, new_head));
-        }
         return None;
     }
-    Some((old_head, new_head))
+    change_span(&branch_refs)
 }
 
-fn branch_ref_hint(cmd: &NormalizedCommand) -> Option<String> {
-    let branch = cmd
-        .pre_repo
-        .as_ref()
-        .and_then(|repo| repo.branch.clone())
-        .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.branch.clone()))?;
-    let branch = branch.trim();
-    if branch.is_empty() {
-        return None;
-    }
-    if branch.starts_with("refs/") {
-        Some(branch.to_string())
-    } else {
-        Some(format!("refs/heads/{}", branch))
-    }
-}
-
-fn old_head_from_branch_ref_changes(cmd: &NormalizedCommand) -> Option<String> {
-    let branch_ref = branch_ref_hint(cmd)?;
+fn cherry_pick_new_commits(cmd: &NormalizedCommand) -> Vec<String> {
     cmd.ref_changes
         .iter()
-        .find(|change| change.reference == branch_ref)
-        .and_then(|change| non_empty(change.old.clone()))
-        .filter(|old| !is_zero_oid(old))
-}
-
-fn old_head_from_refs(
-    cmd: &NormalizedCommand,
-    refs: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    non_empty_opt(
-        cmd.pre_repo
-            .as_ref()
-            .and_then(|repo| repo.branch.as_deref())
-            .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-            .or_else(|| {
-                cmd.post_repo
-                    .as_ref()
-                    .and_then(|repo| repo.branch.as_deref())
-                    .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-            }),
-    )
-}
-
-fn commit_base_hint(
-    cmd: &NormalizedCommand,
-    refs: &std::collections::HashMap<String, String>,
-    new_head: &str,
-) -> Option<String> {
-    sanitize_base(
-        old_head_from_branch_ref_changes(cmd)
-            .or_else(|| old_head_from_worktree_head_reflog(cmd, new_head))
-            .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
-            .or_else(|| old_head_from_refs(cmd, refs)),
-        new_head,
-    )
-}
-
-fn old_head_from_worktree_head_reflog(cmd: &NormalizedCommand, new_head: &str) -> Option<String> {
-    let worktree = cmd.worktree.as_deref()?;
-    resolve_worktree_head_reflog_old_oid_for_new_head(worktree, new_head)
-        .ok()
-        .flatten()
+        .filter(|change| change.reference == "HEAD")
+        .filter_map(valid_ref_transition)
+        .map(|(_, new)| new)
+        .collect()
 }
 
 fn rebase_change(
@@ -365,21 +318,8 @@ fn rebase_change(
         return Some((old_head, new_head));
     }
 
-    let from_changes = head_change(cmd, refs);
-    let new_head = from_changes
-        .as_ref()
-        .map(|(_, new_head)| new_head.clone())
-        .or_else(|| non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone())))?;
-
-    if let Some((old_head, new_head_from_changes)) = from_changes
-        && old_head != new_head_from_changes
-    {
-        return Some((old_head, new_head_from_changes));
-    }
-
-    non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
-        .filter(|old_head| old_head != &new_head)
-        .map(|old_head| (old_head, new_head))
+    let (old_head, new_head) = head_change(cmd, refs)?;
+    (old_head != new_head).then_some((old_head, new_head))
 }
 
 fn inferred_rebase_branch_change(cmd: &NormalizedCommand) -> Option<(String, String)> {
@@ -395,15 +335,6 @@ fn inferred_rebase_branch_change(cmd: &NormalizedCommand) -> Option<(String, Str
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         return None;
-    }
-
-    let post_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
-    if let Some(post_head) = post_head
-        && let Some(change) = candidates
-            .iter()
-            .find(|change| change.new.trim() == post_head)
-    {
-        return Some((change.old.trim().to_string(), change.new.trim().to_string()));
     }
 
     if candidates.len() == 1 {
@@ -444,78 +375,6 @@ fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String,
     Some((old_head.to_string(), new_head.to_string()))
 }
 
-/// Parse `update-ref <ref> <new_oid> [<old_oid>]` arguments, returning
-/// (ref_name, old_oid, new_oid) for branch refs only.  Falls back to
-/// `state.refs` for the old OID when the command provides only two positionals,
-/// then to the reflog of the target ref.
-fn parse_update_ref_heads(
-    cmd: &NormalizedCommand,
-    args: &[String],
-    refs: &std::collections::HashMap<String, String>,
-) -> Option<(String, String, String)> {
-    let mut positionals = Vec::new();
-    let mut i = 0usize;
-    while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "update-ref" => {
-                i += 1;
-                continue;
-            }
-            "--stdin" | "--batch-updates" | "-d" | "--delete" => return None,
-            "-m" | "--message" => {
-                i += 2;
-                continue;
-            }
-            "--create-reflog" | "--no-deref" => {
-                i += 1;
-                continue;
-            }
-            _ if arg.starts_with("--message=") => {
-                i += 1;
-                continue;
-            }
-            _ if arg.starts_with('-') => return None,
-            _ => {
-                positionals.push(arg.clone());
-                i += 1;
-            }
-        }
-    }
-
-    let (ref_name, new_oid, old_oid_arg) = match positionals.as_slice() {
-        [ref_name, new_oid] => (ref_name.clone(), new_oid.clone(), None),
-        [ref_name, new_oid, old_oid] => (ref_name.clone(), new_oid.clone(), Some(old_oid.clone())),
-        _ => return None,
-    };
-
-    if !ref_name.starts_with("refs/heads/") {
-        return None;
-    }
-
-    let old_oid = old_oid_arg
-        .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
-        .or_else(|| refs.get(&ref_name).cloned())
-        .or_else(|| {
-            // The command has already executed; read the old value from the
-            // reflog entry that recorded this update-ref.
-            let worktree = cmd.worktree.as_deref()?;
-            resolve_reflog_old_oid_for_ref_new_oid_in_worktree(worktree, &ref_name, &new_oid)
-                .or_else(|| {
-                    resolve_worktree_head_reflog_old_oid_for_new_head(worktree, &new_oid)
-                        .ok()
-                        .flatten()
-                })
-        })
-        .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))?;
-
-    if old_oid == new_oid {
-        return None;
-    }
-
-    Some((ref_name, old_oid, new_oid))
-}
-
 fn infer_reset_kind(args: &[String]) -> ResetKind {
     if args.iter().any(|arg| arg == "--soft") {
         return ResetKind::Soft;
@@ -539,7 +398,6 @@ fn infer_reset_kind(args: &[String]) -> ResetKind {
 mod tests {
     use super::*;
     use crate::daemon::domain::{CommandScope, RefChange};
-    use tempfile::tempdir;
 
     fn command(primary: &str, argv: &[&str]) -> NormalizedCommand {
         NormalizedCommand {
@@ -555,20 +413,136 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
+            reflog_start_offsets: std::collections::HashMap::new(),
             stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),
                 new: "b".to_string(),
             }],
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
+    }
+
+    fn assert_only_opaque(result: &AnalysisResult) {
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| matches!(event, SemanticEvent::OpaqueCommand)),
+            "expected only opaque events, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn update_ref_reports_cursor_ref_changes() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command(
+            "update-ref",
+            &[
+                "git",
+                "update-ref",
+                "refs/heads/main",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+        );
+        cmd.ref_changes = vec![RefChange {
+            reference: "refs/heads/main".to_string(),
+            old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        }];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::RefUpdated { reference, old, new }
+                if reference == "refs/heads/main"
+                    && old == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        )));
+    }
+
+    #[test]
+    fn update_ref_without_cursor_ref_change_is_opaque() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command(
+            "update-ref",
+            &[
+                "git",
+                "update-ref",
+                "refs/heads/main",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+        );
+        cmd.ref_changes.clear();
+        let refs = std::collections::HashMap::from([(
+            "refs/heads/main".to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )]);
+
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+
+        assert_only_opaque(&result);
+    }
+
+    #[test]
+    fn squash_merge_resolves_branch_from_ref_state() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("merge", &["git", "merge", "--squash", "feature"]);
+        cmd.ref_changes.clear();
+        let refs = std::collections::HashMap::from([
+            (
+                "HEAD".to_string(),
+                "1111111111111111111111111111111111111111".to_string(),
+            ),
+            (
+                "refs/heads/feature".to_string(),
+                "2222222222222222222222222222222222222222".to_string(),
+            ),
+        ]);
+
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::MergeSquash { source_head, onto }
+                if source_head == "2222222222222222222222222222222222222222"
+                    && onto == "1111111111111111111111111111111111111111"
+        )));
+    }
+
+    #[test]
+    fn squash_merge_with_unresolved_source_is_opaque() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("merge", &["git", "merge", "--squash", "feature"]);
+        cmd.ref_changes.clear();
+        let refs = std::collections::HashMap::from([(
+            "HEAD".to_string(),
+            "1111111111111111111111111111111111111111".to_string(),
+        )]);
+
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+
+        assert_only_opaque(&result);
     }
 
     #[test]
@@ -591,19 +565,9 @@ mod tests {
     }
 
     #[test]
-    fn amend_prefers_pre_head_over_zero_old_reflog_change() {
+    fn amend_prefers_head_transition_over_zero_old_branch_change() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command("commit", &["git", "commit", "--amend", "-m", "x"]);
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
         cmd.ref_changes = vec![
             RefChange {
                 reference: "refs/heads/main".to_string(),
@@ -640,6 +604,79 @@ mod tests {
     }
 
     #[test]
+    fn amend_prefers_head_transition_over_contaminated_branch_hint() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "--amend", "-m", "x"]);
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/child".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/parent".to_string(),
+                old: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+        ];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::CommitAmended { old_head, new_head }
+                if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new_head == "dddddddddddddddddddddddddddddddddddddddd"
+        )));
+    }
+
+    #[test]
+    fn amend_uses_first_head_transition_when_later_head_moves_are_captured() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "--amend", "-m", "x"]);
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+                new: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+            },
+        ];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::CommitAmended { old_head, new_head }
+                if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new_head == "dddddddddddddddddddddddddddddddddddddddd"
+        )));
+    }
+
+    #[test]
     fn reset_emits_reset_kind() {
         let analyzer = HistoryAnalyzer;
         let result = analyzer
@@ -660,20 +697,10 @@ mod tests {
     }
 
     #[test]
-    fn commit_uses_pre_post_head_when_reflog_delta_is_empty() {
+    fn commit_without_ref_transition_is_opaque() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
         cmd.ref_changes.clear();
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("old-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("new-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
 
         let result = analyzer
             .analyze(
@@ -684,34 +711,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            result.events.iter().any(|event| matches!(
-                event,
-                SemanticEvent::CommitCreated {
-                    base,
-                    new_head,
-                } if base.as_deref() == Some("old-head") && new_head == "new-head"
-            )),
-            "expected commit-created event from pre/post head fallback, got {:?}",
-            result.events
-        );
+        assert_only_opaque(&result);
     }
 
     #[test]
-    fn commit_fallback_prefers_pre_head_over_family_refs() {
+    fn commit_without_ref_transition_ignores_family_refs() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
         cmd.ref_changes.clear();
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("old-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("new-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
         let refs = std::collections::HashMap::from([(
             "refs/heads/main".to_string(),
             "wrong-family-head".to_string(),
@@ -721,30 +728,14 @@ mod tests {
             .analyze(&cmd, AnalysisView { refs: &refs })
             .unwrap();
 
-        assert!(
-            result.events.iter().any(|event| matches!(
-                event,
-                SemanticEvent::CommitCreated {
-                    base,
-                    new_head
-                } if base.as_deref() == Some("old-head") && new_head == "new-head"
-            )),
-            "expected commit-created event to prefer pre-head over family refs, got {:?}",
-            result.events
-        );
+        assert_only_opaque(&result);
     }
 
     #[test]
-    fn commit_emits_created_when_only_post_head_is_available() {
+    fn commit_without_ref_transition_ignores_family_head() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
         cmd.ref_changes.clear();
-        cmd.pre_repo = None;
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("new-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
         let refs = std::collections::HashMap::from([(
             "refs/heads/main".to_string(),
             "old-head".to_string(),
@@ -753,52 +744,14 @@ mod tests {
         let result = analyzer
             .analyze(&cmd, AnalysisView { refs: &refs })
             .unwrap();
-        assert!(
-            result.events.iter().any(|event| matches!(
-                event,
-                SemanticEvent::CommitCreated {
-                    base,
-                    new_head
-                } if base.as_deref() == Some("old-head") && new_head == "new-head"
-            )),
-            "expected commit-created event from post-head fallback, got {:?}",
-            result.events
-        );
+        assert_only_opaque(&result);
     }
 
     #[test]
-    fn commit_falls_back_to_head_reflog_when_pre_and_post_are_contaminated() {
+    fn commit_without_ref_transition_does_not_read_head_reflog() {
         let analyzer = HistoryAnalyzer;
-        let dir = tempdir().expect("tempdir");
-        let worktree = dir.path();
-        let git_dir = worktree.join(".git");
-        fs::create_dir_all(git_dir.join("logs")).expect("create logs");
-        fs::write(
-            git_dir.join("logs").join("HEAD"),
-            concat!(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ",
-                "Test User <test@example.com> 0 +0000\tcommit: first\n",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ",
-                "cccccccccccccccccccccccccccccccccccccccc ",
-                "Test User <test@example.com> 0 +0000\tcommit: squash\n"
-            ),
-        )
-        .expect("write HEAD reflog");
-
         let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
         cmd.ref_changes.clear();
-        cmd.worktree = Some(worktree.to_path_buf());
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("cccccccccccccccccccccccccccccccccccccccc".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("cccccccccccccccccccccccccccccccccccccccc".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
 
         let result = analyzer
             .analyze(
@@ -809,20 +762,11 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            result.events.iter().any(|event| matches!(
-                event,
-                SemanticEvent::CommitCreated { base, new_head }
-                    if base.as_deref() == Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                        && new_head == "cccccccccccccccccccccccccccccccccccccccc"
-            )),
-            "expected commit-created event from HEAD reflog fallback, got {:?}",
-            result.events
-        );
+        assert_only_opaque(&result);
     }
 
     #[test]
-    fn commit_prefers_post_head_when_family_ref_changes_are_contaminated() {
+    fn commit_prefers_head_transition_over_other_branch_ref_changes() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command("commit", &["git", "-C", "/repo-b", "commit", "-m", "x"]);
         cmd.ref_changes = vec![
@@ -842,17 +786,6 @@ mod tests {
                 new: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             },
         ];
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-            branch: Some("branch-b".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-            branch: Some("branch-b".to_string()),
-            detached: false,
-        });
-
         let result = analyzer
             .analyze(
                 &cmd,
@@ -867,15 +800,15 @@ mod tests {
                 SemanticEvent::CommitCreated {
                     new_head,
                     ..
-                } if new_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                } if new_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )),
-            "expected commit-created event to use branch-b post head, got {:?}",
+            "expected commit-created event to use the captured HEAD transition, got {:?}",
             result.events
         );
     }
 
     #[test]
-    fn head_change_prefers_branch_hint_over_head_change() {
+    fn head_change_prefers_head_transition_over_branch_ref_change() {
         let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
         cmd.ref_changes = vec![
             RefChange {
@@ -889,22 +822,11 @@ mod tests {
                 new: "new-main".to_string(),
             },
         ];
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("old-main".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("new-main".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-
         let change = head_change(&cmd, &Default::default());
         assert_eq!(
             change,
-            Some(("old-main".to_string(), "new-main".to_string())),
-            "expected branch-specific change to win over generic HEAD change"
+            Some(("old-head".to_string(), "wrong-head".to_string())),
+            "expected captured HEAD transition to win over branch ref changes"
         );
     }
 
@@ -924,12 +846,6 @@ mod tests {
                 new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             },
         ];
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-            branch: Some("feature".to_string()),
-            detached: false,
-        });
-
         let result = analyzer
             .analyze(
                 &cmd,
@@ -992,7 +908,8 @@ mod tests {
                 event,
                 SemanticEvent::CherryPickComplete {
                     original_head,
-                    new_head
+                    new_head,
+                    ..
                 } if original_head == "a" && new_head == "d"
             )),
             "expected cherry-pick span event, got {:?}",
@@ -1001,20 +918,10 @@ mod tests {
     }
 
     #[test]
-    fn cherry_pick_prefers_ref_state_when_pre_head_matches_post_head() {
+    fn cherry_pick_without_ref_transition_is_opaque() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command("cherry-pick", &["git", "cherry-pick", "--continue"]);
         cmd.ref_changes.clear();
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("new-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("new-head".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
         let refs = std::collections::HashMap::from([
             ("HEAD".to_string(), "old-head".to_string()),
             ("refs/heads/main".to_string(), "old-head".to_string()),
@@ -1023,54 +930,6 @@ mod tests {
         let result = analyzer
             .analyze(&cmd, AnalysisView { refs: &refs })
             .unwrap();
-        assert!(
-            result.events.iter().any(|event| matches!(
-                event,
-                SemanticEvent::CherryPickComplete {
-                    original_head,
-                    new_head
-                } if original_head == "old-head" && new_head == "new-head"
-            )),
-            "expected cherry-pick complete event from ref-state fallback, got {:?}",
-            result.events
-        );
-    }
-
-    #[test]
-    fn merge_squash_emits_resolved_source_ref_and_head() {
-        let analyzer = HistoryAnalyzer;
-        let mut cmd = command("merge", &["git", "merge", "--squash", "feature"]);
-        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
-        cmd.merge_squash_source_head = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
-
-        let result = analyzer
-            .analyze(
-                &cmd,
-                AnalysisView {
-                    refs: &Default::default(),
-                },
-            )
-            .unwrap();
-
-        assert!(
-            result.events.iter().any(|event| matches!(
-                event,
-                SemanticEvent::MergeSquash {
-                    base_branch,
-                    base_head,
-                    source_ref,
-                    source_head,
-                } if base_branch.as_deref() == Some("main")
-                    && base_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    && source_ref == "feature"
-                    && source_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )),
-            "expected merge-squash event with resolved source head, got {:?}",
-            result.events
-        );
+        assert_only_opaque(&result);
     }
 }

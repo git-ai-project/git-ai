@@ -1,9 +1,9 @@
 use crate::test_utils::{fixture_path, load_fixture};
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::CopilotAgent;
-use git_ai::transcripts::watermark::{ByteOffsetWatermark, RecordIndexWatermark};
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::CopilotAgent;
+use git_ai::streams::watermark::{ByteOffsetWatermark, RecordIndexWatermark};
 use serde_json::json;
 use std::{fs, io::Write};
 
@@ -20,6 +20,7 @@ fn ensure_clean_env() {
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_session_json_raw_event_fidelity() {
     ensure_clean_env();
     let fixture = fixture_path("copilot_session_simple.json");
@@ -37,6 +38,7 @@ fn test_copilot_session_json_raw_event_fidelity() {
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_event_stream_raw_event_fidelity() {
     ensure_clean_env();
     let fixture = fixture_path("copilot_session_event_stream.jsonl");
@@ -58,7 +60,7 @@ fn test_copilot_event_stream_raw_event_fidelity() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_returns_empty_transcript_in_codespaces() {
     let original_codespaces = std::env::var("CODESPACES").ok();
     unsafe {
@@ -83,7 +85,7 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_returns_empty_transcript_in_remote_containers() {
     let original = std::env::var("REMOTE_CONTAINERS").ok();
     unsafe {
@@ -358,6 +360,7 @@ fn test_copilot_preset_after_edit_snake_case() {
 // and edited_filepaths are no longer returned by read_incremental.
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_after_edit_with_jsonl_session() {
     ensure_clean_env();
 
@@ -579,7 +582,8 @@ fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
         "cwd": "/Users/test/project",
         "toolName": "copilot_findTextInFiles",
         "toolInput": { "query": "hello" },
-        "sessionId": "copilot-session-search"
+        "sessionId": "copilot-session-search",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/ws-id/GitHub.copilot-chat/transcripts/session.jsonl"
     })
     .to_string();
 
@@ -590,6 +594,27 @@ fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
             .unwrap_err()
             .to_string()
             .contains("unsupported tool_name")
+    );
+}
+
+#[test]
+fn test_copilot_preset_cli_non_edit_tool_is_filtered() {
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "view",
+        "toolInput": { "path": "/Users/test/project/file.ts" },
+        "sessionId": "copilot-session-view"
+    })
+    .to_string();
+
+    let result = parse_copilot(&hook_input);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("non-edit tool"),
+        "Expected non-edit tool error, got: {}",
+        err_msg
     );
 }
 
@@ -665,6 +690,7 @@ fn vscode_post_tool_use_hook_input(transcript_path: &str) -> String {
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_preset_vscode_model_uses_auto_model_id_when_present() {
     ensure_clean_env();
     let (_temp_dir, transcript_path) =
@@ -679,6 +705,7 @@ fn test_copilot_preset_vscode_model_uses_auto_model_id_when_present() {
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_preset_vscode_model_prefers_non_auto_model_id_from_chat_sessions() {
     ensure_clean_env();
     let (_temp_dir, transcript_path) =
@@ -693,6 +720,7 @@ fn test_copilot_preset_vscode_model_prefers_non_auto_model_id_from_chat_sessions
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_preset_vscode_model_falls_back_to_selected_model_id() {
     ensure_clean_env();
     let (_temp_dir, transcript_path) =
@@ -709,6 +737,7 @@ fn test_copilot_preset_vscode_model_falls_back_to_selected_model_id() {
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_preset_vscode_model_lookup_supports_json_chat_session_file() {
     ensure_clean_env();
     let (_temp_dir, transcript_path) =
@@ -725,6 +754,7 @@ fn test_copilot_preset_vscode_model_lookup_supports_json_chat_session_file() {
 }
 
 #[test]
+#[serial_test::serial(copilot_env)]
 fn test_copilot_preset_vscode_does_not_use_details_as_model_fallback() {
     ensure_clean_env();
     let (_temp_dir, transcript_path) =

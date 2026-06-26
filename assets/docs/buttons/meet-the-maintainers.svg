@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="196" height="44" viewBox="0 0 196 44" fill="none">
+  <defs>
+    <filter id="btnShadow" x="-10%" y="-10%" width="120%" height="140%">
+      <feDropShadow dx="0" dy="1" stdDeviation="0.8" flood-color="#1b1f24" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+  <rect x="0.5" y="0.5" width="195" height="39" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1" filter="url(#btnShadow)"/>
+  <text x="98" y="26" text-anchor="middle" fill="#24292f" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="17" font-weight="600">Meet the maintainers</text>
+</svg>

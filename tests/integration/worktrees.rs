@@ -10,7 +10,7 @@ use insta::assert_debug_snapshot;
 use rand::RngExt;
 use regex::Regex;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -222,8 +222,11 @@ crate::worktree_test_wrappers! {
 crate::worktree_test_wrappers! {
     fn stash_pop_preserves_ai_authorship() {
         let repo = TestRepo::new();
+        let file_path = repo.path().join("stash.txt");
+        fs::write(&file_path, "base\n").unwrap();
+        repo.git_ai(&["checkpoint", "mock_known_human", "stash.txt"])
+            .unwrap();
         let mut file = repo.filename("stash.txt");
-        file.set_contents(crate::lines!["base".human()]);
         repo.stage_all_and_commit("base").unwrap();
 
         file.set_contents(crate::lines!["base".human(), "ai stash line".ai()]);
@@ -238,8 +241,11 @@ crate::worktree_test_wrappers! {
 crate::worktree_test_wrappers! {
     fn reset_mixed_reconstructs_working_log() {
         let repo = TestRepo::new();
+        let file_path = repo.path().join("reset.txt");
+        fs::write(&file_path, "base\n").unwrap();
+        repo.git_ai(&["checkpoint", "mock_known_human", "reset.txt"])
+            .unwrap();
         let mut file = repo.filename("reset.txt");
-        file.set_contents(crate::lines!["base".human()]);
         repo.stage_all_and_commit("base").unwrap();
 
         file.set_contents(crate::lines!["base".human(), "ai reset line".ai()]);
@@ -256,8 +262,11 @@ crate::worktree_test_wrappers! {
 crate::worktree_test_wrappers! {
     fn rebase_preserves_ai_authorship() {
         let repo = TestRepo::new();
+        let file_path = repo.path().join("rebase.txt");
+        fs::write(&file_path, "base\n").unwrap();
+        repo.git_ai(&["checkpoint", "mock_known_human", "rebase.txt"])
+            .unwrap();
         let mut file = repo.filename("rebase.txt");
-        file.set_contents(crate::lines!["base".human()]);
         repo.stage_all_and_commit("base").unwrap();
         repo.git(&["checkout", "-b", "integration"]).unwrap();
 
@@ -280,8 +289,11 @@ crate::worktree_test_wrappers! {
 crate::worktree_test_wrappers! {
     fn cherry_pick_preserves_ai_authorship() {
         let repo = TestRepo::new();
+        let file_path = repo.path().join("cherry.txt");
+        fs::write(&file_path, "base\n").unwrap();
+        repo.git_ai(&["checkpoint", "mock_known_human", "cherry.txt"])
+            .unwrap();
         let mut file = repo.filename("cherry.txt");
-        file.set_contents(crate::lines!["base".human()]);
         repo.stage_all_and_commit("base").unwrap();
         repo.git(&["checkout", "-b", "integration"]).unwrap();
 
@@ -374,11 +386,20 @@ crate::worktree_test_wrappers! {
             messages_url: None,
             },
         );
+        let file_content = "a\nb\n";
+        let mut initial_contents = HashMap::new();
+        initial_contents.insert("initial.txt".to_string(), file_content.to_string());
         working_log
-            .write_initial_attributions(initial_attributions, prompts)
+            .write_initial_attributions_with_contents(
+                initial_attributions,
+                prompts,
+                BTreeMap::new(),
+                initial_contents,
+                BTreeMap::new(),
+            )
             .expect("write initial attributions");
 
-        fs::write(repo.path().join("initial.txt"), "a\nb\n").expect("write file");
+        fs::write(repo.path().join("initial.txt"), file_content).expect("write file");
         repo.git_ai(&["checkpoint"]).unwrap();
         repo.stage_all_and_commit("commit initial attribution")
             .unwrap();
