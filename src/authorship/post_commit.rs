@@ -11,7 +11,7 @@ use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::Config;
 use crate::error::GitAiError;
-use crate::git::notes_api::write_note as notes_add;
+use crate::git::notes_api::write_note;
 use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
@@ -345,6 +345,11 @@ where
         authorship_log.metadata.base_commit_sha = commit_sha.clone();
     }
 
+    crate::authorship::human_metadata::fill_missing_current_human_metadata(
+        repo,
+        &mut authorship_log,
+    );
+
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
@@ -365,7 +370,7 @@ where
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
-    notes_add(repo, &commit_sha, &authorship_note_str)?;
+    write_note(repo, &commit_sha, &authorship_note_str)?;
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
@@ -579,6 +584,14 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     recovery_file_timestamps: Option<&FileTimestampsByPath>,
     before_external_recovery: Option<&dyn Fn(&UnknownLinesByFile)>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
+    // Reconcile the note cache with refs/notes/ai before reading the original
+    // commit's note. GitNotes reads are SQLite-first and no longer run a full
+    // ref sync per read, so a note changed on the ref out-of-band (old clients,
+    // remote fetch, direct `git notes`) could otherwise be shadowed by a stale
+    // cache entry and lose human/session/prompt metadata across the amend.
+    // Cursor-guarded and cheap when the ref is unchanged.
+    let _ = crate::git::notes_api::sync_from_git_ref(repo);
+
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
 
@@ -598,14 +611,13 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     final_state_snapshot.extend(observed_snapshot);
 
     // Check if original commit has existing authorship data
-    let has_existing_data =
-        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
-            .map(|log| {
-                !log.metadata.prompts.is_empty()
-                    || !log.metadata.humans.is_empty()
-                    || !log.metadata.sessions.is_empty()
-            })
-            .unwrap_or(false);
+    let has_existing_data = crate::git::notes_api::read_authorship_v3(repo, original_commit)
+        .map(|log| {
+            !log.metadata.prompts.is_empty()
+                || !log.metadata.humans.is_empty()
+                || !log.metadata.sessions.is_empty()
+        })
+        .unwrap_or(false);
 
     let working_va = crate::tokio_runtime::block_on(async {
         VirtualAttributions::from_working_log_for_commit_snapshot(
@@ -694,9 +706,7 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
     // Preserve human/session metadata from the original commit's note
-    if let Ok(original_log) =
-        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
-    {
+    if let Ok(original_log) = crate::git::notes_api::read_authorship_v3(repo, original_commit) {
         for (id, record) in original_log.metadata.humans {
             authorship_log.metadata.humans.entry(id).or_insert(record);
         }
@@ -740,7 +750,7 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     let authorship_note_str = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
-    notes_add(repo, amended_commit, &authorship_note_str)?;
+    write_note(repo, amended_commit, &authorship_note_str)?;
 
     // Write INITIAL file for uncommitted attributions
     if !initial_attributions.files.is_empty() {

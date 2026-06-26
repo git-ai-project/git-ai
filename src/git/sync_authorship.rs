@@ -8,6 +8,63 @@ use crate::{
 };
 
 use super::repository::Repository;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Minimum interval between notes fetches for the same target. The limiter is
+/// process-global and split by operation type, but scoped to repo+remote so
+/// unrelated repositories in the same daemon do not suppress each other.
+const NOTES_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+type GlobalFetchTimestamps = Mutex<HashMap<String, Instant>>;
+
+// Process-global rate limiters — one per operation type (git fetch vs HTTP
+// fetch). Each map is keyed by repo+remote target.
+static LAST_GIT_NOTES_FETCH_AT: OnceLock<GlobalFetchTimestamps> = OnceLock::new();
+static LAST_HTTP_NOTES_FETCH_AT: OnceLock<GlobalFetchTimestamps> = OnceLock::new();
+
+/// Returns `true` if the last HTTP notes fetch was less than
+/// `NOTES_FETCH_MIN_INTERVAL` ago. Updates the timestamp when returning `false`.
+pub fn http_notes_fetch_rate_limited(repository: &Repository, remote_name: &str) -> bool {
+    global_fetch_rate_limited(
+        &LAST_HTTP_NOTES_FETCH_AT,
+        &notes_fetch_rate_limit_key(repository, remote_name),
+    )
+}
+
+/// Reset all rate-limiter timestamps. Only available in test builds.
+#[cfg(test)]
+pub fn reset_notes_fetch_rate_limiters() {
+    for cell in [&LAST_GIT_NOTES_FETCH_AT, &LAST_HTTP_NOTES_FETCH_AT] {
+        if let Some(mutex) = cell.get()
+            && let Ok(mut timestamps) = mutex.lock()
+        {
+            timestamps.clear();
+        }
+    }
+}
+
+/// Returns `true` if the last fetch was less than `NOTES_FETCH_MIN_INTERVAL`
+/// ago. Updates the timestamp when returning `false`.
+fn global_fetch_rate_limited(cell: &OnceLock<GlobalFetchTimestamps>, key: &str) -> bool {
+    let mutex = cell.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut timestamps) = mutex.lock() else {
+        return false; // poisoned — allow the fetch
+    };
+    let now = Instant::now();
+    if let Some(prev) = timestamps.get(key)
+        && now.saturating_duration_since(*prev) < NOTES_FETCH_MIN_INTERVAL
+    {
+        return true; // too soon
+    }
+    timestamps.insert(key.to_string(), now);
+    false
+}
+
+fn notes_fetch_rate_limit_key(repository: &Repository, remote_name: &str) -> String {
+    format!("{}::{}", repository.common_dir().display(), remote_name)
+}
 
 #[cfg(windows)]
 fn disabled_hooks_config() -> &'static str {
@@ -159,7 +216,9 @@ pub fn fetch_missing_notes_for_commits(
     if let Ok(remotes) = repository.remotes_with_urls() {
         for (remote_name, _) in remotes {
             tracing::debug!("Attempting safe notes fetch from remote {}", remote_name);
-            match fetch_authorship_notes(repository, &remote_name) {
+            // Bypass rate limiter: this is a targeted fetch for specific missing
+            // commits in the rewrite path, not a bulk sync from a user git op.
+            match fetch_authorship_notes_inner(repository, &remote_name, false) {
                 Ok(_) => tracing::debug!("Fetched and merged notes from remote {}", remote_name),
                 Err(e) => {
                     tracing::debug!("Notes fetch from remote {} failed: {}", remote_name, e);
@@ -196,6 +255,38 @@ pub fn fetch_authorship_notes(
     repository: &Repository,
     remote_name: &str,
 ) -> Result<NotesExistence, GitAiError> {
+    fetch_authorship_notes_inner(repository, remote_name, true)
+}
+
+/// Internal fetch that optionally bypasses the rate limiter.
+/// Used by `fetch_missing_notes_for_commits` which is a targeted fetch for
+/// specific missing commits in the rewrite path — not a bulk sync triggered
+/// by a user git operation.
+fn fetch_authorship_notes_inner(
+    repository: &Repository,
+    remote_name: &str,
+    rate_limit: bool,
+) -> Result<NotesExistence, GitAiError> {
+    // Process-global rate limit scoped to this repo+remote target. Prevents
+    // redundant fetches on busy monorepos without suppressing unrelated repos.
+    if rate_limit
+        && global_fetch_rate_limited(
+            &LAST_GIT_NOTES_FETCH_AT,
+            &notes_fetch_rate_limit_key(repository, remote_name),
+        )
+    {
+        tracing::debug!(
+            "fetch_authorship_notes: rate-limited, skipping fetch from '{}'",
+            remote_name
+        );
+        // A fetch was recently allowed for this repo+remote, so we presume notes
+        // are present rather than re-fetching. We deliberately do NOT return
+        // NotFound here: that variant means "confirmed no notes on remote" and
+        // triggers callers to skip syncing, which would be wrong to assert from a
+        // rate-limit skip alone (we don't know the prior fetch's result here).
+        return Ok(NotesExistence::Found);
+    }
+
     // Generate tracking ref for this remote
     let tracking_ref = tracking_ref_for_remote(remote_name);
 
@@ -322,6 +413,9 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
                 attempt + 1,
                 PUSH_NOTES_MAX_ATTEMPTS
             );
+            // Backoff between retries to avoid hammering the remote when
+            // concurrent pushers cause non-fast-forward rejections.
+            std::thread::sleep(NOTES_FETCH_MIN_INTERVAL);
         }
 
         fetch_and_merge_tracking_notes(repository, remote_name);
@@ -571,5 +665,68 @@ mod tests {
             args: vec!["fetch".to_string(), "origin".to_string()],
         };
         assert!(!is_missing_remote_notes_ref_error(&err));
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_blocks_within_one_second() {
+        let cell: OnceLock<GlobalFetchTimestamps> = OnceLock::new();
+        let key = "repo-a::origin";
+
+        // First call: not rate-limited, sets the timestamp.
+        assert!(
+            !global_fetch_rate_limited(&cell, key),
+            "first call should not be rate-limited"
+        );
+
+        // Immediate second call for the same target: should be rate-limited.
+        assert!(
+            global_fetch_rate_limited(&cell, key),
+            "second call within 1s should be rate-limited"
+        );
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_allows_after_interval() {
+        let cell: OnceLock<GlobalFetchTimestamps> = OnceLock::new();
+        let key = "repo-a::origin";
+
+        // Seed with a timestamp older than the interval.
+        {
+            let mutex = cell.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut timestamps = mutex.lock().unwrap();
+            timestamps.insert(
+                key.to_string(),
+                Instant::now() - NOTES_FETCH_MIN_INTERVAL - Duration::from_millis(1),
+            );
+        }
+
+        assert!(
+            !global_fetch_rate_limited(&cell, key),
+            "call after interval should not be rate-limited"
+        );
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_uninitialized_allows_first_call() {
+        let cell: OnceLock<GlobalFetchTimestamps> = OnceLock::new();
+        assert!(
+            !global_fetch_rate_limited(&cell, "repo-a::origin"),
+            "first call on fresh cell should not be rate-limited"
+        );
+    }
+
+    #[test]
+    fn notes_fetch_rate_limiter_allows_different_targets() {
+        let cell: OnceLock<GlobalFetchTimestamps> = OnceLock::new();
+
+        assert!(!global_fetch_rate_limited(&cell, "repo-a::origin"));
+        assert!(
+            !global_fetch_rate_limited(&cell, "repo-b::origin"),
+            "different repo target should not be rate-limited by repo-a"
+        );
+        assert!(
+            !global_fetch_rate_limited(&cell, "repo-a::upstream"),
+            "different remote target should not be rate-limited by origin"
+        );
     }
 }

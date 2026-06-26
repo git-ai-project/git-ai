@@ -1389,7 +1389,7 @@ mod tests {
             vec![
                 "-NoProfile",
                 "-Command",
-                "[Console]::Out.Write('out'); [Console]::Error.Write('err'); Start-Sleep -Seconds 60",
+                "[Console]::Out.Write('out'); [Console]::Out.Flush(); [Console]::Error.Write('err'); [Console]::Error.Flush(); Start-Sleep -Seconds 60",
             ],
         )
     }
@@ -1455,8 +1455,11 @@ mod tests {
     #[test]
     fn test_run_logged_command_with_timeout_reports_partial_output() {
         let (program, args) = stdout_stderr_sleep_command();
-        let record =
-            run_logged_command_with_timeout(program, &args, None, Duration::from_millis(300));
+        // The child sleeps for 60s, so it always outlives the timeout. Use a
+        // generous timeout (rather than a few hundred ms) so that slow process
+        // startup -- notably PowerShell cold-start on Windows CI runners -- has
+        // time to actually emit its partial output before we kill it.
+        let record = run_logged_command_with_timeout(program, &args, None, Duration::from_secs(3));
 
         assert!(record.timed_out, "{record:?}");
         assert_eq!(record.stdout, "out");

@@ -32,6 +32,15 @@ pub(crate) struct DiffTreeResult {
 }
 
 pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError> {
+    // Reconcile the SQLite note cache with the authoritative refs/notes/ai
+    // before migrating notes. GitNotes reads are SQLite-first and no longer run
+    // a full ref sync on every read (that was removed for performance), so a
+    // note changed on the ref out-of-band (old clients, remote fetch, direct
+    // `git notes`) could otherwise be shadowed by a stale cache entry here and
+    // propagated into the rewritten commit's note. This is cursor-guarded and
+    // cheap when the ref is unchanged, and migrations are infrequent.
+    let _ = notes_api::sync_from_git_ref(repo);
+
     match event {
         RewriteEvent::SquashMerge {
             ref source_head,
@@ -64,6 +73,12 @@ pub fn handle_non_fast_forward_rewrite(
     new_tip: &str,
     onto: Option<&str>,
 ) -> Result<(), GitAiError> {
+    // Reconcile the note cache with refs/notes/ai before reading source notes.
+    // This handler is also invoked directly (not only via handle_rewrite_event),
+    // e.g. for rebases detected by the daemon. Cursor-guarded and cheap when the
+    // ref is unchanged. See the note in handle_rewrite_event for rationale.
+    let _ = notes_api::sync_from_git_ref(repo);
+
     let mappings = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto)?;
     if mappings.is_empty() {
         return Ok(());
@@ -267,6 +282,8 @@ fn write_authorship_log(
     commit_sha: &str,
     log: &AuthorshipLog,
 ) -> Result<(), GitAiError> {
+    let mut log = log.clone();
+    crate::authorship::human_metadata::fill_missing_current_human_metadata(repo, &mut log);
     let serialized = log.serialize_to_string().map_err(|e| {
         GitAiError::Generic(format!("failed to serialize rewrite authorship log: {}", e))
     })?;
@@ -404,7 +421,8 @@ fn shift_authorship_notes_with_existing_mode(
     }
 
     let mut all_writes = verbatim_writes;
-    for (sha, log) in merged_by_target {
+    for (sha, mut log) in merged_by_target {
+        crate::authorship::human_metadata::fill_missing_current_human_metadata(repo, &mut log);
         let serialized = log.serialize_to_string().map_err(|e| {
             GitAiError::Generic(format!("failed to serialize shifted authorship log: {}", e))
         })?;

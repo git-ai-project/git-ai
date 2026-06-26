@@ -1,12 +1,10 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rewrite::{RewriteEvent, handle_rewrite_event};
 use crate::error::GitAiError;
-use crate::git::notes_api::{
-    read_authorship_v3 as get_reference_as_authorship_log_v3, read_note as show_authorship_note,
-};
 use crate::git::refs::{
     AI_AUTHORSHIP_FORK_TRACKING_REF, copy_missing_notes_for_commits_from_ref,
-    note_blob_oids_for_commits, ref_exists,
+    get_reference_as_authorship_log_v3, note_blob_oids_for_commits, ref_exists,
+    show_authorship_note,
 };
 use crate::git::repository::{
     CommitRange, Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin,
