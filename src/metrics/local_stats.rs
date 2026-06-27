@@ -15,7 +15,7 @@ use crate::metrics::types::MetricEvent;
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use serde::Serialize;
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Serialize)]
 pub struct LocalActivityStats {
@@ -30,6 +30,47 @@ pub struct LocalActivityStats {
     pub hourly: Vec<u32>,
     /// AI lines committed per day of week (local time), 7 elements: Mon=0 … Sun=6.
     pub daily: Vec<u32>,
+    /// AI lines committed per calendar day (local time), sparse — only days with
+    /// AI activity are present. Drives the contribution-calendar heatmap.
+    pub calendar: Vec<DayActivity>,
+    /// First day rendered in the calendar grid (window start, or earliest activity
+    /// for the all-time window).
+    pub calendar_start: NaiveDate,
+    /// Last day rendered in the calendar grid (today, local time).
+    pub calendar_end: NaiveDate,
+    /// Derived headline stats for the compact summary block.
+    pub summary: ActivitySummary,
+}
+
+/// AI lines committed on a single local calendar day.
+#[derive(Debug, Clone, Serialize)]
+pub struct DayActivity {
+    pub date: NaiveDate,
+    pub ai_lines: u32,
+    /// Estimated token spend (USD) on this day, summed across models with known
+    /// pricing. Lines and spend diverge — a low-lines day can still be expensive.
+    #[serde(default)]
+    pub estimated_cost_usd: f64,
+}
+
+/// Derived headline statistics for the `git-ai usage` summary block.
+#[derive(Debug, Default, Serialize)]
+pub struct ActivitySummary {
+    /// Distinct local days with AI activity in the window.
+    pub active_days: u32,
+    /// Days from the first active day through today, inclusive.
+    pub total_days: u32,
+    /// Longest run of consecutive active days.
+    pub longest_streak: u32,
+    /// Trailing run of consecutive active days, counted only when it reaches
+    /// today or yesterday (one-day grace).
+    pub current_streak: u32,
+    /// Day with the most AI lines (earliest wins ties).
+    pub most_active_day: Option<DayActivity>,
+    /// Longest session duration (last event − first event) in seconds.
+    pub longest_session_secs: u32,
+    /// Top model by total tokens (already shortened). None when no token data.
+    pub favorite_model: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -217,10 +258,15 @@ fn compute_activity_from_records(
 
     let mut hourly: Vec<u32> = vec![0u32; 24];
     let mut daily: Vec<u32> = vec![0u32; 7];
+    // AI lines committed per local calendar day (sorted; sparse — only days with
+    // AI activity). Drives the contribution calendar and all derived day stats.
+    let mut ai_lines_by_day: BTreeMap<NaiveDate, u32> = BTreeMap::new();
 
     // Yield classification: track the latest timestamp seen per session, and
     // all commit timestamps, then correlate after the loop.
     let mut session_last_ts: HashMap<String, u32> = HashMap::new();
+    // First timestamp seen per session, for longest-session duration.
+    let mut session_first_ts: HashMap<String, u32> = HashMap::new();
     let mut commit_timestamps: Vec<u32> = Vec::new();
 
     for record in records {
@@ -247,6 +293,7 @@ fn compute_activity_from_records(
                         hourly[local_dt.hour() as usize] += c.ai_lines;
                         // Weekday: Mon=0 … Sun=6 (chrono's num_days_from_monday).
                         daily[local_dt.weekday().num_days_from_monday() as usize] += c.ai_lines;
+                        *ai_lines_by_day.entry(local_dt.date_naive()).or_insert(0) += c.ai_lines;
                     }
 
                     let (key, order_key) = bucket_key(&local_dt, granularity);
@@ -272,10 +319,13 @@ fn compute_activity_from_records(
             5 => {
                 aggregate_session(event, &mut session_ids, &mut session_tool_counts);
 
-                // Track last-seen timestamp per session for yield classification.
+                // Track first/last-seen timestamp per session for yield
+                // classification and longest-session duration.
                 if let Some(sid) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() {
-                    let entry = session_last_ts.entry(sid).or_insert(0);
-                    *entry = (*entry).max(record.ts);
+                    let last = session_last_ts.entry(sid.clone()).or_insert(0);
+                    *last = (*last).max(record.ts);
+                    let first = session_first_ts.entry(sid).or_insert(record.ts);
+                    *first = (*first).min(record.ts);
                 }
                 let tool = sparse_get_string(&event.attrs, attr_pos::TOOL)
                     .flatten()
@@ -343,7 +393,8 @@ fn compute_activity_from_records(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
-    let tokens = build_token_summary(message_usage, codex_sessions, now_ts, since_ts);
+    let (tokens, cost_by_day) =
+        build_token_summary(message_usage, codex_sessions, now_ts, since_ts);
 
     // Map by order key for fill_buckets to look up real data.
     let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
@@ -353,6 +404,74 @@ fn compute_activity_from_records(
 
     // Fill in empty buckets between since_ts and now so the chart has no gaps.
     let filled = fill_buckets(bucket_by_order, since_ts, granularity);
+
+    // ── Derived calendar + summary stats ──
+    let calendar_end = Local::now().date_naive();
+    // Earliest day with any activity — AI lines OR token spend — so a spend-only
+    // day before the first AI-line day isn't clipped from the all-time window.
+    let first_active = ai_lines_by_day
+        .keys()
+        .next()
+        .copied()
+        .into_iter()
+        .chain(cost_by_day.keys().next().copied())
+        .min();
+    let calendar_start = if since_ts == 0 {
+        first_active.unwrap_or(calendar_end)
+    } else {
+        ts_to_local(since_ts).date_naive()
+    };
+
+    let active_days = ai_lines_by_day.len() as u32;
+    // Denominator for "active days X/Y": the length of the selected window in
+    // days. For the all-time window (since_ts == 0) there is no fixed length, so
+    // fall back to days elapsed since the first active day.
+    let total_days = if since_ts == 0 {
+        first_active
+            .map(|first| ((calendar_end - first).num_days() + 1).max(0) as u32)
+            .unwrap_or(0)
+    } else {
+        (now_ts.saturating_sub(since_ts) / 86_400).max(1)
+    };
+    let (longest_streak, current_streak) = compute_streaks(&ai_lines_by_day, calendar_end);
+    let most_active_day = ai_lines_by_day
+        .iter()
+        .fold(None::<(NaiveDate, u32)>, |best, (&d, &v)| match best {
+            Some((_, bv)) if bv >= v => best,
+            _ => Some((d, v)),
+        })
+        .map(|(date, ai_lines)| DayActivity {
+            date,
+            ai_lines,
+            estimated_cost_usd: cost_by_day.get(&date).copied().unwrap_or(0.0),
+        });
+    let longest_session_secs = session_last_ts
+        .iter()
+        .map(|(sid, &last)| last.saturating_sub(*session_first_ts.get(sid).unwrap_or(&last)))
+        .max()
+        .unwrap_or(0);
+    // Union of AI-line days and spend days: a spend-heavy / low-lines day must
+    // appear so the second heatmap row can surface it.
+    let mut all_days: BTreeSet<NaiveDate> = ai_lines_by_day.keys().copied().collect();
+    all_days.extend(cost_by_day.keys().copied());
+    let calendar: Vec<DayActivity> = all_days
+        .iter()
+        .map(|&date| DayActivity {
+            date,
+            ai_lines: ai_lines_by_day.get(&date).copied().unwrap_or(0),
+            estimated_cost_usd: cost_by_day.get(&date).copied().unwrap_or(0.0),
+        })
+        .collect();
+
+    let summary = ActivitySummary {
+        active_days,
+        total_days,
+        longest_streak,
+        current_streak,
+        most_active_day,
+        longest_session_secs,
+        favorite_model: tokens.by_model.first().map(|m| m.model.clone()),
+    };
 
     Ok(LocalActivityStats {
         period_label,
@@ -382,7 +501,40 @@ fn compute_activity_from_records(
         buckets: filled,
         hourly,
         daily,
+        calendar,
+        calendar_start,
+        calendar_end,
+        summary,
     })
+}
+
+/// Compute (longest, current) consecutive-active-day streaks from a sorted set of
+/// active days. A run extends only when consecutive days differ by exactly one
+/// calendar day (DST-proof `NaiveDate` arithmetic). The current streak is the
+/// trailing run, counted only when it reaches today or yesterday (one-day grace).
+fn compute_streaks(days: &BTreeMap<NaiveDate, u32>, today: NaiveDate) -> (u32, u32) {
+    let mut longest = 0u32;
+    let mut run = 0u32;
+    let mut prev: Option<NaiveDate> = None;
+    for &d in days.keys() {
+        run = match prev {
+            Some(p) if (d - p).num_days() == 1 => run + 1,
+            _ => 1,
+        };
+        longest = longest.max(run);
+        prev = Some(d);
+    }
+    let last = match prev {
+        Some(p) => p,
+        None => return (0, 0),
+    };
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let current = if last == today || last == yesterday {
+        run
+    } else {
+        0
+    };
+    (longest, current)
 }
 
 /// Per-model token accumulator.
@@ -510,12 +662,17 @@ fn cost_for_message_slice(entries: impl Iterator<Item = (String, TokenAccum)>) -
         .sum()
 }
 
+/// Returns the aggregate token summary plus a per-local-day spend map (USD),
+/// derived from the same per-message / per-session data so the daily series
+/// reconciles with the headline total.
 fn build_token_summary(
     message_usage: HashMap<String, (String, TokenAccum, u32, String)>,
     codex_sessions: HashMap<String, CodexSessionAccum>,
     now_ts: u32,
     since_ts: u32,
-) -> TokenSummary {
+) -> (TokenSummary, BTreeMap<NaiveDate, f64>) {
+    // Per-day spend, bucketed by the message/session timestamp's local date.
+    let mut cost_by_day: BTreeMap<NaiveDate, f64> = BTreeMap::new();
     // Week-over-week split: "this week" = last 7 days, "last week" = 7–14 days ago.
     // Only meaningful when the query window covers at least 14 days; otherwise
     // last-week events were never fetched and last_week_cost would be 0 by
@@ -534,6 +691,13 @@ fn build_token_summary(
     let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
     for (_id, (model, acc, ts, sid)) in message_usage {
         let short = shorten_model(&model);
+
+        if let Some(pricing) = pricing_for(&short) {
+            *cost_by_day
+                .entry(ts_to_local(ts).date_naive())
+                .or_insert(0.0) += estimate_cost(&acc, &pricing);
+        }
+
         let entry = model_tokens.entry(short.clone()).or_default();
         entry.input += acc.input;
         entry.output += acc.output;
@@ -565,6 +729,13 @@ fn build_token_summary(
         let model = acc.model.clone().unwrap_or_else(|| "codex".to_string());
         let short = shorten_model(&model);
         let mapped = acc.to_token_accum();
+
+        if let Some(pricing) = pricing_for(&short) {
+            *cost_by_day
+                .entry(ts_to_local(acc.last_usage_ts).date_naive())
+                .or_insert(0.0) += estimate_cost(&mapped, &pricing);
+        }
+
         let entry = model_tokens.entry(short.clone()).or_default();
         entry.input += mapped.input;
         entry.output += mapped.output;
@@ -649,7 +820,7 @@ fn build_token_summary(
     by_model.sort_by_key(|m| Reverse(m.input + m.output + m.cache_read + m.cache_creation));
     summary.by_model = by_model;
     summary.wow_spend = wow_spend;
-    summary
+    (summary, cost_by_day)
 }
 
 fn ts_to_local(ts: u32) -> DateTime<Local> {
@@ -1256,6 +1427,93 @@ mod tests {
         assert_eq!(stats.tokens.cache_creation, 10);
         assert_eq!(stats.tokens.by_model[0].model, "claude-sonnet-4-6");
         assert!(stats.buckets.iter().any(|bucket| bucket.ai_lines == 10));
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn streaks_empty_is_zero() {
+        let days: BTreeMap<NaiveDate, u32> = BTreeMap::new();
+        assert_eq!(compute_streaks(&days, day(2026, 4, 10)), (0, 0));
+    }
+
+    #[test]
+    fn streaks_longest_breaks_on_gap_and_current_requires_recency() {
+        // Three-day run, a gap, then a two-day run ending "today".
+        let mut days: BTreeMap<NaiveDate, u32> = BTreeMap::new();
+        for d in [1u32, 2, 3, 7, 8] {
+            days.insert(day(2026, 4, d), 5);
+        }
+        let today = day(2026, 4, 8);
+        let (longest, current) = compute_streaks(&days, today);
+        assert_eq!(longest, 3);
+        assert_eq!(current, 2);
+    }
+
+    #[test]
+    fn streaks_current_zero_when_trailing_run_is_stale() {
+        let mut days: BTreeMap<NaiveDate, u32> = BTreeMap::new();
+        for d in [1u32, 2, 3] {
+            days.insert(day(2026, 4, d), 5);
+        }
+        // Today is well past the last active day → current streak is 0.
+        let (longest, current) = compute_streaks(&days, day(2026, 4, 20));
+        assert_eq!(longest, 3);
+        assert_eq!(current, 0);
+    }
+
+    #[test]
+    fn streaks_current_counts_with_yesterday_grace() {
+        let mut days: BTreeMap<NaiveDate, u32> = BTreeMap::new();
+        for d in [4u32, 5, 6] {
+            days.insert(day(2026, 4, d), 5);
+        }
+        // Last active day is yesterday relative to today → still counts.
+        let (longest, current) = compute_streaks(&days, day(2026, 4, 7));
+        assert_eq!(longest, 3);
+        assert_eq!(current, 3);
+    }
+
+    #[test]
+    fn derived_summary_from_records() {
+        let now = now_ts();
+        let repo = "github.com/acme/project";
+        // Two sessions: one spanning ~1h, one a single event.
+        let session_start = now.saturating_sub(7200);
+        let records = [
+            claude_session(session_start, Some(repo), "session-1"),
+            claude_session(session_start + 3600, Some(repo), "session-1"),
+            claude_session(now.saturating_sub(60), Some(repo), "session-2"),
+            committed(now.saturating_sub(300), repo, 40, 0, 40),
+            committed(now.saturating_sub(120), repo, 10, 0, 10),
+        ];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            now.saturating_sub(24 * 3600),
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        // Both commits land on the same local day → one active day, 50 AI lines.
+        assert_eq!(stats.summary.active_days, 1);
+        assert_eq!(stats.calendar.len(), 1);
+        assert_eq!(stats.calendar[0].ai_lines, 50);
+        assert_eq!(stats.summary.total_days, 1);
+        assert_eq!(stats.summary.longest_streak, 1);
+        assert_eq!(stats.summary.current_streak, 1);
+        let most = stats.summary.most_active_day.as_ref().unwrap();
+        assert_eq!(most.ai_lines, 50);
+        // Longest session spans the two session-1 events (~3600s); session-2 is 0.
+        assert_eq!(stats.summary.longest_session_secs, 3600);
+        assert_eq!(
+            stats.summary.favorite_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
     }
 
     #[test]
