@@ -1379,12 +1379,12 @@ fn collect_unstaged_hunks_from_snapshot(
             .cloned()
             .unwrap_or_else(|| committed_content.clone());
 
-        if committed_content == final_content {
+        if content_eq_eol_normalized(&committed_content, &final_content) {
             continue;
         }
 
-        let committed_lines = split_lines_preserving_terminators(&committed_content);
-        let final_lines = split_lines_preserving_terminators(&final_content);
+        let committed_lines = split_lines_normalized_terminators(&committed_content);
+        let final_lines = split_lines_normalized_terminators(&final_content);
         let diff_ops = crate::authorship::imara_diff_utils::capture_diff_slices(
             &committed_lines,
             &final_lines,
@@ -1452,9 +1452,22 @@ fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
     lines
 }
 
+fn split_lines_normalized_terminators(s: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    split_lines_preserving_terminators(s)
+        .into_iter()
+        .map(crate::authorship::imara_diff_utils::normalize_line_endings)
+        .collect()
+}
+
+fn content_eq_eol_normalized(a: &str, b: &str) -> bool {
+    a == b
+        || crate::authorship::imara_diff_utils::normalize_line_endings(a)
+            == crate::authorship::imara_diff_utils::normalize_line_endings(b)
+}
+
 fn diff_hunks_between_contents(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
-    let old_lines = split_lines_preserving_terminators(old_content);
-    let new_lines = split_lines_preserving_terminators(new_content);
+    let old_lines = split_lines_normalized_terminators(old_content);
+    let new_lines = split_lines_normalized_terminators(new_content);
     crate::authorship::imara_diff_utils::capture_diff_slices(&old_lines, &new_lines)
         .into_iter()
         .filter_map(|op| match op {
@@ -1495,13 +1508,13 @@ fn diff_hunks_between_contents(old_content: &str, new_content: &str) -> Vec<Diff
 }
 
 fn line_sequence_contains(needle: &str, haystack: &str) -> bool {
-    let needle_lines = split_lines_preserving_terminators(needle);
+    let needle_lines = split_lines_normalized_terminators(needle);
     if needle_lines.is_empty() {
         return true;
     }
 
     let mut next_needle = 0;
-    for haystack_line in split_lines_preserving_terminators(haystack) {
+    for haystack_line in split_lines_normalized_terminators(haystack) {
         if haystack_line == needle_lines[next_needle] {
             next_needle += 1;
             if next_needle == needle_lines.len() {
@@ -1522,16 +1535,19 @@ fn merged_carryover_content_pure(
     if committed_content == observed_content {
         return observed_content.to_string();
     }
+    if content_eq_eol_normalized(committed_content, observed_content) {
+        return committed_content.to_string();
+    }
     if line_sequence_contains(committed_content, observed_content) {
         return observed_content.to_string();
     }
     if line_sequence_contains(observed_content, committed_content) {
         return committed_content.to_string();
     }
-    if committed_content == parent_content {
+    if content_eq_eol_normalized(committed_content, parent_content) {
         return observed_content.to_string();
     }
-    if observed_content == parent_content {
+    if content_eq_eol_normalized(observed_content, parent_content) {
         return committed_content.to_string();
     }
     carryover_merge_content(parent_content, committed_content, observed_content)
@@ -1552,21 +1568,31 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
     if committed == observed {
         return observed.to_string();
     }
-    if parent == committed {
+    if content_eq_eol_normalized(committed, observed) {
+        return committed.to_string();
+    }
+    if content_eq_eol_normalized(parent, committed) {
         return observed.to_string();
     }
-    if parent == observed {
+    if content_eq_eol_normalized(parent, observed) {
         return committed.to_string();
     }
 
     let base_lines = split_lines_preserving_terminators(parent);
     let committed_lines = split_lines_preserving_terminators(committed);
     let observed_lines = split_lines_preserving_terminators(observed);
+    let base_cmp_lines = split_lines_normalized_terminators(parent);
+    let committed_cmp_lines = split_lines_normalized_terminators(committed);
+    let observed_cmp_lines = split_lines_normalized_terminators(observed);
 
     // For each side, map every base line index to its aligned index on that
     // side (None if the base line was changed/deleted on that side). Also record
     // each side's content so we can emit it for changed chunks.
-    fn align_to_base(base_len: usize, base: &[&str], side: &[&str]) -> Vec<Option<usize>> {
+    fn align_to_base<T: std::hash::Hash + Eq + Clone>(
+        base: &[T],
+        side: &[T],
+    ) -> Vec<Option<usize>> {
+        let base_len = base.len();
         let mut map = vec![None; base_len];
         for op in capture_diff_slices(base, side) {
             if let DiffOp::Equal {
@@ -1583,8 +1609,8 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
         map
     }
 
-    let committed_map = align_to_base(base_lines.len(), &base_lines, &committed_lines);
-    let observed_map = align_to_base(base_lines.len(), &base_lines, &observed_lines);
+    let committed_map = align_to_base(&base_cmp_lines, &committed_cmp_lines);
+    let observed_map = align_to_base(&base_cmp_lines, &observed_cmp_lines);
 
     // A base line is "stable" when both sides keep it aligned (unchanged on
     // both). We walk base lines; runs of stable lines are emitted verbatim,
@@ -3634,6 +3660,19 @@ mod tests {
             carryover_merge_content(parent, committed, observed),
             "a\nB\n"
         );
+    }
+
+    #[test]
+    fn carryover_merge_ignores_mixed_eol_when_content_matches_committed() {
+        let parent = "base one\nbase two\n";
+        let committed = "base one\nbase two\nai line\n";
+        let observed = "base one\r\nbase two\r\nai line\n";
+
+        assert_eq!(
+            merged_carryover_content_pure(parent, committed, observed),
+            committed
+        );
+        assert!(diff_hunks_between_contents(observed, committed).is_empty());
     }
 
     /// Differential test: the in-memory carryover merge must agree with real
