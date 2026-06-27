@@ -330,6 +330,30 @@ where
             &commit_sha,
             context.precomputed_parent_diff,
         )?;
+        // Compute the set of committed-coordinate lines that were explicitly displaced to
+        // INITIAL by the attribution loop (i.e., human-modified lines that replaced AI
+        // content after the last checkpoint).  These are lines present in both the INITIAL
+        // attributions (carrying their carryover line numbers) and in recovery_hunks.  Edge
+        // recovery must not re-claim these lines.
+        let displaced_to_initial_lines: HashMap<String, HashSet<u32>> = initial_attributions
+            .files
+            .iter()
+            .filter_map(|(file, line_attrs)| {
+                let committed_for_file = recovery_hunks.get(file)?;
+                let committed_set: HashSet<u32> =
+                    committed_for_file.iter().flat_map(|r| r.expand()).collect();
+                let displaced: HashSet<u32> = line_attrs
+                    .iter()
+                    .flat_map(|la| la.start_line..=la.end_line)
+                    .filter(|l| committed_set.contains(l))
+                    .collect();
+                if displaced.is_empty() {
+                    None
+                } else {
+                    Some((file.clone(), displaced))
+                }
+            })
+            .collect();
         crate::authorship::attribution_recovery::recover_attribution(
             repo,
             &parent_sha,
@@ -340,6 +364,11 @@ where
             AttributionRecoveryContext {
                 file_timestamps: context.recovery_file_timestamps,
                 before_external_recovery: context.before_external_recovery,
+                displaced_to_initial_lines: if displaced_to_initial_lines.is_empty() {
+                    None
+                } else {
+                    Some(&displaced_to_initial_lines)
+                },
             },
         )?;
         authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -595,7 +624,7 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     let observed_snapshot = working_log.observed_file_snapshot()?;
     let mut final_state_snapshot =
         commit_tree_snapshot_for_files(repo, amended_commit, &pathspecs)?;
-    final_state_snapshot.extend(observed_snapshot);
+    final_state_snapshot.extend(observed_snapshot.clone());
 
     // Check if original commit has existing authorship data
     let has_existing_data =
@@ -679,6 +708,25 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
     }
 
     let recovery_hunks = recovery_committed_hunks(repo, &parent_sha, amended_commit, None)?;
+    let displaced_to_initial_lines_amend: HashMap<String, HashSet<u32>> = initial_attributions
+        .files
+        .iter()
+        .filter_map(|(file, line_attrs)| {
+            let committed_for_file = recovery_hunks.get(file)?;
+            let committed_set: HashSet<u32> =
+                committed_for_file.iter().flat_map(|r| r.expand()).collect();
+            let displaced: HashSet<u32> = line_attrs
+                .iter()
+                .flat_map(|la| la.start_line..=la.end_line)
+                .filter(|l| committed_set.contains(l))
+                .collect();
+            if displaced.is_empty() {
+                None
+            } else {
+                Some((file.clone(), displaced))
+            }
+        })
+        .collect();
     crate::authorship::attribution_recovery::recover_attribution(
         repo,
         &parent_sha,
@@ -689,6 +737,11 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps(
         AttributionRecoveryContext {
             file_timestamps: recovery_file_timestamps,
             before_external_recovery,
+            displaced_to_initial_lines: if displaced_to_initial_lines_amend.is_empty() {
+                None
+            } else {
+                Some(&displaced_to_initial_lines_amend)
+            },
         },
     )?;
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();

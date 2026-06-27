@@ -2036,7 +2036,27 @@ fn build_carryover_snapshot(
                     .cloned()
                     .unwrap_or_default()
             };
-            merged_carryover_content_pure(&parent_content, &committed_content, observed_content)
+            let merged = merged_carryover_content_pure(
+                &parent_content,
+                &committed_content,
+                observed_content,
+            );
+            // If the 3-way merge favored the observed (checkpoint) content over what was
+            // committed, check whether the observed content is stale — i.e. the commit is
+            // a superset of observed (every observed line appears in committed in order).
+            // This happens when the AI checkpointed a file and then a human edited it
+            // without firing a known_human checkpoint: the last checkpoint blob is the AI
+            // version, but the committed file contains both AI and human changes.  In that
+            // case there are no uncommitted changes; committed is the ground truth for
+            // carryover.
+            if &merged == observed_content
+                && observed_content != &committed_content
+                && line_sequence_contains(observed_content, &committed_content)
+            {
+                committed_content
+            } else {
+                merged
+            }
         } else {
             committed_content
         };
@@ -2178,48 +2198,47 @@ impl VirtualAttributions {
             collect_unstaged_hunks(repo, commit_sha, effective_pathspecs)?
         };
 
-        // IMPORTANT: If a line appears in both committed_hunks and unstaged_hunks, it means:
-        // - The line was committed in this commit (in commit coordinates)
-        // - The line was then modified again in the working directory (in workdir coordinates)
-        // Since both use the same line numbering after the commit (workdir coordinates = commit coordinates
-        // for the committed state), we can directly compare line numbers.
-        // We should treat these lines as committed, not unstaged, because the attribution belongs
-        // to the commit even if there's a subsequent unstaged modification.
+        // When there is no carryover snapshot, unstaged_hunks reflect the live working
+        // directory vs the commit.  In that case, if a line appears in both committed_hunks
+        // and unstaged_hunks, the line was committed and then modified again in the working
+        // tree — we attribute it to the commit and treat the working-tree version as a future
+        // change, UNLESS it's a pure insertion (which shifts coordinates without representing
+        // the same logical line).
         //
-        // HOWEVER: If a line is a PURE INSERTION (old_count=0), it means a new line was inserted
-        // at that position, pushing existing lines down. In this case, the line number overlap
-        // doesn't mean the same line - it's a different line at the same position!
-        // We should NOT filter out pure insertions even if they overlap with committed line numbers.
-        for (file_path, committed_ranges) in &committed_hunks {
-            if let Some(unstaged_ranges) = unstaged_hunks.get_mut(file_path) {
-                // Expand both to line numbers for comparison
-                let committed_lines: std::collections::HashSet<u32> =
-                    committed_ranges.iter().flat_map(|r| r.expand()).collect();
+        // When a carryover_snapshot IS present, unstaged_hunks come from
+        // collect_unstaged_hunks_from_snapshot: they express "the carryover (last checkpoint)
+        // differs from committed at this position."  A Replace in that diff means the human
+        // modified a line after the AI checkpoint without firing a known_human checkpoint,
+        // and the commit captured the human's version.  Filtering those Replace lines out
+        // would silently re-attribute the human's content to AI.  We therefore skip the
+        // overlap filter entirely when a carryover snapshot is available — the attribution
+        // loop already handles the committed vs. uncommitted split correctly.
+        if carryover_snapshot.is_none() {
+            for (file_path, committed_ranges) in &committed_hunks {
+                if let Some(unstaged_ranges) = unstaged_hunks.get_mut(file_path) {
+                    let committed_lines: std::collections::HashSet<u32> =
+                        committed_ranges.iter().flat_map(|r| r.expand()).collect();
 
-                // Get pure insertion lines for this file (these should NOT be filtered out)
-                let pure_insertion_lines: std::collections::HashSet<u32> = pure_insertion_hunks
-                    .get(file_path)
-                    .map(|ranges| ranges.iter().flat_map(|r| r.expand()).collect())
-                    .unwrap_or_default();
+                    let pure_insertion_lines: std::collections::HashSet<u32> = pure_insertion_hunks
+                        .get(file_path)
+                        .map(|ranges| ranges.iter().flat_map(|r| r.expand()).collect())
+                        .unwrap_or_default();
 
-                // Filter out any unstaged lines that were also committed
-                // (these are lines that were committed, then modified again in workdir)
-                // BUT keep pure insertions even if they overlap with committed line numbers
-                let mut filtered_unstaged_lines: Vec<u32> = unstaged_ranges
-                    .iter()
-                    .flat_map(|r| r.expand())
-                    .filter(|line| {
-                        // Keep the line if it's NOT in committed, OR if it's a pure insertion
-                        !committed_lines.contains(line) || pure_insertion_lines.contains(line)
-                    })
-                    .collect();
+                    let mut filtered_unstaged_lines: Vec<u32> = unstaged_ranges
+                        .iter()
+                        .flat_map(|r| r.expand())
+                        .filter(|line| {
+                            !committed_lines.contains(line) || pure_insertion_lines.contains(line)
+                        })
+                        .collect();
 
-                if filtered_unstaged_lines.is_empty() {
-                    unstaged_ranges.clear();
-                } else {
-                    filtered_unstaged_lines.sort_unstable();
-                    filtered_unstaged_lines.dedup();
-                    *unstaged_ranges = LineRange::compress_lines(&filtered_unstaged_lines);
+                    if filtered_unstaged_lines.is_empty() {
+                        unstaged_ranges.clear();
+                    } else {
+                        filtered_unstaged_lines.sort_unstable();
+                        filtered_unstaged_lines.dedup();
+                        *unstaged_ranges = LineRange::compress_lines(&filtered_unstaged_lines);
+                    }
                 }
             }
         }
@@ -2266,7 +2285,7 @@ impl VirtualAttributions {
                 line_attrs
             };
 
-            // Get unstaged lines for this file (in working directory coordinates).
+            // Get unstaged lines for this file (in working directory / carryover coordinates).
             let mut unstaged_lines: Vec<u32> = Vec::new();
             let unstaged_lookup = unstaged_hunks.get(&nfc_file_path).or_else(|| {
                 rename_map
@@ -2280,11 +2299,33 @@ impl VirtualAttributions {
                 unstaged_lines.sort_unstable();
             }
 
+            // Pure-insertion lines: carryover lines that were inserted (not replaced).
+            // Only these cause a coordinate shift between carryover and committed space.
+            // Replace-type unstaged lines leave the count the same, so do NOT shift
+            // subsequent lines in the committed coordinate system.
+            let mut pure_insertion_lines: Vec<u32> = Vec::new();
+            let pure_insertion_lookup = pure_insertion_hunks.get(&nfc_file_path).or_else(|| {
+                rename_map
+                    .get(&nfc_file_path)
+                    .and_then(|np| pure_insertion_hunks.get(np))
+            });
+            if let Some(ranges) = pure_insertion_lookup {
+                for range in ranges {
+                    pure_insertion_lines.extend(range.expand());
+                }
+                pure_insertion_lines.sort_unstable();
+            }
+
             // Split line attributions into committed and uncommitted
             // VirtualAttributions has line numbers in working directory coordinates,
             // so we need to convert to commit coordinates before comparing with committed hunks
             let mut committed_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
             let mut uncommitted_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
+            // Track committed-coordinate lines that were explicitly resolved (either
+            // placed in committed_lines_map or displaced to uncommitted due to unstaged
+            // content). Gap-fill must not override these: lines that ended up unstaged
+            // had human-modified content and should not be attributed to the AI.
+            let mut explicitly_resolved_commit_lines: StdHashMap<u32, ()> = StdHashMap::new();
 
             // Get the committed hunks for this file (if any) - these are in commit coordinates.
             // If the file was renamed, committed_hunks is keyed by the new path.
@@ -2307,10 +2348,23 @@ impl VirtualAttributions {
                             .or_default()
                             .push(workdir_line_num);
                         referenced_prompts.insert(line_attr.author_id.clone());
+                        // Record the corresponding committed-coordinate position so that gap-fill
+                        // does not later claim this position for AI attribution.
+                        // Only pure insertions shift coordinates; replacements do not.
+                        // A replaced carryover line W has committed coordinate W - (# pure
+                        // insertions before W).
+                        let pure_inserts_before = pure_insertion_lines
+                            .iter()
+                            .filter(|&&l| l < workdir_line_num)
+                            .count() as u32;
+                        explicitly_resolved_commit_lines
+                            .insert(workdir_line_num - pure_inserts_before, ());
                     } else {
                         // Convert working directory line number to commit line number
-                        // by subtracting the count of unstaged lines before this line
-                        let adjustment = unstaged_lines
+                        // by subtracting the count of pure-insertion unstaged lines before this line.
+                        // Replace-type unstaged lines do not shift line numbers; only inserted
+                        // carryover lines (which have no corresponding committed line) shift coords.
+                        let adjustment = pure_insertion_lines
                             .iter()
                             .filter(|&&l| l < workdir_line_num)
                             .count() as u32;
@@ -2331,6 +2385,7 @@ impl VirtualAttributions {
                                 .entry(line_attr.author_id.clone())
                                 .or_default()
                                 .push(commit_line_num);
+                            explicitly_resolved_commit_lines.insert(commit_line_num, ());
                         } else if is_renamed_file
                             && line_attr.author_id != CheckpointKind::Human.to_str()
                             && !line_attr.author_id.starts_with("h_")
@@ -2343,6 +2398,7 @@ impl VirtualAttributions {
                                 .entry(line_attr.author_id.clone())
                                 .or_default()
                                 .push(commit_line_num);
+                            explicitly_resolved_commit_lines.insert(commit_line_num, ());
                         }
                     }
                 }
@@ -2401,6 +2457,15 @@ impl VirtualAttributions {
                             .binary_search_by_key(&line, |(l, _)| *l)
                             .is_ok()
                         {
+                            continue;
+                        }
+
+                        // Skip lines whose committed position was explicitly resolved during the
+                        // attribution loop above (placed in committed_lines_map or displaced to
+                        // uncommitted because the carryover snapshot differed from the commit).
+                        // Filling these positions would override a conscious attribution decision
+                        // — e.g. a human-modified line that replaced an AI-written line.
+                        if explicitly_resolved_commit_lines.contains_key(&line) {
                             continue;
                         }
 

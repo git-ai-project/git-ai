@@ -29,6 +29,11 @@ pub(crate) type UnknownLinesByFile = BTreeMap<String, Vec<u32>>;
 pub(crate) struct AttributionRecoveryContext<'a> {
     pub(crate) file_timestamps: Option<&'a FileTimestampsByPath>,
     pub(crate) before_external_recovery: Option<&'a dyn Fn(&UnknownLinesByFile)>,
+    /// Per-file sets of committed-coordinate line numbers that were explicitly displaced
+    /// to INITIAL by the attribution loop (i.e., human-modified lines that replaced
+    /// AI-checkpoint content without a known_human checkpoint firing).  Edge recovery
+    /// must not re-claim these lines for AI — they were consciously excluded.
+    pub(crate) displaced_to_initial_lines: Option<&'a HashMap<String, HashSet<u32>>>,
 }
 
 pub(crate) fn recover_attribution(
@@ -64,6 +69,7 @@ pub(crate) fn recover_attribution(
         commit_sha,
         authorship_log,
         committed_hunks,
+        context.displaced_to_initial_lines,
     );
     let unknown_after_edges = unknown_lines_by_file(authorship_log, committed_hunks);
     if unknown_after_edges.is_empty() {
@@ -342,15 +348,40 @@ fn recover_adjacent_edges(
     commit_sha: &str,
     authorship_log: &mut AuthorshipLog,
     committed_hunks: &HashMap<String, Vec<LineRange>>,
+    displaced_to_initial_lines: Option<&HashMap<String, HashSet<u32>>>,
 ) {
     let unknown = unknown_lines_by_file(authorship_log, committed_hunks);
     for (file_path, unknown_lines) in unknown {
         let line_to_author = line_author_map(authorship_log, &file_path);
         let runs = contiguous_runs(&unknown_lines);
+
+        // Lines that were explicitly displaced to INITIAL by the attribution loop (e.g.,
+        // human-modified lines that replaced AI-checkpoint content).  Edge recovery must not
+        // re-claim these — they were consciously excluded from the authorship note.
+        let displaced: Option<&HashSet<u32>> =
+            displaced_to_initial_lines.and_then(|map| map.get(&file_path));
+
         for run in runs {
             let Some(recovery) = edge_recovery_for_run(&line_to_author, &run) else {
                 continue;
             };
+
+            // Skip any lines that were explicitly sent to INITIAL during attribution.
+            let lines: Vec<u32> = if let Some(displaced_set) = displaced {
+                recovery
+                    .lines
+                    .iter()
+                    .copied()
+                    .filter(|&line_num| !displaced_set.contains(&line_num))
+                    .collect()
+            } else {
+                recovery.lines.clone()
+            };
+
+            if lines.is_empty() {
+                continue;
+            }
+
             let trace_id = generate_trace_id();
             let source_session = recovery
                 .source_author
@@ -363,19 +394,14 @@ fn recover_adjacent_edges(
             } else {
                 recovery.source_author.clone()
             };
-            let recovered_line_count = recovery.lines.len() as u32;
-            add_attestation(
-                authorship_log,
-                &file_path,
-                &recovered_author,
-                &recovery.lines,
-            );
+            let recovered_line_count = lines.len() as u32;
+            add_attestation(authorship_log, &file_path, &recovered_author, &lines);
 
             let metadata = json!({
                 "solver": "edge_extension",
                 "file_path": file_path,
                 "source_author": &recovery.source_author,
-                "recovered_lines": &recovery.lines,
+                "recovered_lines": &lines,
             });
             record_recovery_metric(RecoveryMetricInput {
                 repo,
