@@ -44,6 +44,7 @@ mod cli_parser_rebase_args;
 mod codex;
 mod cold_trace2_repo;
 mod commit_post_stats_benchmark;
+mod config_cli_coverage;
 mod config_pattern_detection;
 mod continue_cli;
 mod cross_repo_cwd_attribution;
