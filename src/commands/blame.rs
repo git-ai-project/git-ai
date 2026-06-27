@@ -1,9 +1,8 @@
 use crate::auth::CredentialStore;
 use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
-use crate::git::notes_api::read_authorship_v3 as get_reference_as_authorship_log_v3;
 use crate::git::repository::Repository;
 use crate::git::repository::{exec_git, exec_git_stdin};
 #[cfg(windows)]
@@ -935,6 +934,43 @@ impl Repository {
         Ok(hunks)
     }
 
+    /// Batch-load v3 authorship logs for a set of commits in a handful of git
+    /// invocations (one `ls-tree` + batched `cat-file`) instead of one
+    /// `git notes show` subprocess per commit.
+    ///
+    /// Commits without a valid note are recorded as `None` so callers can cache
+    /// negative lookups too. Behavior mirrors `read_authorship_v3`: the schema
+    /// version is enforced and each log's `base_commit_sha` is aligned to the
+    /// commit its note is attached to.
+    fn load_authorship_logs_batched(
+        &self,
+        commit_shas: impl IntoIterator<Item = String>,
+    ) -> HashMap<String, Option<AuthorshipLog>> {
+        let unique: Vec<String> = commit_shas
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        if unique.is_empty() {
+            return cache;
+        }
+
+        let notes = crate::git::notes_api::read_notes_batch(self, &unique).unwrap_or_default();
+        for sha in unique {
+            let log = notes.get(&sha).and_then(|content| {
+                let mut log = AuthorshipLog::deserialize_from_string(content).ok()?;
+                if log.metadata.schema_version != AUTHORSHIP_LOG_VERSION {
+                    return None;
+                }
+                log.metadata.base_commit_sha = sha.clone();
+                Some(log)
+            });
+            cache.insert(sha, log);
+        }
+        cache
+    }
+
     /// Post-process blame hunks to populate ai_human_author from authorship logs.
     /// For each hunk, looks up the authorship log for its commit and finds the human_author
     /// from the prompt record that covers lines in the hunk.
@@ -946,23 +982,21 @@ impl Repository {
         file_path: &str,
         options: &GitAiBlameOptions,
     ) -> Result<Vec<BlameHunk>, GitAiError> {
-        // Cache authorship logs by commit SHA to avoid repeated lookups
-        let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        // Batch-load authorship logs for every commit in one shot to avoid one
+        // `git notes show` subprocess per commit.
+        let commit_authorship_cache =
+            self.load_authorship_logs_batched(hunks.iter().map(|h| h.commit_sha.clone()));
         // Cache for foreign prompts to avoid repeated grepping
         let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
 
         let mut result_hunks: Vec<BlameHunk> = Vec::new();
 
         for hunk in hunks {
-            // Get or fetch the authorship log for this commit
-            let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha)
-            {
-                cached.clone()
-            } else {
-                let authorship = get_reference_as_authorship_log_v3(self, &hunk.commit_sha).ok();
-                commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
-                authorship
-            };
+            // Look up the pre-loaded authorship log for this commit.
+            let authorship_log = commit_authorship_cache
+                .get(&hunk.commit_sha)
+                .cloned()
+                .flatten();
 
             // If we have an authorship log, look up human_author for each line
             if let Some(ref authorship_log) = authorship_log {
@@ -1040,6 +1074,18 @@ impl Repository {
     }
 }
 
+fn format_agent_author(tool: &str, model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() || model.eq_ignore_ascii_case("unknown") {
+        tool.to_string()
+    } else {
+        // Strip a redundant "claude-" prefix (e.g. "claude-sonnet-4-6" -> "sonnet-4-6")
+        // to keep the label compact.
+        let model = model.strip_prefix("claude-").unwrap_or(model);
+        format!("{} {}", tool, model)
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn overlay_ai_authorship(
     repo: &Repository,
@@ -1068,8 +1114,10 @@ fn overlay_ai_authorship(
     let mut commits_with_notes: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
-    // Group hunks by commit SHA to avoid repeated lookups
-    let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+    // Batch-load authorship logs for every commit in one shot to avoid one
+    // `git notes show` subprocess per commit.
+    let commit_authorship_cache =
+        repo.load_authorship_logs_batched(blame_hunks.iter().map(|h| h.commit_sha.clone()));
     // Simulated authorship logs for agent commits without notes. We keep these separate
     // from commit_authorship_cache so a single agent commit can be handled across multiple
     // blame hunks without being limited to the first hunk's line range.
@@ -1077,15 +1125,11 @@ fn overlay_ai_authorship(
     // Cache for foreign prompts to avoid repeated grepping
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
     for hunk in blame_hunks {
-        // Check if we've already looked up this commit's authorship
-        let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha) {
-            cached.clone()
-        } else {
-            // Try to get authorship log for this commit
-            let authorship = get_reference_as_authorship_log_v3(repo, &hunk.commit_sha).ok();
-            commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
-            authorship
-        };
+        // Look up the pre-loaded authorship log for this commit.
+        let authorship_log = commit_authorship_cache
+            .get(&hunk.commit_sha)
+            .cloned()
+            .flatten();
 
         // If we have AI authorship data, look up the author for lines in this hunk
         if let Some(ref authorship_log) = authorship_log {
@@ -1131,8 +1175,13 @@ fn overlay_ai_authorship(
                         if options.use_prompt_hashes_as_names {
                             line_authors.insert(current_line_num, prompt_hash.clone());
                         } else {
-                            line_authors
-                                .insert(current_line_num, prompt_record.agent_id.tool.clone());
+                            line_authors.insert(
+                                current_line_num,
+                                format_agent_author(
+                                    &prompt_record.agent_id.tool,
+                                    &prompt_record.agent_id.model,
+                                ),
+                            );
                         }
 
                         prompt_records.insert(prompt_hash, prompt_record.clone());
@@ -1724,7 +1773,11 @@ fn output_default_format(
         } else if options.show_prompt && prompt_records.contains_key(author) {
             let prompt = &prompt_records[author];
             let short_hash = &author[..7.min(author.len())];
-            format!("{} [{}]", prompt.agent_id.tool, short_hash)
+            format!(
+                "{} [{}]",
+                format_agent_author(&prompt.agent_id.tool, &prompt.agent_id.model),
+                short_hash
+            )
         } else if options.show_email {
             format!("{} <{}>", author, &hunk.author_email)
         } else {
@@ -2235,4 +2288,33 @@ fn parse_line_range(range_str: &str) -> Option<(u32, u32)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_agent_author_with_model() {
+        // A leading "claude-" is stripped to keep the label compact.
+        assert_eq!(
+            format_agent_author("claude", "claude-sonnet-4-6"),
+            "claude sonnet-4-6"
+        );
+        // Non-claude models are shown verbatim.
+        assert_eq!(format_agent_author("cursor", "gpt-4"), "cursor gpt-4");
+        // Only a leading "claude-" is stripped, not occurrences elsewhere.
+        assert_eq!(
+            format_agent_author("amp", "anthropic/claude-opus"),
+            "amp anthropic/claude-opus"
+        );
+    }
+
+    #[test]
+    fn test_format_agent_author_omits_unknown_or_empty_model() {
+        assert_eq!(format_agent_author("mock_ai", "unknown"), "mock_ai");
+        assert_eq!(format_agent_author("mock_ai", "UNKNOWN"), "mock_ai");
+        assert_eq!(format_agent_author("claude", ""), "claude");
+        assert_eq!(format_agent_author("claude", "   "), "claude");
+    }
 }
