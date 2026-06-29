@@ -790,61 +790,100 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
 pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
     let local_ref = format!("refs/notes/{}", AI_AUTHORSHIP_REFNAME);
 
-    // 1. List notes from both refs
+    // The source/tracking ref is only written by our fetch step and is stable for
+    // the duration of this merge, so read it once.
     let source_notes = list_all_notes(repo, source_ref)?;
-    let local_notes = list_all_notes(repo, &local_ref)?;
-
-    // 2. Resolve parent commit SHAs for the merge commit
-    let local_commit = rev_parse(repo, &local_ref)?;
     let source_commit = rev_parse(repo, source_ref)?;
 
-    // Nothing to merge if both refs point to the same commit.
-    if local_commit == source_commit {
-        tracing::debug!("notes refs already at same commit, nothing to merge");
-        return Ok(());
+    // `fast-import` commits directly to refs/notes/ai and locks the ref against the
+    // value it observed when it started. A concurrent writer (e.g. the daemon
+    // flushing a new authorship note) can move refs/notes/ai mid-import, producing
+    // a "cannot lock ref ... is at X but expected Y" failure. Retry on that
+    // contention, re-reading the local notes and tip each attempt so the merge
+    // incorporates the concurrent write rather than clobbering it (no data loss).
+    const MAX_ATTEMPTS: usize = 5;
+    let mut last_lock_error: Option<GitAiError> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        // Re-read the local side every attempt to pick up any concurrent update.
+        let local_notes = list_all_notes(repo, &local_ref)?;
+        let local_commit = rev_parse(repo, &local_ref)?;
+
+        // Nothing to merge if both refs point to the same commit.
+        if local_commit == source_commit {
+            tracing::debug!("notes refs already at same commit, nothing to merge");
+            return Ok(());
+        }
+
+        // Build the fast-import stream.
+        //    Use explicit `M` (filemodify) commands instead of `N` (notemodify) because
+        //    `N` validates that the annotated object exists locally, which fails when
+        //    merging notes from a remote that annotates commits not yet fetched to this
+        //    repo (e.g., notes from another developer's push on a monorepo).
+        //
+        //    Emit source (remote) notes first, then local notes. fast-import uses
+        //    last-writer-wins for duplicate paths, so local notes take precedence —
+        //    this implements the "ours" merge strategy.
+        let mut stream = String::new();
+        stream.push_str(&format!("commit {}\n", local_ref));
+        stream.push_str("committer git-ai <git-ai@noreply> 0 +0000\n");
+        stream.push_str("data 23\nMerge notes (fallback)\n");
+        stream.push_str(&format!("from {}\n", local_commit));
+        stream.push_str(&format!("merge {}\n", source_commit));
+        // Start with a clean tree to avoid mixed-fanout issues
+        stream.push_str("deleteall\n");
+
+        // Source notes first (will be overwritten by local on conflict)
+        for (blob, object) in &source_notes {
+            let path = notes_path_for_object(object);
+            stream.push_str(&format!("M 100644 {} {}\n", blob, path));
+        }
+        // Local notes second (wins on conflict)
+        for (blob, object) in &local_notes {
+            let path = notes_path_for_object(object);
+            stream.push_str(&format!("M 100644 {} {}\n", blob, path));
+        }
+        stream.push_str("done\n");
+
+        // Run fast-import
+        let mut args = repo.global_args_for_exec();
+        args.extend_from_slice(&[
+            "fast-import".to_string(),
+            "--quiet".to_string(),
+            "--done".to_string(),
+        ]);
+
+        match exec_git_stdin(&args, stream.as_bytes()) {
+            Ok(_) => {
+                tracing::debug!("fallback merge via fast-import completed successfully");
+                return Ok(());
+            }
+            Err(e) if is_ref_lock_error(&e) && attempt + 1 < MAX_ATTEMPTS => {
+                tracing::debug!(
+                    "fallback merge hit ref-lock contention on refs/notes/ai \
+                     (attempt {}/{}), retrying: {}",
+                    attempt + 1,
+                    MAX_ATTEMPTS,
+                    e
+                );
+                last_lock_error = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+            }
+            Err(e) => return Err(e),
+        }
     }
 
-    // 3. Build the fast-import stream.
-    //    Use explicit `M` (filemodify) commands instead of `N` (notemodify) because
-    //    `N` validates that the annotated object exists locally, which fails when
-    //    merging notes from a remote that annotates commits not yet fetched to this
-    //    repo (e.g., notes from another developer's push on a monorepo).
-    //
-    //    Emit source (remote) notes first, then local notes. fast-import uses
-    //    last-writer-wins for duplicate paths, so local notes take precedence —
-    //    this implements the "ours" merge strategy.
-    let mut stream = String::new();
-    stream.push_str(&format!("commit {}\n", local_ref));
-    stream.push_str("committer git-ai <git-ai@noreply> 0 +0000\n");
-    stream.push_str("data 23\nMerge notes (fallback)\n");
-    stream.push_str(&format!("from {}\n", local_commit));
-    stream.push_str(&format!("merge {}\n", source_commit));
-    // Start with a clean tree to avoid mixed-fanout issues
-    stream.push_str("deleteall\n");
+    Err(last_lock_error
+        .unwrap_or_else(|| GitAiError::Generic("fallback merge notes failed".to_string())))
+}
 
-    // Source notes first (will be overwritten by local on conflict)
-    for (blob, object) in &source_notes {
-        let path = notes_path_for_object(object);
-        stream.push_str(&format!("M 100644 {} {}\n", blob, path));
-    }
-    // Local notes second (wins on conflict)
-    for (blob, object) in &local_notes {
-        let path = notes_path_for_object(object);
-        stream.push_str(&format!("M 100644 {} {}\n", blob, path));
-    }
-    stream.push_str("done\n");
-
-    // 4. Run fast-import
-    let mut args = repo.global_args_for_exec();
-    args.extend_from_slice(&[
-        "fast-import".to_string(),
-        "--quiet".to_string(),
-        "--done".to_string(),
-    ]);
-    exec_git_stdin(&args, stream.as_bytes())?;
-
-    tracing::debug!("fallback merge via fast-import completed successfully");
-    Ok(())
+/// Detects a git ref-lock contention error (the ref moved between when an
+/// operation read its value and when it tried to update it). Used to retry
+/// concurrent refs/notes/ai updates.
+fn is_ref_lock_error(error: &GitAiError) -> bool {
+    matches!(
+        error,
+        GitAiError::GitCliError { stderr, .. } if stderr.contains("cannot lock ref")
+    )
 }
 
 /// List all notes on a given ref. Returns Vec<(note_blob_sha, annotated_object_sha)>.
