@@ -303,7 +303,7 @@ impl ApiContext {
         Ok(joined)
     }
 
-    /// Make a POST request with JSON body
+    /// Make a POST request with JSON body, gzip-compressed.
     pub fn post_json<T: serde::Serialize>(
         &self,
         endpoint: &str,
@@ -325,7 +325,7 @@ impl ApiContext {
             request = request.set("Authorization", &format!("Bearer {}", token));
         }
 
-        http::send_with_body(request, &body_json)
+        http::send_with_gzip_body(request, body_json.as_bytes())
             .map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))
     }
 
