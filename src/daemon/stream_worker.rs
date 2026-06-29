@@ -15,7 +15,7 @@ use crate::streams::agent::{SHARED_STREAM_SESSION_ID, StreamDescriptor};
 use crate::streams::db::{StreamRecord, StreamsDatabase};
 use crate::streams::types::StreamError;
 use crate::streams::watermark::{WatermarkStrategy, WatermarkType};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use std::collections::{BinaryHeap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +38,79 @@ pub fn extract_event_timestamp(event: &serde_json::Value) -> Option<u32> {
     } else {
         ts_val.as_u64().map(|ms| (ms / 1000) as u32)
     }
+}
+
+/// Decide whether a session's transcript events may be emitted under the
+/// configured `allow_repositories` / `exclude_repositories` filters.
+///
+/// `work_dir` is the resolved working directory for the session (hook > DB >
+/// inferred cwd), or `None` when it could not be determined — which is always
+/// the case for shared streams (e.g. Copilot OTEL) since they serve many repos.
+///
+/// Semantics mirror the checkpoint-time filter (`Config::is_allowed_repository`):
+/// exclusions take precedence, an empty allowlist allows everything, and an
+/// active allowlist fails closed — a session whose repository can't be verified
+/// (no work_dir, not a git repo, or no remote) is dropped. That fail-closed
+/// behavior is intentional: customers set these filters for security, so an
+/// unverifiable repository must not leak session data.
+pub(super) fn session_repo_allowed(config: &config::Config, work_dir: Option<&Path>) -> bool {
+    // Fast path: no filters configured (common case). Avoids touching the repo.
+    if !config.has_repository_filters() {
+        return true;
+    }
+
+    let remotes = work_dir
+        .and_then(|wd| crate::git::repository::discover_repository_in_path_no_git_exec(wd).ok())
+        .and_then(|repo| repo.remotes_with_urls().ok());
+
+    config.is_allowed_repository_with_remotes(remotes.as_ref())
+}
+
+fn stream_file_metadata(stream_path: &str) -> Option<(u64, Option<DateTime<Utc>>)> {
+    let metadata = std::fs::metadata(stream_path).ok()?;
+    let file_size = metadata.len();
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| Utc.timestamp_opt(d.as_secs() as i64, 0).unwrap());
+    Some((file_size, modified))
+}
+
+fn update_stream_file_metadata(
+    db: &StreamsDatabase,
+    stream: &StreamRecord,
+) -> Result<(), StreamError> {
+    let Some((file_size, modified)) = stream_file_metadata(&stream.stream_path) else {
+        return Ok(());
+    };
+
+    db.update_file_metadata(
+        &stream.session_id,
+        &stream.stream_kind,
+        &stream.stream_path,
+        file_size,
+        modified,
+    )
+}
+
+fn record_filter_skip(
+    db: &StreamsDatabase,
+    stream: &StreamRecord,
+    filter_fingerprint: &str,
+) -> Result<(), StreamError> {
+    let Some((file_size, modified)) = stream_file_metadata(&stream.stream_path) else {
+        return Ok(());
+    };
+
+    db.record_filter_skip(
+        &stream.session_id,
+        &stream.stream_kind,
+        &stream.stream_path,
+        file_size,
+        modified,
+        filter_fingerprint,
+    )
 }
 
 /// Priority levels for processing tasks.
@@ -824,6 +897,7 @@ impl StreamWorker {
             processing_errors: 0,
             last_error: None,
             repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
+            last_filter_fingerprint: None,
         };
 
         self.streams_db.insert_stream(&record)
@@ -884,6 +958,7 @@ impl StreamWorker {
             } else {
                 repo_work_dir.map(|p| p.display().to_string())
             },
+            last_filter_fingerprint: None,
         };
 
         self.streams_db.insert_stream(&record)
@@ -1002,6 +1077,29 @@ impl StreamWorker {
                 .or_else(|| stream.repo_work_dir.as_ref().map(PathBuf::from))
                 .or_else(|| agent.infer_cwd(&path))
         };
+
+        // Respect the allow_repositories / exclude_repositories filters for
+        // session (transcript) data, mirroring the checkpoint-time filter in
+        // `git_ai_handlers.rs`. Read a fresh config so a customer toggling the
+        // filters takes effect without restarting the long-lived daemon. When
+        // the repository is excluded (or can't be verified under an active
+        // allowlist) we emit nothing and do NOT advance the watermark. We still
+        // record file metadata plus the active filter fingerprint, so periodic
+        // sweeps do not rediscover an unchanged excluded transcript until the
+        // repository filters change.
+        let config = config::Config::fresh();
+        if !session_repo_allowed(&config, resolved_work_dir.as_deref()) {
+            if let Some(filter_fingerprint) = config.repository_filters_fingerprint() {
+                record_filter_skip(db, &stream, &filter_fingerprint)?;
+            } else {
+                update_stream_file_metadata(db, &stream)?;
+            }
+            tracing::debug!(
+                session_id = %task.session_id,
+                "skipping session events: repository excluded or not in allow_repositories"
+            );
+            return Ok(());
+        }
 
         // Persist inferred cwd to DB if stream didn't already have one
         if !is_shared_stream
@@ -1143,21 +1241,7 @@ impl StreamWorker {
             current_watermark = batch.new_watermark;
         }
 
-        if let Ok(metadata) = std::fs::metadata(&stream.stream_path) {
-            let file_size = metadata.len();
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| Utc.timestamp_opt(d.as_secs() as i64, 0).unwrap());
-            db.update_file_metadata(
-                &stream.session_id,
-                &task.stream_kind,
-                &stream.stream_path,
-                file_size,
-                modified,
-            )?;
-        }
+        update_stream_file_metadata(db, &stream)?;
 
         tracing::debug!(
             session_id = %task.session_id,
@@ -1383,6 +1467,70 @@ mod extract_event_timestamp_tests {
     fn test_empty_string() {
         let event = serde_json::json!({"timestamp": ""});
         assert_eq!(extract_event_timestamp(&event), None);
+    }
+}
+
+#[cfg(test)]
+mod filter_skip_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn filter_skip_marks_file_seen_and_records_filter_without_advancing_watermark() {
+        let temp = TempDir::new().unwrap();
+        let stream_path = temp.path().join("session.jsonl");
+        std::fs::write(
+            &stream_path,
+            r#"{"type":"message","timestamp":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let db = StreamsDatabase::open(temp.path().join("streams.db")).unwrap();
+        let stream_path_str = stream_path.display().to_string();
+        let stream = StreamRecord {
+            session_id: "session-1".to_string(),
+            stream_kind: "transcript".to_string(),
+            tool: "claude".to_string(),
+            stream_path: stream_path_str.clone(),
+            stream_format: "ClaudeJsonl".to_string(),
+            watermark_type: "ByteOffset".to_string(),
+            watermark_value: "0".to_string(),
+            external_session_id: "external-session-1".to_string(),
+            external_parent_session_id: None,
+            first_seen_at: 1704067200,
+            last_processed_at: 1704067200,
+            last_known_size: 0,
+            last_modified: None,
+            processing_errors: 0,
+            last_error: None,
+            repo_work_dir: None,
+            last_filter_fingerprint: None,
+        };
+        db.insert_stream(&stream).unwrap();
+
+        record_filter_skip(&db, &stream, "allow=*github.com/acme/*;exclude=").unwrap();
+
+        let updated = db
+            .get_stream("session-1", "transcript", &stream_path_str)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.last_known_size,
+            std::fs::metadata(&stream_path).unwrap().len() as i64
+        );
+        assert!(updated.last_modified.is_some());
+        assert_eq!(
+            updated.watermark_value, "0",
+            "metadata updates must not advance the event watermark"
+        );
+        assert_eq!(
+            updated.last_processed_at, 1704067200,
+            "metadata updates must not mark filtered events as processed"
+        );
+        assert_eq!(
+            updated.last_filter_fingerprint.as_deref(),
+            Some("allow=*github.com/acme/*;exclude=")
+        );
     }
 }
 

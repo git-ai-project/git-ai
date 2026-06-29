@@ -289,6 +289,7 @@ fn test_sweep_deduplication_via_session_id() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&record).unwrap();
 
@@ -338,6 +339,7 @@ fn test_behind_detection_on_file_growth() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&record).unwrap();
 
@@ -425,6 +427,7 @@ fn test_watermark_persistence_after_processing() {
         processing_errors: 0,
         last_error: None,
         repo_work_dir: None,
+        last_filter_fingerprint: None,
     };
     db.insert_stream(&record).unwrap();
 

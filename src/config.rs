@@ -321,6 +321,10 @@ pub struct ConfigPatch {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_repositories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_repositories: Option<Vec<String>>,
 }
 
 impl Config {
@@ -389,6 +393,31 @@ impl Config {
 
     pub fn has_repository_filters(&self) -> bool {
         !self.allow_repositories.is_empty() || !self.exclude_repositories.is_empty()
+    }
+
+    pub(crate) fn repository_filters_fingerprint(&self) -> Option<String> {
+        if !self.has_repository_filters() {
+            return None;
+        }
+
+        let mut allow = self
+            .allow_repositories
+            .iter()
+            .map(Pattern::as_str)
+            .collect::<Vec<_>>();
+        let mut exclude = self
+            .exclude_repositories
+            .iter()
+            .map(Pattern::as_str)
+            .collect::<Vec<_>>();
+        allow.sort_unstable();
+        exclude.sort_unstable();
+
+        Some(format!(
+            "allow={};exclude={}",
+            allow.join("\u{1f}"),
+            exclude.join("\u{1f}")
+        ))
     }
 
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
@@ -689,6 +718,23 @@ impl Config {
             .write()
             .expect("Failed to acquire write lock on test feature flags");
         *override_flags = None;
+    }
+
+    /// Build a config with only the repository allow/exclude filters populated.
+    ///
+    /// Intended for tests that exercise repository filtering logic without
+    /// touching the on-disk config or process environment. Invalid glob
+    /// patterns are silently dropped (mirroring `build_config`).
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn with_repository_filters_for_test(allow: &[&str], exclude: &[&str]) -> Self {
+        let mut config = build_config();
+        config.allow_repositories = allow.iter().filter_map(|s| Pattern::new(s).ok()).collect();
+        config.exclude_repositories = exclude
+            .iter()
+            .filter_map(|s| Pattern::new(s).ok())
+            .collect();
+        config
     }
 
     /// Get feature flags, checking for test overrides first.
@@ -1652,6 +1698,36 @@ fn apply_test_config_patch(config: &mut Config) {
         }
         if let Some(days) = patch.transcript_streaming_lookback_days {
             config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };
+        }
+        if let Some(patterns) = patch.allow_repositories {
+            config.allow_repositories = patterns
+                .into_iter()
+                .filter_map(|pattern_str| {
+                    Pattern::new(&pattern_str)
+                        .map_err(|e| {
+                            eprintln!(
+                                "Warning: Invalid test pattern in allow_repositories '{}': {}",
+                                pattern_str, e
+                            );
+                        })
+                        .ok()
+                })
+                .collect();
+        }
+        if let Some(patterns) = patch.exclude_repositories {
+            config.exclude_repositories = patterns
+                .into_iter()
+                .filter_map(|pattern_str| {
+                    Pattern::new(&pattern_str)
+                        .map_err(|e| {
+                            eprintln!(
+                                "Warning: Invalid test pattern in exclude_repositories '{}': {}",
+                                pattern_str, e
+                            );
+                        })
+                        .ok()
+                })
+                .collect();
         }
     }
 }
