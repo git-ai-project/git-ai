@@ -1223,6 +1223,66 @@ fn test_cherry_pick_no_commit_defers_to_final_commit_tree() {
     ]);
 }
 
+#[test]
+fn test_cherry_pick_no_commit_abandon_does_not_affect_later_unrelated_commit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("file.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+    let mut file = repo.filename("file.txt");
+    file.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&file_path, "base\nAI picked line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file.txt"]).unwrap();
+    repo.stage_all_and_commit("ai source").unwrap();
+    let source_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI picked line".ai(),
+    ]);
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["cherry-pick", "--no-commit", &source_commit])
+        .unwrap();
+    repo.git_og_with_env(&["reset", "--hard"], &[("GIT_TRACE2_EVENT", "0")])
+        .unwrap();
+
+    fs::write(&file_path, "base\nunrelated human line\n").unwrap();
+    repo.git(&["add", "file.txt"]).unwrap();
+    let unrelated_commit = repo
+        .commit("unrelated commit after abandoned no-commit cherry-pick")
+        .unwrap();
+
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "unrelated human line".unattributed_human(),
+    ]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(
+        stats.ai_additions, 0,
+        "unrelated commit must not inherit AI stats"
+    );
+    assert_eq!(
+        stats.ai_accepted, 0,
+        "unrelated commit must not inherit AI lines"
+    );
+    if let Some(note) = repo.read_authorship_note(&unrelated_commit.commit_sha) {
+        let log = AuthorshipLog::deserialize_from_string(&note).expect("parse unrelated note");
+        assert!(
+            log.metadata.sessions.is_empty(),
+            "unrelated commit must not inherit cherry-pick session metadata"
+        );
+        assert!(
+            log.metadata.prompts.is_empty(),
+            "unrelated commit must not inherit cherry-pick prompt metadata"
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_single_commit_cherry_pick,
     test_cherry_pick_preserves_human_only_commit_note_metadata,
@@ -1239,6 +1299,7 @@ crate::reuse_tests_in_worktree!(
     test_cherry_pick_from_remote_without_prefetched_notes,
     test_cherry_pick_from_remote_reports_notes_import_failure,
     test_cherry_pick_no_commit_defers_to_final_commit_tree,
+    test_cherry_pick_no_commit_abandon_does_not_affect_later_unrelated_commit,
     test_cherry_pick_skip_failed_next_conflict_advances_pending_remote_tracking_source,
     test_cherry_pick_skip_failed_next_conflict_does_not_double_skip_refcursor_sources,
 );

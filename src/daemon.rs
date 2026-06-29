@@ -1878,6 +1878,72 @@ fn apply_cherry_pick_no_commit_rewrite(
     crate::authorship::rewrite::shift_authorship_notes_merging_existing(repo, &mappings)
 }
 
+fn added_content_keys_between(
+    repo: &crate::git::repository::Repository,
+    from: &str,
+    to: &str,
+) -> Result<HashSet<(String, String)>, GitAiError> {
+    let hunks = crate::commands::diff::get_diff_with_line_numbers(repo, from, to)?;
+    let mut keys = HashSet::new();
+    for hunk in hunks {
+        for content in hunk.added_contents {
+            keys.insert((hunk.file_path.clone(), content));
+        }
+    }
+    Ok(keys)
+}
+
+fn first_parent_or_empty_tree(
+    repo: &crate::git::repository::Repository,
+    commit_sha: &str,
+) -> Result<String, GitAiError> {
+    let commit = repo.revparse_single(commit_sha)?.peel_to_commit()?;
+    if commit.parent_count()? == 0 {
+        Ok("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
+    } else {
+        Ok(commit.parent(0)?.id())
+    }
+}
+
+fn source_added_content_overlaps_target(
+    source_keys: &HashSet<(String, String)>,
+    target_keys: &HashSet<(String, String)>,
+) -> bool {
+    !source_keys.is_empty() && source_keys.iter().any(|key| target_keys.contains(key))
+}
+
+fn squash_merge_source_content_present_in_commit(
+    repo: &crate::git::repository::Repository,
+    onto: &str,
+    source_head: &str,
+    squash_commit: &str,
+) -> Result<bool, GitAiError> {
+    let source_keys = added_content_keys_between(repo, onto, source_head)?;
+    let target_keys = added_content_keys_between(repo, onto, squash_commit)?;
+    Ok(source_added_content_overlaps_target(
+        &source_keys,
+        &target_keys,
+    ))
+}
+
+fn cherry_pick_no_commit_source_content_present_in_commit(
+    repo: &crate::git::repository::Repository,
+    sources: &[String],
+    head: &str,
+    commit_sha: &str,
+) -> Result<bool, GitAiError> {
+    let mut source_keys = HashSet::new();
+    for source in sources {
+        let parent = first_parent_or_empty_tree(repo, source)?;
+        source_keys.extend(added_content_keys_between(repo, &parent, source)?);
+    }
+    let target_keys = added_content_keys_between(repo, head, commit_sha)?;
+    Ok(source_added_content_overlaps_target(
+        &source_keys,
+        &target_keys,
+    ))
+}
+
 fn strict_rebase_original_head_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     semantic_old_head: &str,
@@ -5261,20 +5327,6 @@ impl ActorDaemonCoordinator {
                     }
                     crate::daemon::domain::SemanticEvent::CommitCreated { base, new_head } => {
                         let mut handled_as_squash_merge = false;
-                        // DEFERRED (code-review #4): a pending `merge --squash` is
-                        // matched to the next commit by `base == pending.onto`
-                        // alone. If the user ABORTS the squash (e.g. `git reset
-                        // --hard` / `git checkout -- .`) and later makes an
-                        // unrelated commit on the same base, that commit is
-                        // mistaken for the squash and the source ref's session
-                        // metadata leaks into its note (inflating `git-ai stats`;
-                        // line-level blame stays correct). A robust fix is
-                        // non-trivial: the abandon commands (reset/checkout) are
-                        // not currently sequenced into this side-effect layer, so
-                        // we cannot clear the pending state on abort here, and a
-                        // metadata-prune alternative collides with the intentional
-                        // prompt-only-note feature. Left as-is pending one of
-                        // those two mechanisms.
                         if !new_head.is_empty()
                             && cmd.primary_command.as_deref() == Some("commit")
                             && let Some(pending) =
@@ -5282,21 +5334,37 @@ impl ActorDaemonCoordinator {
                         {
                             if base.as_deref().is_some_and(|base| base == pending.onto) {
                                 let repo = find_repository_in_path(&worktree)?;
-                                crate::authorship::rewrite::handle_rewrite_event(
+                                if squash_merge_source_content_present_in_commit(
                                     &repo,
-                                    crate::authorship::rewrite::RewriteEvent::SquashMerge {
-                                        source_head: pending.source_head,
-                                        squash_commit: new_head.clone(),
-                                        onto: pending.onto,
-                                    },
-                                )?;
-                                handled_as_squash_merge = true;
+                                    &pending.onto,
+                                    &pending.source_head,
+                                    new_head,
+                                )? {
+                                    crate::authorship::rewrite::handle_rewrite_event(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::SquashMerge {
+                                            source_head: pending.source_head,
+                                            squash_commit: new_head.clone(),
+                                            onto: pending.onto,
+                                        },
+                                    )?;
+                                    handled_as_squash_merge = true;
+                                } else {
+                                    tracing::debug!(
+                                        commit = %new_head,
+                                        source_head = %pending.source_head,
+                                        onto = %pending.onto,
+                                        "dropping stale pending squash merge state"
+                                    );
+                                }
                             } else {
-                                self.set_pending_squash_merge_for_worktree(
-                                    worktree.as_ref(),
-                                    pending.source_head,
-                                    pending.onto,
-                                )?;
+                                tracing::debug!(
+                                    commit = %new_head,
+                                    base = ?base,
+                                    source_head = %pending.source_head,
+                                    onto = %pending.onto,
+                                    "dropping pending squash merge state after non-matching commit"
+                                );
                             }
                         }
 
@@ -5363,17 +5431,33 @@ impl ActorDaemonCoordinator {
                                     )?
                             {
                                 if base.as_deref().is_some_and(|base| base == pending.head) {
-                                    apply_cherry_pick_no_commit_rewrite(
+                                    if cherry_pick_no_commit_source_content_present_in_commit(
                                         &repo,
                                         &pending.source_commits,
+                                        &pending.head,
                                         new_head,
-                                    )?;
+                                    )? {
+                                        apply_cherry_pick_no_commit_rewrite(
+                                            &repo,
+                                            &pending.source_commits,
+                                            new_head,
+                                        )?;
+                                    } else {
+                                        tracing::debug!(
+                                            commit = %new_head,
+                                            head = %pending.head,
+                                            sources = ?pending.source_commits,
+                                            "dropping stale pending cherry-pick --no-commit state"
+                                        );
+                                    }
                                 } else {
-                                    self.set_pending_cherry_pick_no_commit_for_worktree(
-                                        worktree.as_ref(),
-                                        pending.source_commits,
-                                        pending.head,
-                                    )?;
+                                    tracing::debug!(
+                                        commit = %new_head,
+                                        base = ?base,
+                                        head = %pending.head,
+                                        sources = ?pending.source_commits,
+                                        "dropping pending cherry-pick --no-commit state after non-matching commit"
+                                    );
                                 }
                             }
                         }
