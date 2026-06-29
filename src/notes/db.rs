@@ -309,6 +309,32 @@ impl NotesDatabase {
         Ok(())
     }
 
+    /// Read an internal metadata value from the notes database.
+    pub fn get_metadata_value(&self, key: &str) -> Result<Option<String>, GitAiError> {
+        match self.conn.query_row(
+            "SELECT value FROM schema_metadata WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Persist an internal metadata value in the notes database.
+    pub fn set_metadata_value(&mut self, key: &str, value: &str) -> Result<(), GitAiError> {
+        self.conn.execute(
+            r#"
+            INSERT INTO schema_metadata (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     // ----- Queue operations -----
 
     /// Lock and return a batch of pending notes for upload.
@@ -802,6 +828,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(synced2, 1);
+    }
+
+    #[test]
+    fn test_metadata_value_roundtrip() {
+        let (mut db, _tmp) = create_test_db();
+
+        assert_eq!(db.get_metadata_value("cursor").unwrap(), None);
+
+        db.set_metadata_value("cursor", "tip-1").unwrap();
+        assert_eq!(
+            db.get_metadata_value("cursor").unwrap(),
+            Some("tip-1".to_string())
+        );
+
+        db.set_metadata_value("cursor", "tip-2").unwrap();
+        assert_eq!(
+            db.get_metadata_value("cursor").unwrap(),
+            Some("tip-2".to_string())
+        );
     }
 
     // --- mark_failed ---

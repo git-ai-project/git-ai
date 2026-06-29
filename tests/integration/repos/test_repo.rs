@@ -1239,6 +1239,13 @@ impl TestRepo {
         if let Some(feature_flags) = &patch.feature_flags {
             config.insert("feature_flags".to_string(), feature_flags.clone());
         }
+        if let Some(notes_backend) = &patch.notes_backend {
+            config.insert(
+                "notes_backend".to_string(),
+                serde_json::to_value(notes_backend)
+                    .expect("failed to serialize test notes_backend config"),
+            );
+        }
 
         let config_dir = home.join(".git-ai");
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");

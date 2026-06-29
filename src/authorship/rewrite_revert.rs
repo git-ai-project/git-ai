@@ -28,6 +28,12 @@ pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<
         return Ok(());
     }
 
+    // Reconcile the note cache with refs/notes/ai before reading source notes.
+    // GitNotes reads are SQLite-first and no longer run a full ref sync per read,
+    // so a note changed on the ref out-of-band could be shadowed by a stale cache
+    // entry here. Cursor-guarded and cheap when the ref is unchanged.
+    let _ = notes_api::sync_from_git_ref(repo);
+
     // Resolve every spec's parent_sha (only those missing need a lookup) and the
     // source_base_sha (= first parent of the reverted commit, or of the parent
     // for the legacy HEAD-only path). Batch all the required `<sha>^1` /
