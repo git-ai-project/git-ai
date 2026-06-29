@@ -363,16 +363,20 @@ pub fn effective_ignore_patterns(
     dedupe_patterns(patterns)
 }
 
+/// Remove duplicate patterns, keeping the **last** occurrence of each.
+///
+/// Under the last-match-wins semantics in `IgnoreMatcher`, the final occurrence
+/// of a pattern is the one that decides a path's fate. Keeping the last (rather
+/// than the first) occurrence preserves that position, so a pattern re-asserted
+/// after an intervening negation isn't collapsed onto an earlier duplicate.
 fn dedupe_patterns(patterns: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut deduped = Vec::new();
-
-    for pattern in patterns {
-        if seen.insert(pattern.clone()) {
-            deduped.push(pattern);
-        }
-    }
-
+    let mut deduped: Vec<String> = patterns
+        .into_iter()
+        .rev()
+        .filter(|pattern| seen.insert(pattern.clone()))
+        .collect();
+    deduped.reverse();
     deduped
 }
 
@@ -688,5 +692,33 @@ generated/** linguist-vendored=true
         let patterns = parse_linguist_vendored_patterns(contents);
         assert!(patterns.contains(&"generated/**".to_string()));
         assert!(!patterns.iter().any(|p| p.contains("[attr]")));
+    }
+
+    #[test]
+    fn dedupe_keeps_last_occurrence() {
+        let deduped = dedupe_patterns(vec![
+            "a/**".to_string(),
+            "b/**".to_string(),
+            "a/**".to_string(),
+            "c/**".to_string(),
+        ]);
+        // Each pattern appears once, positioned at its last occurrence.
+        assert_eq!(deduped, vec!["b/**", "a/**", "c/**"]);
+    }
+
+    #[test]
+    fn reasserted_positive_after_negation_wins() {
+        // With last-match-wins dedupe keeping the last occurrence, a pattern
+        // re-asserted after a negation correctly re-excludes the path.
+        let patterns = dedupe_patterns(vec![
+            "**/vendor/**".to_string(),
+            "!**/vendor/**".to_string(),
+            "**/vendor/**".to_string(),
+        ]);
+        let matcher = build_ignore_matcher(&patterns);
+        assert!(should_ignore_file_with_matcher(
+            "app/vendor/lib.js",
+            &matcher
+        ));
     }
 }
