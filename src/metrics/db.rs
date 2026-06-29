@@ -20,6 +20,7 @@ const SCHEMA_VERSION: usize = 4;
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
+const NS_PER_SECOND: u128 = 1_000_000_000;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -86,6 +87,19 @@ pub struct MetricHistoryRecord {
     pub ts: u32,
     pub repo_url: Option<String>,
     pub event: MetricEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionEventRecoveryCandidate {
+    pub row_id: i64,
+    pub event_ts: u32,
+    pub session_id: String,
+    pub trace_id: Option<String>,
+    pub tool: String,
+    pub model: Option<String>,
+    pub external_session_id: String,
+    pub external_tool_use_id: Option<String>,
+    pub repo_url: Option<String>,
 }
 
 /// Point-in-time status summary for local metric delivery.
@@ -186,6 +200,27 @@ impl MetricsDatabase {
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            "#,
+        )?;
+
+        let mut db = Self { conn };
+        db.initialize_schema()?;
+
+        Ok(db)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_at_path(path: &std::path::Path) -> Result<Self, GitAiError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA cache_size=-2000;
+            PRAGMA temp_store=MEMORY;
             "#,
         )?;
 
@@ -928,6 +963,105 @@ impl MetricsDatabase {
         Ok(records)
     }
 
+    pub(crate) fn session_event_candidates_near_timestamps(
+        &self,
+        timestamps_ns: &[u128],
+        window_ns: u128,
+    ) -> Result<Vec<SessionEventRecoveryCandidate>, GitAiError> {
+        if timestamps_ns.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some((min_event_ts, max_event_ts)) =
+            event_ts_bounds_for_ns_windows(timestamps_ns, window_ns)
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                id,
+                event_json,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                external_session_id,
+                external_tool_use_id
+            FROM metrics
+            WHERE event_kind = ?1
+              AND event_ts >= ?2
+              AND event_ts <= ?3
+              AND session_id IS NOT NULL
+              AND session_id != ''
+              AND tool IS NOT NULL
+              AND tool != ''
+              AND tool != 'mock_ai'
+              AND external_session_id IS NOT NULL
+              AND external_session_id != ''
+            ORDER BY id ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            params![
+                MetricEventId::SessionEvent as i64,
+                min_event_ts as i64,
+                max_event_ts as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (
+                row_id,
+                event_json,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                external_session_id,
+                external_tool_use_id,
+            ) = row?;
+            if event_ts < 0 || event_ts > u32::MAX as i64 {
+                continue;
+            }
+            let event_ts = event_ts as u32;
+            if min_distance_to_event_ts(timestamps_ns, event_ts)
+                .is_none_or(|distance| distance > window_ns)
+            {
+                continue;
+            }
+
+            let (repo_url, model) = recovery_attrs_from_event_json(&event_json);
+            candidates.push(SessionEventRecoveryCandidate {
+                row_id,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                model,
+                external_session_id,
+                external_tool_use_id,
+                repo_url,
+            });
+        }
+
+        Ok(candidates)
+    }
+
     /// Backfill cached event metadata for one bounded batch of legacy rows.
     pub fn backfill_event_metadata_batch(
         &mut self,
@@ -1086,6 +1220,51 @@ fn current_unix_ts() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn event_ts_bounds_for_ns_windows(timestamps_ns: &[u128], window_ns: u128) -> Option<(u32, u32)> {
+    let mut min_ts: Option<u32> = None;
+    let mut max_ts: Option<u32> = None;
+    for timestamp_ns in timestamps_ns {
+        let start = timestamp_ns.saturating_sub(window_ns) / NS_PER_SECOND;
+        let end = timestamp_ns
+            .saturating_add(window_ns)
+            .min(u32::MAX as u128 * NS_PER_SECOND)
+            / NS_PER_SECOND;
+        let start = start.min(u32::MAX as u128) as u32;
+        let end = end.min(u32::MAX as u128) as u32;
+        min_ts = Some(min_ts.map_or(start, |current| current.min(start)));
+        max_ts = Some(max_ts.map_or(end, |current| current.max(end)));
+    }
+    min_ts.zip(max_ts)
+}
+
+fn min_distance_to_event_ts(timestamps_ns: &[u128], event_ts: u32) -> Option<u128> {
+    timestamps_ns
+        .iter()
+        .map(|timestamp_ns| distance_to_event_second(*timestamp_ns, event_ts))
+        .min()
+}
+
+fn distance_to_event_second(timestamp_ns: u128, event_ts: u32) -> u128 {
+    let start_ns = event_ts as u128 * NS_PER_SECOND;
+    let end_ns = start_ns.saturating_add(NS_PER_SECOND - 1);
+    if timestamp_ns < start_ns {
+        start_ns - timestamp_ns
+    } else {
+        timestamp_ns.saturating_sub(end_ns)
+    }
+}
+
+fn recovery_attrs_from_event_json(event_json: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<Value>(event_json) else {
+        return (None, None);
+    };
+    let attrs = value.get("a").and_then(Value::as_object);
+    (
+        sparse_object_string(attrs, attr_pos::REPO_URL),
+        sparse_object_string(attrs, attr_pos::MODEL),
+    )
 }
 
 fn metric_row_is_older_than_cutoff(
@@ -1767,6 +1946,144 @@ mod tests {
                     external_tool_use_id: Some("checkpoint-tool-use".to_string()),
                 },
             ]
+        );
+    }
+
+    fn session_event_json(
+        ts: u32,
+        session_id: &str,
+        external_session_id: &str,
+        tool: &str,
+        repo_url: Option<&str>,
+    ) -> String {
+        let repo_attr = repo_url
+            .map(|url| format!(r#","{}":"{}""#, attr_pos::REPO_URL, url))
+            .unwrap_or_default();
+        format!(
+            r#"{{
+                "t":{ts},
+                "e":5,
+                "v":{{"0":{{"type":"assistant"}},"1":"event-{session_id}","3":"tool-use-{session_id}"}},
+                "a":{{
+                    "20":"{tool}",
+                    "21":"gpt-5",
+                    "23":"{external_session_id}",
+                    "24":"{session_id}",
+                    "25":"trace-{session_id}"
+                    {repo_attr}
+                }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn test_session_event_candidates_near_timestamps_filters_kind_and_window() {
+        let (mut db, _temp_dir) = create_test_db();
+        let base_ts = seconds_ago(60);
+        let events = vec![
+            session_event_json(
+                base_ts,
+                "session-near",
+                "external-near",
+                "codex",
+                Some("https://github.com/acme/repo"),
+            ),
+            session_event_json(
+                base_ts + 10,
+                "session-far",
+                "external-far",
+                "codex",
+                Some("https://github.com/acme/repo"),
+            ),
+            format!(
+                r#"{{
+                    "t":{base_ts},
+                    "e":4,
+                    "v":{{"7":"checkpoint-tool-use"}},
+                    "a":{{"20":"codex","23":"external-checkpoint","24":"session-checkpoint"}}
+                }}"#
+            ),
+        ];
+        db.insert_events(&events).unwrap();
+
+        let timestamp_ns = (base_ts as u128 * 1_000_000_000) + 500_000_000;
+        let candidates = db
+            .session_event_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].event_ts, base_ts);
+        assert_eq!(candidates[0].session_id, "session-near");
+        assert_eq!(candidates[0].external_session_id, "external-near");
+    }
+
+    #[test]
+    fn test_session_event_candidates_treat_event_ts_as_second_bucket() {
+        let (mut db, _temp_dir) = create_test_db();
+        let base_ts = seconds_ago(60);
+        db.insert_events(&[session_event_json(
+            base_ts,
+            "session-bucket",
+            "external-bucket",
+            "codex",
+            Some("https://github.com/acme/repo"),
+        )])
+        .unwrap();
+
+        let timestamp_ns = base_ts as u128 * NS_PER_SECOND + 3_500_000_000;
+        let candidates = db
+            .session_event_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].session_id, "session-bucket");
+    }
+
+    #[test]
+    fn test_session_event_candidates_parse_required_and_optional_metadata() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts = seconds_ago(30);
+        db.insert_events(&[
+            session_event_json(
+                ts,
+                "session-complete",
+                "external-complete",
+                "claude-code",
+                Some("https://github.com/acme/repo"),
+            ),
+            format!(
+                r#"{{
+                    "t":{ts},
+                    "e":5,
+                    "v":{{"0":{{"type":"assistant"}}}},
+                    "a":{{"20":"codex","24":"missing-external-session"}}
+                }}"#
+            ),
+        ])
+        .unwrap();
+
+        let timestamp_ns = ts as u128 * 1_000_000_000;
+        let candidates = db
+            .session_event_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.session_id, "session-complete");
+        assert_eq!(
+            candidate.trace_id.as_deref(),
+            Some("trace-session-complete")
+        );
+        assert_eq!(candidate.tool, "claude-code");
+        assert_eq!(candidate.model.as_deref(), Some("gpt-5"));
+        assert_eq!(candidate.external_session_id, "external-complete");
+        assert_eq!(
+            candidate.external_tool_use_id.as_deref(),
+            Some("tool-use-session-complete")
+        );
+        assert_eq!(
+            candidate.repo_url.as_deref(),
+            Some("https://github.com/acme/repo")
         );
     }
 

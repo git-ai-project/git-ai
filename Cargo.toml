@@ -1,6 +1,6 @@
 [package]
 name = "git-ai"
-version = "1.6.2"
+version = "1.6.5"
 edition = "2024"
 default-run = "git-ai"
 
@@ -47,7 +47,6 @@ openssl = { version = "0.10", features = ["vendored"] }
 [target.'cfg(windows)'.dependencies]
 named_pipe = "0.4.1"
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [features]
 test-support = ["dep:tempfile"]
