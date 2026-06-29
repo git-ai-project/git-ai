@@ -25,9 +25,101 @@ impl AgentPreset for CursorBackgroundPreset {
     }
 }
 
+impl CursorPreset {
+    /// Extract needed fields from malformed JSON using regex.
+    /// When Cursor sends large payloads with file content containing unescaped quotes,
+    /// standard JSON parsing fails. The metadata fields we need are properly escaped.
+    fn extract_fields_from_malformed_json(
+        input: &str,
+    ) -> Result<serde_json::Value, serde_json::Error> {
+        use regex::Regex;
+        use serde_json::json;
+
+        let str_field = |name: &str| -> Option<String> {
+            let pattern = format!(r#""{}"\s*:\s*"((?:[^"\\]|\\.)*)""#, regex::escape(name));
+            let re = Regex::new(&pattern).ok()?;
+            let caps = re.captures(input)?;
+            let raw = caps.get(1)?.as_str();
+            serde_json::from_str::<String>(&format!("\"{}\"", raw)).ok()
+        };
+
+        let workspace_roots: Vec<String> = {
+            let re = Regex::new(r#""workspace_roots"\s*:\s*\[([^\]]*)\]"#).ok();
+            re.and_then(|r| r.captures(input))
+                .and_then(|caps| caps.get(1))
+                .map(|m| {
+                    let inner = m.as_str();
+                    let elem_re = Regex::new(r#""((?:[^"\\]|\\.)*)""#).unwrap();
+                    elem_re
+                        .captures_iter(inner)
+                        .filter_map(|c| {
+                            let raw = c.get(1)?.as_str();
+                            serde_json::from_str::<String>(&format!("\"{}\"", raw)).ok()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let mut obj = serde_json::Map::new();
+
+        if let Some(v) = str_field("conversation_id") {
+            obj.insert("conversation_id".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("hook_event_name") {
+            obj.insert("hook_event_name".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("model") {
+            obj.insert("model".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("file_path") {
+            obj.insert("file_path".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("cursor_version") {
+            obj.insert("cursor_version".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("ide_version") {
+            obj.insert("ide_version".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("ideVersion") {
+            obj.insert("ideVersion".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("tool_name") {
+            obj.insert("tool_name".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("tool_use_id") {
+            obj.insert("tool_use_id".to_string(), json!(v));
+        }
+        if let Some(v) = str_field("transcript_path") {
+            obj.insert("transcript_path".to_string(), json!(v));
+        }
+        if !workspace_roots.is_empty() {
+            obj.insert("workspace_roots".to_string(), json!(workspace_roots));
+        }
+
+        if obj.contains_key("conversation_id") {
+            eprintln!(
+                "[git-ai] Regex extraction recovered fields: {:?}",
+                obj.keys().collect::<Vec<_>>()
+            );
+            Ok(serde_json::Value::Object(obj))
+        } else {
+            serde_json::from_str::<serde_json::Value>("invalid")
+        }
+    }
+}
+
 impl AgentPreset for CursorPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
         let data: serde_json::Value = serde_json::from_str(hook_input)
+            .or_else(|first_err| {
+                eprintln!(
+                    "[git-ai] Cursor hook_input JSON parse failed: {} (input length: {} bytes). Attempting regex extraction.",
+                    first_err,
+                    hook_input.len()
+                );
+                Self::extract_fields_from_malformed_json(hook_input)
+            })
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
         // conversation_id is required for session_id
