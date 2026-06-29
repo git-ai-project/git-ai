@@ -136,7 +136,16 @@ fn batch_read_blob_contents(
 
     let stdin_data = blob_oids.join("\n") + "\n";
     let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    parse_cat_file_batch_output_with_oids(&output.stdout)
+    let results = parse_cat_file_batch_output_with_oids(&output.stdout)?;
+    for oid in blob_oids {
+        if !results.contains_key(oid) {
+            return Err(GitAiError::Generic(format!(
+                "missing git blob object referenced by authorship note: {}",
+                oid
+            )));
+        }
+    }
+    Ok(results)
 }
 
 /// Resolve authorship note blob OIDs for a set of commits using one batched cat-file call.
@@ -197,39 +206,129 @@ pub fn note_blob_oids_for_commits_from_ref(
         return Ok(HashMap::new());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("cat-file".to_string());
-    args.push("--batch-check".to_string());
-
-    let mut stdin_data = String::new();
+    let mut path_to_commit = HashMap::new();
+    let mut fanout_prefixes = HashSet::new();
     for commit_sha in commit_shas {
-        // Notes can be stored with either flat paths (<sha>) or fanout paths (<aa>/<bb...>).
-        // Query both forms so this works regardless of repository note fanout state.
-        stdin_data.push_str(&flat_note_pathspec_for_ref(notes_ref, commit_sha));
-        stdin_data.push('\n');
-        stdin_data.push_str(&fanout_note_pathspec_for_ref(notes_ref, commit_sha));
-        stdin_data.push('\n');
+        let flat_path = commit_sha.clone();
+        path_to_commit.insert(flat_path, commit_sha.clone());
+
+        let fanout_path = notes_path_for_object(commit_sha);
+        path_to_commit.insert(fanout_path, commit_sha.clone());
+        if commit_sha.len() > 2 {
+            fanout_prefixes.insert(commit_sha[..2].to_string());
+        }
     }
 
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    let stdout = String::from_utf8(output.stdout)?;
-    let mut lines = stdout.lines();
     let mut result = HashMap::new();
+    let Some(root_entries) = ls_tree_note_entries(repo, notes_ref, false, &[])? else {
+        return Ok(HashMap::new());
+    };
 
-    for commit_sha in commit_shas {
-        let Some(flat_line) = lines.next() else {
-            break;
-        };
-        let fanout_line = lines.next().unwrap_or_default();
+    for entry in root_entries {
+        if let Some(commit_sha) = path_to_commit.get(&entry.path) {
+            if entry.object_type != "blob" {
+                return Err(GitAiError::Generic(format!(
+                    "authorship note path {} in {} is {}, expected blob",
+                    entry.path, notes_ref, entry.object_type
+                )));
+            }
+            result.entry(commit_sha.clone()).or_insert(entry.oid);
+        }
+    }
 
-        if let Some(oid) = parse_batch_check_blob_oid(flat_line)
-            .or_else(|| parse_batch_check_blob_oid(fanout_line))
-        {
-            result.insert(commit_sha.clone(), oid);
+    let mut prefixes = fanout_prefixes.into_iter().collect::<Vec<_>>();
+    prefixes.sort();
+    if let Some(entries) = ls_tree_note_entries(repo, notes_ref, true, &prefixes)? {
+        for entry in entries {
+            if let Some(commit_sha) = path_to_commit.get(&entry.path) {
+                if entry.object_type != "blob" {
+                    return Err(GitAiError::Generic(format!(
+                        "authorship note path {} in {} is {}, expected blob",
+                        entry.path, notes_ref, entry.object_type
+                    )));
+                }
+                result.entry(commit_sha.clone()).or_insert(entry.oid);
+            }
         }
     }
 
     Ok(result)
+}
+
+#[derive(Debug)]
+struct LsTreeNoteEntry {
+    object_type: String,
+    oid: String,
+    path: String,
+}
+
+fn ls_tree_note_entries(
+    repo: &Repository,
+    notes_ref: &str,
+    recursive: bool,
+    pathspecs: &[String],
+) -> Result<Option<Vec<LsTreeNoteEntry>>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("ls-tree".to_string());
+    args.push("-z".to_string());
+    args.push("--full-tree".to_string());
+    if recursive {
+        args.push("-r".to_string());
+    }
+    args.push(notes_ref.to_string());
+    if !pathspecs.is_empty() {
+        args.push("--".to_string());
+        args.extend(pathspecs.iter().cloned());
+    }
+
+    let output = match exec_git(&args) {
+        Ok(output) => output,
+        Err(GitAiError::GitCliError {
+            code: Some(128),
+            stderr,
+            ..
+        }) if stderr.contains("Not a valid object name") && stderr.contains(notes_ref) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+
+    parse_ls_tree_note_entries(&output.stdout).map(Some)
+}
+
+fn parse_ls_tree_note_entries(data: &[u8]) -> Result<Vec<LsTreeNoteEntry>, GitAiError> {
+    let mut entries = Vec::new();
+    for raw in data.split(|byte| *byte == 0).filter(|raw| !raw.is_empty()) {
+        let Some(tab_idx) = raw.iter().position(|byte| *byte == b'\t') else {
+            return Err(GitAiError::Generic(
+                "Malformed ls-tree output: missing path separator".to_string(),
+            ));
+        };
+        let meta = std::str::from_utf8(&raw[..tab_idx])?;
+        let path = std::str::from_utf8(&raw[tab_idx + 1..])?.to_string();
+        let mut parts = meta.split_whitespace();
+        let Some(_mode) = parts.next() else {
+            return Err(GitAiError::Generic(
+                "Malformed ls-tree output: missing mode".to_string(),
+            ));
+        };
+        let Some(object_type) = parts.next() else {
+            return Err(GitAiError::Generic(
+                "Malformed ls-tree output: missing object type".to_string(),
+            ));
+        };
+        let Some(oid) = parts.next() else {
+            return Err(GitAiError::Generic(
+                "Malformed ls-tree output: missing object id".to_string(),
+            ));
+        };
+        entries.push(LsTreeNoteEntry {
+            object_type: object_type.to_string(),
+            oid: oid.to_string(),
+            path,
+        });
+    }
+    Ok(entries)
 }
 
 /// Copy missing notes for a bounded commit set from `source_ref` into `refs/notes/ai`.
@@ -500,6 +599,16 @@ pub fn get_commits_with_notes_from_list(
         }
     }
 
+    let note_blob_oids = note_blob_oids_for_commits(repo, commit_shas)?;
+    let mut unique_blob_oids = Vec::new();
+    let mut seen_blob_oids = HashSet::new();
+    for blob_oid in note_blob_oids.values() {
+        if seen_blob_oids.insert(blob_oid.clone()) {
+            unique_blob_oids.push(blob_oid.clone());
+        }
+    }
+    let note_blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
+
     // Build the result Vec
     let mut result = Vec::new();
     for sha in commit_shas {
@@ -508,8 +617,11 @@ pub fn get_commits_with_notes_from_list(
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
 
-        // Check if this commit has a note by trying to show it
-        if let Some(authorship_log) = get_authorship(repo, sha) {
+        if let Some(blob_oid) = note_blob_oids.get(sha)
+            && let Some(content) = note_blob_contents.get(blob_oid)
+            && let Ok(mut authorship_log) = AuthorshipLog::deserialize_from_string(content)
+        {
+            authorship_log.metadata.base_commit_sha = sha.clone();
             result.push(CommitAuthorship::Log {
                 sha: sha.clone(),
                 git_author,

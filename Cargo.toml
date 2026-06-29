@@ -1,6 +1,6 @@
 [package]
 name = "git-ai"
-version = "1.5.9"
+version = "1.6.5"
 edition = "2024"
 default-run = "git-ai"
 
@@ -13,7 +13,6 @@ sha2 = "0.10"
 imara-diff = "0.2"
 chrono = { version = "0.4.44", default-features = false, features = ["serde", "clock", "std"] }
 indicatif = "0.18"
-smol = "2.0"
 futures = "0.3"
 tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing = "0.1"

@@ -13,10 +13,10 @@
 /// Graphite's restack/move/absorb/split operations internally use `git commit-tree` +
 /// `git update-ref` (low-level plumbing commands) instead of `git rebase`.
 ///
-/// git-ai's wrapper-mode `update-ref` post-hook intercepts the ref move, detects the
-/// non-fast-forward rewrite, and remaps authorship notes to the new commit SHAs. This
-/// covers the core operations: restack, move, modify (with child restacking), and
-/// full stack workflows.
+/// git-ai receives Graphite's `update-ref` trace2 events, detects the
+/// non-fast-forward rewrite, and remaps authorship notes to the new commit SHAs.
+/// This covers the core operations: restack, move, modify (with child restacking),
+/// and full stack workflows.
 ///
 /// Remaining known issues (still `#[ignore]`):
 ///   - `gt absorb` and `gt split --by-file` lose attribution (update-ref hook cannot
@@ -56,7 +56,7 @@
 /// - `gt rename` - Rename branch
 /// - `gt track` / `gt untrack` - Metadata tracking
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use crate::repos::test_repo::{TestRepo, real_git_executable};
 
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -119,8 +119,7 @@ macro_rules! require_gt {
 
 /// Create a shim directory containing a `git` symlink (or copy on Windows)
 /// that points to the test-only git shim binary. The shim logs tracked git
-/// invocations for external tools like Graphite, then delegates to either the
-/// real git binary or the git-ai wrapper depending on the test mode.
+/// invocations for external tools like Graphite, then delegates to real git.
 static GT_GIT_SHIM_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 fn gt_git_shim_dir() -> &'static PathBuf {
@@ -158,12 +157,8 @@ fn gt_git_path() -> String {
     format!("{}{}{}", shim_dir.display(), sep, original_path)
 }
 
-fn gt_git_target(repo: &TestRepo) -> String {
-    if repo.mode().uses_wrapper() {
-        get_binary_path().to_string_lossy().to_string()
-    } else {
-        real_git_executable().to_string()
-    }
+fn gt_git_target() -> String {
+    real_git_executable().to_string()
 }
 
 fn new_gt_started_log_path() -> PathBuf {
@@ -249,11 +244,8 @@ fn assert_worktree_clean(repo: &TestRepo) {
 /// Execute a `gt` command inside the given TestRepo directory.
 ///
 /// The key insight: `gt` calls `git` internally for commits, rebases, etc.
-/// By prepending a wrapper directory to PATH that contains a `git` symlink
-/// pointing to the git-ai binary, all of `gt`'s git operations flow through
-/// the git-ai wrapper. This ensures attribution notes are properly created
-/// during commits and correctly copied during rebases (via post-rewrite
-/// handling in the wrapper).
+/// By prepending a shim directory to PATH, all of `gt`'s git operations emit
+/// trace2 metadata to the daemon and can be synchronized by the test harness.
 ///
 /// Passes `--no-interactive` to avoid prompts.
 /// Returns Ok(stdout+stderr) on success, Err(stderr) on failure.
@@ -278,61 +270,31 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         .args(args)
         .arg("--no-interactive");
 
-    let started_log_path = repo.mode().uses_daemon().then(new_gt_started_log_path);
+    let started_log_path = new_gt_started_log_path();
 
     // Put the test shim first in PATH so `gt` calls it instead of raw git. The
-    // shim logs tracked git invocations and then delegates to the mode-appropriate
-    // target binary.
+    // shim logs tracked git invocations and then delegates to real git.
     command.env("PATH", gt_git_path());
-    command.env("GIT_AI_TEST_GIT_SHIM_TARGET", gt_git_target(repo));
+    command.env("GIT_AI_TEST_GIT_SHIM_TARGET", gt_git_target());
     command.env(
         "GIT_AI_TEST_GIT_SHIM_FALLBACK_TARGET",
         real_git_executable(),
     );
-    if repo.mode().uses_wrapper() {
-        command.env("GIT_AI_TEST_GIT_SHIM_TARGET_USE_GIT_AI", "1");
-    }
-    if let Some(started_log_path) = started_log_path.as_ref() {
-        command.env("GIT_AI_TEST_SYNC_START_LOG", started_log_path);
-    }
+    command.env("GIT_AI_TEST_SYNC_START_LOG", &started_log_path);
 
     // Set deterministic git metadata + isolated config/locale across all gt invocations.
     apply_deterministic_git_env(&mut command, repo);
 
-    if repo.mode().uses_daemon() {
-        let trace_socket = repo.daemon_trace_socket_path();
-        let nesting =
-            std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string());
-        command.env(
-            "GIT_TRACE2_EVENT",
-            git_ai::daemon::DaemonConfig::trace2_event_target_for_path(&trace_socket),
-        );
-        command.env("GIT_TRACE2_EVENT_NESTING", nesting);
-    }
-
-    // In WrapperDaemon mode, the shim's target (git-ai wrapper) needs daemon
-    // socket paths and the config patch to initialize the telemetry handle
-    // and send authoritative wrapper state.
-    if repo.mode() == GitTestMode::WrapperDaemon {
-        command.env("GIT_AI_DAEMON_HOME", repo.daemon_home_path());
-        command.env(
-            "GIT_AI_DAEMON_CONTROL_SOCKET",
-            repo.daemon_control_socket_path(),
-        );
-        command.env(
-            "GIT_AI_DAEMON_TRACE_SOCKET",
-            repo.daemon_trace_socket_path(),
-        );
-    }
-
-    // Only set hook-mode env in hook-based test modes.
-    if repo.mode().uses_hooks() {
-        command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-    }
+    let trace_socket = repo.daemon_trace_socket_path();
+    let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string());
+    command.env(
+        "GIT_TRACE2_EVENT",
+        git_ai::daemon::DaemonConfig::trace2_event_target_for_path(&trace_socket),
+    );
+    command.env("GIT_TRACE2_EVENT_NESTING", nesting);
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
     command.env("GITAI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 
-    // Pass config patch (needed for wrapper-daemon mode).
     if let Some(patch) = repo.config_patch_json() {
         command.env("GIT_AI_TEST_CONFIG_PATCH", patch);
     }
@@ -361,10 +323,8 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         .output()
         .unwrap_or_else(|e| panic!("Failed to execute gt {:?}: {}", args, e));
 
-    if let Some(started_log_path) = started_log_path.as_ref() {
-        let sessions = gt_started_sessions(started_log_path);
-        repo.sync_daemon_external_completion_sessions(&sessions);
-    }
+    let sessions = gt_started_sessions(&started_log_path);
+    repo.sync_daemon_external_completion_sessions(&sessions);
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -384,49 +344,9 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Install git-ai hooks in a test repo so that `gt` rebase operations
-/// trigger git-ai's post-rewrite hook for attribution note copying.
-/// The wrapper handles commit-time attribution, while hooks handle
-/// the old-SHA → new-SHA note remapping during rebases.
-fn install_hooks(repo: &TestRepo) {
-    if !repo.mode().uses_hooks() {
-        return;
-    }
-
-    let binary_path = get_binary_path();
-    let mut command = Command::new(binary_path);
-    command
-        .current_dir(repo.path())
-        .args(["git-hooks", "ensure"]);
-    command.env("HOME", repo.test_home_path());
-    command.env(
-        "GIT_CONFIG_GLOBAL",
-        repo.test_home_path().join(".gitconfig"),
-    );
-    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
-    command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-    command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
-
-    let output = command
-        .output()
-        .expect("failed to run git-ai git-hooks ensure");
-    if !output.status.success() {
-        panic!(
-            "git-ai git-hooks ensure failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-}
-
 /// Initialize Graphite in a TestRepo (sets trunk to "main").
-/// Also installs git-ai hooks so that rebase-based gt operations
-/// (restack, move, delete) properly copy attribution notes.
 fn gt_init(repo: &TestRepo) {
-    install_hooks(repo);
     gt(repo, &["init", "--trunk", "main"]).expect("gt init should succeed");
-    // Re-install hooks after gt init, in case gt init modified core.hooksPath
-    install_hooks(repo);
 }
 
 /// Create an initial commit so the repo is not empty (required for most gt operations).
@@ -605,7 +525,7 @@ fn test_gt_modify_new_commit_preserves_attribution() {
 }
 
 /// `gt modify` amends via `commit-tree` when restacking children.
-/// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
+/// The daemon observes the `update-ref` trace2 event and remaps authorship notes.
 #[test]
 fn test_gt_modify_restacks_children_preserves_attribution() {
     require_gt!();
@@ -692,10 +612,13 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
     gt_init(&repo);
 
     // First commit: all human
-    let mut file = repo.filename("squash_mixed.txt");
-    file.set_contents(crate::lines!["human only line 1", "human only line 2"]);
+    let file_path = repo.path().join("squash_mixed.txt");
+    std::fs::write(&file_path, "human only line 1\nhuman only line 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "squash_mixed.txt"])
+        .unwrap();
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "squash-mixed", "-m", "human commit"]).expect("gt create should succeed");
+    let mut file = crate::repos::test_file::TestFile::from_existing_file(file_path, &repo);
 
     // Second commit: add AI lines
     file.set_contents(crate::lines![
@@ -726,7 +649,7 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
 // ===========================================================================
 
 /// `gt restack` uses `git commit-tree` + `git update-ref`.
-/// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
+/// The daemon observes the `update-ref` trace2 event and remaps authorship notes.
 #[test]
 fn test_gt_restack_preserves_attribution() {
     require_gt!();
@@ -851,10 +774,13 @@ fn test_gt_fold_with_mixed_content() {
     gt_init(&repo);
 
     // Create parent branch with a file containing mixed content
-    let mut file = repo.filename("fold_mixed.txt");
-    file.set_contents(crate::lines!["parent line 1", "parent line 2"]);
+    let file_path = repo.path().join("fold_mixed.txt");
+    std::fs::write(&file_path, "parent line 1\nparent line 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "fold_mixed.txt"])
+        .unwrap();
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "fold-mixed-parent", "-m", "parent"]).expect("gt create should succeed");
+    let mut file = crate::repos::test_file::TestFile::from_existing_file(file_path, &repo);
 
     // Create child that modifies the same file
     file.set_contents(crate::lines![
@@ -882,7 +808,7 @@ fn test_gt_fold_with_mixed_content() {
 // ===========================================================================
 
 /// `gt move` uses `git commit-tree` + `git update-ref`.
-/// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
+/// The daemon observes the `update-ref` trace2 event and remaps authorship notes.
 #[test]
 fn test_gt_move_preserves_attribution() {
     require_gt!();

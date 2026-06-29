@@ -66,7 +66,7 @@ jobs:
             --burst-every 6 \
             --repetitions 2 \
             --margin-pct 55 \
-            --margin-baseline main_wrapper \
+            --margin-baseline main_daemon \
             --enforce-margin
 
       - name: Upload smoke benchmark artifacts
@@ -117,7 +117,7 @@ jobs:
             --iterations-basic 5 \
             --iterations-complex 4 \
             --margin-pct 25 \
-            --margin-baseline current_wrapper \
+            --margin-baseline main_daemon \
             --enforce-margin
 
       - name: Run full nasty benchmark gate
@@ -132,7 +132,7 @@ jobs:
             --burst-every 15 \
             --repetitions 2 \
             --margin-pct 25 \
-            --margin-baseline current_wrapper \
+            --margin-baseline main_daemon \
             --enforce-margin
 
       - name: Upload nightly benchmark artifacts

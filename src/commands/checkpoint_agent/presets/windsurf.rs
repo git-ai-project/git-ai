@@ -131,17 +131,26 @@ impl AgentPreset for WindsurfPreset {
             .or_else(|| parse::optional_str(&data, "execution_id"))
             .unwrap_or("bash")
             .to_string();
+        let bash_command = tool_info
+            .and_then(|ti| ti.get("command"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| parse::bash_command_from_hook_input(&data));
 
         let event = if is_bash {
             if is_pre_bash {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id: execution_id,
+                    command: bash_command,
                 })
             } else {
                 ParsedHookEvent::PostBashCall(PostBashCall {
                     context,
                     tool_use_id: execution_id,
+                    command: bash_command,
                     stream_source,
                 })
             }

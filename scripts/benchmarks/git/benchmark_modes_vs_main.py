@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Benchmark git-ai execution modes against main-branch wrapper mode.
+Benchmark git-ai's daemon against the main-branch daemon.
 
 Compares:
-1) main(wrapper)
-2) current(wrapper)
-3) current(daemon)
+1) main(daemon)
+2) current(daemon)
+
+git-ai is daemon-architecture: all attribution side effects run in the daemon
+(the git proxy is a thin trace2-emitting passthrough), so the only meaningful
+comparison is daemon-vs-daemon -- this branch's daemon vs main's daemon.
 
 The harness builds binaries for both branches, runs a scenario matrix that
 covers basic and complex Git operations, and emits:
@@ -32,6 +35,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+# Daemon quiescence polling: the daemon applies attribution asynchronously, so
+# we poll `daemon status` until the family's latest_seq holds steady. These bound
+# how long we wait and how often we poll.
+DAEMON_IDLE_POLL_S = 0.02
+DAEMON_IDLE_TIMEOUT_S = 120.0
+
 
 class BenchmarkError(RuntimeError):
     pass
@@ -52,6 +61,11 @@ class Scenario:
     complexity: str  # basic | complex
     setup: Callable[["VariantRunner", Path], None]
     measure: Callable[["VariantRunner", Path, int], None]
+    # Post-sync correctness check (runs OUTSIDE the timed window). Asserts the
+    # daemon actually produced the expected authorship notes for this scenario.
+    # None for scenarios whose measure step creates no attributable commit
+    # (e.g. stash round-trip, mixed reset that only moves HEAD backwards).
+    validate: Callable[["VariantRunner", Path], None] | None = None
 
 
 @dataclasses.dataclass
@@ -114,6 +128,7 @@ def run_cmd(
     cwd: Path,
     env: dict[str, str],
     timeout_s: int = 900,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
         cmd,
@@ -124,7 +139,7 @@ def run_cmd(
         check=False,
         timeout=timeout_s,
     )
-    if proc.returncode != 0:
+    if check and proc.returncode != 0:
         raise BenchmarkError(
             "Command failed\n"
             f"cmd: {' '.join(cmd)}\n"
@@ -350,13 +365,30 @@ class VariantRunner:
         return decoded
 
     def wait_for_daemon_idle(self, repo_dir: Path) -> None:
+        """Block until the daemon has finished applying side effects for this repo.
+
+        The daemon processes attribution asynchronously after the foreground git
+        command returns, so a real timing/validation pass MUST wait for it to go
+        quiescent before reading notes. We poll ``daemon status`` and watch the
+        family's ``latest_seq`` (the actor's applied-command counter): once it has
+        advanced past zero and then held steady across several polls, every queued
+        command -- and its synchronous ``refs/notes/ai`` write -- has been applied.
+
+        This is the only sync primitive available on BOTH binaries under test:
+        the removed ``daemon barrier`` subcommand and the ``sync.family`` control
+        method do not exist on the main-branch daemon, but ``daemon status`` does.
+        Each scenario runs in a freshly copied repo (a fresh daemon family that
+        starts at seq 0), so ``latest_seq > 0`` reliably means "work was seen".
+        """
         if self.variant.mode != "daemon":
             return
 
-        last_latest_seq = 0
-        stable_polls = 0
         repo = str(repo_dir)
-        for _ in range(200):
+        last_seq = -1
+        stable_polls = 0
+        required_stable_polls = 5
+        deadline = time.monotonic() + DAEMON_IDLE_TIMEOUT_S
+        while time.monotonic() < deadline:
             status = self.daemon_request(["status", "--repo", repo])
             if not bool(status.get("ok")):
                 raise BenchmarkError(
@@ -367,42 +399,24 @@ class VariantRunner:
                 raise BenchmarkError(
                     f"Daemon status response missing data for {repo}: {status!r}"
                 )
+            last_error = data.get("last_error")
+            if last_error:
+                raise BenchmarkError(
+                    f"Daemon reported a side-effect error for {repo}: {last_error}"
+                )
             latest_seq = int(data.get("latest_seq") or 0)
-            if latest_seq > 0:
-                barrier = self.daemon_request(
-                    ["barrier", "--repo", repo, "--seq", str(latest_seq)]
-                )
-                if not bool(barrier.get("ok")):
-                    raise BenchmarkError(
-                        f"Daemon barrier failed for {repo}: {barrier.get('error')}"
-                    )
-
-            settled = self.daemon_request(["status", "--repo", repo])
-            if not bool(settled.get("ok")):
-                raise BenchmarkError(
-                    f"Daemon settled-status failed for {repo}: {settled.get('error')}"
-                )
-            settled_data = settled.get("data")
-            if not isinstance(settled_data, dict):
-                raise BenchmarkError(
-                    "Daemon settled-status response missing data "
-                    f"for {repo}: {settled!r}"
-                )
-            settled_latest = int(settled_data.get("latest_seq") or 0)
-            settled_backlog = int(settled_data.get("backlog") or 0)
-
-            if settled_backlog == 0 and settled_latest == last_latest_seq:
+            if latest_seq == last_seq:
                 stable_polls += 1
-                if stable_polls >= 2:
+                if latest_seq > 0 and stable_polls >= required_stable_polls:
                     return
             else:
                 stable_polls = 0
-
-            last_latest_seq = settled_latest
-            time.sleep(0.01)
+                last_seq = latest_seq
+            time.sleep(DAEMON_IDLE_POLL_S)
 
         raise BenchmarkError(
-            f"Daemon did not settle for repo {repo} (latest_seq={last_latest_seq})"
+            f"Daemon did not go quiescent for repo {repo} "
+            f"(latest_seq={last_seq}) within {DAEMON_IDLE_TIMEOUT_S}s"
         )
 
     def run_git(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -442,6 +456,56 @@ class VariantRunner:
         if not files:
             return
         self.run_git_ai(["checkpoint", "mock_ai", *files], cwd=repo_dir)
+
+    def commit_has_ai_note(self, repo_dir: Path, rev: str) -> bool:
+        """True if `rev` carries an authorship note under refs/notes/ai."""
+        sha = self.run_git(["rev-parse", rev], cwd=repo_dir).stdout.strip()
+        probe = run_cmd(
+            [str(self.real_git), "notes", "--ref=ai", "show", sha],
+            cwd=repo_dir,
+            env=self.base_env,
+            timeout_s=self.timeout_s,
+            check=False,
+        )
+        return probe.returncode == 0
+
+    def commit_stats(self, repo_dir: Path, rev: str) -> dict[str, Any]:
+        """Parsed `git-ai stats <rev> --json` for `rev`."""
+        proc = self.run_git_ai(["stats", rev, "--json"], cwd=repo_dir)
+        payload = (proc.stdout or "").strip()
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as err:
+            raise BenchmarkError(
+                f"Failed to decode `git-ai stats {rev} --json`: {err}\n{payload}"
+            ) from err
+        if not isinstance(decoded, dict):
+            raise BenchmarkError(
+                f"Unexpected `git-ai stats` shape for {rev}: {decoded!r}"
+            )
+        return decoded
+
+    def assert_ai_note(self, repo_dir: Path, rev: str, *, context: str) -> None:
+        """Assert `rev` has an ai note AND reports AI-attributed additions.
+
+        Validates both that the daemon ran at all (note present) and that it
+        attributed the AI-authored lines rather than silently dropping them
+        (ai_additions > 0). Catches "daemon did nothing" and "daemon
+        mis-attributed" without re-implementing the integration suite.
+        """
+        sha = self.run_git(["rev-parse", rev], cwd=repo_dir).stdout.strip()
+        if not self.commit_has_ai_note(repo_dir, sha):
+            raise BenchmarkError(
+                f"[{self.variant.key}] {context}: commit {sha[:12]} has no "
+                f"refs/notes/ai note after daemon sync"
+            )
+        stats = self.commit_stats(repo_dir, sha)
+        ai_additions = int(stats.get("ai_additions") or 0)
+        if ai_additions <= 0:
+            raise BenchmarkError(
+                f"[{self.variant.key}] {context}: commit {sha[:12]} reports "
+                f"ai_additions={ai_additions} (expected > 0); stats={stats!r}"
+            )
 
 
 def seed_basic_repo(runner: VariantRunner, repo_dir: Path, file_count: int = 24) -> list[str]:
@@ -730,6 +794,16 @@ def measure_squash_merge(runner: VariantRunner, repo_dir: Path, run_idx: int) ->
     runner.run_git(["commit", "-q", "-m", f"squash merge run {run_idx}"], cwd=repo_dir)
 
 
+def validate_head_is_ai(runner: VariantRunner, repo_dir: Path) -> None:
+    """Assert HEAD is an AI-attributed commit after the daemon has synced.
+
+    Used by scenarios whose measure step leaves an AI-authored commit at HEAD
+    (fresh AI commit, cherry-pick, rebase, squash-merge). Confirms the daemon
+    both ran (note present) and attributed the AI lines (ai_additions > 0).
+    """
+    runner.assert_ai_note(repo_dir, "HEAD", context="HEAD after measure")
+
+
 SCENARIOS = [
     Scenario(
         key="commit_human",
@@ -737,6 +811,8 @@ SCENARIOS = [
         complexity="basic",
         setup=setup_human_commit,
         measure=measure_human_commit,
+        # Human-only: no AI attribution to validate.
+        validate=None,
     ),
     Scenario(
         key="checkpoint_commit_ai",
@@ -744,6 +820,7 @@ SCENARIOS = [
         complexity="basic",
         setup=setup_ai_checkpoint_commit,
         measure=measure_ai_checkpoint_commit,
+        validate=validate_head_is_ai,
     ),
     Scenario(
         key="reset_mixed_head6",
@@ -751,6 +828,9 @@ SCENARIOS = [
         complexity="basic",
         setup=setup_reset_mixed,
         measure=measure_reset_mixed,
+        # `reset --mixed HEAD~6` lands HEAD on an AI commit created in setup;
+        # validating it confirms the note survived the ref move.
+        validate=validate_head_is_ai,
     ),
     Scenario(
         key="stash_roundtrip",
@@ -758,6 +838,8 @@ SCENARIOS = [
         complexity="basic",
         setup=setup_stash_roundtrip,
         measure=measure_stash_roundtrip,
+        # stash push/pop creates no commit; HEAD stays the setup AI commit.
+        validate=validate_head_is_ai,
     ),
     Scenario(
         key="cherry_pick_three",
@@ -765,6 +847,7 @@ SCENARIOS = [
         complexity="basic",
         setup=setup_cherry_pick_three,
         measure=measure_cherry_pick_three,
+        validate=validate_head_is_ai,
     ),
     Scenario(
         key="rebase_linear",
@@ -772,6 +855,7 @@ SCENARIOS = [
         complexity="complex",
         setup=setup_rebase_linear,
         measure=measure_rebase_linear,
+        validate=validate_head_is_ai,
     ),
     Scenario(
         key="rebase_rebase_merges",
@@ -779,6 +863,7 @@ SCENARIOS = [
         complexity="complex",
         setup=setup_rebase_merges,
         measure=measure_rebase_merges,
+        validate=validate_head_is_ai,
     ),
     Scenario(
         key="squash_merge_commit",
@@ -786,6 +871,7 @@ SCENARIOS = [
         complexity="complex",
         setup=setup_squash_merge,
         measure=measure_squash_merge,
+        validate=validate_head_is_ai,
     ),
 ]
 
@@ -886,7 +972,7 @@ def render_report(
     slowdowns: dict[str, dict[str, float]],
     margin_checks: list[MarginCheckResult],
 ) -> None:
-    baseline_key = "main_wrapper"
+    baseline_key = "main_daemon"
     margin_baseline_key = str(metadata["margin_baseline"])
     margin_baseline_label = margin_baseline_key.replace("_", " ")
 
@@ -918,41 +1004,38 @@ def render_report(
     lines.append("## Exact Timings (ms)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) runs | current(wrapper) runs | current(daemon) runs |"
+        "| Scenario | main(daemon) runs | current(daemon) runs |"
     )
-    lines.append("|---|---:|---:|---:|")
+    lines.append("|---|---:|---:|")
     for scenario in scenarios:
         row = [scenario.key]
         for key in [
-            "main_wrapper",
-            "current_wrapper",
+            "main_daemon",
             "current_daemon",
         ]:
             runs = summary[scenario.key][key]["runs_ms"]  # type: ignore[index]
             row.append(", ".join(f"{float(v):.3f}" for v in runs))  # type: ignore[arg-type]
         lines.append(
-            f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} |"
+            f"| {row[0]} | {row[1]} | {row[2]} |"
         )
     lines.append("")
-    lines.append("## Median Summary (ms) and Slowdown vs main(wrapper)")
+    lines.append("## Median Summary (ms) and Slowdown vs main(daemon)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) | current(wrapper) | current(daemon) | wrapper Δ% | daemon Δ% |"
+        "| Scenario | main(daemon) | current(daemon) | daemon Δ% |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|")
     for scenario in scenarios:
         data = summary[scenario.key]
-        base = float(data["main_wrapper"]["median_ms"])  # type: ignore[index]
-        cw = float(data["current_wrapper"]["median_ms"])  # type: ignore[index]
+        base = float(data["main_daemon"]["median_ms"])  # type: ignore[index]
         cd = float(data["current_daemon"]["median_ms"])  # type: ignore[index]
         s = slowdowns.get(scenario.key, {})
         lines.append(
-            f"| {scenario.key} | {base:.3f} | {cw:.3f} | {cd:.3f} | "
-            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
+            f"| {scenario.key} | {base:.3f} | {cd:.3f} | "
+            f"{s.get('current_daemon', 0.0):.3f}% |"
         )
 
     ratios: dict[str, list[float]] = {
-        "current_wrapper": [],
         "current_daemon": [],
     }
     for scenario in scenarios:
@@ -965,7 +1048,7 @@ def render_report(
     lines.append("")
     lines.append("## Aggregate Comparison")
     lines.append("")
-    lines.append("| Variant | Geometric Mean Ratio vs main(wrapper) | Geometric Mean Slowdown |")
+    lines.append("| Variant | Geometric Mean Ratio vs main(daemon) | Geometric Mean Slowdown |")
     lines.append("|---|---:|---:|")
     for key, ratio_values in ratios.items():
         gm = geometric_mean(ratio_values)
@@ -1027,7 +1110,7 @@ def write_raw_csv(path: Path, results: list[RunResult]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark main(wrapper) against current wrapper/daemon "
+            "Benchmark main(daemon) against current(daemon) "
             "across basic and complex git workflows."
         )
     )
@@ -1080,13 +1163,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-margin",
         action="store_true",
-        help="Exit non-zero when any current_wrapper/current_daemon margin check fails.",
+        help="Exit non-zero when any current_daemon margin check fails.",
     )
     parser.add_argument(
         "--margin-baseline",
         type=str,
-        choices=["current_wrapper", "main_wrapper"],
-        default="current_wrapper",
+        choices=["main_daemon"],
+        default="main_daemon",
         help="Baseline variant for margin checks.",
     )
     return parser.parse_args()
@@ -1139,9 +1222,12 @@ def main() -> int:
             main_bin = build_release_binary(main_worktree, targets_dir / "main")
             main_sha = git_output(main_worktree, ["rev-parse", "HEAD"])
 
+        # git-ai is daemon-architecture: all attribution side effects run in the
+        # daemon (the git proxy is a thin trace2-emitting passthrough). Wrapper
+        # mode with no daemon captures nothing, so the only meaningful comparison
+        # is daemon-vs-daemon: this branch's daemon vs main's daemon.
         variants = [
-            Variant("main_wrapper", "main(wrapper)", main_bin, "wrapper"),
-            Variant("current_wrapper", "current(wrapper)", current_bin, "wrapper"),
+            Variant("main_daemon", "main(daemon)", main_bin, "daemon"),
             Variant("current_daemon", "current(daemon)", current_bin, "daemon"),
         ]
 
@@ -1186,10 +1272,23 @@ def main() -> int:
                             run_repo,
                             ignore=ignore_transient_git_lockfiles,
                         )
+                        # The daemon does attribution asynchronously, AFTER the
+                        # foreground git command returns. To measure the real
+                        # end-to-end cost (foreground passthrough + daemon
+                        # attribution) the quiescence wait MUST be inside the
+                        # timed window -- otherwise we only time the passthrough,
+                        # which is near-identical between two daemon builds.
                         t0 = time.perf_counter()
                         scenario.measure(runner, run_repo, run_index)
-                        duration_ms = (time.perf_counter() - t0) * 1000.0
                         runner.wait_for_daemon_idle(run_repo)
+                        duration_ms = (time.perf_counter() - t0) * 1000.0
+
+                        # Correctness gate (outside the timed window): confirm the
+                        # daemon actually produced the expected authorship notes,
+                        # so a build that is "fast" because it silently dropped
+                        # attribution cannot pass.
+                        if scenario.validate is not None:
+                            scenario.validate(runner, run_repo)
                         raw_results.append(
                             RunResult(
                                 scenario=scenario.key,
@@ -1210,12 +1309,12 @@ def main() -> int:
                     runner.close()
 
         summary = summarize_runs(raw_results)
-        slowdowns = compute_slowdowns(summary, baseline_key="main_wrapper")
+        slowdowns = compute_slowdowns(summary, baseline_key="main_daemon")
         margin_checks = compute_margin_checks(
             summary,
             baseline_key=args.margin_baseline,
             margin_pct=args.margin_pct,
-            variants=["current_wrapper", "current_daemon"],
+            variants=["current_daemon"],
         )
 
         metadata: dict[str, str | int | dict[str, str]] = {
@@ -1242,7 +1341,7 @@ def main() -> int:
                 {
                     "metadata": metadata,
                     "summary": summary,
-                    "slowdowns_pct_vs_main_wrapper": slowdowns,
+                    "slowdowns_pct_vs_main_daemon": slowdowns,
                     "margin_checks": [dataclasses.asdict(check) for check in margin_checks],
                 },
                 indent=2,

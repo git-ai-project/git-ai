@@ -529,20 +529,25 @@ fn test_old_format_note_roundtrips_without_corruption() {
 #[test]
 fn test_reset_preserves_old_format_notes_in_working_log() {
     let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
 
     // Create initial commit
-    let mut file = repo.filename("test.txt");
-    file.set_contents(crate::lines!["Line 1"]);
+    fs::write(&file_path, "Line 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Create commit with AI content
-    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    fs::write(&file_path, "Line 1\nAI line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
     let commit = repo.stage_all_and_commit("AI commit").unwrap();
 
     // Replace with old-format note (using "windsurf" as tool name)
     let old_hash = "aabbccddeeff1122";
+    let human_hash = "h_resetoldhuman";
     let old_note = format!(
         r#"test.txt
+  {} 1-1
   {} 2-2
 ---
 {{
@@ -559,9 +564,14 @@ fn test_reset_preserves_old_format_notes_in_working_log() {
       "accepted_lines": 1,
       "overriden_lines": 0
     }}
+  }},
+  "humans": {{
+    "{}": {{
+      "author": "Test User <test@example.com>"
+    }}
   }}
 }}"#,
-        old_hash, commit.commit_sha, old_hash
+        human_hash, old_hash, commit.commit_sha, old_hash, human_hash
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
@@ -587,6 +597,7 @@ fn test_reset_preserves_old_format_notes_in_working_log() {
     );
 
     // Verify AI attribution still works
+    let mut file = repo.filename("test.txt");
     file.assert_committed_lines(crate::lines!["Line 1".human(), "AI line".ai(),]);
 }
 
@@ -644,7 +655,10 @@ fn test_amend_old_prompts_commit_with_new_session_checkpoints() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("example.txt");
 
-    // Step 1: Create initial commit with AI content
+    // Step 1: Create initial commit with known-human context and AI content
+    fs::write(&file_path, "Human line 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "example.txt"])
+        .unwrap();
     let initial = "Human line 1\nAI old line\n";
     fs::write(&file_path, initial).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
@@ -653,8 +667,10 @@ fn test_amend_old_prompts_commit_with_new_session_checkpoints() {
 
     // Step 2: Replace the note with an old-format note (simulating pre-upgrade git-ai)
     let old_hash = "deadbeef12345678"; // 16-char bare hex (old format)
+    let human_hash = "h_amendoldhuman";
     let old_note = format!(
         r#"example.txt
+  {} 1-1
   {} 2-2
 ---
 {{
@@ -671,9 +687,14 @@ fn test_amend_old_prompts_commit_with_new_session_checkpoints() {
       "accepted_lines": 1,
       "overriden_lines": 0
     }}
+  }},
+  "humans": {{
+    "{}": {{
+      "author": "Test User <test@example.com>"
+    }}
   }}
 }}"#,
-        old_hash, commit.commit_sha, old_hash
+        human_hash, old_hash, commit.commit_sha, old_hash, human_hash
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
@@ -1650,7 +1671,10 @@ fn test_amend_old_prompts_delete_ai_line_then_add_new_session_line() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("prune.txt");
 
-    // Step 1: Create initial commit with AI content
+    // Step 1: Create initial commit with known-human context and AI content
+    fs::write(&file_path, "Human line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "prune.txt"])
+        .unwrap();
     let initial = "Human line\nOld AI line\n";
     fs::write(&file_path, initial).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "prune.txt"])
@@ -1659,8 +1683,10 @@ fn test_amend_old_prompts_delete_ai_line_then_add_new_session_line() {
 
     // Step 2: Replace note with old-format
     let old_hash = "prunetest1234567";
+    let human_hash = "h_pruneoldhuman";
     let old_note = format!(
         r#"prune.txt
+  {} 1-1
   {} 2-2
 ---
 {{
@@ -1677,9 +1703,14 @@ fn test_amend_old_prompts_delete_ai_line_then_add_new_session_line() {
       "accepted_lines": 1,
       "overriden_lines": 0
     }}
+  }},
+  "humans": {{
+    "{}": {{
+      "author": "Test User <test@example.com>"
+    }}
   }}
 }}"#,
-        old_hash, commit.commit_sha, old_hash
+        human_hash, old_hash, commit.commit_sha, old_hash, human_hash
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
@@ -1755,7 +1786,10 @@ fn test_amend_old_prompts_keep_old_line_add_new_session_same_file() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("keepold.txt");
 
-    // Step 1: Create initial commit with AI content
+    // Step 1: Create initial commit with known-human context and AI content
+    fs::write(&file_path, "Human line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "keepold.txt"])
+        .unwrap();
     let initial = "Human line\nOld AI line\n";
     fs::write(&file_path, initial).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "keepold.txt"])
@@ -1764,8 +1798,10 @@ fn test_amend_old_prompts_keep_old_line_add_new_session_same_file() {
 
     // Step 2: Replace note with old-format
     let old_hash = "keepoldtest12345";
+    let human_hash = "h_keepoldhuman";
     let old_note = format!(
         r#"keepold.txt
+  {} 1-1
   {} 2-2
 ---
 {{
@@ -1782,9 +1818,14 @@ fn test_amend_old_prompts_keep_old_line_add_new_session_same_file() {
       "accepted_lines": 1,
       "overriden_lines": 0
     }}
+  }},
+  "humans": {{
+    "{}": {{
+      "author": "Test User <test@example.com>"
+    }}
   }}
 }}"#,
-        old_hash, commit.commit_sha, old_hash
+        human_hash, old_hash, commit.commit_sha, old_hash, human_hash
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
@@ -1859,7 +1900,10 @@ fn test_multiple_amends_mixed_format_accumulation() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("multi.txt");
 
-    // Step 1: Initial commit
+    // Step 1: Initial commit with known-human context and AI content
+    fs::write(&file_path, "Line 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "multi.txt"])
+        .unwrap();
     let initial = "Line 1\nOld AI line\n";
     fs::write(&file_path, initial).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "multi.txt"])
@@ -1868,8 +1912,10 @@ fn test_multiple_amends_mixed_format_accumulation() {
 
     // Step 2: Replace note with old-format
     let old_hash = "multiamend123456";
+    let human_hash = "h_multiamendhuman";
     let old_note = format!(
         r#"multi.txt
+  {} 1-1
   {} 2-2
 ---
 {{
@@ -1886,9 +1932,14 @@ fn test_multiple_amends_mixed_format_accumulation() {
       "accepted_lines": 1,
       "overriden_lines": 0
     }}
+  }},
+  "humans": {{
+    "{}": {{
+      "author": "Test User <test@example.com>"
+    }}
   }}
 }}"#,
-        old_hash, commit.commit_sha, old_hash
+        human_hash, old_hash, commit.commit_sha, old_hash, human_hash
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
@@ -2071,7 +2122,10 @@ fn test_amend_old_prompts_different_file_gets_session_edits() {
     let file_a = repo.path().join("file_a.txt");
     let file_b = repo.path().join("file_b.txt");
 
-    // Step 1: Initial commit with AI content in file_a
+    // Step 1: Initial commit with known-human context and AI content in file_a
+    fs::write(&file_a, "Human line A\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file_a.txt"])
+        .unwrap();
     let initial_a = "Human line A\nOld AI line A\n";
     fs::write(&file_a, initial_a).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
@@ -2080,8 +2134,10 @@ fn test_amend_old_prompts_different_file_gets_session_edits() {
 
     // Step 2: Replace with old-format note for file_a
     let old_hash = "crossfile1234567";
+    let human_hash = "h_crossfilehuman";
     let old_note = format!(
         r#"file_a.txt
+  {} 1-1
   {} 2-2
 ---
 {{
@@ -2098,9 +2154,14 @@ fn test_amend_old_prompts_different_file_gets_session_edits() {
       "accepted_lines": 1,
       "overriden_lines": 0
     }}
+  }},
+  "humans": {{
+    "{}": {{
+      "author": "Test User <test@example.com>"
+    }}
   }}
 }}"#,
-        old_hash, commit.commit_sha, old_hash
+        human_hash, old_hash, commit.commit_sha, old_hash, human_hash
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");

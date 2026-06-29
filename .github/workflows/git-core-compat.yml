@@ -3,6 +3,12 @@ name: Git Core Compatibility
 permissions:
   contents: read
 
+env:
+  GIT_COMPAT_URL: https://github.com/git/git.git
+  GIT_COMPAT_REF: v2.54.0
+  GIT_COMPAT_SHA: 94f057755b7941b321fd11fec1b2e3ca5313a4e0
+  GIT_COMPAT_CLEAN_SOURCE: "1"
+
 on:
   pull_request:
     paths:
@@ -55,33 +61,51 @@ jobs:
           restore-keys: |
             ubuntu-cargo-
 
-      - name: Get week for git source cache key
-        id: date
-        run: echo "week=$(date +'%Y-%U')" >> $GITHUB_OUTPUT
-
       - name: Cache git source
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/git-core-tests
-          key: git-source-${{ runner.os }}-${{ steps.date.outputs.week }}
-          restore-keys: |
-            git-source-${{ runner.os }}-
+          key: git-source-${{ runner.os }}-${{ env.GIT_COMPAT_SHA }}
 
       - name: Clone git source
         run: |
-          if [ ! -d /tmp/git-core-tests ]; then
-            git clone --depth 1 https://github.com/git/git.git /tmp/git-core-tests
+          set -euo pipefail
+          if [ -L /tmp/git-core-tests ]; then
+            echo "::error::/tmp/git-core-tests is a symlink"
+            exit 1
+          fi
+          if [ -L /tmp/git-core-tests/.git ]; then
+            echo "::error::/tmp/git-core-tests/.git is a symlink"
+            exit 1
+          fi
+          if [ ! -d /tmp/git-core-tests/.git ]; then
+            if [ -e /tmp/git-core-tests ]; then
+              echo "::error::/tmp/git-core-tests exists but is not a Git checkout"
+              exit 1
+            fi
+            git clone --depth 1 --branch "$GIT_COMPAT_REF" "$GIT_COMPAT_URL" /tmp/git-core-tests
           else
             echo "Using cached git source"
           fi
 
-      - name: Build git source
-        run: |
-          if [ ! -f /tmp/git-core-tests/GIT-BUILD-OPTIONS ]; then
-            make -C /tmp/git-core-tests -j$(nproc) NO_CURL=YesPlease NO_GETTEXT=YesPlease
+          if git -C /tmp/git-core-tests remote get-url origin >/dev/null 2>&1; then
+            git -C /tmp/git-core-tests remote set-url origin "$GIT_COMPAT_URL"
           else
-            echo "Using cached git build"
+            git -C /tmp/git-core-tests remote add origin "$GIT_COMPAT_URL"
           fi
+          git -C /tmp/git-core-tests fetch --depth 1 origin "$GIT_COMPAT_REF"
+          git -C /tmp/git-core-tests checkout --force --detach FETCH_HEAD
+
+          actual_sha="$(git -C /tmp/git-core-tests rev-parse HEAD)"
+          if [ "$actual_sha" != "$GIT_COMPAT_SHA" ]; then
+            echo "::error::Expected $GIT_COMPAT_REF to resolve to $GIT_COMPAT_SHA, got $actual_sha"
+            exit 1
+          fi
+
+          git -C /tmp/git-core-tests reset --hard "$GIT_COMPAT_SHA"
+          git -C /tmp/git-core-tests clean -ffdx
+          git -C /tmp/git-core-tests rev-parse HEAD
+          git -C /tmp/git-core-tests describe --tags --always --dirty
 
       - name: Build git-ai
         run: cargo build --release --bin git-ai
@@ -91,3 +115,13 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: python3 tests/git-compat/run-core-tests.py
+
+      - name: Clean git source before cache save
+        run: |
+          set -euo pipefail
+          if [ -L /tmp/git-core-tests ] || [ -L /tmp/git-core-tests/.git ] || [ ! -d /tmp/git-core-tests/.git ]; then
+            echo "::error::/tmp/git-core-tests is not a normal Git checkout"
+            exit 1
+          fi
+          git -C /tmp/git-core-tests reset --hard "$GIT_COMPAT_SHA"
+          git -C /tmp/git-core-tests clean -ffdx

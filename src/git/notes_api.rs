@@ -48,6 +48,12 @@ pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
     }
 }
 
+/// Read note contents for multiple commits in O(1) git process calls.
+/// Returns a map of commit_sha → note_content for commits that have notes.
+///
+/// On the HTTP backend this checks the local cache, then fetches-and-caches any
+/// misses from the remote, and finally falls back to local git notes; on the
+/// GitNotes backend it reads directly via the batched `notes_for_commits` path.
 pub fn read_notes_batch(
     repo: &Repository,
     commit_shas: &[String],
@@ -134,13 +140,8 @@ pub fn read_authorship_v3(
 ///
 /// 1. `authorship_traversal::load_ai_touched_files_for_commits` — passes OIDs
 ///    to `batch_read_blobs_with_oids`; must be real git OIDs.
-/// 2. `rebase_authorship::build_rebase_note_cache` — passes OIDs to
-///    `batch_read_blob_contents`; must be real git OIDs.
-/// 3. `rebase_authorship::load_note_contents_for_commits` — same pattern.
-/// 4. `rebase_authorship::try_fast_path_cherry_pick_remap` — passes OIDs to
-///    `batch_read_blob_contents`; also checks `len() != source_commits.len()`
-///    and returns `false` on mismatch, which is the correct behaviour when
-///    notes are not in git refs.
+/// 2. `rewrite::shift_authorship_notes` — reads notes by OID;
+///    must be real git OIDs.
 ///
 /// **HTTP backend**: notes do not live in `refs/notes/ai`, so there are no
 /// git blob OIDs to return.  Returning an empty map causes callers to handle
@@ -436,6 +437,12 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
         return Ok(());
     }
 
+    tracing::info!(
+        remote = %remote,
+        backend = %"http",
+        uncached_commits = uncached.len(),
+        "fetching authorship notes"
+    );
     tracing::debug!(
         "warm_cache_for_remote: fetching notes for {} uncached commits",
         uncached.len()
@@ -850,11 +857,8 @@ mod tests {
             "Config::fresh() should reflect GIT_AI_NOTES_BACKEND_KIND=http"
         );
 
-        // The actual early-return code in run_pre_push_hook_managed was added
-        // in Phase 2.6. Verify it compiles and is reachable by referencing the
-        // function pointer. Structural verification: when kind == Http, the
-        // function returns before doing any work.
-        let _ = crate::commands::hooks::push_hooks::run_pre_push_hook_managed as fn(_, _);
+        // Structural verification: the Http backend skip is now inlined in
+        // apply_push_side_effect in daemon.rs — no separate hook function needed.
     }
 
     // --- warm_cache_for_remote tests ---

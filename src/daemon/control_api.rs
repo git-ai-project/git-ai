@@ -1,7 +1,6 @@
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::StatSnapshot;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::daemon::domain::RepoContext;
 use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,8 +9,12 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
+    #[serde(rename = "ping")]
+    Ping,
     #[serde(rename = "checkpoint.run")]
     CheckpointRun { request: Box<CheckpointRequest> },
+    #[serde(rename = "sync.family")]
+    SyncFamily { repo_working_dir: String },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
     #[serde(rename = "telemetry.submit")]
@@ -21,33 +24,32 @@ pub enum ControlRequest {
     /// Signal the daemon that new notes are pending in notes-db and should be flushed.
     #[serde(rename = "notes.flush")]
     FlushNotes,
-    #[serde(rename = "wrapper.pre_state")]
-    WrapperPreState {
-        invocation_id: String,
-        repo_working_dir: String,
-        repo_context: RepoContext,
-    },
-    #[serde(rename = "wrapper.post_state")]
-    WrapperPostState {
-        invocation_id: String,
-        repo_working_dir: String,
-        repo_context: RepoContext,
-    },
     #[serde(rename = "snapshot.watermarks")]
     SnapshotWatermarks { repo_working_dir: String },
     #[serde(rename = "bash_session.start")]
     BashSessionStart {
         repo_work_dir: String,
+        original_cwd: Option<String>,
         session_id: String,
         tool_use_id: String,
         agent_id: AgentId,
         metadata: HashMap<String, String>,
         stat_snapshot: Box<StatSnapshot>,
+        trace_id: String,
+        started_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "bash_session.end")]
     BashSessionEnd {
+        repo_work_dir: String,
+        original_cwd: Option<String>,
         session_id: String,
         tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        ended_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "bash_session.query")]
     BashSessionQuery { repo_work_dir: String },
@@ -55,6 +57,32 @@ pub enum ControlRequest {
     BashSnapshotQuery {
         session_id: String,
         tool_use_id: String,
+    },
+    #[serde(rename = "bash_hook_attempt.start")]
+    BashHookAttemptStart {
+        original_cwd: String,
+        discovered_repo_work_dir: Option<String>,
+        repo_discovery_error: Option<String>,
+        session_id: String,
+        tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        started_at_ns: u128,
+        command: Option<String>,
+    },
+    #[serde(rename = "bash_hook_attempt.end")]
+    BashHookAttemptEnd {
+        original_cwd: String,
+        discovered_repo_work_dir: Option<String>,
+        repo_discovery_error: Option<String>,
+        session_id: String,
+        tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        ended_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "shutdown")]
     Shutdown,

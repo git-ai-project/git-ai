@@ -54,7 +54,7 @@ jobs:
 
       # Setup Gradle
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
 
       # Build plugin
       - name: Build plugin
@@ -107,7 +107,7 @@ jobs:
 
       # Setup Gradle
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
         with:
           cache-read-only: true
 
@@ -167,7 +167,7 @@ jobs:
 
       # Run Qodana inspections
       - name: Qodana - Code Inspection
-        uses: JetBrains/qodana-action@d7b5ec2fbec32197ef447c450e00589ed5f34fd5 # v2026.1.0
+        uses: JetBrains/qodana-action@4861e015da555e86a72b862892aba6c2b93e6891 # v2026.1.3
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         with:
@@ -201,7 +201,7 @@ jobs:
 
       # Setup Gradle
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
         with:
           cache-read-only: true
 

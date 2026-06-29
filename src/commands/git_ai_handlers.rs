@@ -53,6 +53,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "install-hooks"
             | "install"
             | "uninstall-hooks"
+            | "usage"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -107,6 +108,15 @@ pub fn handle_git_ai(args: &[String]) {
                 log_message("stats", "info", None)
             }
             handle_stats(&args[1..]);
+        }
+        "usage" => {
+            commands::usage::handle_usage(&args[1..]);
+        }
+        "analyze" => {
+            commands::analyze::handle_analyze(&args[1..]);
+            if is_interactive_terminal() {
+                log_message("analyze", "info", None)
+            }
         }
         "status" => {
             commands::status::handle_status(&args[1..]);
@@ -172,9 +182,6 @@ pub fn handle_git_ai(args: &[String]) {
         "git-hooks" => {
             handle_git_hooks(&args[1..]);
         }
-        "squash-authorship" => {
-            commands::squash_authorship::handle_squash_authorship(&args[1..]);
-        }
         "ci" => {
             commands::ci_handlers::handle_ci(&args[1..]);
         }
@@ -228,7 +235,7 @@ pub fn handle_git_ai(args: &[String]) {
 }
 
 /// Dispatch `git-ai notes <subcommand>` commands.
-fn handle_notes_subcommand(args: &[String]) {
+pub(crate) fn handle_notes_subcommand(args: &[String]) {
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("--help");
     match subcommand {
         "migrate" => {
@@ -333,8 +340,15 @@ fn print_help() {
     );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!("  usage              Show local AI usage statistics");
+    eprintln!("    --period <1d|3d|7d|30d>  Time window (default: 30d)");
+    eprintln!("    --json                 Output in JSON format");
+    eprintln!("  analyze [beta]      Analyze agent sessions and effectiveness");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!(
+        "    --diff-only            Report only current-diff stats, omitting the per-checkpoint breakdown"
+    );
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
     eprintln!("  show-prompt <id>   Display a prompt record by its ID");
     eprintln!("    --commit <rev>        Look in a specific commit only");
@@ -356,11 +370,6 @@ fn print_help() {
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
-    eprintln!("  squash-authorship  Generate authorship log for squashed commits");
-    eprintln!(
-        "    <base_branch> <new_sha> <old_sha>  Required: base branch, new commit SHA, old commit SHA"
-    );
-    eprintln!("    --dry-run             Show what would be done without making changes");
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
@@ -537,10 +546,8 @@ fn handle_checkpoint(args: &[String]) {
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        let send_result = crate::daemon::send_control_request_fire_and_forget(
-            &config.control_socket_path,
-            &control_request,
-        );
+        let send_result =
+            crate::daemon::send_control_request(&config.control_socket_path, &control_request);
         if perf {
             eprintln!(
                 "[perf] checkpoint: ipc_send={:.1}ms",
@@ -676,7 +683,7 @@ fn notes_existence_label(existence: NotesExistence) -> &'static str {
     }
 }
 
-fn handle_effective_ignore_patterns_internal(args: &[String]) {
+pub(crate) fn handle_effective_ignore_patterns_internal(args: &[String]) {
     let payload = parse_machine_json_arg(args, "effective-ignore-patterns")
         .unwrap_or_else(|msg| emit_machine_json_error(msg));
 
@@ -696,7 +703,7 @@ fn handle_effective_ignore_patterns_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_blame_analysis_internal(args: &[String]) {
+pub(crate) fn handle_blame_analysis_internal(args: &[String]) {
     let payload = parse_machine_json_arg(args, "blame-analysis")
         .unwrap_or_else(|msg| emit_machine_json_error(msg));
 
@@ -720,7 +727,7 @@ fn handle_blame_analysis_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_fetch_authorship_notes_internal(args: &[String]) {
+pub(crate) fn handle_fetch_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "fetch-authorship-notes");
 
@@ -737,7 +744,7 @@ fn handle_fetch_authorship_notes_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_push_authorship_notes_internal(args: &[String]) {
+pub(crate) fn handle_push_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "push-authorship-notes");
 
@@ -852,7 +859,6 @@ fn handle_ai_diff(args: &[String]) {
             std::process::exit(1);
         }
     };
-
     if let Err(e) = commands::diff::handle_diff(&repo, args) {
         eprintln!("Diff failed: {}", e);
         std::process::exit(1);

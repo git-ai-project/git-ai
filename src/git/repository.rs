@@ -1,11 +1,9 @@
-use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
     common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
 };
 use crate::git::repo_storage::RepoStorage;
-use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::push_authorship_notes;
 #[cfg(windows)]
@@ -16,6 +14,7 @@ use gix_index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1119,43 +1118,6 @@ impl Repository {
         }
     }
 
-    pub fn handle_rewrite_log_event(
-        &mut self,
-        rewrite_log_event: RewriteLogEvent,
-        commit_author: String,
-        supress_output: bool,
-        apply_side_effects: bool,
-    ) {
-        let log = self
-            .storage
-            .append_rewrite_event(rewrite_log_event.clone())
-            .expect("Error writing .git/ai/rewrite_log");
-
-        if apply_side_effects
-            && let Err(error) = rewrite_authorship_if_needed(
-                self,
-                &rewrite_log_event,
-                commit_author,
-                &log,
-                supress_output,
-            )
-        {
-            tracing::debug!(
-                "rewrite_authorship_if_needed failed for {:?}: {}",
-                rewrite_log_event,
-                error
-            );
-            crate::observability::log_error(
-                &error,
-                Some(serde_json::json!({
-                    "component": "repository",
-                    "operation": "handle_rewrite_log_event",
-                    "rewrite_event": rewrite_log_event,
-                })),
-            );
-        }
-    }
-
     // Internal util to get the git object type for a given OID
     fn object_type(&self, oid: &str) -> Result<String, GitAiError> {
         let reader = crate::git::fast_reader::FastObjectReader::new(&self.git_common_dir);
@@ -1678,7 +1640,7 @@ impl Repository {
         const MAX_CONCURRENT: usize = 30;
 
         let repo_global_args = self.global_args_for_exec();
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
         let futures: Vec<_> = file_paths
             .iter()
@@ -1690,17 +1652,23 @@ impl Repository {
                 let semaphore = semaphore.clone();
 
                 async move {
-                    let _permit = semaphore.acquire().await;
-                    let result = exec_git(&args).and_then(|output| {
-                        String::from_utf8(output.stdout)
-                            .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
-                    });
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("staged file semaphore was closed");
+                    let result = crate::tokio_runtime::spawn_blocking_result(move || {
+                        exec_git(&args).and_then(|output| {
+                            String::from_utf8(output.stdout)
+                                .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
+                        })
+                    })
+                    .await;
                     (file_path, result)
                 }
             })
             .collect();
 
-        let results = smol::block_on(async { join_all(futures).await });
+        let results = crate::tokio_runtime::block_on(async { join_all(futures).await });
 
         let mut staged_files = HashMap::new();
         for (file_path, result) in results {
@@ -2700,12 +2668,54 @@ pub fn exec_git_allow_nonzero_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile_and_env(args, profile, &[])
+}
+
+pub fn exec_git_allow_nonzero_with_env(
+    args: &[String],
+    envs: &[(&str, &OsStr)],
+) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile_and_env(args, InternalGitProfile::General, envs)
+}
+
+#[cfg(feature = "test-support")]
+fn spawn_probe_log(effective_args: &[String]) {
+    let Ok(path) = std::env::var("GIT_AI_SPAWN_LOG") else {
+        return;
+    };
+    let sub = effective_args
+        .iter()
+        .find(|a| !a.starts_with('-') && !a.contains('=') && !a.contains('/') && !a.contains('\\'))
+        .cloned()
+        .unwrap_or_default();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", sub);
+    }
+}
+
+#[cfg(not(feature = "test-support"))]
+#[inline]
+fn spawn_probe_log(_effective_args: &[String]) {}
+
+fn exec_git_allow_nonzero_with_profile_and_env(
+    args: &[String],
+    profile: InternalGitProfile,
+    envs: &[(&str, &OsStr)],
+) -> Result<Output, GitAiError> {
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    spawn_probe_log(&effective_args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_env(&mut cmd);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
 
     #[cfg(windows)]
     {
@@ -2771,6 +2781,16 @@ pub fn spawn_git_passthrough(args: &[String]) -> Result<Child, GitAiError> {
     cmd.spawn().map_err(GitAiError::IoError)
 }
 
+fn apply_internal_git_env(cmd: &mut Command) {
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+    cmd.env_remove("GIT_TRACE");
+    cmd.env_remove("GIT_TRACE2");
+    cmd.env_remove("GIT_TRACE2_BRIEF");
+    cmd.env_remove("GIT_TRACE2_PERF");
+    cmd.env("GIT_TRACE2_EVENT", "0");
+}
+
 /// Helper to execute a git command with an explicit internal profile.
 pub fn exec_git_with_profile(
     args: &[String],
@@ -2807,13 +2827,13 @@ pub fn exec_git_stdin_with_profile(
     // TODO Make sure to handle process signals, etc.
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    spawn_probe_log(&effective_args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -2858,6 +2878,70 @@ pub fn exec_git_stdin_with_profile(
     Ok(output)
 }
 
+pub(crate) fn batch_read_paths_at_treeishes(
+    repo: &Repository,
+    requests: &[(String, String)],
+) -> Result<HashMap<(String, String), String>, GitAiError> {
+    if requests.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "cat-file".to_string(),
+        "--batch-check=%(objectname) %(objecttype)".to_string(),
+    ]);
+
+    let stdin_data = requests
+        .iter()
+        .map(|(treeish, path)| format!("{treeish}:{path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() != requests.len() {
+        return Err(GitAiError::Generic(format!(
+            "git cat-file returned {} records for {} path requests",
+            lines.len(),
+            requests.len()
+        )));
+    }
+
+    let mut request_blob_oids: HashMap<(String, String), String> = HashMap::new();
+    let mut unique_blob_oids = Vec::new();
+    let mut seen_blob_oids = HashSet::new();
+
+    for (request, line) in requests.iter().zip(lines) {
+        let mut parts = line.split_whitespace();
+        let Some(oid) = parts.next() else {
+            continue;
+        };
+        if parts.next() != Some("blob") {
+            continue;
+        }
+        let oid = oid.to_string();
+        request_blob_oids.insert(request.clone(), oid.clone());
+        if seen_blob_oids.insert(oid.clone()) {
+            unique_blob_oids.push(oid);
+        }
+    }
+
+    let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
+        &repo.global_args_for_exec(),
+        &unique_blob_oids,
+    )?;
+
+    let mut contents = HashMap::new();
+    for (request, blob_oid) in request_blob_oids {
+        if let Some(content) = blob_contents.get(&blob_oid) {
+            contents.insert(request, content.clone());
+        }
+    }
+    Ok(contents)
+}
+
 /// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.
 /// Returns None if the version cannot be parsed.
 #[doc(hidden)]
@@ -2899,23 +2983,60 @@ pub fn parse_git_version(version_str: &str) -> Option<(u32, u32, u32)> {
 fn parse_diff_added_lines(
     diff_output: &str,
 ) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
+    let parsed = parse_diff_added_lines_internal(diff_output);
+    Ok((parsed.all_lines, parsed.total_deleted))
+}
+
+struct ParsedDiffAddedLines {
+    all_lines: HashMap<String, Vec<u32>>,
+    insertion_lines: HashMap<String, Vec<u32>>,
+    total_deleted: usize,
+}
+
+struct ActiveDiffHunk {
+    new_line: u32,
+    is_pure_insertion: bool,
+}
+
+fn parse_diff_added_lines_internal(diff_output: &str) -> ParsedDiffAddedLines {
     let mut result: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut insertion_lines: HashMap<String, Vec<u32>> = HashMap::new();
     let mut current_file: Option<String> = None;
+    let mut current_hunk: Option<ActiveDiffHunk> = None;
     let mut total_deleted: usize = 0;
 
     for line in diff_output.lines() {
         if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
             current_file = path_opt;
+            current_hunk = None;
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if let Some((added_lines, _is_pure_insertion, old_count)) = parse_hunk_header(line) {
+            if let Some((new_start, _new_count, old_count)) = parse_hunk_header_counts(line) {
                 // Count deleted lines for ALL hunks, including those from purely
                 // deleted files (where current_file is None because +++ /dev/null).
                 total_deleted += old_count as usize;
-                // Only record added-line numbers when there is a destination file.
+                current_hunk = Some(ActiveDiffHunk {
+                    new_line: new_start,
+                    is_pure_insertion: old_count == 0,
+                });
+            }
+        } else if let Some(hunk) = current_hunk.as_mut() {
+            if line.starts_with('+') {
                 if let Some(ref file) = current_file {
-                    result.entry(file.clone()).or_default().extend(added_lines);
+                    result.entry(file.clone()).or_default().push(hunk.new_line);
+                    if hunk.is_pure_insertion {
+                        insertion_lines
+                            .entry(file.clone())
+                            .or_default()
+                            .push(hunk.new_line);
+                    }
                 }
+                hunk.new_line += 1;
+            } else if line.starts_with('-') || line.starts_with('\\') {
+                // Removed lines and "\ No newline at end of file" markers do
+                // not advance the new-file line cursor.
+            } else {
+                hunk.new_line += 1;
             }
         }
     }
@@ -2925,8 +3046,16 @@ fn parse_diff_added_lines(
         lines.sort_unstable();
         lines.dedup();
     }
+    for lines in insertion_lines.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
 
-    Ok((result, total_deleted))
+    ParsedDiffAddedLines {
+        all_lines: result,
+        insertion_lines,
+        total_deleted,
+    }
 }
 
 /// Parses the unified diff output to extract line numbers of added lines,
@@ -2938,44 +3067,8 @@ fn parse_diff_added_lines(
 pub fn parse_diff_added_lines_with_insertions(
     diff_output: &str,
 ) -> Result<(HashMap<String, Vec<u32>>, HashMap<String, Vec<u32>>), GitAiError> {
-    let mut all_lines: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut insertion_lines: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut current_file: Option<String> = None;
-
-    for line in diff_output.lines() {
-        if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
-            current_file = path_opt;
-        } else if line.starts_with("@@ ") {
-            // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if let Some(ref file) = current_file
-                && let Some((added_lines, is_pure_insertion, _old_count)) = parse_hunk_header(line)
-            {
-                all_lines
-                    .entry(file.clone())
-                    .or_default()
-                    .extend(added_lines.clone());
-
-                if is_pure_insertion {
-                    insertion_lines
-                        .entry(file.clone())
-                        .or_default()
-                        .extend(added_lines);
-                }
-            }
-        }
-    }
-
-    // Sort and deduplicate line numbers for each file
-    for lines in all_lines.values_mut() {
-        lines.sort_unstable();
-        lines.dedup();
-    }
-    for lines in insertion_lines.values_mut() {
-        lines.sort_unstable();
-        lines.dedup();
-    }
-
-    Ok((all_lines, insertion_lines))
+    let parsed = parse_diff_added_lines_internal(diff_output);
+    Ok((parsed.all_lines, parsed.insertion_lines))
 }
 
 /// Returns true if any path in the set contains non-ASCII characters.
@@ -3005,17 +3098,7 @@ fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String
     Some(Some(normalize_diff_path_token(raw)))
 }
 
-/// Parse a hunk header line to extract added line numbers and whether it's a pure insertion
-///
-/// Format: @@ -old_start,old_count +new_start,new_count @@
-/// Returns (line numbers that were added, is_pure_insertion)
-/// is_pure_insertion is true when old_count=0, meaning these are new lines, not modifications
-/// Returns `(added_line_numbers, is_pure_insertion, old_count)`.
-///
-/// `old_count` is the number of lines removed in the old file for this hunk
-/// (the value after the comma in `@@ -old_start,old_count …`).  Callers that
-/// only need the added-line numbers can discard it with `_`.
-fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool, u32)> {
+fn parse_hunk_header_counts(line: &str) -> Option<(u32, u32, u32)> {
     // Find the part between @@ and @@
     let parts: Vec<&str> = line.split("@@").collect();
     if parts.len() < 2 {
@@ -3059,18 +3142,7 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool, u32)> {
         1 // If no count specified, it's 1 line
     };
 
-    // If count is 0, no lines were added (only deleted)
-    if count == 0 {
-        return Some((Vec::new(), false, old_count));
-    }
-
-    // Generate all line numbers in the range
-    let lines: Vec<u32> = (start..start + count).collect();
-
-    // Pure insertion if old_count is 0 (no lines from old file were modified)
-    let is_pure_insertion = old_count == 0;
-
-    Some((lines, is_pure_insertion, old_count))
+    Some((start, count, old_count))
 }
 
 #[cfg(test)]

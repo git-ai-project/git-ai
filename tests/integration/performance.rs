@@ -15,7 +15,6 @@ fn setup() {
 
     // Test that we can override feature flags
     let test_flags = FeatureFlags {
-        rewrite_stash: true,
         auth_keyring: false,
         transcript_streaming: true,
         transcript_sweep: true,

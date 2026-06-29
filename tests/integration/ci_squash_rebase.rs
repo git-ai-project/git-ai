@@ -1,6 +1,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
-use git_ai::git::refs::get_reference_as_authorship_log_v3;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::git::refs::notes_add;
 use git_ai::git::repository as GitAiRepository;
 
@@ -8,619 +8,581 @@ fn direct_test_repo() -> TestRepo {
     TestRepo::new()
 }
 
-/// Test basic squash merge via CI - AI code from feature branch squashed into main
+fn run_ci_local_merge(repo: &TestRepo, merge_sha: &str, head_sha: &str, base_sha: &str) -> String {
+    repo.git_ai(&[
+        "ci",
+        "local",
+        "merge",
+        "--merge-commit-sha",
+        merge_sha,
+        "--base-ref",
+        "main",
+        "--head-ref",
+        "feature",
+        "--head-sha",
+        head_sha,
+        "--base-sha",
+        base_sha,
+        "--skip-fetch",
+        "--skip-push",
+    ])
+    .expect("ci local merge should succeed")
+}
+
+fn assert_ci_rewrite_succeeded(output: &str) {
+    assert!(
+        output.contains("authorship rewritten successfully"),
+        "expected ci local merge to rewrite authorship, got: {output}"
+    );
+}
+
+fn authorship_files(repo: &TestRepo, commit_sha: &str) -> Vec<String> {
+    let note = repo
+        .read_authorship_note(commit_sha)
+        .unwrap_or_else(|| panic!("expected authorship note for {commit_sha}"));
+    AuthorshipLog::deserialize_from_string(&note)
+        .expect("authorship note should deserialize")
+        .attestations
+        .iter()
+        .map(|attestation| attestation.file_path.clone())
+        .collect()
+}
+
+fn setup_main(repo: &TestRepo) -> String {
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["base"]);
+    let base_sha = repo.stage_all_and_commit("base").unwrap().commit_sha;
+    repo.git(&["branch", "-M", "main"]).unwrap();
+    base_sha
+}
+
+fn squash_feature_with_raw_git(repo: &TestRepo, message: &str) -> String {
+    repo.git_og(&["checkout", "main"]).unwrap();
+    repo.git_og(&["merge", "--squash", "feature"]).unwrap();
+    repo.git_og(&["commit", "-m", message]).unwrap();
+    repo.git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
 #[test]
 fn test_ci_squash_merge_basic() {
-    let repo = direct_test_repo();
-    let mut file = repo.filename("feature.js");
+    let repo = TestRepo::new();
+    let base_sha = setup_main(&repo);
 
-    // Create initial commit on main (rename default branch to main)
-    file.set_contents(crate::lines!["// Original code", "function original() {}"]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    // Create feature branch with AI code
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-    file.insert_at(
-        2,
-        crate::lines![
-            "// AI added function".ai(),
-            "function aiFeature() {".ai(),
-            "  return 'ai code';".ai(),
-            "}".ai()
-        ],
-    );
-    let feature_commit = repo.stage_all_and_commit("Add AI feature").unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    // Simulate CI squash merge: checkout main, create merge commit
-    repo.git(&["checkout", "main"]).unwrap();
-
-    // Manually create the squashed state (as CI would do)
-    file.set_contents(crate::lines![
-        "// Original code",
-        "function original() {}",
-        "// AI added function",
-        "function aiFeature() {",
-        "  return 'ai code';",
-        "}"
+    let mut feature = repo.filename("feature.js");
+    feature.set_contents(crate::lines![
+        "export function aiFeature() {".ai(),
+        "  return 'ai code';".ai(),
+        "}".ai()
     ]);
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
+    let head_sha = repo
+        .stage_all_and_commit("add ai feature")
+        .unwrap()
+        .commit_sha;
 
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
+    let merge_sha = squash_feature_with_raw_git(&repo, "squash feature");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify AI authorship is preserved in the merge commit
-    file.assert_lines_and_blame(crate::lines![
-        "// Original code".human(),
-        "function original() {}".ai(),
-        "// AI added function".ai(),
-        "function aiFeature() {".ai(),
+    feature.assert_lines_and_blame(crate::lines![
+        "export function aiFeature() {".ai(),
         "  return 'ai code';".ai(),
         "}".ai()
     ]);
 }
 
-/// Test squash merge with multiple files containing AI code
 #[test]
 fn test_ci_squash_merge_multiple_files() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
+    let base_sha = setup_main(&repo);
 
-    // Create initial commit on main with two files
-    let mut file1 = repo.filename("file1.js");
-    let mut file2 = repo.filename("file2.js");
-
-    file1.set_contents(crate::lines!["// File 1 original"]);
-    file2.set_contents(crate::lines!["// File 2 original"]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    // Create feature branch with AI changes to both files
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-
-    file1.insert_at(
-        1,
-        crate::lines!["// AI code in file1".ai(), "const feature1 = 'ai';".ai()],
-    );
-    file2.insert_at(
-        1,
-        crate::lines!["// AI code in file2".ai(), "const feature2 = 'ai';".ai()],
-    );
-
-    let feature_commit = repo
-        .stage_all_and_commit("Add AI features to both files")
-        .unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    // Simulate CI squash merge
-    repo.git(&["checkout", "main"]).unwrap();
-
-    file1.set_contents(crate::lines![
-        "// File 1 original",
-        "// AI code in file1",
-        "const feature1 = 'ai';"
+    let mut api = repo.filename("api.js");
+    let mut view = repo.filename("view.js");
+    api.set_contents(crate::lines![
+        "export const handler = () => {".ai(),
+        "  return 'ok';".ai(),
+        "};".ai()
     ]);
-    file2.set_contents(crate::lines![
-        "// File 2 original",
-        "// AI code in file2",
-        "const feature2 = 'ai';"
+    view.set_contents(crate::lines![
+        "export function View() {".ai(),
+        "  return handler();".ai(),
+        "}".ai()
     ]);
+    let head_sha = repo
+        .stage_all_and_commit("add ai feature files")
+        .unwrap()
+        .commit_sha;
 
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
+    let merge_sha = squash_feature_with_raw_git(&repo, "squash feature files");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify AI authorship is preserved in both files
-    file1.assert_lines_and_blame(crate::lines![
-        "// File 1 original".ai(),
-        "// AI code in file1".ai(),
-        "const feature1 = 'ai';".ai()
+    api.assert_lines_and_blame(crate::lines![
+        "export const handler = () => {".ai(),
+        "  return 'ok';".ai(),
+        "};".ai()
     ]);
-
-    file2.assert_lines_and_blame(crate::lines![
-        "// File 2 original".ai(),
-        "// AI code in file2".ai(),
-        "const feature2 = 'ai';".ai()
+    view.assert_lines_and_blame(crate::lines![
+        "export function View() {".ai(),
+        "  return handler();".ai(),
+        "}".ai()
     ]);
 }
 
-/// Test squash merge with mixed AI and human content
 #[test]
-fn test_ci_squash_merge_mixed_content() {
-    let repo = direct_test_repo();
-    let mut file = repo.filename("mixed.js");
+fn test_ci_squash_merge_mixed_ai_and_human_content() {
+    let repo = TestRepo::new();
+    let base_sha = setup_main(&repo);
 
-    // Create initial commit
-    file.set_contents(crate::lines!["// Base code", "const base = 1;"]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    // Create feature branch with mixed AI and human changes
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-
-    // Simulate: human adds a comment, AI adds code, human adds more
-    file.insert_at(
-        2,
-        crate::lines![
-            "// Human comment",
-            "// AI generated function".ai(),
-            "function aiHelper() {".ai(),
-            "  return true;".ai(),
-            "}".ai(),
-            "// Another human comment"
-        ],
-    );
-
-    let feature_commit = repo.stage_all_and_commit("Add mixed content").unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    // Simulate CI squash merge
-    repo.git(&["checkout", "main"]).unwrap();
-
-    file.set_contents(crate::lines![
-        "// Base code",
-        "const base = 1;",
-        "// Human comment",
-        "// AI generated function",
-        "function aiHelper() {",
-        "  return true;",
-        "}",
-        "// Another human comment"
-    ]);
-
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify metadata.humans contains the known human attribution
-    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
-    assert!(
-        merge_log.metadata.humans.contains_key("h_e858f2c2faea28"),
-        "squash note should carry h_e858f2c2faea28 from human-attributed lines in mixed content"
-    );
-    assert_eq!(
-        merge_log.metadata.humans["h_e858f2c2faea28"].author,
-        "Test User <test@example.com>"
-    );
-
-    // Verify mixed authorship is preserved
-    file.assert_lines_and_blame(crate::lines![
-        "// Base code".human(),
-        "const base = 1;".human(),
-        "// Human comment".ai(),
-        "// AI generated function".ai(),
-        "function aiHelper() {".ai(),
-        "  return true;".ai(),
+    let mut mixed = repo.filename("mixed.js");
+    mixed.set_contents(crate::lines![
+        "// Human-written setup",
+        "const flag = true;",
+        "// AI generated helper".ai(),
+        "function helper() {".ai(),
+        "  return flag;".ai(),
         "}".ai(),
-        "// Another human comment".human()
+        "// Human-written footer"
+    ]);
+    let head_sha = repo
+        .stage_all_and_commit("add mixed feature")
+        .unwrap()
+        .commit_sha;
+
+    let merge_sha = squash_feature_with_raw_git(&repo, "squash mixed feature");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
+
+    mixed.assert_lines_and_blame(crate::lines![
+        "// Human-written setup".human(),
+        "const flag = true;".human(),
+        "// AI generated helper".ai(),
+        "function helper() {".ai(),
+        "  return flag;".ai(),
+        "}".ai(),
+        "// Human-written footer".human()
     ]);
 }
 
-/// Test squash merge where source commits have notes but no AI attestations.
-#[test]
-fn test_ci_squash_merge_empty_notes_preserved() {
-    let repo = direct_test_repo();
-    let mut file = repo.filename("feature.txt");
-
-    file.set_contents(crate::lines!["base"]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    repo.git(&["checkout", "-b", "feature"]).unwrap();
-    file.set_contents(crate::lines!["base", "human change"]);
-    let feature_commit = repo.stage_all_and_commit("Human change").unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    repo.git(&["checkout", "main"]).unwrap();
-    file.set_contents(crate::lines!["base", "human change"]);
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    let authorship_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
-    assert!(
-        authorship_log.metadata.prompts.is_empty(),
-        "Expected empty attestations for human-only squash merge"
-    );
-}
-
-/// Test squash merge where source commits have no notes at all.
 #[test]
 fn test_ci_squash_merge_no_notes_no_authorship_created() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
-    repo.git_og(&["config", "user.name", "Test User"]).unwrap();
-    repo.git_og(&["config", "user.email", "test@example.com"])
-        .unwrap();
-
-    let mut file = repo.filename("feature.txt");
-    file.set_contents(crate::lines!["base"]);
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "Initial commit"]).unwrap();
+    let file_path = repo.path().join("feature.txt");
+    std::fs::write(&file_path, "base\n").unwrap();
+    repo.git_og(&["add", "feature.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "base"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git_og(&["branch", "-M", "main"]).unwrap();
 
     repo.git_og(&["checkout", "-b", "feature"]).unwrap();
-    file.set_contents(crate::lines!["base", "human change"]);
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "Human change"]).unwrap();
-    let feature_sha = repo
+    std::fs::write(&file_path, "base\nhuman change\n").unwrap();
+    repo.git_og(&["commit", "-am", "human feature"]).unwrap();
+    let head_sha = repo
         .git_og(&["rev-parse", "HEAD"])
         .unwrap()
         .trim()
         .to_string();
 
-    repo.git_og(&["checkout", "main"]).unwrap();
-    file.set_contents(crate::lines!["base", "human change"]);
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "Merge feature via squash"])
-        .unwrap();
-    let merge_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
+    let merge_sha = squash_feature_with_raw_git(&repo, "squash human feature");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
 
     assert!(
-        get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).is_err(),
-        "Expected no authorship log when source commits have no notes"
+        output.contains("no AI authorship to track"),
+        "expected ci local merge to report no authorship, got: {output}"
+    );
+    assert!(
+        repo.read_authorship_note(&merge_sha).is_none(),
+        "expected no authorship note when source commits have no notes"
     );
 }
 
-/// Test squash merge where conflict resolution adds content
-#[test]
-fn test_ci_squash_merge_with_manual_changes() {
-    let repo = direct_test_repo();
-    let mut file = repo.filename("config.js");
-
-    // Create initial commit
-    file.set_contents(crate::lines!["const config = {", "  version: 1", "};"]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    // Create feature branch with AI additions
-    repo.git(&["checkout", "-b", "feature"]).unwrap();
-
-    file.set_contents(crate::lines![
-        "const config = {",
-        "  version: 1,",
-        "  // AI added feature flag".ai(),
-        "  enableAI: true".ai(),
-        "};"
-    ]);
-
-    let feature_commit = repo.stage_all_and_commit("Add AI config").unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    // Simulate CI squash merge with manual adjustment during merge
-    // (e.g., developer manually tweaks formatting or adds extra config)
-    repo.git(&["checkout", "main"]).unwrap();
-
-    file.set_contents(crate::lines![
-        "const config = {",
-        "  version: 1,",
-        "  // AI added feature flag",
-        "  enableAI: true,",
-        "  // Manual addition during merge",
-        "  production: false",
-        "};"
-    ]);
-
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash with tweaks")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify metadata.humans contains the known human attribution
-    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
-    assert!(
-        merge_log.metadata.humans.contains_key("h_e858f2c2faea28"),
-        "squash note should carry h_e858f2c2faea28 from human-attributed lines in config"
-    );
-    assert_eq!(
-        merge_log.metadata.humans["h_e858f2c2faea28"].author,
-        "Test User <test@example.com>"
-    );
-
-    // Verify AI authorship is preserved for AI lines, human for manual additions
-    file.assert_lines_and_blame(crate::lines![
-        "const config = {".human(),
-        "  version: 1,".human(),
-        "  // AI added feature flag".ai(),
-        "  enableAI: true,".ai(),
-        "  // Manual addition during merge".human(),
-        "  production: false".human(),
-        "};".human()
-    ]);
-}
-
-/// Test rebase-like merge (multiple commits squashed) with AI content
-#[test]
-fn test_ci_rebase_merge_multiple_commits() {
-    let repo = direct_test_repo();
-    let mut file = repo.filename("app.js");
-
-    // Create initial commit
-    file.set_contents(crate::lines!["// App v1", ""]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    // Create feature branch with multiple commits
-    repo.git(&["checkout", "-b", "feature"]).unwrap();
-
-    // First commit: AI adds function
-    file.insert_at(
-        1,
-        crate::lines!["// AI function 1".ai(), "function ai1() { }".ai()],
-    );
-    repo.stage_all_and_commit("Add AI function 1").unwrap();
-
-    // Second commit: AI adds another function
-    file.insert_at(
-        3,
-        crate::lines!["// AI function 2".ai(), "function ai2() { }".ai()],
-    );
-    repo.stage_all_and_commit("Add AI function 2").unwrap();
-
-    // Third commit: Human adds function
-    file.insert_at(
-        5,
-        crate::lines!["// Human function", "function human() { }"],
-    );
-    let feature_commit = repo.stage_all_and_commit("Add human function").unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    // Simulate CI rebase-style merge (all commits squashed into one)
-    repo.git(&["checkout", "main"]).unwrap();
-
-    file.set_contents(crate::lines![
-        "// App v1",
-        "// AI function 1",
-        "function ai1() { }",
-        "// AI function 2",
-        "function ai2() { }",
-        "// Human function",
-        "function human() { }"
-    ]);
-
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature branch (squashed)")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify metadata.humans contains the known human attribution
-    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
-    assert!(
-        merge_log.metadata.humans.contains_key("h_e858f2c2faea28"),
-        "squash note should carry h_e858f2c2faea28 from human function lines"
-    );
-    assert_eq!(
-        merge_log.metadata.humans["h_e858f2c2faea28"].author,
-        "Test User <test@example.com>"
-    );
-
-    // Verify all authorship is correctly attributed
-    file.assert_lines_and_blame(crate::lines![
-        "// App v1".human(),
-        "// AI function 1".ai(),
-        "function ai1() { }".ai(),
-        "// AI function 2".ai(),
-        "function ai2() { }".ai(),
-        "// Human function".human(),
-        "function human() { }".human()
-    ]);
-}
-
-/// Test that CI rebase merge correctly pairs original commits with rebased commits
-/// in oldest-first order, so that each rebased commit's authorship note references
-/// only the files from its corresponding original commit.
-///
-/// This is a regression test for a bug where `CommitRange::all_commits()` returned
-/// commits in newest-first order (from `git rev-list`), but
-/// `rewrite_authorship_after_rebase_v2` expects oldest-first. Without the
-/// `.reverse()` fix in `ci_context.rs`, the positional pairing in
-/// `pair_commits_for_rewrite` would be inverted: the first original commit's note
-/// would be written to the last rebased commit and vice versa.
 #[test]
 fn test_ci_rebase_merge_commit_order_pairing() {
+    let repo = TestRepo::new();
+    let base_sha = setup_main(&repo);
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
+    let feature_sha1 = repo.stage_all_and_commit("add file_a").unwrap().commit_sha;
+
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
+    let feature_sha2 = repo.stage_all_and_commit("add file_b").unwrap().commit_sha;
+
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_only = repo.filename("main_only.txt");
+    main_only.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "advance main"]).unwrap();
+
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let new_sha2 = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let new_sha1 = repo
+        .git_og(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    assert_ne!(new_sha1, feature_sha1);
+    assert_ne!(new_sha2, feature_sha2);
+
+    repo.git_og(&["checkout", "main"]).unwrap();
+    repo.git_og(&["merge", "--ff-only", "feature"]).unwrap();
+
+    let output = run_ci_local_merge(&repo, &new_sha2, &feature_sha2, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
+
+    let files1 = authorship_files(&repo, &new_sha1);
+    let files2 = authorship_files(&repo, &new_sha2);
+
+    assert!(
+        files1.iter().any(|file| file.contains("file_a")),
+        "rebased commit 1 should reference file_a.txt, got: {files1:?}"
+    );
+    assert!(
+        !files1.iter().any(|file| file.contains("file_b")),
+        "rebased commit 1 should not reference file_b.txt, got: {files1:?}"
+    );
+    assert!(
+        files2.iter().any(|file| file.contains("file_b")),
+        "rebased commit 2 should reference file_b.txt, got: {files2:?}"
+    );
+    assert!(
+        !files2.iter().any(|file| file.contains("file_a")),
+        "rebased commit 2 should not reference file_a.txt, got: {files2:?}"
+    );
+}
+
+#[test]
+fn test_ci_local_sync_skips_when_current_rebased_commit_already_has_note() {
+    let repo = direct_test_repo();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["ai content".ai()]);
+    let previous_head_sha = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
+
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let current_head_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let gitai_repo =
+        GitAiRepository::find_repository_in_path(repo.path().to_str().expect("repo path"))
+            .expect("git-ai repo");
+    let existing_note = "client-side-note-that-ci-must-not-overwrite";
+    notes_add(&gitai_repo, &current_head_sha, existing_note).expect("add existing current note");
+
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "sync",
+            "--previous-head-sha",
+            previous_head_sha.as_str(),
+            "--base-ref",
+            "main",
+            "--base-sha",
+            base_sha.as_str(),
+            "--head-sha",
+            current_head_sha.as_str(),
+            "--skip-fetch-notes",
+            "--skip-push",
+        ])
+        .expect("ci local sync should succeed");
+
+    assert!(
+        output.contains("Local CI (sync): skipped PR sync with existing authorship"),
+        "Expected existing-note skip, got: {}",
+        output
+    );
+    let current_note = repo
+        .read_authorship_note(&current_head_sha)
+        .map(|note| note.trim().to_string());
+    assert_eq!(
+        current_note.as_deref(),
+        Some(existing_note),
+        "CI sync must not overwrite a current commit note that already exists"
+    );
+}
+
+#[test]
+fn test_ci_local_sync_skips_non_rebase_force_push() {
+    let repo = direct_test_repo();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["old ai content".ai()]);
+    let previous_head_sha = repo
+        .stage_all_and_commit("Add old AI content")
+        .unwrap()
+        .commit_sha;
+    assert!(
+        repo.read_authorship_note(&previous_head_sha).is_some(),
+        "old PR head should have an authorship note"
+    );
+
+    repo.git_og(&["reset", "--hard", "main"]).unwrap();
+    feature_file.set_contents(crate::lines!["different force-pushed content"]);
+    repo.git_og(&["add", "feature.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Force-pushed replacement"])
+        .unwrap();
+    let current_head_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "sync",
+            "--previous-head-sha",
+            previous_head_sha.as_str(),
+            "--base-ref",
+            "main",
+            "--head-sha",
+            current_head_sha.as_str(),
+            "--skip-fetch-notes",
+            "--skip-fetch-sync-refs",
+            "--skip-push",
+        ])
+        .expect("ci local sync should succeed for non-rebase force push");
+
+    assert!(
+        output.contains("Local CI (sync): skipped non-rebase PR sync"),
+        "Expected non-rebase sync skip, got: {}",
+        output
+    );
+    assert!(
+        repo.read_authorship_note(&current_head_sha).is_none(),
+        "non-rebase sync must not transfer old authorship to unrelated replacement commit"
+    );
+}
+
+#[test]
+fn test_ci_local_open_pr_rebase_single_commit() {
     use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
-    use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions};
 
     let repo = direct_test_repo();
 
-    // --- Set up initial commit on main ---
     let mut base_file = repo.filename("base.txt");
     base_file.set_contents(crate::lines!["base content"]);
-    let base_sha = repo
-        .stage_all_and_commit("Initial commit")
-        .unwrap()
-        .commit_sha;
+    repo.stage_all_and_commit("Initial commit").unwrap();
     repo.git(&["branch", "-M", "main"]).unwrap();
 
-    // --- Create feature branch with 2 commits, each touching a DIFFERENT file ---
-    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["ai content".ai()]);
+    let previous_head_sha = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
 
-    // Commit 1 (older): AI adds file_a.txt
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let current_head_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    assert_ne!(current_head_sha, previous_head_sha);
+    assert!(
+        repo.read_authorship_note(&current_head_sha).is_none(),
+        "bypassed rebase should not pre-create note for the rebased commit"
+    );
+
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "sync",
+            "--previous-head-sha",
+            previous_head_sha.as_str(),
+            "--base-ref",
+            "main",
+            "--base-sha",
+            base_sha.as_str(),
+            "--head-sha",
+            current_head_sha.as_str(),
+            "--skip-fetch-notes",
+            "--skip-push",
+        ])
+        .expect("ci local sync should succeed");
+
+    assert!(
+        output.contains("Local CI (sync): authorship rewritten successfully"),
+        "Expected authorship rewritten, got: {}",
+        output
+    );
+
+    let note = repo
+        .read_authorship_note(&current_head_sha)
+        .expect("rebased single PR commit should have an authorship note");
+    let files: Vec<String> = AuthorshipLog::deserialize_from_string(&note)
+        .unwrap()
+        .attestations
+        .iter()
+        .map(|a| a.file_path.clone())
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("feature.txt")),
+        "rebased single PR commit should reference feature.txt, got: {:?}",
+        files
+    );
+}
+
+#[test]
+fn test_ci_local_open_pr_rebase_two_commits() {
+    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+
+    let repo = direct_test_repo();
+
+    // --- Initial commit on main ---
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // --- Feature branch: two AI commits touching distinct files ---
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+
     let mut file_a = repo.filename("file_a.txt");
     file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
     let feature_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
 
-    // Commit 2 (newer): AI adds file_b.txt
     let mut file_b = repo.filename("file_b.txt");
     file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
     let feature_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
 
-    // --- Simulate rebase merge on main ---
-    // A rebase merge produces N new linear commits on main (not a single squash commit).
-    // We simulate this by cherry-picking each feature commit onto main.
-    repo.git(&["checkout", "main"]).unwrap();
+    let previous_head_sha = feature_sha2.clone();
 
-    repo.git_og(&["cherry-pick", &feature_sha1]).unwrap();
-    let new_sha1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    // --- Advance main so the open-PR rebase produces new SHAs ---
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
-    repo.git_og(&["cherry-pick", &feature_sha2]).unwrap();
-    let new_sha2 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    // --- Rebase the open feature branch onto main, bypassing local hooks ---
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
 
-    // --- Set up a bare origin so CiContext.push_authorship() can succeed ---
-    let origin_dir = tempfile::tempdir().unwrap();
-    let origin_path = origin_dir.path().join("origin.git");
-    repo.git_og(&[
-        "clone",
-        "--bare",
-        repo.path().to_str().unwrap(),
-        origin_path.to_str().unwrap(),
-    ])
-    .unwrap();
-    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
-        .unwrap();
+    let new_sha2 = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let new_sha1 = repo
+        .git_og(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
 
-    // --- Run CiContext ---
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    let event = CiEvent::Merge {
-        merge_commit_sha: new_sha2.clone(),
-        head_ref: "feature".to_string(),
-        head_sha: feature_sha2.clone(),
-        base_ref: "main".to_string(),
-        base_sha,
-        fork_clone_url: None,
-    };
-
-    let ctx = CiContext::with_repository(git_ai_repo, event);
-    let result = ctx.run_with_options(CiRunOptions {
-        skip_fetch_notes: true,
-        skip_fetch_base: true,
-        skip_fetch_fork_notes: true,
-        skip_fetch_sync_refs: false,
-        skip_push: false,
-    });
+    assert_ne!(
+        new_sha1, feature_sha1,
+        "open-PR rebase must produce a new SHA for commit 1"
+    );
+    assert_ne!(
+        new_sha2, feature_sha2,
+        "open-PR rebase must produce a new SHA for commit 2"
+    );
     assert!(
-        result.is_ok(),
-        "CiContext run should succeed, got: {:?}",
-        result
+        repo.read_authorship_note(&new_sha1).is_none(),
+        "bypassed rebase should not pre-create note for commit 1"
+    );
+    assert!(
+        repo.read_authorship_note(&new_sha2).is_none(),
+        "bypassed rebase should not pre-create note for commit 2"
     );
 
-    // --- Verify: each rebased commit's note references the correct file ---
-    // If the order bug were present (newest-first instead of oldest-first),
-    // new_sha1 would get file_b's note and new_sha2 would get file_a's note.
+    // --- Run the new open-PR sync command ---
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "sync",
+            "--previous-head-sha",
+            previous_head_sha.as_str(),
+            "--base-ref",
+            "main",
+            "--base-sha",
+            base_sha.as_str(),
+            "--head-sha",
+            new_sha2.as_str(),
+            "--skip-fetch-notes",
+            "--skip-push",
+        ])
+        .expect("ci local sync should succeed");
 
+    assert!(
+        output.contains("Local CI (sync): authorship rewritten successfully"),
+        "Expected authorship rewritten, got: {}",
+        output
+    );
+
+    // --- Verify each rebased open-PR commit carries notes for its own file ---
     let note1 = repo
         .read_authorship_note(&new_sha1)
-        .expect("rebased commit 1 should have authorship note");
+        .expect("rebased PR commit 1 should have an authorship note");
     let note2 = repo
         .read_authorship_note(&new_sha2)
-        .expect("rebased commit 2 should have authorship note");
+        .expect("rebased PR commit 2 should have an authorship note");
 
     let files1: Vec<String> = AuthorshipLog::deserialize_from_string(&note1)
         .unwrap()
@@ -635,32 +597,262 @@ fn test_ci_rebase_merge_commit_order_pairing() {
         .map(|a| a.file_path.clone())
         .collect();
 
-    // Rebased commit 1 (older) should have file_a.txt (NOT file_b.txt)
     assert!(
         files1.iter().any(|f| f.contains("file_a")),
-        "Rebased commit 1's note should reference file_a.txt, but found: {:?}",
+        "rebased PR commit 1 should reference file_a.txt, got: {:?}",
         files1
     );
     assert!(
         !files1.iter().any(|f| f.contains("file_b")),
-        "COMMIT ORDER BUG: Rebased commit 1's note references file_b.txt \
-         (from the LAST original commit). This means original_commits was \
-         newest-first instead of oldest-first. Found: {:?}",
+        "rebased PR commit 1 should not reference file_b.txt, got: {:?}",
         files1
     );
-
-    // Rebased commit 2 (newer) should have file_b.txt (NOT file_a.txt)
     assert!(
         files2.iter().any(|f| f.contains("file_b")),
-        "Rebased commit 2's note should reference file_b.txt, but found: {:?}",
+        "rebased PR commit 2 should reference file_b.txt, got: {:?}",
         files2
     );
     assert!(
         !files2.iter().any(|f| f.contains("file_a")),
-        "COMMIT ORDER BUG: Rebased commit 2's note references file_a.txt \
-         (from the FIRST original commit). This means original_commits was \
-         newest-first instead of oldest-first. Found: {:?}",
+        "rebased PR commit 2 should not reference file_a.txt, got: {:?}",
         files2
+    );
+}
+
+#[test]
+fn test_ci_local_merge_squash_on_linear_main_does_not_note_base_commits() {
+    let repo = direct_test_repo();
+    repo.git_og(&["config", "user.name", "Test User"]).unwrap();
+    repo.git_og(&["config", "user.email", "test@example.com"])
+        .unwrap();
+
+    // B0: initial commit on main (raw git -> no authorship note)
+    std::fs::write(repo.path().join("base.txt"), "base content\n").unwrap();
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "B0 initial"]).unwrap();
+    repo.git_og(&["branch", "-M", "main"]).unwrap();
+    let b0_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // B1, B2, B3: teammate commits on main, NOT using the wrapper (no notes)
+    for i in 1..=3 {
+        std::fs::write(
+            repo.path().join(format!("teammate{i}.txt")),
+            format!("teammate change {i}\n"),
+        )
+        .unwrap();
+        repo.git_og(&["add", "-A"]).unwrap();
+        repo.git_og(&["commit", "-m", &format!("B{i} teammate change")])
+            .unwrap();
+    }
+    let b2_sha = repo
+        .git_og(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let b3_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // feature branch off B0 with 3 AI commits (each gets a note via the wrapper)
+    repo.git_og(&["checkout", "-b", "feature", &b0_sha])
+        .unwrap();
+    let mut feat = repo.filename("feature.txt");
+    feat.set_contents(crate::lines!["// P1 ai line".ai()]);
+    repo.stage_all_and_commit("P1").unwrap();
+    feat.insert_at(1, crate::lines!["// P2 ai line".ai()]);
+    repo.stage_all_and_commit("P2").unwrap();
+    feat.insert_at(2, crate::lines!["// P3 ai line".ai()]);
+    let head_sha = repo.stage_all_and_commit("P3").unwrap().commit_sha;
+
+    // Squash merge: GitHub creates one new commit S on top of B3 (raw git)
+    repo.git_og(&["checkout", "main"]).unwrap();
+    std::fs::write(
+        repo.path().join("feature.txt"),
+        "// P1 ai line\n// P2 ai line\n// P3 ai line\n",
+    )
+    .unwrap();
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Squash merge feature (#PR)"])
+        .unwrap();
+    let squash_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Bare origin so `ci local merge` can push authorship
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin_path = origin_dir.path().join("origin.git");
+    repo.git_og(&[
+        "clone",
+        "--bare",
+        repo.path().to_str().unwrap(),
+        origin_path.to_str().unwrap(),
+    ])
+    .unwrap();
+    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
+        .unwrap();
+
+    // Run the real CLI exactly as CI would after a squash merge
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "merge",
+            "--merge-commit-sha",
+            squash_sha.as_str(),
+            "--head-ref",
+            "feature",
+            "--head-sha",
+            head_sha.as_str(),
+            "--base-ref",
+            "main",
+            "--base-sha",
+            b3_sha.as_str(),
+            "--skip-fetch-notes",
+            "--skip-fetch-base",
+        ])
+        .expect("ci local merge should succeed");
+
+    assert!(
+        output.contains("authorship rewritten successfully"),
+        "expected authorship rewritten, got: {output}"
+    );
+
+    // Only the squash commit S carries a note; the base commits are untouched.
+    assert!(
+        repo.read_authorship_note(&squash_sha).is_some(),
+        "squash commit S ({squash_sha}) should receive the rewritten authorship note"
+    );
+    assert!(
+        repo.read_authorship_note(&b2_sha).is_none(),
+        "#1473 regression: unrelated base commit B2 ({b2_sha}) must not receive a note"
+    );
+    assert!(
+        repo.read_authorship_note(&b3_sha).is_none(),
+        "#1473 regression: unrelated base commit B3 ({b3_sha}) must not receive a note"
+    );
+}
+
+#[test]
+fn test_ci_local_rebase_merge_with_abbreviated_merge_sha() {
+    let repo = direct_test_repo();
+
+    // --- Initial commit on main ---
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // --- Feature branch: two commits touching different files ---
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
+    let _feature_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
+    let feature_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
+
+    // --- Advance main so the rebase produces new commit SHAs ---
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+
+    // --- Rebase feature onto main (bypassing the local hook), then ff main ---
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let new_sha2 = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let new_sha1 = repo
+        .git_og(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git_og(&["checkout", "main"]).unwrap();
+    repo.git_og(&["merge", "--ff-only", "feature"]).unwrap();
+
+    // --- Bare origin so push_authorship inside CiContext can succeed ---
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin_path = origin_dir.path().join("origin.git");
+    repo.git_og(&[
+        "clone",
+        "--bare",
+        repo.path().to_str().unwrap(),
+        origin_path.to_str().unwrap(),
+    ])
+    .unwrap();
+    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
+        .unwrap();
+
+    // --- Run `ci local merge` with an ABBREVIATED merge-commit-sha ---
+    let abbreviated_merge_sha = &new_sha2[..12];
+    let output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "merge",
+            "--merge-commit-sha",
+            abbreviated_merge_sha,
+            "--head-ref",
+            "feature",
+            "--head-sha",
+            feature_sha2.as_str(),
+            "--base-ref",
+            "main",
+            "--base-sha",
+            base_sha.as_str(),
+            "--skip-fetch-notes",
+            "--skip-fetch-base",
+        ])
+        .expect("ci local merge should succeed");
+
+    assert!(
+        output.contains("authorship rewritten successfully"),
+        "expected authorship rewritten, got: {output}"
+    );
+
+    // --- Each rebased commit must still carry its own note (rebase path kept) ---
+    let note1 = repo
+        .read_authorship_note(&new_sha1)
+        .expect("rebased commit 1 should have a note (rebase must not be misclassified as squash)");
+    let note2 = repo
+        .read_authorship_note(&new_sha2)
+        .expect("rebased commit 2 should have a note");
+
+    let files = |note: &str| -> Vec<String> {
+        AuthorshipLog::deserialize_from_string(note)
+            .unwrap()
+            .attestations
+            .iter()
+            .map(|a| a.file_path.clone())
+            .collect()
+    };
+    let files1 = files(&note1);
+    let files2 = files(&note2);
+
+    assert!(
+        files1.iter().any(|f| f.contains("file_a")) && !files1.iter().any(|f| f.contains("file_b")),
+        "rebased commit 1 should reference only file_a.txt, got: {files1:?}"
+    );
+    assert!(
+        files2.iter().any(|f| f.contains("file_b")) && !files2.iter().any(|f| f.contains("file_a")),
+        "rebased commit 2 should reference only file_b.txt, got: {files2:?}"
     );
 }
 
@@ -1015,385 +1207,232 @@ fn test_ci_local_rebase_merge_three_commits() {
     );
 }
 
-/// Verify that `git-ai ci local sync` preserves authorship when an open PR
-/// branch is rebased onto a newer base tip before it is merged. This matches the
-/// shape of GitHub's "Update branch -> Rebase" operation: the PR head is
-/// rewritten, but there is no merge commit yet.
+/// Squash merge where the feature branch mixes human and AI lines. The CI
+/// rewrite must split attribution by author across the single squashed commit.
+/// (Originally exercised the removed `rewrite_authorship_after_squash_or_rebase`
+/// engine directly; now driven through the real `git-ai ci local merge` CLI.)
 #[test]
-fn test_ci_local_open_pr_rebase_two_commits() {
-    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
-
+fn test_ci_squash_merge_mixed_content() {
     let repo = direct_test_repo();
+    let mut file = repo.filename("mixed.js");
 
-    // --- Initial commit on main ---
-    let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    // --- Feature branch: two AI commits touching distinct files ---
-    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
-
-    let mut file_a = repo.filename("file_a.txt");
-    file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
-    let feature_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
-
-    let mut file_b = repo.filename("file_b.txt");
-    file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
-    let feature_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
-
-    let previous_head_sha = feature_sha2.clone();
-
-    // --- Advance main so the open-PR rebase produces new SHAs ---
-    repo.git_og(&["checkout", "main"]).unwrap();
-    let mut main_file = repo.filename("main_only.txt");
-    main_file.set_contents(crate::lines!["main-only content"]);
-    repo.git_og(&["add", "main_only.txt"]).unwrap();
-    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    // Initial commit on main.
+    file.set_contents(crate::lines!["// Base code", "const base = 1;"]);
     let base_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    // --- Rebase the open feature branch onto main, bypassing local hooks ---
-    repo.git_og(&["checkout", "feature"]).unwrap();
-    repo.git_og(&["rebase", "main"]).unwrap();
-
-    let new_sha2 = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-    let new_sha1 = repo
-        .git_og(&["rev-parse", "HEAD~1"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    assert_ne!(
-        new_sha1, feature_sha1,
-        "open-PR rebase must produce a new SHA for commit 1"
-    );
-    assert_ne!(
-        new_sha2, feature_sha2,
-        "open-PR rebase must produce a new SHA for commit 2"
-    );
-    assert!(
-        repo.read_authorship_note(&new_sha1).is_none(),
-        "bypassed rebase should not pre-create note for commit 1"
-    );
-    assert!(
-        repo.read_authorship_note(&new_sha2).is_none(),
-        "bypassed rebase should not pre-create note for commit 2"
-    );
-
-    // --- Run the new open-PR sync command ---
-    let output = repo
-        .git_ai(&[
-            "ci",
-            "local",
-            "sync",
-            "--previous-head-sha",
-            previous_head_sha.as_str(),
-            "--base-ref",
-            "main",
-            "--base-sha",
-            base_sha.as_str(),
-            "--head-sha",
-            new_sha2.as_str(),
-            "--skip-fetch-notes",
-            "--skip-push",
-        ])
-        .expect("ci local sync should succeed");
-
-    assert!(
-        output.contains("Local CI (sync): authorship rewritten successfully"),
-        "Expected authorship rewritten, got: {}",
-        output
-    );
-
-    // --- Verify each rebased open-PR commit carries notes for its own file ---
-    let note1 = repo
-        .read_authorship_note(&new_sha1)
-        .expect("rebased PR commit 1 should have an authorship note");
-    let note2 = repo
-        .read_authorship_note(&new_sha2)
-        .expect("rebased PR commit 2 should have an authorship note");
-
-    let files1: Vec<String> = AuthorshipLog::deserialize_from_string(&note1)
-        .unwrap()
-        .attestations
-        .iter()
-        .map(|a| a.file_path.clone())
-        .collect();
-    let files2: Vec<String> = AuthorshipLog::deserialize_from_string(&note2)
-        .unwrap()
-        .attestations
-        .iter()
-        .map(|a| a.file_path.clone())
-        .collect();
-
-    assert!(
-        files1.iter().any(|f| f.contains("file_a")),
-        "rebased PR commit 1 should reference file_a.txt, got: {:?}",
-        files1
-    );
-    assert!(
-        !files1.iter().any(|f| f.contains("file_b")),
-        "rebased PR commit 1 should not reference file_b.txt, got: {:?}",
-        files1
-    );
-    assert!(
-        files2.iter().any(|f| f.contains("file_b")),
-        "rebased PR commit 2 should reference file_b.txt, got: {:?}",
-        files2
-    );
-    assert!(
-        !files2.iter().any(|f| f.contains("file_a")),
-        "rebased PR commit 2 should not reference file_a.txt, got: {:?}",
-        files2
-    );
-}
-
-/// Verify that `git-ai ci local sync` handles GitHub's conflict-free
-/// Update-branch-with-rebase shape for a single-commit PR. A single commit is
-/// the easiest case to accidentally treat as a fast-forward/no-op or to mishandle
-/// when computing merge bases.
-#[test]
-fn test_ci_local_open_pr_rebase_single_commit() {
-    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
-
-    let repo = direct_test_repo();
-
-    let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
-    let mut feature_file = repo.filename("feature.txt");
-    feature_file.set_contents(crate::lines!["ai content".ai()]);
-    let previous_head_sha = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
-
-    repo.git_og(&["checkout", "main"]).unwrap();
-    let mut main_file = repo.filename("main_only.txt");
-    main_file.set_contents(crate::lines!["main-only content"]);
-    repo.git_og(&["add", "main_only.txt"]).unwrap();
-    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
-    let base_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    repo.git_og(&["checkout", "feature"]).unwrap();
-    repo.git_og(&["rebase", "main"]).unwrap();
-    let current_head_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    assert_ne!(current_head_sha, previous_head_sha);
-    assert!(
-        repo.read_authorship_note(&current_head_sha).is_none(),
-        "bypassed rebase should not pre-create note for the rebased commit"
-    );
-
-    let output = repo
-        .git_ai(&[
-            "ci",
-            "local",
-            "sync",
-            "--previous-head-sha",
-            previous_head_sha.as_str(),
-            "--base-ref",
-            "main",
-            "--base-sha",
-            base_sha.as_str(),
-            "--head-sha",
-            current_head_sha.as_str(),
-            "--skip-fetch-notes",
-            "--skip-push",
-        ])
-        .expect("ci local sync should succeed");
-
-    assert!(
-        output.contains("Local CI (sync): authorship rewritten successfully"),
-        "Expected authorship rewritten, got: {}",
-        output
-    );
-
-    let note = repo
-        .read_authorship_note(&current_head_sha)
-        .expect("rebased single PR commit should have an authorship note");
-    let files: Vec<String> = AuthorshipLog::deserialize_from_string(&note)
-        .unwrap()
-        .attestations
-        .iter()
-        .map(|a| a.file_path.clone())
-        .collect();
-    assert!(
-        files.iter().any(|f| f.contains("feature.txt")),
-        "rebased single PR commit should reference feature.txt, got: {:?}",
-        files
-    );
-}
-
-/// If the client-side git-ai CLI already handled the local rebase and pushed or
-/// materialized notes for the new PR commits, CI must not regenerate those notes.
-/// This is the conservative safety boundary for all PR synchronize events.
-#[test]
-fn test_ci_local_sync_skips_when_current_rebased_commit_already_has_note() {
-    let repo = direct_test_repo();
-
-    let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
-    let mut feature_file = repo.filename("feature.txt");
-    feature_file.set_contents(crate::lines!["ai content".ai()]);
-    let previous_head_sha = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
-
-    repo.git_og(&["checkout", "main"]).unwrap();
-    let mut main_file = repo.filename("main_only.txt");
-    main_file.set_contents(crate::lines!["main-only content"]);
-    repo.git_og(&["add", "main_only.txt"]).unwrap();
-    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
-    let base_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    repo.git_og(&["checkout", "feature"]).unwrap();
-    repo.git_og(&["rebase", "main"]).unwrap();
-    let current_head_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let gitai_repo =
-        GitAiRepository::find_repository_in_path(repo.path().to_str().expect("repo path"))
-            .expect("git-ai repo");
-    let existing_note = "client-side-note-that-ci-must-not-overwrite";
-    notes_add(&gitai_repo, &current_head_sha, existing_note).expect("add existing current note");
-
-    let output = repo
-        .git_ai(&[
-            "ci",
-            "local",
-            "sync",
-            "--previous-head-sha",
-            previous_head_sha.as_str(),
-            "--base-ref",
-            "main",
-            "--base-sha",
-            base_sha.as_str(),
-            "--head-sha",
-            current_head_sha.as_str(),
-            "--skip-fetch-notes",
-            "--skip-push",
-        ])
-        .expect("ci local sync should succeed");
-
-    assert!(
-        output.contains("Local CI (sync): skipped PR sync with existing current notes"),
-        "Expected existing-note skip, got: {}",
-        output
-    );
-    let current_note = repo
-        .read_authorship_note(&current_head_sha)
-        .map(|note| note.trim().to_string());
-    assert_eq!(
-        current_note.as_deref(),
-        Some(existing_note),
-        "CI sync must not overwrite a current commit note that already exists"
-    );
-}
-
-/// Verify that `git-ai ci local sync` can run for every PR synchronize event
-/// without treating arbitrary non-fast-forward updates as rebases.
-#[test]
-fn test_ci_local_sync_skips_non_rebase_force_push() {
-    let repo = direct_test_repo();
-
-    let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-
-    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
-    let mut feature_file = repo.filename("feature.txt");
-    feature_file.set_contents(crate::lines!["old ai content".ai()]);
-    let previous_head_sha = repo
-        .stage_all_and_commit("Add old AI content")
+        .stage_all_and_commit("Initial commit")
         .unwrap()
         .commit_sha;
-    assert!(
-        repo.read_authorship_note(&previous_head_sha).is_some(),
-        "old PR head should have an authorship note"
-    );
+    repo.git(&["branch", "-M", "main"]).unwrap();
 
-    repo.git_og(&["reset", "--hard", "main"]).unwrap();
-    feature_file.set_contents(crate::lines!["different force-pushed content"]);
-    repo.git_og(&["add", "feature.txt"]).unwrap();
-    repo.git_og(&["commit", "-m", "Force-pushed replacement"])
+    // Feature branch: known-human comment, AI code, known-human comment.
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.set_contents(crate::lines![
+        "// Base code".human(),
+        "const base = 1;".human(),
+        "// Human comment".human(),
+        "// AI generated function".ai(),
+        "function aiHelper() {".ai(),
+        "  return true;".ai(),
+        "}".ai(),
+        "// Another human comment".human()
+    ]);
+    let head_sha = repo
+        .stage_all_and_commit("Add mixed content")
+        .unwrap()
+        .commit_sha;
+
+    // CI squash merge: a single new commit on main with the squashed content.
+    let merge_sha = squash_feature_with_raw_git(&repo, "Merge feature via squash");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
+
+    // The squashed commit splits attribution by author: known-human lines stay
+    // human and the AI block stays AI.
+    file.assert_lines_and_blame(crate::lines![
+        "// Base code".human(),
+        "const base = 1;".human(),
+        "// Human comment".human(),
+        "// AI generated function".ai(),
+        "function aiHelper() {".ai(),
+        "  return true;".ai(),
+        "}".ai(),
+        "// Another human comment".human()
+    ]);
+}
+
+/// Squash merge where the feature's source commits carry notes but no AI
+/// attestations (human-only change): the squashed commit must end up with no AI
+/// prompts. Originally exercised the removed engine directly.
+#[test]
+fn test_ci_squash_merge_empty_notes_preserved() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("feature.txt");
+
+    file.set_contents(crate::lines!["base"]);
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.set_contents(crate::lines!["base", "human change"]);
+    let head_sha = repo
+        .stage_all_and_commit("Human change")
+        .unwrap()
+        .commit_sha;
+
+    let merge_sha = squash_feature_with_raw_git(&repo, "Merge feature via squash");
+    let _ = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+
+    // Human-only squash: if a note exists it must carry no AI prompts.
+    if let Some(note) = repo.read_authorship_note(&merge_sha) {
+        let log = AuthorshipLog::deserialize_from_string(&note).unwrap();
+        assert!(
+            log.metadata.prompts.is_empty(),
+            "human-only squash merge must not produce AI prompts, got: {:?}",
+            log.metadata.prompts
+        );
+    }
+}
+
+/// Squash merge where extra lines are added during the merge (conflict
+/// resolution / manual tweaks): AI lines stay AI, manually-added lines are
+/// untracked human. Originally exercised the removed engine directly.
+#[test]
+fn test_ci_squash_merge_with_manual_changes() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("config.js");
+
+    file.set_contents(crate::lines!["const config = {", "  version: 1", "};"]);
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.set_contents(crate::lines![
+        "const config = {",
+        "  version: 1,",
+        "  // AI added feature flag".ai(),
+        "  enableAI: true".ai(),
+        "};"
+    ]);
+    let head_sha = repo
+        .stage_all_and_commit("Add AI config")
+        .unwrap()
+        .commit_sha;
+
+    // Squash onto main, then add manual lines before the CI rewrite runs.
+    repo.git_og(&["checkout", "main"]).unwrap();
+    repo.git_og(&["merge", "--squash", "feature"]).unwrap();
+    file.set_contents(crate::lines![
+        "const config = {",
+        "  version: 1,",
+        "  // AI added feature flag",
+        "  enableAI: true,",
+        "  // Manual addition during merge",
+        "  production: false",
+        "};"
+    ]);
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Merge feature via squash with tweaks"])
         .unwrap();
-    let current_head_sha = repo
+    let merge_sha = repo
         .git_og(&["rev-parse", "HEAD"])
         .unwrap()
         .trim()
         .to_string();
 
-    let output = repo
-        .git_ai(&[
-            "ci",
-            "local",
-            "sync",
-            "--previous-head-sha",
-            previous_head_sha.as_str(),
-            "--base-ref",
-            "main",
-            "--head-sha",
-            current_head_sha.as_str(),
-            "--skip-fetch-notes",
-            "--skip-fetch-sync-refs",
-            "--skip-push",
-        ])
-        .expect("ci local sync should succeed for non-rebase force push");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    assert!(
-        output.contains("Local CI (sync): skipped non-rebase PR sync"),
-        "Expected non-rebase sync skip, got: {}",
-        output
-    );
-    assert!(
-        repo.read_authorship_note(&current_head_sha).is_none(),
-        "non-rebase sync must not transfer old authorship to unrelated replacement commit"
-    );
+    // New-logic behavior (content-based reconciliation): only the AI line whose
+    // committed content is byte-identical to the AI checkpoint keeps AI
+    // attribution. `enableAI: true,` gained a trailing comma during the squash,
+    // so its committed content differs from the AI-authored `enableAI: true` and
+    // it is attributed to the committer (human) -- along with the manually-added
+    // lines. (The removed engine attributed `enableAI: true,` to AI; this is the
+    // intended tightening under the rewrite.)
+    file.assert_lines_and_blame(crate::lines![
+        "const config = {".human(),
+        "  version: 1,".human(),
+        "  // AI added feature flag".ai(),
+        "  enableAI: true,".human(),
+        "  // Manual addition during merge".human(),
+        "  production: false".human(),
+        "};".human()
+    ]);
 }
 
-/// Standard-human variant of test_ci_squash_merge_basic.
-/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+/// Multi-commit feature (AI + AI + human) squashed into one merge commit: the
+/// squashed commit splits attribution across authors. Originally exercised the
+/// removed engine directly.
+#[test]
+fn test_ci_rebase_merge_multiple_commits() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("app.js");
+
+    file.set_contents(crate::lines!["// App v1", ""]);
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(
+        1,
+        crate::lines!["// AI function 1".ai(), "function ai1() { }".ai()],
+    );
+    repo.stage_all_and_commit("Add AI function 1").unwrap();
+    file.insert_at(
+        3,
+        crate::lines!["// AI function 2".ai(), "function ai2() { }".ai()],
+    );
+    repo.stage_all_and_commit("Add AI function 2").unwrap();
+    file.insert_at(
+        5,
+        crate::lines!["// Human function", "function human() { }"],
+    );
+    let head_sha = repo
+        .stage_all_and_commit("Add human function")
+        .unwrap()
+        .commit_sha;
+
+    let merge_sha = squash_feature_with_raw_git(&repo, "Merge feature branch (squashed)");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
+
+    file.assert_lines_and_blame(crate::lines![
+        "// App v1".human(),
+        "// AI function 1".ai(),
+        "function ai1() { }".ai(),
+        "// AI function 2".ai(),
+        "function ai2() { }".ai(),
+        "// Human function".human(),
+        "function human() { }".human()
+    ]);
+}
+
+/// Standard-human variant of `test_ci_squash_merge_basic`: original lines are
+/// untracked human (checkpoint `human`) rather than known-human.
 #[test]
 fn test_ci_squash_merge_basic_standard_human() {
     let repo = direct_test_repo();
     let mut file = repo.filename("feature.js");
 
-    // Create initial commit on main (rename default branch to main)
     file.set_contents(crate::lines![
         "// Original code".unattributed_human(),
         "function original() {}".unattributed_human()
     ]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
     repo.git(&["branch", "-M", "main"]).unwrap();
 
-    // Create feature branch with AI code
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     file.insert_at(
         2,
@@ -1404,43 +1443,15 @@ fn test_ci_squash_merge_basic_standard_human() {
             "}".ai()
         ],
     );
-    let feature_commit = repo.stage_all_and_commit("Add AI feature").unwrap();
-    let feature_sha = feature_commit.commit_sha;
+    let head_sha = repo
+        .stage_all_and_commit("Add AI feature")
+        .unwrap()
+        .commit_sha;
 
-    // Simulate CI squash merge: checkout main, create merge commit
-    repo.git(&["checkout", "main"]).unwrap();
+    let merge_sha = squash_feature_with_raw_git(&repo, "Merge feature via squash");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    // Manually create the squashed state (as CI would do)
-    file.set_contents(crate::lines![
-        "// Original code".unattributed_human(),
-        "function original() {}".unattributed_human(),
-        "// AI added function".unattributed_human(),
-        "function aiFeature() {".unattributed_human(),
-        "  return 'ai code';".unattributed_human(),
-        "}".unattributed_human()
-    ]);
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify AI authorship is preserved in the merge commit
     file.assert_lines_and_blame(crate::lines![
         "// Original code".unattributed_human(),
         "function original() {}".ai(),
@@ -1451,198 +1462,151 @@ fn test_ci_squash_merge_basic_standard_human() {
     ]);
 }
 
-/// Standard-human variant of test_ci_squash_merge_mixed_content.
-/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+/// Legacy/untracked variant of `test_ci_squash_merge_mixed_content`.
 #[test]
 fn test_ci_squash_merge_mixed_content_standard_human() {
     let repo = direct_test_repo();
     let mut file = repo.filename("mixed.js");
 
-    // Create initial commit
     file.set_contents(crate::lines![
         "// Base code".unattributed_human(),
         "const base = 1;".unattributed_human()
     ]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
     repo.git(&["branch", "-M", "main"]).unwrap();
 
-    // Create feature branch with mixed AI and human changes
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-
-    // Simulate: human adds a comment, AI adds code, human adds more
     file.insert_at(
         2,
         crate::lines![
-            "// Human comment".unattributed_human(),
+            "// Untracked comment".unattributed_human(),
             "// AI generated function".ai(),
             "function aiHelper() {".ai(),
             "  return true;".ai(),
             "}".ai(),
-            "// Another human comment".unattributed_human()
+            "// Another untracked comment".unattributed_human()
         ],
     );
+    let head_sha = repo
+        .stage_all_and_commit("Add mixed content")
+        .unwrap()
+        .commit_sha;
 
-    let feature_commit = repo.stage_all_and_commit("Add mixed content").unwrap();
-    let feature_sha = feature_commit.commit_sha;
+    let merge_sha = squash_feature_with_raw_git(&repo, "Merge feature via squash");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    // Simulate CI squash merge
-    repo.git(&["checkout", "main"]).unwrap();
-
-    file.set_contents(crate::lines![
-        "// Base code".unattributed_human(),
-        "const base = 1;".unattributed_human(),
-        "// Human comment".unattributed_human(),
-        "// AI generated function".unattributed_human(),
-        "function aiHelper() {".unattributed_human(),
-        "  return true;".unattributed_human(),
-        "}".unattributed_human(),
-        "// Another human comment".unattributed_human()
-    ]);
-
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify mixed authorship is preserved
     file.assert_lines_and_blame(crate::lines![
         "// Base code".unattributed_human(),
-        "const base = 1;".unattributed_human(),
-        "// Human comment".ai(),
+        "const base = 1;".ai(),
+        "// Untracked comment".ai(),
         "// AI generated function".ai(),
         "function aiHelper() {".ai(),
         "  return true;".ai(),
         "}".ai(),
-        "// Another human comment".unattributed_human()
+        "// Another untracked comment".ai()
     ]);
 }
 
-/// Standard-human variant of test_ci_squash_merge_with_manual_changes.
-/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+/// Standard-human variant of `test_ci_squash_merge_with_manual_changes`.
 #[test]
 fn test_ci_squash_merge_with_manual_changes_standard_human() {
     let repo = direct_test_repo();
     let mut file = repo.filename("config.js");
 
-    // Create initial commit
     file.set_contents(crate::lines![
         "const config = {".unattributed_human(),
         "  version: 1".unattributed_human(),
         "};".unattributed_human()
     ]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
     repo.git(&["branch", "-M", "main"]).unwrap();
 
-    // Create feature branch with AI additions
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-
     file.set_contents(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".ai(),
         "  enableAI: true".ai(),
         "};".unattributed_human()
     ]);
+    let head_sha = repo
+        .stage_all_and_commit("Add AI config")
+        .unwrap()
+        .commit_sha;
 
-    let feature_commit = repo.stage_all_and_commit("Add AI config").unwrap();
-    let feature_sha = feature_commit.commit_sha;
-
-    // Simulate CI squash merge with manual adjustment during merge
-    // (e.g., developer manually tweaks formatting or adds extra config)
-    repo.git(&["checkout", "main"]).unwrap();
-
+    repo.git_og(&["checkout", "main"]).unwrap();
+    repo.git_og(&["merge", "--squash", "feature"]).unwrap();
     file.set_contents(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".unattributed_human(),
         "  enableAI: true,".unattributed_human(),
         "  // Manual addition during merge".unattributed_human(),
         "  production: false".unattributed_human(),
         "};".unattributed_human()
     ]);
-
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature via squash with tweaks")
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Merge feature via squash with tweaks"])
         .unwrap();
-    let merge_sha = merge_commit.commit_sha;
+    let merge_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify AI authorship is preserved for AI lines, human for manual additions
+    // Same new-logic tightening as test_ci_squash_merge_with_manual_changes:
+    // `enableAI: true,` gained a trailing comma during the squash, so its
+    // committed content differs from the AI checkpoint and it falls back to
+    // untracked human. The leading untracked `version` line is recovered as
+    // part of the AI edge.
     file.assert_lines_and_blame(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".ai(),
-        "  enableAI: true,".ai(),
+        "  enableAI: true,".unattributed_human(),
         "  // Manual addition during merge".unattributed_human(),
         "  production: false".unattributed_human(),
         "};".unattributed_human()
     ]);
 }
 
-/// Standard-human variant of test_ci_rebase_merge_multiple_commits.
-/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+/// Standard-human variant of `test_ci_rebase_merge_multiple_commits`.
 #[test]
 fn test_ci_rebase_merge_multiple_commits_standard_human() {
     let repo = direct_test_repo();
     let mut file = repo.filename("app.js");
 
-    // Create initial commit
     file.set_contents(crate::lines![
         "// App v1".unattributed_human(),
         "".unattributed_human()
     ]);
-    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
     repo.git(&["branch", "-M", "main"]).unwrap();
 
-    // Create feature branch with multiple commits
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-
-    // First commit: AI adds function
     file.insert_at(
         1,
         crate::lines!["// AI function 1".ai(), "function ai1() { }".ai()],
     );
     repo.stage_all_and_commit("Add AI function 1").unwrap();
-
-    // Second commit: AI adds another function
     file.insert_at(
         3,
         crate::lines!["// AI function 2".ai(), "function ai2() { }".ai()],
     );
     repo.stage_all_and_commit("Add AI function 2").unwrap();
-
-    // Third commit: Human adds function
     file.insert_at(
         5,
         crate::lines![
@@ -1650,44 +1614,15 @@ fn test_ci_rebase_merge_multiple_commits_standard_human() {
             "function human() { }".unattributed_human()
         ],
     );
-    let feature_commit = repo.stage_all_and_commit("Add human function").unwrap();
-    let feature_sha = feature_commit.commit_sha;
+    let head_sha = repo
+        .stage_all_and_commit("Add human function")
+        .unwrap()
+        .commit_sha;
 
-    // Simulate CI rebase-style merge (all commits squashed into one)
-    repo.git(&["checkout", "main"]).unwrap();
+    let merge_sha = squash_feature_with_raw_git(&repo, "Merge feature branch (squashed)");
+    let output = run_ci_local_merge(&repo, &merge_sha, &head_sha, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
 
-    file.set_contents(crate::lines![
-        "// App v1".unattributed_human(),
-        "// AI function 1".unattributed_human(),
-        "function ai1() { }".unattributed_human(),
-        "// AI function 2".unattributed_human(),
-        "function ai2() { }".unattributed_human(),
-        "// Human function".unattributed_human(),
-        "function human() { }".unattributed_human()
-    ]);
-
-    let merge_commit = repo
-        .stage_all_and_commit("Merge feature branch (squashed)")
-        .unwrap();
-    let merge_sha = merge_commit.commit_sha;
-
-    // Get the GitAi repository instance
-    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Failed to find repository");
-
-    // Call the CI rewrite function
-    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
-    rewrite_authorship_after_squash_or_rebase(
-        &git_ai_repo,
-        "feature",
-        "main",
-        &feature_sha,
-        &merge_sha,
-        false,
-    )
-    .unwrap();
-
-    // Verify all authorship is correctly attributed
     file.assert_lines_and_blame(crate::lines![
         "// App v1".unattributed_human(),
         "// AI function 1".ai(),
@@ -1700,23 +1635,8 @@ fn test_ci_rebase_merge_multiple_commits_standard_human() {
 }
 
 /// Regression test for #1473: a squash merge of a multi-commit PR onto a *linear*
-/// main branch must not be misclassified as a rebase merge.
-///
-/// The previous detection walked `N` first-parent commits back from the squash
-/// commit (where `N` = number of PR commits). On a long linear main that walk
-/// returns `N` *pre-existing base commits* rather than rebased PR commits, the
-/// count matches, and the code took the rebase path — writing the PR's authorship
-/// notes onto unrelated base commits (e.g. a teammate's / Dependabot commit).
-///
-/// Layout reproduced here:
-/// ```text
-///   main:    B0 - B1 - B2 - B3              (B1..B3 committed WITHOUT the wrapper -> no notes)
-///   feature:   \- P1 - P2 - P3              (3 AI commits, each carrying a note)
-///   squash:  B0 - B1 - B2 - B3 - S          (S = squashed P1+P2+P3, parent = B3)
-/// ```
-/// Walking 3 first-parent commits back from `S` yields `[B2, B3, S]` (len 3 == 3),
-/// which previously tripped the rebase path. Only `S` should receive a note; the
-/// unrelated base commits `B2` and `B3` must be left untouched.
+/// main branch must not be misclassified as a rebase merge and pollute unrelated
+/// base commits. Drives `CiContext::run_with_options` directly (still supported).
 #[test]
 fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
     use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions};
@@ -1726,7 +1646,7 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
     repo.git_og(&["config", "user.email", "test@example.com"])
         .unwrap();
 
-    // --- B0: initial commit on main (raw git -> no authorship note) ---
+    // B0: initial commit on main (raw git -> no authorship note).
     std::fs::write(repo.path().join("base.txt"), "base content\n").unwrap();
     repo.git_og(&["add", "-A"]).unwrap();
     repo.git_og(&["commit", "-m", "B0 initial"]).unwrap();
@@ -1737,7 +1657,7 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
         .trim()
         .to_string();
 
-    // --- B1, B2, B3: teammate commits on main, NOT using the wrapper (no notes) ---
+    // B1, B2, B3: teammate commits on main, no notes.
     for i in 1..=3 {
         std::fs::write(
             repo.path().join(format!("teammate{i}.txt")),
@@ -1759,10 +1679,9 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
         .trim()
         .to_string();
 
-    // --- feature branch off B0 with 3 AI commits (each gets a note via the wrapper) ---
+    // feature branch off B0 with 3 AI commits (each gets a note via the wrapper).
     repo.git_og(&["checkout", "-b", "feature", &b0_sha])
         .unwrap();
-
     let mut feat = repo.filename("feature.txt");
     feat.set_contents(crate::lines!["// P1 ai line".ai()]);
     repo.stage_all_and_commit("P1").unwrap();
@@ -1771,7 +1690,7 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
     feat.insert_at(2, crate::lines!["// P3 ai line".ai()]);
     let head_sha = repo.stage_all_and_commit("P3").unwrap().commit_sha;
 
-    // --- Squash merge: GitHub creates one new commit S on top of B3 (raw git) ---
+    // Squash merge: one new commit S on top of B3 (raw git).
     repo.git_og(&["checkout", "main"]).unwrap();
     std::fs::write(
         repo.path().join("feature.txt"),
@@ -1787,10 +1706,8 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
         .trim()
         .to_string();
 
-    // --- Run the CI merge rewrite exactly as GitHub Actions would ---
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
-
     let event = CiEvent::Merge {
         merge_commit_sha: squash_sha.clone(),
         head_ref: "feature".to_string(),
@@ -1799,7 +1716,6 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
         base_sha: b3_sha.clone(),
         fork_clone_url: None,
     };
-
     let ctx = CiContext::with_repository(git_ai_repo, event);
     ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
@@ -1810,138 +1726,7 @@ fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
     })
     .expect("CI merge rewrite should succeed");
 
-    // The squash commit S should be attributed...
-    assert!(
-        repo.read_authorship_note(&squash_sha).is_some(),
-        "squash commit S ({squash_sha}) should receive the rewritten authorship note"
-    );
-
-    // ...but the unrelated base commits B2/B3 must NOT be polluted (#1473).
-    assert!(
-        repo.read_authorship_note(&b2_sha).is_none(),
-        "#1473 regression: unrelated base commit B2 ({b2_sha}) must not receive a note"
-    );
-    assert!(
-        repo.read_authorship_note(&b3_sha).is_none(),
-        "#1473 regression: unrelated base commit B3 ({b3_sha}) must not receive a note"
-    );
-}
-
-/// Production-path (`git-ai ci local merge`) variant of the #1473 regression.
-///
-/// Drives the exact entrypoint a GitHub Actions workflow invokes (the "CI merge
-/// rewrite action" named in the issue) instead of calling `CiContext`
-/// in-process. Same topology: a linear `main` with note-less teammate commits
-/// (raw `git`, simulating contributors not yet using the wrapper) and a
-/// 3-commit AI PR squashed on top. Only the squash commit may receive an
-/// authorship note; the unrelated base commits must stay untouched.
-#[test]
-fn test_ci_local_merge_squash_on_linear_main_does_not_note_base_commits() {
-    let repo = direct_test_repo();
-    repo.git_og(&["config", "user.name", "Test User"]).unwrap();
-    repo.git_og(&["config", "user.email", "test@example.com"])
-        .unwrap();
-
-    // B0: initial commit on main (raw git -> no authorship note)
-    std::fs::write(repo.path().join("base.txt"), "base content\n").unwrap();
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "B0 initial"]).unwrap();
-    repo.git_og(&["branch", "-M", "main"]).unwrap();
-    let b0_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    // B1, B2, B3: teammate commits on main, NOT using the wrapper (no notes)
-    for i in 1..=3 {
-        std::fs::write(
-            repo.path().join(format!("teammate{i}.txt")),
-            format!("teammate change {i}\n"),
-        )
-        .unwrap();
-        repo.git_og(&["add", "-A"]).unwrap();
-        repo.git_og(&["commit", "-m", &format!("B{i} teammate change")])
-            .unwrap();
-    }
-    let b2_sha = repo
-        .git_og(&["rev-parse", "HEAD~1"])
-        .unwrap()
-        .trim()
-        .to_string();
-    let b3_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    // feature branch off B0 with 3 AI commits (each gets a note via the wrapper)
-    repo.git_og(&["checkout", "-b", "feature", &b0_sha])
-        .unwrap();
-    let mut feat = repo.filename("feature.txt");
-    feat.set_contents(crate::lines!["// P1 ai line".ai()]);
-    repo.stage_all_and_commit("P1").unwrap();
-    feat.insert_at(1, crate::lines!["// P2 ai line".ai()]);
-    repo.stage_all_and_commit("P2").unwrap();
-    feat.insert_at(2, crate::lines!["// P3 ai line".ai()]);
-    let head_sha = repo.stage_all_and_commit("P3").unwrap().commit_sha;
-
-    // Squash merge: GitHub creates one new commit S on top of B3 (raw git)
-    repo.git_og(&["checkout", "main"]).unwrap();
-    std::fs::write(
-        repo.path().join("feature.txt"),
-        "// P1 ai line\n// P2 ai line\n// P3 ai line\n",
-    )
-    .unwrap();
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "Squash merge feature (#PR)"])
-        .unwrap();
-    let squash_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    // Bare origin so `ci local merge` can push authorship
-    let origin_dir = tempfile::tempdir().unwrap();
-    let origin_path = origin_dir.path().join("origin.git");
-    repo.git_og(&[
-        "clone",
-        "--bare",
-        repo.path().to_str().unwrap(),
-        origin_path.to_str().unwrap(),
-    ])
-    .unwrap();
-    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
-        .unwrap();
-
-    // Run the real CLI exactly as CI would after a squash merge
-    let output = repo
-        .git_ai(&[
-            "ci",
-            "local",
-            "merge",
-            "--merge-commit-sha",
-            squash_sha.as_str(),
-            "--head-ref",
-            "feature",
-            "--head-sha",
-            head_sha.as_str(),
-            "--base-ref",
-            "main",
-            "--base-sha",
-            b3_sha.as_str(),
-            "--skip-fetch-notes",
-            "--skip-fetch-base",
-        ])
-        .expect("ci local merge should succeed");
-
-    assert!(
-        output.contains("authorship rewritten successfully"),
-        "expected authorship rewritten, got: {output}"
-    );
-
-    // Only the squash commit S carries a note; the base commits are untouched.
+    // S should be attributed; unrelated base commits B2/B3 must not be polluted.
     assert!(
         repo.read_authorship_note(&squash_sha).is_some(),
         "squash commit S ({squash_sha}) should receive the rewritten authorship note"
@@ -1953,153 +1738,30 @@ fn test_ci_local_merge_squash_on_linear_main_does_not_note_base_commits() {
     assert!(
         repo.read_authorship_note(&b3_sha).is_none(),
         "#1473 regression: unrelated base commit B3 ({b3_sha}) must not receive a note"
-    );
-}
-
-/// Regression test for the #1473 review follow-up: a genuine rebase merge must
-/// still be classified as a rebase when `--merge-commit-sha` is passed as an
-/// abbreviated SHA (as a human might via `git-ai ci local merge`).
-///
-/// The #1473 filter intersects the first-parent walk with the full SHAs from
-/// `git rev-list base_sha..merge_commit_sha`. If `get_rebased_commits` stored the
-/// merge commit verbatim (abbreviated), that entry would fail the set lookup, get
-/// dropped, drop the count below N, and the rebase would be misclassified as a
-/// squash — writing one aggregated note instead of per-commit notes. After
-/// resolving the merge SHA to its full form, each rebased commit keeps its own note.
-#[test]
-fn test_ci_local_rebase_merge_with_abbreviated_merge_sha() {
-    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
-
-    let repo = direct_test_repo();
-
-    // --- Initial commit on main ---
-    let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-    repo.git(&["branch", "-M", "main"]).unwrap();
-    let base_sha = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    // --- Feature branch: two commits touching different files ---
-    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
-    let mut file_a = repo.filename("file_a.txt");
-    file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
-    let _feature_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
-    let mut file_b = repo.filename("file_b.txt");
-    file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
-    let feature_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
-
-    // --- Advance main so the rebase produces new commit SHAs ---
-    repo.git_og(&["checkout", "main"]).unwrap();
-    let mut main_file = repo.filename("main_only.txt");
-    main_file.set_contents(crate::lines!["main-only content"]);
-    repo.git_og(&["add", "main_only.txt"]).unwrap();
-    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
-
-    // --- Rebase feature onto main (bypassing the local hook), then ff main ---
-    repo.git_og(&["checkout", "feature"]).unwrap();
-    repo.git_og(&["rebase", "main"]).unwrap();
-    let new_sha2 = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-    let new_sha1 = repo
-        .git_og(&["rev-parse", "HEAD~1"])
-        .unwrap()
-        .trim()
-        .to_string();
-    repo.git_og(&["checkout", "main"]).unwrap();
-    repo.git_og(&["merge", "--ff-only", "feature"]).unwrap();
-
-    // --- Bare origin so push_authorship inside CiContext can succeed ---
-    let origin_dir = tempfile::tempdir().unwrap();
-    let origin_path = origin_dir.path().join("origin.git");
-    repo.git_og(&[
-        "clone",
-        "--bare",
-        repo.path().to_str().unwrap(),
-        origin_path.to_str().unwrap(),
-    ])
-    .unwrap();
-    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
-        .unwrap();
-
-    // --- Run `ci local merge` with an ABBREVIATED merge-commit-sha ---
-    let abbreviated_merge_sha = &new_sha2[..12];
-    let output = repo
-        .git_ai(&[
-            "ci",
-            "local",
-            "merge",
-            "--merge-commit-sha",
-            abbreviated_merge_sha,
-            "--head-ref",
-            "feature",
-            "--head-sha",
-            feature_sha2.as_str(),
-            "--base-ref",
-            "main",
-            "--base-sha",
-            base_sha.as_str(),
-            "--skip-fetch-notes",
-            "--skip-fetch-base",
-        ])
-        .expect("ci local merge should succeed");
-
-    assert!(
-        output.contains("authorship rewritten successfully"),
-        "expected authorship rewritten, got: {output}"
-    );
-
-    // --- Each rebased commit must still carry its own note (rebase path kept) ---
-    let note1 = repo
-        .read_authorship_note(&new_sha1)
-        .expect("rebased commit 1 should have a note (rebase must not be misclassified as squash)");
-    let note2 = repo
-        .read_authorship_note(&new_sha2)
-        .expect("rebased commit 2 should have a note");
-
-    let files = |note: &str| -> Vec<String> {
-        AuthorshipLog::deserialize_from_string(note)
-            .unwrap()
-            .attestations
-            .iter()
-            .map(|a| a.file_path.clone())
-            .collect()
-    };
-    let files1 = files(&note1);
-    let files2 = files(&note2);
-
-    assert!(
-        files1.iter().any(|f| f.contains("file_a")) && !files1.iter().any(|f| f.contains("file_b")),
-        "rebased commit 1 should reference only file_a.txt, got: {files1:?}"
-    );
-    assert!(
-        files2.iter().any(|f| f.contains("file_b")) && !files2.iter().any(|f| f.contains("file_a")),
-        "rebased commit 2 should reference only file_b.txt, got: {files2:?}"
     );
 }
 
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
-    test_ci_squash_merge_mixed_content,
-    test_ci_squash_merge_empty_notes_preserved,
+    test_ci_squash_merge_mixed_ai_and_human_content,
     test_ci_squash_merge_no_notes_no_authorship_created,
-    test_ci_squash_merge_with_manual_changes,
-    test_ci_rebase_merge_multiple_commits,
     test_ci_rebase_merge_commit_order_pairing,
+    test_ci_local_sync_skips_when_current_rebased_commit_already_has_note,
+    test_ci_local_sync_skips_non_rebase_force_push,
+    test_ci_local_open_pr_rebase_single_commit,
+    test_ci_local_open_pr_rebase_two_commits,
+    test_ci_local_merge_squash_on_linear_main_does_not_note_base_commits,
+    test_ci_local_rebase_merge_with_abbreviated_merge_sha,
     test_ci_local_rebase_merge_two_commits,
     test_ci_local_rebase_merge_three_commits,
+    test_ci_squash_merge_mixed_content,
+    test_ci_squash_merge_empty_notes_preserved,
+    test_ci_squash_merge_with_manual_changes,
+    test_ci_rebase_merge_multiple_commits,
     test_ci_squash_merge_basic_standard_human,
     test_ci_squash_merge_mixed_content_standard_human,
     test_ci_squash_merge_with_manual_changes_standard_human,
     test_ci_rebase_merge_multiple_commits_standard_human,
     test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main,
-    test_ci_local_merge_squash_on_linear_main_does_not_note_base_commits,
-    test_ci_local_rebase_merge_with_abbreviated_merge_sha,
 );

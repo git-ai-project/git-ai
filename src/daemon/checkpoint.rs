@@ -200,6 +200,7 @@ fn execute_resolved_checkpoint(
     let mut working_log = repo
         .storage
         .working_log_for_base_commit(&resolved.base_commit)?;
+
     if !resolved.dirty_files.is_empty() {
         working_log.set_dirty_files(Some(resolved.dirty_files.clone()));
     }
@@ -263,7 +264,7 @@ fn execute_resolved_checkpoint(
     let trace_id = checkpoint_request.trace_id.clone();
 
     let entries_start = Instant::now();
-    let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
+    let (entries, file_stats) = crate::tokio_runtime::block_on(get_checkpoint_entries(
         kind,
         author,
         repo,
@@ -438,21 +439,24 @@ fn save_current_file_states(
 
     let blobs_dir = working_log.dir.join("blobs");
     let dirty_files = working_log.dirty_files.clone();
+    let files = files.to_vec();
 
-    let file_content_hashes = smol::block_on(async {
-        let semaphore = Arc::new(smol::lock::Semaphore::new(8));
+    let file_content_hashes = crate::tokio_runtime::block_on(async {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
         let blobs_dir = Arc::new(blobs_dir);
         let dirty_files = Arc::new(dirty_files);
 
-        let futures = files.iter().map(|file_path| {
-            let file_path = file_path.clone();
+        let mut futures = Vec::with_capacity(files.len());
+        for file_path in files {
             let blobs_dir = Arc::clone(&blobs_dir);
             let dirty_files = Arc::clone(&dirty_files);
             let semaphore = Arc::clone(&semaphore);
 
-            async move {
-                // Acquire semaphore permit
-                let _permit = semaphore.acquire().await;
+            futures.push(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("file state semaphore was closed");
 
                 // Read file content - check dirty_files first, then filesystem
                 let content = if let Some(ref dirty_map) = *dirty_files {
@@ -467,21 +471,24 @@ fn save_current_file_states(
                     ))
                 })?;
 
-                // Create SHA256 hash of the content
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let sha = format!("{:x}", hasher.finalize());
+                crate::tokio_runtime::spawn_blocking_result(move || {
+                    // Create SHA256 hash of the content
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let sha = format!("{:x}", hasher.finalize());
 
-                // Ensure blobs directory exists
-                std::fs::create_dir_all(&*blobs_dir)?;
+                    // Ensure blobs directory exists
+                    std::fs::create_dir_all(&*blobs_dir)?;
 
-                // Write content to blob file
-                let blob_path = blobs_dir.join(&sha);
-                std::fs::write(blob_path, content)?;
+                    // Write content to blob file
+                    let blob_path = blobs_dir.join(&sha);
+                    std::fs::write(blob_path, content)?;
 
-                Ok::<(String, String), GitAiError>((file_path, sha))
-            }
-        });
+                    Ok::<(String, String), GitAiError>((file_path, sha))
+                })
+                .await
+            });
+        }
 
         // Collect results from all concurrent operations
         let results: Vec<Result<(String, String), GitAiError>> =
@@ -578,6 +585,7 @@ fn get_checkpoint_entry_for_file(
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     initial_snapshot_contents: Arc<HashMap<String, String>>,
+    parent_note_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
     let file_start = Instant::now();
@@ -628,7 +636,6 @@ fn get_checkpoint_entry_for_file(
 
     let is_from_checkpoint = from_checkpoint.is_some();
     let (previous_content, prev_attributions) = if let Some((content, attrs)) = from_checkpoint {
-        // File exists in a previous checkpoint - use that
         (content, attrs)
     } else {
         // File doesn't exist in any previous checkpoint - need to initialize from git + INITIAL
@@ -651,12 +658,32 @@ fn get_checkpoint_entry_for_file(
             }
         }
 
-        // Start with INITIAL attributions (they win)
+        // Start with INITIAL attributions (they win), augmented by parent note
         let mut prev_line_attributions = initial_attrs_for_file.clone();
+
+        // Parent note seeding removed — handled at post-commit via inheritance.
+        let _ = &parent_note_attributions;
+
         let mut blamed_lines: HashSet<u32> = HashSet::new();
 
-        // Default all previous-content lines to "human" (no cross-commit blame)
-        let prev_total_lines = previous_content.lines().count() as u32;
+        // Default all previous-content lines to "human" (no cross-commit blame).
+        // When INITIAL has a snapshot that DIFFERS from current content, use its
+        // line count (that's what the diff will compare against). When the snapshot
+        // matches current content (no edits after INITIAL), use the HEAD content
+        // line count so the AI fallback can fire for uncovered lines.
+        let effective_prev_content = if !initial_attrs_for_file.is_empty() {
+            let snapshot = initial_snapshot_content
+                .as_deref()
+                .unwrap_or(&previous_content);
+            if content_eq_normalized(snapshot, &current_content) {
+                &previous_content
+            } else {
+                snapshot
+            }
+        } else {
+            &previous_content
+        };
+        let prev_total_lines = effective_prev_content.lines().count() as u32;
         for line_num in 1..=prev_total_lines {
             blamed_lines.insert(line_num);
         }
@@ -750,6 +777,7 @@ fn get_checkpoint_entry_for_file(
         content: &current_content,
         ts,
     })?;
+
     tracing::debug!(
         "[BENCHMARK] Processing file {} took {:?}",
         file_path,
@@ -837,10 +865,12 @@ async fn get_checkpoint_entries(
         .and_then(|c| c.tree().ok())
         .map(|t| t.id().to_string());
 
+    let parent_note_attributions: HashMap<String, Vec<LineAttribution>> = HashMap::new();
+
     const MAX_CONCURRENT: usize = 30;
 
     // Create a semaphore to limit concurrent tasks
-    let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
     // Move other repeated allocations outside the loop
     let previous_file_state_by_file = Arc::new(previous_file_state_by_file);
@@ -849,6 +879,7 @@ async fn get_checkpoint_entries(
     let head_tree_id = Arc::new(head_tree_id);
     let initial_attributions = Arc::new(initial_attributions);
     let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
+    let parent_note_attributions = Arc::new(parent_note_attributions);
 
     // Spawn tasks for each file
     let spawn_start = Instant::now();
@@ -868,14 +899,16 @@ async fn get_checkpoint_entries(
             .unwrap_or_default();
         let initial_attributions = Arc::clone(&initial_attributions);
         let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
+        let parent_note_attributions = Arc::clone(&parent_note_attributions);
         let semaphore = Arc::clone(&semaphore);
 
-        let task = smol::spawn(async move {
-            // Acquire semaphore permit to limit concurrency
-            let _permit = semaphore.acquire().await;
+        let task = async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .expect("checkpoint entry semaphore was closed");
 
-            // Wrap all the blocking git operations in smol::unblock
-            smol::unblock(move || {
+            crate::tokio_runtime::spawn_blocking_result(move || {
                 get_checkpoint_entry_for_file(
                     file_path,
                     kind,
@@ -888,11 +921,12 @@ async fn get_checkpoint_entries(
                     head_tree_id.clone(),
                     initial_attributions.clone(),
                     initial_snapshot_contents.clone(),
+                    parent_note_attributions.clone(),
                     ts,
                 )
             })
             .await
-        });
+        };
 
         tasks.push(task);
     }

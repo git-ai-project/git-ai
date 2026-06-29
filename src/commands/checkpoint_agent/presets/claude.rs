@@ -98,10 +98,12 @@ impl AgentPreset for ClaudePreset {
             external_parent_session_id,
         });
 
+        let bash_command = parse::bash_command_from_hook_input(&data);
         let event = match (hook_event, is_bash) {
             (Some("PreToolUse"), true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
+                command: bash_command,
             }),
             (Some("PreToolUse"), false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -112,6 +114,7 @@ impl AgentPreset for ClaudePreset {
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
+                command: bash_command,
                 stream_source,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {

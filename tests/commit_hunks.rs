@@ -357,19 +357,20 @@ fn test_commit_hunks_attribution_boundaries_split() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("split.txt");
 
-    // Untracked line first
-    fs::write(&file_path, "Untracked\n").unwrap();
-    repo.git_ai(&["checkpoint", "human", "split.txt"]).unwrap();
+    // Known human line first
+    fs::write(&file_path, "Human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "split.txt"])
+        .unwrap();
 
     // Then AI adds
-    fs::write(&file_path, "Untracked\nAI added\n").unwrap();
+    fs::write(&file_path, "Human\nAI added\n").unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "split.txt"])
         .unwrap();
 
     let commit = repo.stage_all_and_commit("boundary split").unwrap();
 
     let mut file = repo.filename("split.txt");
-    file.assert_committed_lines(lines!["Untracked".unattributed_human(), "AI added".ai()]);
+    file.assert_committed_lines(lines!["Human".human(), "AI added".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -389,14 +390,14 @@ fn test_commit_hunks_attribution_boundaries_split() {
         .filter(|h| h.hunk_kind == "addition")
         .collect();
 
-    // Untracked and AI should be separate hunks
+    // Human and AI should be separate hunks
     assert_eq!(addition_hunks.len(), 2);
 
-    // First hunk: untracked (no prompt_id, no human_id)
+    // First hunk: human
     assert_eq!(addition_hunks[0].start_line, 1);
     assert_eq!(addition_hunks[0].end_line, 1);
     assert!(addition_hunks[0].prompt_id.is_none());
-    assert!(addition_hunks[0].human_id.is_none());
+    assert!(addition_hunks[0].human_id.is_some());
 
     // Second hunk: AI
     assert_eq!(addition_hunks[1].start_line, 2);

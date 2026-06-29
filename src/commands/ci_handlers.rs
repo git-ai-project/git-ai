@@ -9,9 +9,6 @@ fn print_ci_result(result: &CiRunResult, prefix: &str) {
         CiRunResult::AuthorshipRewritten { .. } => {
             println!("{}: authorship rewritten successfully", prefix);
         }
-        CiRunResult::SyncAuthorshipRewritten { .. } => {
-            println!("{}: authorship rewritten successfully", prefix);
-        }
         CiRunResult::AlreadyExists { .. } => {
             println!("{}: authorship already exists", prefix);
         }
@@ -24,11 +21,17 @@ fn print_ci_result(result: &CiRunResult, prefix: &str) {
         CiRunResult::SkippedFastForward => {
             println!("{}: skipped fast-forward merge", prefix);
         }
+        CiRunResult::SyncAuthorshipRewritten { commit_count } => {
+            println!(
+                "{}: authorship rewritten successfully for {} rebased commits",
+                prefix, commit_count
+            );
+        }
         CiRunResult::SkippedNonRebaseSync => {
             println!("{}: skipped non-rebase PR sync", prefix);
         }
         CiRunResult::SkippedExistingSyncNotes => {
-            println!("{}: skipped PR sync with existing current notes", prefix);
+            println!("{}: skipped PR sync with existing authorship", prefix);
         }
         CiRunResult::NoAuthorshipAvailable => {
             println!(
@@ -99,9 +102,9 @@ fn handle_ci_github(args: &[String]) {
                     std::process::exit(1);
                 }
                 Ok(None) => {
-                    // No actionable pull_request event for git-ai. This is not
-                    // an error, especially now that synchronize events run for
-                    // every PR head update.
+                    // Not an actionable event (e.g. a `synchronize` that is not a
+                    // rebased-PR-head sync). With the workflow now firing on every
+                    // `synchronize`, this must be a graceful no-op, not a failure.
                     println!("No GitHub CI context found; nothing to do");
                     std::process::exit(0);
                 }
@@ -262,7 +265,6 @@ fn handle_ci_local(args: &[String]) {
                     std::process::exit(1);
                 }
             };
-
             let fork_clone_url = flag("--fork-clone-url");
 
             let ctx = CiContext {

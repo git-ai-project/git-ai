@@ -7,9 +7,7 @@ use crate::commands::checkpoint_agent::presets::{
 use crate::config;
 use crate::daemon::checkpoint::PreparedPathRole;
 use crate::error::GitAiError;
-use crate::git::repo_state::{
-    git_dir_for_worktree, read_head_state_for_worktree, worktree_root_for_path,
-};
+use crate::git::repo_state::{read_head_state_for_worktree, worktree_root_for_path};
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -55,38 +53,9 @@ struct CheckpointDebugLogEntry<'a> {
 struct RepoContext {
     repo_work_dir: PathBuf,
     base_commit: BaseCommit,
-    unmerged_paths: std::collections::HashSet<PathBuf>,
 }
 
 const MAX_CHECKPOINT_FILES: usize = 1000;
-
-fn has_active_merge_state(git_dir: &Path) -> bool {
-    git_dir.join("MERGE_HEAD").exists()
-        || git_dir.join("CHERRY_PICK_HEAD").exists()
-        || git_dir.join("rebase-merge").exists()
-        || git_dir.join("rebase-apply").exists()
-}
-
-fn get_unmerged_paths_via_git(repo_work_dir: &Path) -> std::collections::HashSet<PathBuf> {
-    use crate::git::repository::exec_git_allow_nonzero;
-    let args = vec![
-        "-C".to_string(),
-        repo_work_dir.to_string_lossy().to_string(),
-        "ls-files".to_string(),
-        "-u".to_string(),
-    ];
-    let output = match exec_git_allow_nonzero(&args) {
-        Ok(o) => o,
-        Err(_) => return std::collections::HashSet::new(),
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|l| l.split('\t').nth(1))
-        .map(|path| repo_work_dir.join(path))
-        .collect()
-}
 
 fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>, GitAiError> {
     let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -130,22 +99,11 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
                 };
                 let head_ms = t_head.elapsed().as_secs_f64() * 1000.0;
 
-                let t_unmerged = std::time::Instant::now();
-                let unmerged_paths = if let Some(git_dir) = git_dir_for_worktree(&repo_work_dir)
-                    && has_active_merge_state(&git_dir)
-                {
-                    get_unmerged_paths_via_git(&repo_work_dir)
-                } else {
-                    std::collections::HashSet::new()
-                };
-                let unmerged_ms = t_unmerged.elapsed().as_secs_f64() * 1000.0;
-
                 if perf {
                     eprintln!(
-                        "[perf] build_checkpoint_files: discover={:.1}ms head={:.1}ms unmerged={:.1}ms (repo={})",
+                        "[perf] build_checkpoint_files: discover={:.1}ms head={:.1}ms (repo={})",
                         t_discover.elapsed().as_secs_f64() * 1000.0,
                         head_ms,
-                        unmerged_ms,
                         repo_work_dir.display(),
                     );
                 }
@@ -156,16 +114,11 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
                     RepoContext {
                         repo_work_dir: repo_work_dir.clone(),
                         base_commit,
-                        unmerged_paths,
                     },
                 );
             }
             repo_cache.get(&repo_work_dir).unwrap()
         };
-
-        if ctx.unmerged_paths.contains(path) {
-            continue;
-        }
 
         let t_read = std::time::Instant::now();
         let content = if path.exists() {
@@ -442,17 +395,47 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<Vec<CheckpointRequest>, Gi
 }
 
 fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAiError> {
-    use crate::commands::checkpoint_agent::bash_tool;
+    use crate::commands::checkpoint_agent::bash_tool::{
+        self, BashHookAttemptPhase, BashHookAttemptSignal,
+    };
 
-    let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
-    let repo_work_dir = repo.workdir()?;
+    let started_at_ns = crate::daemon::bash_history_db::unix_time_ns();
+    let repo_work_dir = match discover_repository_in_path_no_git_exec(e.context.cwd.as_path())
+        .and_then(|repo| repo.workdir())
+    {
+        Ok(repo_work_dir) => repo_work_dir,
+        Err(error) => {
+            let error_message = error.to_string();
+            bash_tool::signal_daemon_bash_hook_attempt(
+                BashHookAttemptPhase::Start,
+                BashHookAttemptSignal {
+                    original_cwd: e.context.cwd.as_path(),
+                    discovered_repo_work_dir: None,
+                    repo_discovery_error: Some(&error_message),
+                    session_id: &e.context.external_session_id,
+                    tool_use_id: &e.tool_use_id,
+                    agent_id: &e.context.agent_id,
+                    metadata: &e.context.metadata,
+                    trace_id: &e.context.trace_id,
+                    timestamp_ns: started_at_ns,
+                    command: e.command.as_deref(),
+                },
+            );
+            return Ok(vec![]);
+        }
+    };
 
-    let dirty_paths = match bash_tool::handle_bash_pre_tool_use_with_context(
+    let dirty_paths = match bash_tool::handle_bash_pre_tool_use_with_context_and_cwd(
         &repo_work_dir,
-        &e.context.external_session_id,
-        &e.tool_use_id,
-        &e.context.agent_id,
-        Some(&e.context.metadata),
+        e.context.cwd.as_path(),
+        bash_tool::BashToolHookContext {
+            session_id: &e.context.external_session_id,
+            tool_use_id: &e.tool_use_id,
+            agent_id: &e.context.agent_id,
+            agent_metadata: Some(&e.context.metadata),
+            trace_id: &e.context.trace_id,
+            command: e.command.as_deref(),
+        },
     ) {
         Ok(result) => result.dirty_paths,
         Err(error) => {
@@ -487,15 +470,47 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
 }
 
 fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, GitAiError> {
-    use crate::commands::checkpoint_agent::bash_tool;
+    use crate::commands::checkpoint_agent::bash_tool::{
+        self, BashHookAttemptPhase, BashHookAttemptSignal,
+    };
 
-    let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
-    let repo_work_dir = repo.workdir()?;
+    let ended_at_ns = crate::daemon::bash_history_db::unix_time_ns();
+    let repo_work_dir = match discover_repository_in_path_no_git_exec(e.context.cwd.as_path())
+        .and_then(|repo| repo.workdir())
+    {
+        Ok(repo_work_dir) => repo_work_dir,
+        Err(error) => {
+            let error_message = error.to_string();
+            bash_tool::signal_daemon_bash_hook_attempt(
+                BashHookAttemptPhase::End,
+                BashHookAttemptSignal {
+                    original_cwd: e.context.cwd.as_path(),
+                    discovered_repo_work_dir: None,
+                    repo_discovery_error: Some(&error_message),
+                    session_id: &e.context.external_session_id,
+                    tool_use_id: &e.tool_use_id,
+                    agent_id: &e.context.agent_id,
+                    metadata: &e.context.metadata,
+                    trace_id: &e.context.trace_id,
+                    timestamp_ns: ended_at_ns,
+                    command: e.command.as_deref(),
+                },
+            );
+            return Ok(vec![]);
+        }
+    };
 
-    let bash_result = bash_tool::handle_bash_post_tool_use(
+    let bash_result = bash_tool::handle_bash_post_tool_use_with_cwd(
         &repo_work_dir,
-        &e.context.external_session_id,
-        &e.tool_use_id,
+        e.context.cwd.as_path(),
+        bash_tool::BashToolHookContext {
+            session_id: &e.context.external_session_id,
+            tool_use_id: &e.tool_use_id,
+            agent_id: &e.context.agent_id,
+            agent_metadata: Some(&e.context.metadata),
+            trace_id: &e.context.trace_id,
+            command: e.command.as_deref(),
+        },
     );
 
     let file_paths: Vec<PathBuf> = match &bash_result {

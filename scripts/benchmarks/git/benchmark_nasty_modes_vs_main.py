@@ -403,8 +403,7 @@ def render_report(
 ) -> None:
     scenarios = ["linear", "onto", "rebase_merges"]
     variants = [
-        "main_wrapper",
-        "current_wrapper",
+        "main_daemon",
         "current_daemon",
     ]
     margin_baseline_key = str(metadata["margin_baseline"])
@@ -432,35 +431,32 @@ def render_report(
     )
     lines.append("")
 
-    lines.append("## Median Duration (s) and Slowdown vs main(wrapper)")
+    lines.append("## Median Duration (s) and Slowdown vs main(daemon)")
     lines.append("")
-    lines.append(
-        "| Scenario | main(wrapper) | current(wrapper) | current(daemon) | wrapper Δ% | daemon Δ% |"
-    )
-    lines.append("|---|---:|---:|---:|---:|---:|")
+    lines.append("| Scenario | main(daemon) | current(daemon) | daemon Δ% |")
+    lines.append("|---|---:|---:|---:|")
 
     for scenario in scenarios:
         row = summary.get(scenario, {})
-        base = float(row.get("main_wrapper", {}).get("median_s", 0.0))
-        cw = float(row.get("current_wrapper", {}).get("median_s", 0.0))
+        base = float(row.get("main_daemon", {}).get("median_s", 0.0))
         cd = float(row.get("current_daemon", {}).get("median_s", 0.0))
         s = slowdowns.get(scenario, {})
         lines.append(
-            f"| {scenario} | {base:.3f} | {cw:.3f} | {cd:.3f} | "
-            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
+            f"| {scenario} | {base:.3f} | {cd:.3f} | "
+            f"{s.get('current_daemon', 0.0):.3f}% |"
         )
 
     lines.append("")
     lines.append("## Aggregate Comparison")
     lines.append("")
-    lines.append("| Variant | Geometric Mean Ratio vs main(wrapper) | Geometric Mean Slowdown |")
+    lines.append("| Variant | Geometric Mean Ratio vs main(daemon) | Geometric Mean Slowdown |")
     lines.append("|---|---:|---:|")
 
-    for key in ["current_wrapper", "current_daemon"]:
+    for key in ["current_daemon"]:
         ratios: list[float] = []
         for scenario in scenarios:
             row = summary.get(scenario, {})
-            base = float(row.get("main_wrapper", {}).get("median_s", 0.0))
+            base = float(row.get("main_daemon", {}).get("median_s", 0.0))
             med = float(row.get(key, {}).get("median_s", 0.0))
             if base > 0 and med > 0:
                 ratios.append(med / base)
@@ -533,13 +529,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-margin",
         action="store_true",
-        help="Exit non-zero when any current_wrapper/current_daemon margin check fails.",
+        help="Exit non-zero when the current_daemon margin check fails.",
     )
     parser.add_argument(
         "--margin-baseline",
         type=str,
-        choices=["current_wrapper", "main_wrapper"],
-        default="current_wrapper",
+        choices=["main_daemon"],
+        default="main_daemon",
         help="Baseline variant for margin checks.",
     )
     parser.add_argument("--current-bin", type=Path, default=None)
@@ -602,9 +598,12 @@ def main() -> int:
         print("Cloning seed repo snapshot...")
         seed_repo_path, seed_repo_head = clone_seed_repo(args.repo_url, seed_repo_dir, real_git)
 
+        # git-ai is daemon-architecture: all attribution side effects run in the
+        # daemon (the git proxy is a thin trace2-emitting passthrough). Wrapper
+        # mode with no daemon captures nothing, so the only meaningful comparison
+        # is daemon-vs-daemon: this branch's daemon vs main's daemon.
         variants = [
-            Variant("main_wrapper", "main(wrapper)", main_bin, "wrapper"),
-            Variant("current_wrapper", "current(wrapper)", current_bin, "wrapper"),
+            Variant("main_daemon", "main(daemon)", main_bin, "daemon"),
             Variant("current_daemon", "current(daemon)", current_bin, "daemon"),
         ]
 
@@ -682,12 +681,12 @@ def main() -> int:
                     shutil.rmtree(home_dir, ignore_errors=True)
 
         summary = summarize_variant_runs(all_results)
-        slowdowns = compute_slowdowns(summary, baseline_key="main_wrapper")
+        slowdowns = compute_slowdowns(summary, baseline_key="main_daemon")
         margin_checks = compute_margin_checks(
             summary,
             baseline_key=args.margin_baseline,
             margin_pct=args.margin_pct,
-            variants=["current_wrapper", "current_daemon"],
+            variants=["current_daemon"],
         )
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -754,7 +753,7 @@ def main() -> int:
                 {
                     "metadata": metadata,
                     "summary": summary,
-                    "slowdowns_pct_vs_main_wrapper": slowdowns,
+                    "slowdowns_pct_vs_main_daemon": slowdowns,
                     "margin_checks": [dataclasses.asdict(check) for check in margin_checks],
                 },
                 indent=2,

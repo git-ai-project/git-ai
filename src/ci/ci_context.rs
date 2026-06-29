@@ -1,7 +1,5 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::rebase_authorship::{
-    rewrite_authorship_after_rebase_v2, rewrite_authorship_after_squash_or_rebase,
-};
+use crate::authorship::rewrite::{RewriteEvent, handle_rewrite_event};
 use crate::error::GitAiError;
 use crate::git::notes_api::{
     read_authorship_v3 as get_reference_as_authorship_log_v3, read_note as show_authorship_note,
@@ -111,7 +109,7 @@ impl CiContext {
         match &self.event {
             CiEvent::Merge {
                 merge_commit_sha,
-                head_ref,
+                head_ref: _,
                 head_sha,
                 base_ref,
                 base_sha,
@@ -259,9 +257,9 @@ impl CiContext {
                     println!("Fetched base branch.");
                 }
 
-                // Detect squash vs rebase merge by counting commits
-                // For squash: N original commits → 1 merge commit
-                // For rebase: N original commits → N rebased commits
+                // Detect squash vs rebase merge by counting commits:
+                //   squash: N original commits → 1 merge commit
+                //   rebase: N original commits → N rebased commits
                 let (original_commits_base, original_commits) =
                     self.original_pr_commits(head_sha, base_ref, base_sha);
 
@@ -273,11 +271,10 @@ impl CiContext {
 
                 self.import_fork_notes_for_commits(fork_clone_url, &original_commits, options)?;
 
-                // For multi-commit PRs, check if this is a rebase merge (multiple new commits)
-                // by walking back from merge_commit_sha
-                if original_commits.len() > 1 {
-                    // Try to find the new rebased commits
-                    // Walk back from merge_commit_sha the same number of commits as original
+                // For multi-commit PRs, decide whether the merge is a rebase
+                // (N original → N new commits) or a squash (N → 1) by walking
+                // back from merge_commit_sha.
+                let is_rebase_merge = if original_commits.len() > 1 {
                     let mut new_commits =
                         self.get_rebased_commits(merge_commit_sha, original_commits.len());
 
@@ -287,11 +284,9 @@ impl CiContext {
                     // misclassified (PR notes then land on unrelated commits). Restrict
                     // to commits the merge actually introduced
                     // (`base_sha..merge_commit_sha`; see gitrevisions(7)) — a squash
-                    // yields exactly one, so it can't look like a rebase. GitHub passes
-                    // `pull_request.base.sha` and GitLab passes `diff_refs.start_sha`
-                    // (the target-branch tip at MR creation); an empty `base_sha`
-                    // (transient API failure on either path) safely skips the filter
-                    // and falls back to the pre-#1473 behavior.
+                    // yields exactly one, so it can't look like a rebase. An empty
+                    // `base_sha` (transient API failure) safely skips the filter and
+                    // falls back to the pre-#1473 behavior.
                     if !base_sha.is_empty() {
                         let introduced: std::collections::HashSet<String> =
                             CommitRange::new_infer_refname(
@@ -309,45 +304,58 @@ impl CiContext {
                         }
                     }
 
-                    if new_commits.len() == original_commits.len() {
-                        println!(
-                            "Detected rebase merge: {} original -> {} new commits",
-                            original_commits.len(),
-                            new_commits.len()
-                        );
-                        // Rebase merge - use v2 which writes authorship to each rebased commit
-                        rewrite_authorship_after_rebase_v2(
-                            &self.repo,
-                            head_sha,
-                            &original_commits,
-                            &new_commits,
-                            "", // human_author not used
-                        )?;
-                    } else {
-                        println!(
-                            "Detected squash merge: {} original commits -> 1 merge commit",
-                            original_commits.len()
-                        );
-                        // Squash merge - use existing function which writes to single merge commit
-                        rewrite_authorship_after_squash_or_rebase(
-                            &self.repo,
-                            head_ref,
-                            base_ref,
-                            head_sha,
-                            merge_commit_sha,
-                            false,
-                        )?;
-                    }
+                    new_commits.len() == original_commits.len()
                 } else {
-                    // Single commit - use squash_or_rebase (handles both cases)
-                    println!("Single commit PR, using squash/rebase handler");
-                    rewrite_authorship_after_squash_or_rebase(
+                    false
+                };
+
+                if is_rebase_merge {
+                    println!(
+                        "Detected rebase merge: {} original commits → {} new commits",
+                        original_commits.len(),
+                        original_commits.len()
+                    );
+                    // Rebase merge — shift each original commit's note onto its
+                    // rebased counterpart via the range-diff/hunk-shift path.
+                    handle_rewrite_event(
                         &self.repo,
-                        head_ref,
-                        base_ref,
-                        head_sha,
-                        merge_commit_sha,
-                        false,
+                        RewriteEvent::NonFastForward {
+                            old_tip: head_sha.to_string(),
+                            new_tip: merge_commit_sha.to_string(),
+                            onto: if base_sha.is_empty() {
+                                None
+                            } else {
+                                Some(base_sha.to_string())
+                            },
+                        },
+                    )?;
+                } else {
+                    println!(
+                        "Detected squash merge: {} original commit(s) → 1 merge commit",
+                        original_commits.len()
+                    );
+                    // Squash merge — reconstruct the single merge commit's
+                    // authorship by unioning every source commit's note, using the
+                    // exact same handler the local daemon uses for `merge --squash`.
+                    let onto = if base_sha.is_empty() {
+                        // No base SHA: fall back to the merge commit's first parent
+                        // so the squash handler can still enumerate source commits.
+                        self.repo
+                            .find_commit(merge_commit_sha.to_string())
+                            .ok()
+                            .and_then(|c| c.parent(0).ok())
+                            .map(|p| p.id())
+                            .unwrap_or_else(|| base_ref.to_string())
+                    } else {
+                        base_sha.to_string()
+                    };
+                    handle_rewrite_event(
+                        &self.repo,
+                        RewriteEvent::SquashMerge {
+                            source_head: head_sha.to_string(),
+                            squash_commit: merge_commit_sha.to_string(),
+                            onto,
+                        },
                     )?;
                 }
                 println!("Rewrote authorship.");
@@ -355,6 +363,18 @@ impl CiContext {
                 // Check if authorship was created for THIS specific commit
                 match get_reference_as_authorship_log_v3(&self.repo, merge_commit_sha) {
                     Ok(authorship_log) => {
+                        // A note may be reconstructed with only human attestations
+                        // (e.g. a PR whose contributor never used git-ai, so there
+                        // are no AI sessions/prompts to carry forward). There is no
+                        // AI authorship to track in that case.
+                        let has_ai_authorship = !authorship_log.metadata.sessions.is_empty()
+                            || !authorship_log.metadata.prompts.is_empty();
+                        if !has_ai_authorship {
+                            println!(
+                                "No AI authorship to track for this commit (no AI-touched files in PR)"
+                            );
+                            return Ok(CiRunResult::NoAuthorshipAvailable);
+                        }
                         if options.skip_push {
                             println!("Skipping authorship push (--skip-push). Done.");
                         } else {
@@ -512,12 +532,13 @@ impl CiContext {
                     previous_head_sha, head_sha
                 );
 
-                rewrite_authorship_after_rebase_v2(
+                handle_rewrite_event(
                     &self.repo,
-                    previous_head_sha,
-                    &original_commits,
-                    &new_commits,
-                    "",
+                    RewriteEvent::NonFastForward {
+                        old_tip: previous_head_sha.to_string(),
+                        new_tip: head_sha.to_string(),
+                        onto: Some(resolved_base_sha.clone()),
+                    },
                 )?;
                 println!("Rewrote authorship.");
 
@@ -751,8 +772,7 @@ impl CiContext {
     ) -> Vec<String> {
         let mut commits = Vec::new();
         // Resolve to a full SHA up front so the entries are comparable to the
-        // full 40-char SHAs produced by `git rev-list` (the #1473 `retain` filter
-        // in `run_with_options` compares against such a set). Callers like
+        // full 40-char SHAs produced by `git rev-list`. Callers like
         // `git-ai ci local merge` may pass an abbreviated `merge_commit_sha`; the
         // remaining entries already come from parent ids, which are full.
         let mut current_sha = self
