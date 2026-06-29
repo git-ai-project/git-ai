@@ -323,6 +323,9 @@ fi
 
 echo "Setting up IDE/agent hooks..."
 if ! ${INSTALL_DIR}/git-ai install-hooks; then
+    if [ -n "${API_KEY:-}" ]; then
+        error "Failed to set up enterprise git-ai configuration. Please retry the installer."
+    fi
     warn "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
 else
     success "Successfully set up IDE/agent hooks"

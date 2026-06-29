@@ -503,8 +503,18 @@ if ($env:INSTALL_NONCE -and $env:API_BASE) {
 Write-Host 'Setting up IDE/agent hooks...'
 try {
     & $finalExe install-hooks | Out-Host
-    Write-Success 'Successfully set up IDE/agent hooks'
+    if ($LASTEXITCODE -ne 0) {
+        if ($env:API_KEY) {
+            Write-ErrorAndExit 'Failed to set up enterprise git-ai configuration. Please retry the installer.'
+        }
+        Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
+    } else {
+        Write-Success 'Successfully set up IDE/agent hooks'
+    }
 } catch {
+    if ($env:API_KEY) {
+        Write-ErrorAndExit 'Failed to set up enterprise git-ai configuration. Please retry the installer.'
+    }
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
 }
 
