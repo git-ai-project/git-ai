@@ -3,8 +3,14 @@
 //! Runs inside the daemon process using tokio. Accumulates telemetry envelopes
 //! and CAS payloads, then flushes them to their destinations every 3 seconds.
 
+use crate::api::logs::daemon_logs_upload_allowed;
 use crate::api::metrics::{MetricsUploadResponse, metrics_upload_allowed};
+use crate::api::types::{
+    DAEMON_LOGS_UPLOAD_VERSION, DaemonLogEvent, DaemonLogFieldValue, DaemonLogKind, DaemonLogLevel,
+    DaemonLogsUploadRequest,
+};
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
+use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::error::GitAiError;
@@ -19,6 +25,9 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
+const DAEMON_LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const MAX_DAEMON_LOG_EVENTS_PER_UPLOAD: usize = 1000;
+const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
 
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
@@ -30,6 +39,7 @@ struct TelemetryBuffer {
     messages: Vec<MessageEvent>,
     metrics: Vec<MetricEvent>,
     cas_records: Vec<CasSyncPayload>,
+    daemon_logs: Vec<DaemonLogEvent>,
 }
 
 struct ErrorEvent {
@@ -61,6 +71,7 @@ impl TelemetryBuffer {
             messages: Vec::new(),
             metrics: Vec::new(),
             cas_records: Vec::new(),
+            daemon_logs: Vec::new(),
         }
     }
 
@@ -70,6 +81,7 @@ impl TelemetryBuffer {
             && self.messages.is_empty()
             && self.metrics.is_empty()
             && self.cas_records.is_empty()
+            && self.daemon_logs.is_empty()
     }
 
     fn ingest_envelopes(&mut self, envelopes: Vec<TelemetryEnvelope>) {
@@ -125,6 +137,17 @@ impl TelemetryBuffer {
         self.cas_records.extend(records);
     }
 
+    fn ingest_daemon_logs(&mut self, events: Vec<DaemonLogEvent>) {
+        self.daemon_logs.extend(events);
+        let overflow = self
+            .daemon_logs
+            .len()
+            .saturating_sub(MAX_DAEMON_LOG_BUFFER_EVENTS);
+        if overflow > 0 {
+            self.daemon_logs.drain(0..overflow);
+        }
+    }
+
     fn take(&mut self) -> TelemetryBuffer {
         TelemetryBuffer {
             errors: std::mem::take(&mut self.errors),
@@ -132,6 +155,7 @@ impl TelemetryBuffer {
             messages: std::mem::take(&mut self.messages),
             metrics: std::mem::take(&mut self.metrics),
             cas_records: std::mem::take(&mut self.cas_records),
+            daemon_logs: std::mem::take(&mut self.daemon_logs),
         }
     }
 }
@@ -172,6 +196,14 @@ impl DaemonTelemetryWorkerHandle {
     /// Submit CAS records for batched upload.
     pub async fn submit_cas(&self, records: Vec<CasSyncPayload>) {
         self.buffer.lock().await.ingest_cas(records);
+    }
+
+    /// Submit daemon diagnostic events for batched upload.
+    pub async fn submit_daemon_logs(&self, events: Vec<DaemonLogEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        self.buffer.lock().await.ingest_daemon_logs(events);
     }
 
     /// Returns the current number of metrics waiting for upload.
@@ -231,6 +263,16 @@ impl DaemonTelemetryWorkerHandle {
     pub fn submit_cas_sync(&self, records: Vec<CasSyncPayload>) {
         if let Ok(mut buf) = self.buffer.try_lock() {
             buf.ingest_cas(records);
+        }
+    }
+
+    /// Submit daemon diagnostic events synchronously (best-effort, non-blocking).
+    pub fn submit_daemon_logs_sync(&self, events: Vec<DaemonLogEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        if let Ok(mut buf) = self.buffer.try_lock() {
+            buf.ingest_daemon_logs(events);
         }
     }
 }
@@ -307,6 +349,24 @@ pub fn submit_daemon_internal_cas(records: Vec<CasSyncPayload>) -> bool {
     }
 }
 
+/// Submit daemon diagnostic events from within the daemon process.
+/// Returns true if the handle was available and events were submitted.
+pub fn submit_daemon_internal_daemon_logs(events: Vec<DaemonLogEvent>) -> bool {
+    if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let handle = handle.clone();
+            runtime.spawn(async move {
+                handle.submit_daemon_logs(events).await;
+            });
+        } else {
+            handle.submit_daemon_logs_sync(events);
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// Spawn the telemetry worker task. Returns a handle for submitting events.
 ///
 /// The worker runs a flush loop every 3 seconds, sending accumulated events
@@ -316,11 +376,12 @@ pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
     let handle = DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
     };
+    let daemon_id = crate::uuid::generate_v4();
 
     spawn_metrics_metadata_backfill();
 
     tokio::spawn(async move {
-        telemetry_flush_loop(buffer).await;
+        telemetry_flush_loop(buffer, daemon_id).await;
     });
 
     handle
@@ -363,16 +424,31 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
     Ok(())
 }
 
-async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
+async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: String) {
     let mut ticker = interval(FLUSH_INTERVAL);
+    let started_at = std::time::Instant::now();
+    let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
     // The first tick completes immediately; skip it.
     ticker.tick().await;
 
     loop {
         ticker.tick().await;
 
+        let now = std::time::Instant::now();
+        let heartbeat = if now >= next_heartbeat_at && daemon_log_upload_enabled() {
+            while next_heartbeat_at <= now {
+                next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
+            }
+            Some(daemon_heartbeat_event(started_at.elapsed()))
+        } else {
+            None
+        };
+
         let snapshot = {
             let mut buf = buffer.lock().await;
+            if let Some(event) = heartbeat {
+                buf.ingest_daemon_logs(vec![event]);
+            }
             if buf.is_empty() {
                 None
             } else {
@@ -381,26 +457,39 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
         };
 
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
-        tokio::task::spawn_blocking(move || {
+        let daemon_id_for_flush = daemon_id.clone();
+        let failed_daemon_logs = tokio::task::spawn_blocking(move || {
+            let mut failed_daemon_logs = Vec::new();
             if let Some(snapshot) = snapshot {
-                flush_telemetry_batch(snapshot);
+                failed_daemon_logs = flush_telemetry_batch(snapshot, &daemon_id_for_flush);
             }
             flush_pending_metrics();
+            failed_daemon_logs
         })
         .await
         .unwrap_or_else(|e| {
             tracing::error!(%e, "telemetry flush task panicked");
+            Vec::new()
         });
+
+        if !failed_daemon_logs.is_empty() {
+            buffer.lock().await.ingest_daemon_logs(failed_daemon_logs);
+        }
     }
 }
 
-fn flush_telemetry_batch(batch: TelemetryBuffer) {
+fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
+    let mut failed_daemon_logs = Vec::new();
 
     // Flush metrics (always processed — uploaded or stored in SQLite)
     if !batch.metrics.is_empty() {
         flush_metrics(&batch.metrics);
+    }
+
+    if !batch.daemon_logs.is_empty() {
+        failed_daemon_logs = flush_daemon_logs(batch.daemon_logs, daemon_id, &distinct_id);
     }
 
     // Flush Sentry events (errors, performance, messages)
@@ -424,6 +513,8 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 
     // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
     flush_notes();
+
+    failed_daemon_logs
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
@@ -677,6 +768,77 @@ fn current_unix_ts() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn daemon_log_upload_enabled() -> bool {
+    Config::fresh().get_feature_flags().daemon_log_upload
+}
+
+fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "uptime_seconds".to_string(),
+        DaemonLogFieldValue::from(uptime.as_secs()),
+    );
+    fields.insert(
+        "os".to_string(),
+        DaemonLogFieldValue::from(std::env::consts::OS),
+    );
+    fields.insert(
+        "arch".to_string(),
+        DaemonLogFieldValue::from(std::env::consts::ARCH),
+    );
+
+    DaemonLogEvent {
+        id: Some(crate::uuid::generate_v4()),
+        kind: DaemonLogKind::Heartbeat,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        level: DaemonLogLevel::Info,
+        target: Some("git_ai::daemon".to_string()),
+        message: "alive".to_string(),
+        fields,
+        repo_url: None,
+        git_ai_version: None,
+    }
+}
+
+fn flush_daemon_logs(
+    events: Vec<DaemonLogEvent>,
+    daemon_id: &str,
+    install_id: &str,
+) -> Vec<DaemonLogEvent> {
+    if !daemon_log_upload_enabled() {
+        return Vec::new();
+    }
+
+    let context = ApiContext::new(None);
+    let api_base_url = context.base_url.clone();
+    let client = ApiClient::new(context);
+
+    if !daemon_logs_upload_allowed(&api_base_url, &client) {
+        // These diagnostics are intentionally best-effort and only live in memory.
+        // If the current API/auth setup cannot upload, do not keep re-flushing the
+        // same buffered events every few seconds.
+        return Vec::new();
+    }
+
+    let mut retry_events = Vec::new();
+    for chunk in events.chunks(MAX_DAEMON_LOG_EVENTS_PER_UPLOAD) {
+        let request = DaemonLogsUploadRequest {
+            version: DAEMON_LOGS_UPLOAD_VERSION,
+            git_ai_version: Some(GIT_AI_VERSION.to_string()),
+            daemon_id: Some(daemon_id.to_string()),
+            install_id: Some(install_id.to_string()),
+            repo_url: None,
+            events: chunk.to_vec(),
+        };
+
+        if client.upload_daemon_logs(&request).is_err() {
+            retry_events.extend_from_slice(chunk);
+        }
+    }
+
+    retry_events
 }
 
 fn flush_sentry_and_posthog(
@@ -1636,5 +1798,54 @@ mod tests {
         assert_eq!(db.borrow().count().unwrap(), 1);
         let history = db.borrow().get_metric_history(0, None, &[1]).unwrap();
         assert!(history.iter().any(|record| record.ts == old_ts));
+    }
+
+    fn sample_daemon_log_event(message: impl Into<String>) -> DaemonLogEvent {
+        DaemonLogEvent {
+            id: Some(crate::uuid::generate_v4()),
+            kind: DaemonLogKind::Log,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: DaemonLogLevel::Info,
+            target: Some("git_ai::test".to_string()),
+            message: message.into(),
+            fields: BTreeMap::new(),
+            repo_url: None,
+            git_ai_version: None,
+        }
+    }
+
+    #[test]
+    fn telemetry_buffer_caps_daemon_logs_to_latest_events() {
+        let mut buffer = TelemetryBuffer::new();
+        let total = MAX_DAEMON_LOG_BUFFER_EVENTS + 2;
+        let events = (0..total)
+            .map(|index| sample_daemon_log_event(index.to_string()))
+            .collect();
+
+        buffer.ingest_daemon_logs(events);
+
+        assert_eq!(buffer.daemon_logs.len(), MAX_DAEMON_LOG_BUFFER_EVENTS);
+        assert_eq!(buffer.daemon_logs.first().unwrap().message, "2");
+        assert_eq!(
+            buffer.daemon_logs.last().unwrap().message,
+            (total - 1).to_string()
+        );
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_uses_upload_contract_shape() {
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900));
+
+        assert!(event.id.is_some());
+        assert_eq!(event.kind, DaemonLogKind::Heartbeat);
+        assert_eq!(event.level, DaemonLogLevel::Info);
+        assert_eq!(event.target.as_deref(), Some("git_ai::daemon"));
+        assert_eq!(event.message, "alive");
+        assert_eq!(
+            event.fields.get("uptime_seconds"),
+            Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert!(event.fields.contains_key("os"));
+        assert!(event.fields.contains_key("arch"));
     }
 }

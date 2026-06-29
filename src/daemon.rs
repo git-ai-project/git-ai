@@ -55,6 +55,7 @@ pub mod bash_sessions;
 pub mod checkpoint;
 pub mod control_api;
 pub mod coordinator;
+pub mod daemon_log_layer;
 pub mod domain;
 pub mod family_actor;
 pub mod git_backend;
@@ -6986,6 +6987,7 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
                     .with_writer(std::io::stderr),
             )
             .with(crate::daemon::sentry_layer::SentryLayer)
+            .with(crate::daemon::daemon_log_layer::DaemonLogUploadLayer)
             .init();
     }
 

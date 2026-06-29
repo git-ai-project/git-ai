@@ -82,6 +82,7 @@ define_feature_flags!(
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = true,
     checkpoint_debug_log: checkpoint_debug_log, debug = false, release = false,
+    daemon_log_upload: daemon_log_upload, debug = true, release = true,
 );
 
 impl FeatureFlags {
@@ -135,6 +136,7 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(flags.daemon_log_upload);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -142,6 +144,7 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(flags.daemon_log_upload);
         }
     }
 
@@ -191,6 +194,7 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: false,
+            daemon_log_upload: true,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -198,6 +202,7 @@ mod tests {
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
         assert!(serialized.contains("checkpoint_debug_log"));
+        assert!(serialized.contains("daemon_log_upload"));
     }
 
     #[test]
@@ -207,12 +212,14 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: true,
+            daemon_log_upload: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
         assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
         assert_eq!(cloned.checkpoint_debug_log, flags.checkpoint_debug_log);
+        assert_eq!(cloned.daemon_log_upload, flags.daemon_log_upload);
     }
 
     #[test]
