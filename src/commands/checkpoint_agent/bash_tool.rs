@@ -5,7 +5,7 @@
 
 use crate::authorship::ignore::{
     default_ignore_patterns, load_git_ai_ignore_patterns_from_path,
-    load_linguist_generated_patterns_from_path,
+    load_linguist_generated_patterns_from_path, load_linguist_vendored_patterns_from_path,
 };
 use crate::authorship::working_log::AgentId;
 use crate::daemon::control_api::{BashSnapshotQueryResponse, ControlRequest};
@@ -474,10 +474,13 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
 
     // git-ai-specific patterns: same source of truth as non-bash checkpoints.
+    // Defaults first so later sources (`.git-ai-ignore`, linguist attributes) can
+    // re-include paths via `!` negation under GitignoreBuilder's last-match-wins.
     let shared_patterns: Vec<String> = default_ignore_patterns()
         .into_iter()
         .chain(load_git_ai_ignore_patterns_from_path(repo_root))
         .chain(load_linguist_generated_patterns_from_path(repo_root))
+        .chain(load_linguist_vendored_patterns_from_path(repo_root))
         .collect();
     for pattern in &shared_patterns {
         if let Err(e) = builder.add_line(None, pattern) {
