@@ -583,6 +583,27 @@ fn commit_tree_snapshot_for_files(
     Ok(snapshot)
 }
 
+/// Resolve the diff base for recovery so the diff is always bounded to the
+/// single commit being finalized.
+///
+/// Returns the immediate first parent of `commit_sha` when it can be resolved
+/// and differs from the supplied `parent_sha` (i.e. `parent_sha` is a far-behind
+/// ancestor, as on the daemon fast-forward `update-ref` path). Otherwise returns
+/// `None`, signalling the caller to keep using `parent_sha` unchanged — which is
+/// already the immediate parent in the normal and amend cases.
+fn immediate_parent_diff_base(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+) -> Option<String> {
+    let commit = repo.find_commit(commit_sha.to_string()).ok()?;
+    if commit.parent_count().ok()? == 0 {
+        return None;
+    }
+    let first_parent = commit.parent(0).ok()?.id();
+    (first_parent != parent_sha).then_some(first_parent)
+}
+
 fn recovery_committed_hunks(
     repo: &Repository,
     parent_sha: &str,
@@ -595,10 +616,21 @@ fn recovery_committed_hunks(
         );
     }
 
-    let diff_base = if parent_sha == "initial" {
+    // Recovery only attributes lines added by the commit being finalized, so the
+    // diff must be bounded to that single commit's immediate parent. The caller's
+    // `parent_sha` is normally the immediate parent already, but on the daemon's
+    // fast-forward `update-ref` path it is the *old branch tip* from before a
+    // `git pull` — potentially thousands of commits back. Diffing that full range
+    // buffers the entire history delta of `git diff` into memory (the 20GB+ leak
+    // in PD-23 / #1677). Resolving the immediate parent caps the diff to one
+    // commit while leaving the normal/uncheckpointed-recovery cases unchanged
+    // (there `parent_sha` already equals the immediate parent).
+    let immediate_parent = immediate_parent_diff_base(repo, parent_sha, commit_sha);
+    let diff_base = immediate_parent.as_deref().unwrap_or(parent_sha);
+    let diff_base = if diff_base == "initial" {
         "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     } else {
-        parent_sha
+        diff_base
     };
     let added_lines = repo.diff_added_lines(diff_base, commit_sha, None)?;
     Ok(added_lines
@@ -1118,6 +1150,62 @@ fn record_commit_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_recovery_committed_hunks_bounds_diff_to_immediate_parent() {
+        use crate::git::test_utils::TmpRepo;
+
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("base.txt", "base\n", false).unwrap();
+        // `old_tip` simulates the local branch tip from before a `git pull`.
+        let old_tip = repo.commit_all("old tip").unwrap();
+
+        // A long run of intervening commits, each touching a distinct file, as a
+        // fast-forward pull would drag in. Diffing old_tip..final across all of
+        // these is exactly the unbounded full-range diff PD-23 hit.
+        for i in 0..8 {
+            repo.write_file(
+                &format!("upstream_{i}.txt"),
+                &format!("upstream {i}\n"),
+                false,
+            )
+            .unwrap();
+            repo.commit_all(&format!("upstream commit {i}")).unwrap();
+        }
+
+        // The final (newly pulled) commit only changes `final.txt`.
+        repo.write_file("final.txt", "final change\n", false)
+            .unwrap();
+        let final_sha = repo.commit_all("final").unwrap();
+
+        let gitai = repo.gitai_repo();
+
+        // Passing the far-behind `old_tip` as parent (the daemon fast-forward
+        // update-ref path) must still only diff the final commit's own changes,
+        // not the entire old_tip..final range.
+        let hunks = recovery_committed_hunks(gitai, &old_tip, &final_sha, None).unwrap();
+        assert!(
+            hunks.contains_key("final.txt"),
+            "recovery must see the finalized commit's own changes"
+        );
+        for i in 0..8 {
+            assert!(
+                !hunks.contains_key(&format!("upstream_{i}.txt")),
+                "recovery diff must be bounded to the immediate parent, not the full pull range"
+            );
+        }
+
+        // The immediate-parent helper resolves the far-behind ancestor to the
+        // commit's real first parent, and returns None when already immediate.
+        assert!(immediate_parent_diff_base(gitai, &old_tip, &final_sha).is_some());
+        let real_parent = gitai
+            .find_commit(final_sha.clone())
+            .unwrap()
+            .parent(0)
+            .unwrap()
+            .id();
+        assert!(immediate_parent_diff_base(gitai, &real_parent, &final_sha).is_none());
+    }
 
     #[test]
     fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {
