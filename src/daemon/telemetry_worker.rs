@@ -248,6 +248,17 @@ impl DaemonTelemetryWorkerHandle {
         buffered.saturating_add(pending)
     }
 
+    /// Persist metrics directly from an existing blocking worker.
+    ///
+    /// Transcript sweeps can emit many batches in a tight loop. Routing those
+    /// through the async telemetry entrypoint creates one fire-and-forget
+    /// `spawn_blocking` task per batch, so a fast producer can retain many raw
+    /// transcript events while SQLite writes catch up. This path keeps the
+    /// producer coupled to the metrics DB write and bounds peak memory.
+    pub fn persist_metrics_blocking(&self, events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
+        store_metrics_in_db(events)
+    }
+
     /// Submit telemetry envelopes synchronously (best-effort, non-blocking).
     ///
     /// Used by the daemon process's own `observability::log_*()` calls which

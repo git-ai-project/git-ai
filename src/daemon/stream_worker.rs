@@ -1114,13 +1114,15 @@ impl StreamWorker {
                 })
                 .collect();
 
-            crate::observability::log_metrics(metric_events);
+            if let Err(e) = telemetry.persist_metrics_blocking(&metric_events) {
+                tracing::warn!(%e, "telemetry: failed to persist transcript metrics locally");
+            }
 
-            // Backpressure: if the telemetry buffer has accumulated too many
-            // events, poll briefly to let the 3-second flush cycle drain it.
+            // Backpressure: after synchronous local persistence, this mainly
+            // throttles when metrics upload is available and pending DB rows
+            // are accumulating faster than the flush loop can deliver them.
             // Short sleeps (~100ms) keep shutdown latency low since this runs
-            // inside spawn_blocking. Capped at ~4s to avoid blocking forever
-            // if the flush loop is stuck (API down, etc.).
+            // inside spawn_blocking. Capped at ~4s to avoid blocking forever.
             const BACKPRESSURE_THRESHOLD: usize = 5_000;
             const BACKPRESSURE_MAX_WAITS: usize = 40;
             for _ in 0..BACKPRESSURE_MAX_WAITS {
