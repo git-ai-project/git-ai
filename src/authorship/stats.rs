@@ -534,6 +534,20 @@ pub fn stats_for_commit_stats_from_hunks(
     let parent_count = commit_obj.parent_count()?;
     let is_merge_commit = parent_count > 1;
 
+    Ok(stats_for_commit_stats_from_hunks_with_merge_flag(
+        ignore_patterns,
+        hunks,
+        authorship_log,
+        is_merge_commit,
+    ))
+}
+
+pub(crate) fn stats_for_commit_stats_from_hunks_with_merge_flag(
+    ignore_patterns: &[String],
+    hunks: &[crate::commands::diff::DiffHunk],
+    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+    is_merge_commit: bool,
+) -> CommitStats {
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     let mut git_diff_added_lines = 0u32;
@@ -563,14 +577,14 @@ pub fn stats_for_commit_stats_from_hunks(
     let (ai_accepted, known_human_accepted, ai_accepted_by_tool) =
         accepted_lines_from_attestations(authorship_log, &added_lines_by_file, is_merge_commit);
 
-    Ok(stats_from_authorship_log(
+    stats_from_authorship_log(
         authorship_log,
         git_diff_added_lines,
         git_diff_deleted_lines,
         ai_accepted,
         known_human_accepted,
         &ai_accepted_by_tool,
-    ))
+    )
 }
 
 /// Get git diff statistics between commit and its parent
