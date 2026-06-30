@@ -82,6 +82,8 @@ define_feature_flags!(
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = true,
     checkpoint_debug_log: checkpoint_debug_log, debug = false, release = false,
+    daemon_log_upload: daemon_log_upload, debug = true, release = true,
+    rewrite_metrics_events: rewrite_metrics_events, debug = true, release = false,
 );
 
 impl FeatureFlags {
@@ -135,6 +137,8 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(flags.daemon_log_upload);
+            assert!(flags.rewrite_metrics_events);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -142,6 +146,8 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(flags.daemon_log_upload);
+            assert!(!flags.rewrite_metrics_events);
         }
     }
 
@@ -157,15 +163,31 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_metrics_events_file_override() {
+        let deserializable = DeserializableFeatureFlags {
+            rewrite_metrics_events: Some(false),
+            ..Default::default()
+        };
+
+        let flags = FeatureFlags::from_deserializable(deserializable);
+        assert!(!flags.rewrite_metrics_events);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn test_from_env_and_file_defaults_only() {
         unsafe {
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
+            std::env::remove_var("GIT_AI_REWRITE_METRICS_EVENTS");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
         let defaults = FeatureFlags::default();
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
+        assert_eq!(
+            flags.rewrite_metrics_events,
+            defaults.rewrite_metrics_events
+        );
     }
 
     #[test]
@@ -173,6 +195,7 @@ mod tests {
     fn test_from_env_and_file_file_overrides() {
         unsafe {
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
+            std::env::remove_var("GIT_AI_REWRITE_METRICS_EVENTS");
         }
 
         let file_flags = DeserializableFeatureFlags {
@@ -185,12 +208,34 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn test_rewrite_metrics_events_env_overrides_file() {
+        unsafe {
+            std::env::set_var("GIT_AI_REWRITE_METRICS_EVENTS", "true");
+        }
+
+        let file_flags = DeserializableFeatureFlags {
+            rewrite_metrics_events: Some(false),
+            ..Default::default()
+        };
+
+        let flags = FeatureFlags::from_env_and_file(Some(file_flags));
+        assert!(flags.rewrite_metrics_events);
+
+        unsafe {
+            std::env::remove_var("GIT_AI_REWRITE_METRICS_EVENTS");
+        }
+    }
+
+    #[test]
     fn test_serialization() {
         let flags = FeatureFlags {
             auth_keyring: true,
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: false,
+            daemon_log_upload: true,
+            rewrite_metrics_events: true,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -198,6 +243,8 @@ mod tests {
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
         assert!(serialized.contains("checkpoint_debug_log"));
+        assert!(serialized.contains("daemon_log_upload"));
+        assert!(serialized.contains("rewrite_metrics_events"));
     }
 
     #[test]
@@ -207,12 +254,16 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: true,
+            daemon_log_upload: true,
+            rewrite_metrics_events: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
         assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
         assert_eq!(cloned.checkpoint_debug_log, flags.checkpoint_debug_log);
+        assert_eq!(cloned.daemon_log_upload, flags.daemon_log_upload);
+        assert_eq!(cloned.rewrite_metrics_events, flags.rewrite_metrics_events);
     }
 
     #[test]

@@ -3,8 +3,14 @@
 //! Runs inside the daemon process using tokio. Accumulates telemetry envelopes
 //! and CAS payloads, then flushes them to their destinations every 3 seconds.
 
+use crate::api::logs::daemon_logs_upload_allowed;
 use crate::api::metrics::{MetricsUploadResponse, metrics_upload_allowed};
+use crate::api::types::{
+    DAEMON_LOGS_UPLOAD_VERSION, DaemonLogEvent, DaemonLogFieldValue, DaemonLogKind, DaemonLogLevel,
+    DaemonLogsUploadRequest,
+};
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
+use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::error::GitAiError;
@@ -19,9 +25,14 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
+const DAEMON_LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const MAX_DAEMON_LOG_EVENTS_PER_UPLOAD: usize = 1000;
+const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
 
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
+static DAEMON_LOG_UPLOAD_IN_FLIGHT: std::sync::OnceLock<Arc<AtomicBool>> =
+    std::sync::OnceLock::new();
 
 /// Accumulated telemetry events waiting to be flushed.
 struct TelemetryBuffer {
@@ -30,6 +41,7 @@ struct TelemetryBuffer {
     messages: Vec<MessageEvent>,
     metrics: Vec<MetricEvent>,
     cas_records: Vec<CasSyncPayload>,
+    daemon_logs: Vec<DaemonLogEvent>,
 }
 
 struct ErrorEvent {
@@ -61,6 +73,7 @@ impl TelemetryBuffer {
             messages: Vec::new(),
             metrics: Vec::new(),
             cas_records: Vec::new(),
+            daemon_logs: Vec::new(),
         }
     }
 
@@ -70,6 +83,7 @@ impl TelemetryBuffer {
             && self.messages.is_empty()
             && self.metrics.is_empty()
             && self.cas_records.is_empty()
+            && self.daemon_logs.is_empty()
     }
 
     fn ingest_envelopes(&mut self, envelopes: Vec<TelemetryEnvelope>) {
@@ -125,6 +139,27 @@ impl TelemetryBuffer {
         self.cas_records.extend(records);
     }
 
+    fn ingest_daemon_logs(&mut self, events: Vec<DaemonLogEvent>) {
+        self.daemon_logs.extend(events);
+        self.cap_daemon_logs();
+    }
+
+    fn requeue_failed_daemon_logs(&mut self, mut failed_events: Vec<DaemonLogEvent>) {
+        failed_events.append(&mut self.daemon_logs);
+        self.daemon_logs = failed_events;
+        self.cap_daemon_logs();
+    }
+
+    fn cap_daemon_logs(&mut self) {
+        let overflow = self
+            .daemon_logs
+            .len()
+            .saturating_sub(MAX_DAEMON_LOG_BUFFER_EVENTS);
+        if overflow > 0 {
+            self.daemon_logs.drain(0..overflow);
+        }
+    }
+
     fn take(&mut self) -> TelemetryBuffer {
         TelemetryBuffer {
             errors: std::mem::take(&mut self.errors),
@@ -132,6 +167,7 @@ impl TelemetryBuffer {
             messages: std::mem::take(&mut self.messages),
             metrics: std::mem::take(&mut self.metrics),
             cas_records: std::mem::take(&mut self.cas_records),
+            daemon_logs: std::mem::take(&mut self.daemon_logs),
         }
     }
 }
@@ -172,6 +208,14 @@ impl DaemonTelemetryWorkerHandle {
     /// Submit CAS records for batched upload.
     pub async fn submit_cas(&self, records: Vec<CasSyncPayload>) {
         self.buffer.lock().await.ingest_cas(records);
+    }
+
+    /// Submit daemon diagnostic events for batched upload.
+    pub async fn submit_daemon_logs(&self, events: Vec<DaemonLogEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        self.buffer.lock().await.ingest_daemon_logs(events);
     }
 
     /// Returns the current number of metrics waiting for upload.
@@ -231,6 +275,16 @@ impl DaemonTelemetryWorkerHandle {
     pub fn submit_cas_sync(&self, records: Vec<CasSyncPayload>) {
         if let Ok(mut buf) = self.buffer.try_lock() {
             buf.ingest_cas(records);
+        }
+    }
+
+    /// Submit daemon diagnostic events synchronously (best-effort, non-blocking).
+    pub fn submit_daemon_logs_sync(&self, events: Vec<DaemonLogEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        if let Ok(mut buf) = self.buffer.try_lock() {
+            buf.ingest_daemon_logs(events);
         }
     }
 }
@@ -307,6 +361,24 @@ pub fn submit_daemon_internal_cas(records: Vec<CasSyncPayload>) -> bool {
     }
 }
 
+/// Submit daemon diagnostic events from within the daemon process.
+/// Returns true if the handle was available and events were submitted.
+pub fn submit_daemon_internal_daemon_logs(events: Vec<DaemonLogEvent>) -> bool {
+    if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let handle = handle.clone();
+            runtime.spawn(async move {
+                handle.submit_daemon_logs(events).await;
+            });
+        } else {
+            handle.submit_daemon_logs_sync(events);
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// Spawn the telemetry worker task. Returns a handle for submitting events.
 ///
 /// The worker runs a flush loop every 3 seconds, sending accumulated events
@@ -316,11 +388,12 @@ pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
     let handle = DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
     };
+    let daemon_id = crate::uuid::generate_v4();
 
     spawn_metrics_metadata_backfill();
 
     tokio::spawn(async move {
-        telemetry_flush_loop(buffer).await;
+        telemetry_flush_loop(buffer, daemon_id).await;
     });
 
     handle
@@ -363,16 +436,31 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
     Ok(())
 }
 
-async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
+async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: String) {
     let mut ticker = interval(FLUSH_INTERVAL);
+    let started_at = std::time::Instant::now();
+    let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
     // The first tick completes immediately; skip it.
     ticker.tick().await;
 
     loop {
         ticker.tick().await;
 
+        let now = std::time::Instant::now();
+        let heartbeat = if now >= next_heartbeat_at && daemon_log_upload_enabled() {
+            while next_heartbeat_at <= now {
+                next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
+            }
+            Some(daemon_heartbeat_event(started_at.elapsed()))
+        } else {
+            None
+        };
+
         let snapshot = {
             let mut buf = buffer.lock().await;
+            if let Some(event) = heartbeat {
+                buf.ingest_daemon_logs(vec![event]);
+            }
             if buf.is_empty() {
                 None
             } else {
@@ -381,20 +469,31 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
         };
 
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
-        tokio::task::spawn_blocking(move || {
+        let daemon_id_for_flush = daemon_id.clone();
+        let requeue_daemon_logs = tokio::task::spawn_blocking(move || {
             if let Some(snapshot) = snapshot {
-                flush_telemetry_batch(snapshot);
+                flush_telemetry_batch(snapshot, &daemon_id_for_flush)
+            } else {
+                flush_pending_metrics();
+                Vec::new()
             }
-            flush_pending_metrics();
         })
         .await
         .unwrap_or_else(|e| {
             tracing::error!(%e, "telemetry flush task panicked");
+            Vec::new()
         });
+
+        if !requeue_daemon_logs.is_empty() {
+            buffer
+                .lock()
+                .await
+                .requeue_failed_daemon_logs(requeue_daemon_logs);
+        }
     }
 }
 
-fn flush_telemetry_batch(batch: TelemetryBuffer) {
+fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
 
@@ -424,6 +523,14 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 
     // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
     flush_notes();
+
+    flush_pending_metrics();
+
+    if batch.daemon_logs.is_empty() {
+        Vec::new()
+    } else {
+        dispatch_daemon_log_upload(batch.daemon_logs, daemon_id, &distinct_id)
+    }
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
@@ -677,6 +784,161 @@ fn current_unix_ts() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn daemon_log_upload_enabled() -> bool {
+    Config::fresh().get_feature_flags().daemon_log_upload
+}
+
+fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "uptime_seconds".to_string(),
+        DaemonLogFieldValue::from(uptime.as_secs()),
+    );
+    fields.insert(
+        "os".to_string(),
+        DaemonLogFieldValue::from(std::env::consts::OS),
+    );
+    fields.insert(
+        "arch".to_string(),
+        DaemonLogFieldValue::from(std::env::consts::ARCH),
+    );
+
+    DaemonLogEvent {
+        id: Some(crate::uuid::generate_v4()),
+        kind: DaemonLogKind::Heartbeat,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        level: DaemonLogLevel::Info,
+        target: Some("git_ai::daemon".to_string()),
+        message: "alive".to_string(),
+        fields,
+        repo_url: None,
+        git_ai_version: None,
+    }
+}
+
+fn daemon_log_upload_in_flight_flag() -> Arc<AtomicBool> {
+    DAEMON_LOG_UPLOAD_IN_FLIGHT
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
+
+struct DaemonLogUploadInFlightGuard {
+    in_flight: Arc<AtomicBool>,
+}
+
+impl Drop for DaemonLogUploadInFlightGuard {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
+fn dispatch_daemon_log_upload(
+    events: Vec<DaemonLogEvent>,
+    daemon_id: &str,
+    install_id: &str,
+) -> Vec<DaemonLogEvent> {
+    let daemon_id = daemon_id.to_string();
+    let install_id = install_id.to_string();
+
+    dispatch_daemon_log_upload_with(events, daemon_log_upload_in_flight_flag(), move |events| {
+        let failed_events = flush_daemon_logs(events, &daemon_id, &install_id);
+        if failed_events > 0 {
+            tracing::debug!(
+                failed_events,
+                "daemon log upload failed after fire-and-forget dispatch"
+            );
+        }
+    })
+}
+
+fn dispatch_daemon_log_upload_with<Upload>(
+    events: Vec<DaemonLogEvent>,
+    in_flight: Arc<AtomicBool>,
+    upload: Upload,
+) -> Vec<DaemonLogEvent>
+where
+    Upload: FnOnce(Vec<DaemonLogEvent>) + Send + 'static,
+{
+    if events.is_empty() {
+        return Vec::new();
+    }
+
+    if in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return events;
+    }
+
+    let in_flight_for_task = in_flight.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("git-ai-daemon-log-upload".to_string())
+        .spawn(move || {
+            let _guard = DaemonLogUploadInFlightGuard {
+                in_flight: in_flight_for_task,
+            };
+            upload(events);
+        });
+
+    if let Err(error) = spawn_result {
+        in_flight.store(false, Ordering::Release);
+        tracing::debug!(%error, "failed to spawn daemon log upload task");
+    }
+
+    Vec::new()
+}
+
+fn flush_daemon_logs(events: Vec<DaemonLogEvent>, daemon_id: &str, install_id: &str) -> usize {
+    if !daemon_log_upload_enabled() {
+        return 0;
+    }
+
+    let context = ApiContext::new(None);
+    let api_base_url = context.base_url.clone();
+    let client = ApiClient::new(context);
+
+    if !daemon_logs_upload_allowed(&api_base_url, &client) {
+        // These diagnostics are intentionally best-effort and only live in memory.
+        // If the current API/auth setup cannot upload, do not keep re-flushing the
+        // same buffered events every few seconds.
+        return 0;
+    }
+
+    upload_daemon_log_chunk(events, daemon_id, install_id, |request| {
+        client.upload_daemon_logs(request).map(|_| ())
+    })
+}
+
+fn upload_daemon_log_chunk<Upload>(
+    events: Vec<DaemonLogEvent>,
+    daemon_id: &str,
+    install_id: &str,
+    mut upload: Upload,
+) -> usize
+where
+    Upload: FnMut(&DaemonLogsUploadRequest) -> Result<(), GitAiError>,
+{
+    let Some(chunk) = events.chunks(MAX_DAEMON_LOG_EVENTS_PER_UPLOAD).next() else {
+        return 0;
+    };
+
+    let mut failed_events = events.len().saturating_sub(chunk.len());
+    let request = DaemonLogsUploadRequest {
+        version: DAEMON_LOGS_UPLOAD_VERSION,
+        git_ai_version: Some(GIT_AI_VERSION.to_string()),
+        daemon_id: Some(daemon_id.to_string()),
+        install_id: Some(install_id.to_string()),
+        repo_url: None,
+        events: chunk.to_vec(),
+    };
+
+    if upload(&request).is_err() {
+        failed_events += chunk.len();
+    }
+
+    failed_events
 }
 
 fn flush_sentry_and_posthog(
@@ -1093,6 +1355,7 @@ mod tests {
     use crate::api::metrics::MetricsUploadError;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     fn event_json(ts: u32) -> String {
         format!(r#"{{"t":{ts},"e":1,"v":{{}},"a":{{}}}}"#)
@@ -1636,5 +1899,151 @@ mod tests {
         assert_eq!(db.borrow().count().unwrap(), 1);
         let history = db.borrow().get_metric_history(0, None, &[1]).unwrap();
         assert!(history.iter().any(|record| record.ts == old_ts));
+    }
+
+    fn sample_daemon_log_event(message: impl Into<String>) -> DaemonLogEvent {
+        DaemonLogEvent {
+            id: Some(crate::uuid::generate_v4()),
+            kind: DaemonLogKind::Log,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: DaemonLogLevel::Info,
+            target: Some("git_ai::test".to_string()),
+            message: message.into(),
+            fields: BTreeMap::new(),
+            repo_url: None,
+            git_ai_version: None,
+        }
+    }
+
+    #[test]
+    fn upload_daemon_log_chunk_counts_events_past_per_upload_cap() {
+        let events = (0..MAX_DAEMON_LOG_EVENTS_PER_UPLOAD + 2)
+            .map(|index| sample_daemon_log_event(index.to_string()))
+            .collect::<Vec<_>>();
+        let uploaded_batch_sizes = Rc::new(RefCell::new(Vec::new()));
+
+        let failed_events = upload_daemon_log_chunk(events, "daemon-id", "install-id", {
+            let uploaded_batch_sizes = Rc::clone(&uploaded_batch_sizes);
+            move |request| {
+                uploaded_batch_sizes.borrow_mut().push(request.events.len());
+                Ok(())
+            }
+        });
+
+        assert_eq!(
+            *uploaded_batch_sizes.borrow(),
+            vec![MAX_DAEMON_LOG_EVENTS_PER_UPLOAD]
+        );
+        assert_eq!(failed_events, 2);
+    }
+
+    #[test]
+    fn daemon_log_dispatch_requeues_when_upload_is_already_in_flight() {
+        let in_flight = Arc::new(AtomicBool::new(true));
+        let events = vec![sample_daemon_log_event("queued")];
+
+        let retry_events = dispatch_daemon_log_upload_with(events, in_flight, |_events| {
+            panic!("upload task should not run while another upload is running")
+        });
+
+        assert_eq!(retry_events.len(), 1);
+        assert_eq!(retry_events[0].message, "queued");
+    }
+
+    #[test]
+    fn daemon_log_dispatch_does_not_wait_for_upload_task() {
+        let (upload_started_tx, upload_started_rx) = std::sync::mpsc::channel();
+        let (release_upload_tx, release_upload_rx) = std::sync::mpsc::channel();
+        let in_flight = Arc::new(AtomicBool::new(false));
+
+        let started_at = std::time::Instant::now();
+        let retry_events = dispatch_daemon_log_upload_with(
+            vec![sample_daemon_log_event("blocked")],
+            Arc::clone(&in_flight),
+            move |_events| {
+                upload_started_tx.send(()).unwrap();
+                let _ = release_upload_rx.recv_timeout(Duration::from_secs(2));
+            },
+        );
+
+        assert!(retry_events.is_empty());
+        assert!(
+            started_at.elapsed() < Duration::from_millis(500),
+            "dispatch should return promptly while daemon log upload is blocked"
+        );
+
+        upload_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("upload task should start");
+        assert!(in_flight.load(Ordering::Acquire));
+
+        release_upload_tx.send(()).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while in_flight.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!in_flight.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn telemetry_buffer_caps_daemon_logs_to_latest_events() {
+        let mut buffer = TelemetryBuffer::new();
+        let total = MAX_DAEMON_LOG_BUFFER_EVENTS + 2;
+        let events = (0..total)
+            .map(|index| sample_daemon_log_event(index.to_string()))
+            .collect();
+
+        buffer.ingest_daemon_logs(events);
+
+        assert_eq!(buffer.daemon_logs.len(), MAX_DAEMON_LOG_BUFFER_EVENTS);
+        assert_eq!(buffer.daemon_logs.first().unwrap().message, "2");
+        assert_eq!(
+            buffer.daemon_logs.last().unwrap().message,
+            (total - 1).to_string()
+        );
+    }
+
+    #[test]
+    fn telemetry_buffer_requeues_failed_daemon_logs_without_dropping_newer_events() {
+        let mut buffer = TelemetryBuffer::new();
+        buffer.ingest_daemon_logs(vec![
+            sample_daemon_log_event("new-1"),
+            sample_daemon_log_event("new-2"),
+        ]);
+
+        let failed_events = (0..MAX_DAEMON_LOG_BUFFER_EVENTS)
+            .map(|index| sample_daemon_log_event(format!("old-{index}")))
+            .collect();
+
+        buffer.requeue_failed_daemon_logs(failed_events);
+
+        assert_eq!(buffer.daemon_logs.len(), MAX_DAEMON_LOG_BUFFER_EVENTS);
+        assert_eq!(buffer.daemon_logs.first().unwrap().message, "old-2");
+        assert_eq!(
+            buffer.daemon_logs[MAX_DAEMON_LOG_BUFFER_EVENTS - 2].message,
+            "new-1"
+        );
+        assert_eq!(
+            buffer.daemon_logs[MAX_DAEMON_LOG_BUFFER_EVENTS - 1].message,
+            "new-2"
+        );
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_uses_upload_contract_shape() {
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900));
+
+        assert!(event.id.is_some());
+        assert_eq!(event.kind, DaemonLogKind::Heartbeat);
+        assert_eq!(event.level, DaemonLogLevel::Info);
+        assert_eq!(event.target.as_deref(), Some("git_ai::daemon"));
+        assert_eq!(event.message, "alive");
+        assert_eq!(
+            event.fields.get("uptime_seconds"),
+            Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert!(event.fields.contains_key("os"));
+        assert!(event.fields.contains_key("arch"));
     }
 }
