@@ -472,15 +472,35 @@ fn flush_pending_metrics() {
     }
 }
 
+/// Maximum serialized JSON size (in bytes) for a single metric event to be stored in the DB.
+/// Events exceeding this threshold are dropped to prevent unbounded metrics-db growth.
+/// Typical useful telemetry events are 1-10KB; large events (50KB+) are raw transcript
+/// entries that balloon the DB to multiple GB without providing proportional value.
+const MAX_METRIC_EVENT_JSON_BYTES: usize = 256 * 1024; // 256KB
+
 fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
     if events.is_empty() {
         return Ok(Vec::new());
     }
 
-    let event_jsons: Vec<String> = events
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<_, _>>()?;
+    let mut event_jsons: Vec<String> = Vec::with_capacity(events.len());
+    let mut skipped = 0usize;
+    for event in events {
+        let json = serde_json::to_string(event)?;
+        if json.len() > MAX_METRIC_EVENT_JSON_BYTES {
+            skipped += 1;
+            continue;
+        }
+        event_jsons.push(json);
+    }
+
+    if skipped > 0 {
+        tracing::debug!(
+            skipped,
+            threshold_kb = MAX_METRIC_EVENT_JSON_BYTES / 1024,
+            "metrics: skipped oversized events"
+        );
+    }
 
     if event_jsons.is_empty() {
         return Ok(Vec::new());
