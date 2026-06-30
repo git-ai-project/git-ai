@@ -474,12 +474,30 @@ fn flush_pending_metrics() {
 
 /// Maximum serialized JSON size (in bytes) for a single metric event to be stored in the DB.
 /// Events exceeding this threshold are dropped to prevent unbounded metrics-db growth.
-/// Typical useful telemetry events are 1-10KB; large events (50KB+) are raw transcript
+/// Typical useful telemetry events are 1-10KB; large events are raw transcript
 /// entries that balloon the DB to multiple GB without providing proportional value.
-const MAX_METRIC_EVENT_JSON_BYTES: usize = 256 * 1024; // 256KB
+const MAX_METRIC_EVENT_JSON_BYTES: usize = 64 * 1024; // 64KB
+
+/// Maximum metrics-db file size (in bytes) before new inserts are skipped.
+/// Prevents unbounded disk growth when metrics upload is unavailable.
+const MAX_METRICS_DB_FILE_BYTES: u64 = 512 * 1024 * 1024; // 512MB
 
 fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
     if events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Check DB file size before inserting — skip if over budget.
+    if let Ok(db_path) = MetricsDatabase::db_path()
+        && let Ok(meta) = std::fs::metadata(&db_path)
+        && meta.len() > MAX_METRICS_DB_FILE_BYTES
+    {
+        tracing::debug!(
+            db_size_mb = meta.len() / (1024 * 1024),
+            limit_mb = MAX_METRICS_DB_FILE_BYTES / (1024 * 1024),
+            events = events.len(),
+            "metrics: DB size over budget, skipping insert"
+        );
         return Ok(Vec::new());
     }
 

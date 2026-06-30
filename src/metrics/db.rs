@@ -230,6 +230,11 @@ impl MetricsDatabase {
         Ok(db)
     }
 
+    /// Get database path (public accessor for size checks, etc.)
+    pub fn db_path() -> Result<PathBuf, GitAiError> {
+        Self::database_path()
+    }
+
     /// Get database path: ~/.git-ai/internal/metrics-db
     fn database_path() -> Result<PathBuf, GitAiError> {
         // Allow test override via environment variable
