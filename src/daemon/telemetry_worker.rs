@@ -31,6 +31,15 @@ const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
 
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Cooldown period after a metrics upload failure before retrying.
+/// Prevents repeated 30s-timeout attempts that hold large batches in memory.
+const METRICS_UPLOAD_FAILURE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+/// Timestamp (seconds since UNIX epoch) of the last metrics upload failure.
+/// When non-zero, upload attempts are skipped until the cooldown expires.
+static METRICS_UPLOAD_LAST_FAILURE_AT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 static DAEMON_LOG_UPLOAD_IN_FLIGHT: std::sync::OnceLock<Arc<AtomicBool>> =
     std::sync::OnceLock::new();
 
@@ -550,7 +559,24 @@ fn flush_metrics(events: &[MetricEvent]) {
     let client = ApiClient::new(context);
 
     let should_upload = metrics_upload_allowed(&api_base_url, &client);
-    METRICS_UPLOAD_AVAILABLE.store(should_upload, Ordering::Relaxed);
+
+    // Respect the failure cooldown: don't attempt upload if a recent failure
+    // indicates the server is unreachable.
+    let in_cooldown = {
+        let last_failure = METRICS_UPLOAD_LAST_FAILURE_AT.load(Ordering::Relaxed);
+        if last_failure > 0 {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            now_secs.saturating_sub(last_failure) < METRICS_UPLOAD_FAILURE_COOLDOWN.as_secs()
+        } else {
+            false
+        }
+    };
+
+    let attempt_upload = should_upload && !in_cooldown;
+    METRICS_UPLOAD_AVAILABLE.store(attempt_upload, Ordering::Relaxed);
 
     let mut upload_failed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -561,12 +587,20 @@ fn flush_metrics(events: &[MetricEvent]) {
             continue;
         }
 
-        if should_upload && !upload_failed && std::time::Instant::now() < deadline {
+        if attempt_upload && !upload_failed && std::time::Instant::now() < deadline {
             match flush_pending_metrics_from_db(&client, deadline) {
-                Ok(_) => {}
+                Ok(_) => {
+                    METRICS_UPLOAD_LAST_FAILURE_AT.store(0, Ordering::Relaxed);
+                }
                 Err(e) => {
                     tracing::warn!(%e, "telemetry: failed to upload pending metrics");
                     upload_failed = true;
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    METRICS_UPLOAD_LAST_FAILURE_AT.store(now_secs, Ordering::Relaxed);
+                    METRICS_UPLOAD_AVAILABLE.store(false, Ordering::Relaxed);
                 }
             }
         }
@@ -579,14 +613,45 @@ fn flush_pending_metrics() {
     let client = ApiClient::new(context);
 
     let should_upload = metrics_upload_allowed(&api_base_url, &client);
-    METRICS_UPLOAD_AVAILABLE.store(should_upload, Ordering::Relaxed);
     if !should_upload {
+        METRICS_UPLOAD_AVAILABLE.store(false, Ordering::Relaxed);
         return;
     }
 
+    // Skip upload attempts during cooldown after a failure. This prevents
+    // repeated 30s-timeout HTTP requests that hold large event batches in
+    // memory while the server is unreachable.
+    let last_failure = METRICS_UPLOAD_LAST_FAILURE_AT.load(Ordering::Relaxed);
+    if last_failure > 0 {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now_secs.saturating_sub(last_failure) < METRICS_UPLOAD_FAILURE_COOLDOWN.as_secs() {
+            // Still in cooldown — report upload as unavailable so backpressure
+            // doesn't count pending DB rows that can't be drained.
+            METRICS_UPLOAD_AVAILABLE.store(false, Ordering::Relaxed);
+            return;
+        }
+    }
+
+    METRICS_UPLOAD_AVAILABLE.store(true, Ordering::Relaxed);
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    if let Err(e) = flush_pending_metrics_from_db(&client, deadline) {
-        tracing::warn!(%e, "telemetry: failed to upload pending metrics");
+    match flush_pending_metrics_from_db(&client, deadline) {
+        Ok(_) => {
+            // Delivery succeeded — clear any prior failure state.
+            METRICS_UPLOAD_LAST_FAILURE_AT.store(0, Ordering::Relaxed);
+        }
+        Err(e) => {
+            tracing::warn!(%e, "telemetry: failed to upload pending metrics");
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            METRICS_UPLOAD_LAST_FAILURE_AT.store(now_secs, Ordering::Relaxed);
+            METRICS_UPLOAD_AVAILABLE.store(false, Ordering::Relaxed);
+        }
     }
 }
 
