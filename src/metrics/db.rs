@@ -1349,7 +1349,7 @@ fn truncate_oversized_event_json(event_json: &str) -> std::borrow::Cow<'_, str> 
     let mut truncated_any = false;
     if let Some(values) = value.get_mut("v").and_then(Value::as_object_mut) {
         for entry in values.values_mut() {
-            truncate_heavy_strings_in_value(entry, per_field_budget, &mut truncated_any);
+            truncated_any |= truncate_heavy_strings_in_value(entry, per_field_budget);
         }
     }
 
@@ -1368,7 +1368,12 @@ fn truncate_oversized_event_json(event_json: &str) -> std::borrow::Cow<'_, str> 
 /// and the enclosing object is flagged with [`TRUNCATED_CONTENT_MARKER`]. Object
 /// keys and numeric/boolean fields (token counts, model names, ids) are left
 /// intact.
-fn truncate_heavy_strings_in_value(value: &mut Value, budget: usize, truncated_any: &mut bool) {
+///
+/// Returns `true` when this subtree had at least one string truncated. Each
+/// object is marked based on whether *its own* descendants were truncated, so
+/// sibling objects are flagged independently (a shared mutable flag would only
+/// mark the first truncated sibling — see PD-23 / #1697 review).
+fn truncate_heavy_strings_in_value(value: &mut Value, budget: usize) -> bool {
     match value {
         Value::String(text) if text.len() > budget => {
             let mut end = budget;
@@ -1376,27 +1381,26 @@ fn truncate_heavy_strings_in_value(value: &mut Value, budget: usize, truncated_a
                 end -= 1;
             }
             text.truncate(end);
-            *truncated_any = true;
+            true
         }
         Value::Array(items) => {
+            let mut truncated = false;
             for item in items.iter_mut() {
-                truncate_heavy_strings_in_value(item, budget, truncated_any);
+                truncated |= truncate_heavy_strings_in_value(item, budget);
             }
+            truncated
         }
         Value::Object(map) => {
-            let mut marked = false;
+            let mut truncated = false;
             for child in map.values_mut() {
-                let before = *truncated_any;
-                truncate_heavy_strings_in_value(child, budget, truncated_any);
-                if *truncated_any && !before {
-                    marked = true;
-                }
+                truncated |= truncate_heavy_strings_in_value(child, budget);
             }
-            if marked {
+            if truncated {
                 map.insert(TRUNCATED_CONTENT_MARKER.to_string(), Value::Bool(true));
             }
+            truncated
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -3012,6 +3016,34 @@ mod tests {
             metric_metadata_rows(&db),
             vec![(Some(event_ts as i64), Some(5))]
         );
+    }
+
+    #[test]
+    fn test_truncate_marks_every_truncated_sibling_object() {
+        // Two sibling entries under "v", each an object with an oversized string.
+        // Both must receive the truncation marker — a shared monotonic flag would
+        // only mark the first one (PD-23 / #1697 review regression).
+        let budget = 8;
+        let mut value = serde_json::json!({
+            "0": {"content": "x".repeat(100)},
+            "1": {"content": "y".repeat(100)},
+        });
+
+        let truncated = truncate_heavy_strings_in_value(&mut value, budget);
+        assert!(truncated, "truncation should be reported for the subtree");
+
+        for key in ["0", "1"] {
+            let entry = value.get(key).and_then(Value::as_object).unwrap();
+            assert_eq!(
+                entry.get(TRUNCATED_CONTENT_MARKER),
+                Some(&Value::Bool(true)),
+                "sibling object {key} should be flagged as truncated"
+            );
+            assert!(
+                entry.get("content").and_then(Value::as_str).unwrap().len() <= budget,
+                "sibling object {key} content should be truncated to budget"
+            );
+        }
     }
 
     #[test]
