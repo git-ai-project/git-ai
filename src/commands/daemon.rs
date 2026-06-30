@@ -106,6 +106,17 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
         return Ok(config);
     }
 
+    if let Some(restriction) =
+        crate::daemon::sandbox::detect_security_sandbox_home_restriction(&config)
+    {
+        crate::daemon::sandbox::log_security_sandbox_home_restriction(
+            "daemon_start_attached",
+            &config,
+            &restriction,
+        );
+        return Err(restriction.user_message());
+    }
+
     remove_stale_daemon_files(&config);
 
     if daemon_startup_is_blocked(&config) {
@@ -308,6 +319,17 @@ fn start_daemon_detached_with_config(
 ) -> Result<DaemonConfig, String> {
     if daemon_is_up(&config) {
         return Ok(config);
+    }
+
+    if let Some(restriction) =
+        crate::daemon::sandbox::detect_security_sandbox_home_restriction(&config)
+    {
+        crate::daemon::sandbox::log_security_sandbox_home_restriction(
+            "daemon_autostart",
+            &config,
+            &restriction,
+        );
+        return Err(restriction.user_message());
     }
 
     remove_stale_daemon_files(&config);
