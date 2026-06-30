@@ -20,6 +20,10 @@ const SCHEMA_VERSION: usize = 4;
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
+/// Maximum serialized JSON size for a metric row retained locally.
+pub(crate) const MAX_METRIC_EVENT_JSON_BYTES: usize = 64 * 1024;
+/// Maximum metrics DB size before best-effort writers skip new rows.
+pub(crate) const MAX_METRICS_DB_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
 /// Database migrations - each migration upgrades the schema by one version
@@ -228,6 +232,10 @@ impl MetricsDatabase {
         db.initialize_schema()?;
 
         Ok(db)
+    }
+
+    pub(crate) fn db_path() -> Result<PathBuf, GitAiError> {
+        Self::database_path()
     }
 
     /// Get database path: ~/.git-ai/internal/metrics-db
@@ -542,6 +550,8 @@ impl MetricsDatabase {
             return Ok(Vec::new());
         }
 
+        self.prune_oversized_metric_rows()?;
+
         let now = current_unix_ts();
         self.release_stale_processing_locks(now)?;
 
@@ -829,6 +839,8 @@ impl MetricsDatabase {
     /// rows cannot be aged by event timestamp, so delivered malformed rows fall back to
     /// `delivered_ts`.
     fn prune_old_metrics_if_due(&mut self) -> Result<(), GitAiError> {
+        self.prune_oversized_metric_rows()?;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -870,9 +882,11 @@ impl MetricsDatabase {
 
     fn old_metric_row_ids(&self, cutoff: u64) -> Result<Vec<i64>, GitAiError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_json, event_ts, delivered_ts FROM metrics ORDER BY id ASC",
+            "SELECT id, event_json, event_ts, delivered_ts FROM metrics \
+             WHERE LENGTH(event_json) <= ?1 \
+             ORDER BY id ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![MAX_METRIC_EVENT_JSON_BYTES as i64], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -890,6 +904,14 @@ impl MetricsDatabase {
         }
 
         Ok(ids)
+    }
+
+    fn prune_oversized_metric_rows(&mut self) -> Result<usize, GitAiError> {
+        let deleted = self.conn.execute(
+            "DELETE FROM metrics WHERE LENGTH(event_json) > ?1",
+            params![MAX_METRIC_EVENT_JSON_BYTES as i64],
+        )?;
+        Ok(deleted)
     }
 
     /// Get count of pending metrics.
@@ -913,16 +935,22 @@ impl MetricsDatabase {
         repo_filter: Option<&str>,
         event_ids: &[u16],
     ) -> Result<Vec<MetricHistoryRecord>, GitAiError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT event_json, event_ts, event_kind FROM metrics WHERE event_ts IS NULL OR event_ts >= ?1 ORDER BY id ASC")?;
-        let rows = stmt.query_map(params![since_ts as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        })?;
+        let mut stmt = self.conn.prepare(
+            "SELECT event_json, event_ts, event_kind FROM metrics \
+                 WHERE (event_ts IS NULL OR event_ts >= ?1) \
+                   AND LENGTH(event_json) <= ?2 \
+                 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![since_ts as i64, MAX_METRIC_EVENT_JSON_BYTES as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
 
         let mut records = Vec::new();
         for row in rows {
@@ -1000,6 +1028,7 @@ impl MetricsDatabase {
               AND tool != 'mock_ai'
               AND external_session_id IS NOT NULL
               AND external_session_id != ''
+              AND LENGTH(event_json) <= ?4
             ORDER BY id ASC
             "#,
         )?;
@@ -1007,7 +1036,8 @@ impl MetricsDatabase {
             params![
                 MetricEventId::SessionEvent as i64,
                 min_event_ts as i64,
-                max_event_ts as i64
+                max_event_ts as i64,
+                MAX_METRIC_EVENT_JSON_BYTES as i64
             ],
             |row| {
                 Ok((
@@ -1105,15 +1135,18 @@ impl MetricsDatabase {
         }
 
         let rows = {
+            self.prune_oversized_metric_rows()?;
             let mut stmt = self.conn.prepare(
                 "SELECT id, event_json FROM metrics \
                  WHERE id > ?1 AND (event_ts IS NULL OR event_kind IS NULL) \
+                   AND LENGTH(event_json) <= ?3 \
                  ORDER BY id ASC \
                  LIMIT ?2",
             )?;
-            let mapped = stmt.query_map(params![after_id, limit as i64], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?;
+            let mapped = stmt.query_map(
+                params![after_id, limit as i64, MAX_METRIC_EVENT_JSON_BYTES as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
 
@@ -2215,6 +2248,39 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_prunes_oversized_legacy_rows_before_hydration() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts = days_ago(1);
+        let oversized_payload = "x".repeat(MAX_METRIC_EVENT_JSON_BYTES);
+        let oversized = format!(
+            r#"{{"t":{ts},"e":5,"v":{{"0":{{"payload":"{oversized_payload}"}}}},"a":{{}}}}"#
+        );
+
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1), (?2)",
+                params![event_json(ts), oversized],
+            )
+            .unwrap();
+
+        let summary = db.backfill_event_metadata_batch(100).unwrap();
+
+        assert_eq!(
+            summary,
+            MetricMetadataBackfillSummary {
+                scanned: 1,
+                updated: 1,
+            }
+        );
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(metric_metadata_rows(&db), vec![(Some(ts as i64), Some(1))]);
+    }
+
+    #[test]
     fn test_backfill_event_metadata_batch_after_advances_cursor() {
         let (mut db, _temp_dir) = create_test_db();
         let ts1 = days_ago(3);
@@ -2289,6 +2355,32 @@ mod tests {
             .unwrap();
         assert_eq!(db.count().unwrap(), 1);
         assert_eq!(db.count_retryable().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_dequeue_pending_batch_prunes_oversized_legacy_rows() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts = days_ago(1);
+        let oversized_payload = "x".repeat(MAX_METRIC_EVENT_JSON_BYTES);
+        let oversized = format!(
+            r#"{{"t":{ts},"e":5,"v":{{"0":{{"payload":"{oversized_payload}"}}}},"a":{{}}}}"#
+        );
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1), (?2)",
+                params![event_json(ts), oversized],
+            )
+            .unwrap();
+
+        let batch = db.dequeue_pending_batch(10).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].event_json, event_json(ts));
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
     }
 
     #[test]

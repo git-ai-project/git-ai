@@ -188,6 +188,7 @@ impl Agent for ClaudeAgent {
         let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
+        let mut batch_bytes = 0usize;
 
         let mut line = String::new();
         loop {
@@ -202,6 +203,7 @@ impl Agent for ClaudeAgent {
                 crate::streams::types::JsonlLineState::Complete(bytes_read) => {
                     line_number += 1;
                     current_offset += bytes_read as u64;
+                    batch_bytes = batch_bytes.saturating_add(bytes_read);
                 }
             }
 
@@ -223,7 +225,11 @@ impl Agent for ClaudeAgent {
             };
 
             events.push(entry);
-            if events.len() >= batch_limit {
+            if crate::streams::types::jsonl_batch_limit_reached(
+                events.len(),
+                batch_limit,
+                batch_bytes,
+            ) {
                 break;
             }
         }
@@ -465,6 +471,41 @@ mod tests {
         assert_eq!(events.len(), 5);
         let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
         assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_jsonl_batches_are_bounded_by_raw_bytes() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        let payload = "x".repeat(crate::streams::types::MAX_JSONL_BATCH_BYTES / 3);
+        for i in 0..4 {
+            writeln!(
+                file,
+                r#"{{"type":"user","id":{},"message":{{"content":"{}"}}}}"#,
+                i, payload
+            )
+            .unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = ClaudeAgent::with_batch_size(1000);
+        let batch = agent
+            .read_incremental(
+                file.path(),
+                Box::new(ByteOffsetWatermark::new(0)),
+                "test-session",
+            )
+            .unwrap();
+
+        assert!(!batch.events.is_empty());
+        assert!(batch.events.len() < 4);
+
+        let next_batch = agent
+            .read_incremental(file.path(), batch.new_watermark, "test-session")
+            .unwrap();
+        assert!(!next_batch.events.is_empty());
     }
 
     #[test]

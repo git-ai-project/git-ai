@@ -14,11 +14,15 @@ use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::error::GitAiError;
-use crate::metrics::db::{METADATA_BACKFILL_BATCH_SIZE, MetricRecord, MetricsDatabase};
+use crate::metrics::db::{
+    MAX_METRIC_EVENT_JSON_BYTES, MAX_METRICS_DB_FILE_BYTES, METADATA_BACKFILL_BATCH_SIZE,
+    MetricRecord, MetricsDatabase,
+};
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
@@ -584,10 +588,28 @@ fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
         return Ok(Vec::new());
     }
 
-    let event_jsons: Vec<String> = events
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<_, _>>()?;
+    if let Ok(db_path) = MetricsDatabase::db_path() {
+        let db_size = sqlite_db_total_size(&db_path);
+        if db_size > MAX_METRICS_DB_FILE_BYTES {
+            tracing::debug!(
+                db_size_mb = db_size / (1024 * 1024),
+                limit_mb = MAX_METRICS_DB_FILE_BYTES / (1024 * 1024),
+                events = events.len(),
+                "metrics: DB size over budget, skipping insert"
+            );
+            return Ok(Vec::new());
+        }
+    }
+
+    let (event_jsons, skipped) = serialize_metric_events_under_size(events)?;
+
+    if skipped > 0 {
+        tracing::debug!(
+            skipped,
+            threshold_kb = MAX_METRIC_EVENT_JSON_BYTES / 1024,
+            "metrics: skipped oversized events"
+        );
+    }
 
     if event_jsons.is_empty() {
         return Ok(Vec::new());
@@ -598,6 +620,37 @@ fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
         .lock()
         .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
     db_lock.insert_events(&event_jsons)
+}
+
+fn sqlite_db_total_size(path: &Path) -> u64 {
+    sqlite_db_paths(path)
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok().map(|meta| meta.len()))
+        .sum()
+}
+
+fn sqlite_db_paths(path: &Path) -> [std::path::PathBuf; 3] {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    [path.to_path_buf(), wal.into(), shm.into()]
+}
+
+fn serialize_metric_events_under_size(
+    events: &[MetricEvent],
+) -> Result<(Vec<String>, usize), GitAiError> {
+    let mut event_jsons = Vec::with_capacity(events.len());
+    let mut skipped = 0usize;
+    for event in events {
+        let json = serde_json::to_string(event)?;
+        if json.len() > MAX_METRIC_EVENT_JSON_BYTES {
+            skipped += 1;
+            continue;
+        }
+        event_jsons.push(json);
+    }
+    Ok((event_jsons, skipped))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1379,6 +1432,45 @@ mod tests {
             level: "info".to_string(),
             context: None,
         }
+    }
+
+    fn metric_event_with_payload(payload_len: usize) -> MetricEvent {
+        let mut values = std::collections::HashMap::new();
+        values.insert(
+            "0".to_string(),
+            serde_json::Value::String("x".repeat(payload_len)),
+        );
+        MetricEvent {
+            timestamp: now_ts(),
+            event_id: crate::metrics::types::MetricEventId::SessionEvent as u16,
+            values,
+            attrs: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn serialize_metric_events_under_size_skips_oversized_events() {
+        let events = vec![
+            metric_event_with_payload(64),
+            metric_event_with_payload(MAX_METRIC_EVENT_JSON_BYTES),
+        ];
+
+        let (jsons, skipped) = serialize_metric_events_under_size(&events).unwrap();
+
+        assert_eq!(jsons.len(), 1);
+        assert_eq!(skipped, 1);
+        assert!(jsons[0].contains("\"e\":5"));
+    }
+
+    #[test]
+    fn sqlite_db_total_size_includes_wal_and_shm_files() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("metrics-db");
+        std::fs::write(&path, vec![0; 10]).unwrap();
+        std::fs::write(path.with_file_name("metrics-db-wal"), vec![0; 20]).unwrap();
+        std::fs::write(path.with_file_name("metrics-db-shm"), vec![0; 30]).unwrap();
+
+        assert_eq!(sqlite_db_total_size(&path), 60);
     }
 
     #[tokio::test]

@@ -3,6 +3,9 @@
 use std::io::BufRead;
 use std::time::Duration;
 
+/// Maximum raw JSONL bytes to accumulate in a single transcript batch.
+pub const MAX_JSONL_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
 /// Result of reading a single line from a JSONL reader.
 pub enum JsonlLineState {
     /// End of file reached.
@@ -30,6 +33,10 @@ pub fn read_jsonl_line(
         return Ok(JsonlLineState::Partial);
     }
     Ok(JsonlLineState::Complete(bytes_read))
+}
+
+pub fn jsonl_batch_limit_reached(event_count: usize, event_limit: usize, raw_bytes: usize) -> bool {
+    event_count >= event_limit || (event_count > 0 && raw_bytes >= MAX_JSONL_BATCH_BYTES)
 }
 
 /// Errors that can occur during transcript processing.

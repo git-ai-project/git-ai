@@ -62,6 +62,7 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
 /// Log a batch of metric events (via daemon telemetry worker).
 ///
 /// Events are batched into envelopes of up to 1000 events each.
+/// Consumes the input vector so large transcript payloads are not cloned.
 pub fn log_metrics(
     #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
 ) {
@@ -74,11 +75,10 @@ pub fn log_metrics(
             return;
         }
 
-        // Split into chunks of MAX_METRICS_PER_ENVELOPE
-        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-            let envelope = crate::daemon::TelemetryEnvelope::Metrics {
-                events: chunk.to_vec(),
-            };
+        let mut iter = events.into_iter().peekable();
+        while iter.peek().is_some() {
+            let chunk: Vec<MetricEvent> = iter.by_ref().take(MAX_METRICS_PER_ENVELOPE).collect();
+            let envelope = crate::daemon::TelemetryEnvelope::Metrics { events: chunk };
             submit_telemetry_envelope(vec![envelope]);
         }
     }

@@ -161,6 +161,7 @@ impl Agent for GeminiAgent {
         let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
+        let mut batch_bytes = 0usize;
 
         let mut line = String::new();
         loop {
@@ -175,6 +176,7 @@ impl Agent for GeminiAgent {
                 crate::streams::types::JsonlLineState::Complete(bytes_read) => {
                     line_number += 1;
                     current_offset += bytes_read as u64;
+                    batch_bytes = batch_bytes.saturating_add(bytes_read);
                 }
             }
 
@@ -196,7 +198,11 @@ impl Agent for GeminiAgent {
             };
 
             events.push(entry);
-            if events.len() >= batch_limit {
+            if crate::streams::types::jsonl_batch_limit_reached(
+                events.len(),
+                batch_limit,
+                batch_bytes,
+            ) {
                 break;
             }
         }
