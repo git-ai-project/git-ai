@@ -63,7 +63,22 @@ fn clean_working_log_for_stash(
     }
 
     persisted.write_initial(initial)?;
+    clean_checkpoints_for_stash(&persisted.dir.join("checkpoints.jsonl"), pathspecs)?;
     Ok(())
+}
+
+fn clean_checkpoints_for_stash(
+    path: &std::path::Path,
+    pathspecs: &[String],
+) -> Result<(), GitAiError> {
+    if pathspecs.is_empty() {
+        if path.exists() {
+            fs::write(path, "")?;
+        }
+        return Ok(());
+    }
+
+    filter_checkpoint_entries(path, |file| !path_matches_any(file, pathspecs))
 }
 
 pub fn handle_stash_create(
@@ -190,6 +205,13 @@ fn filter_stash_checkpoints_to_pathspecs(
     path: &std::path::Path,
     pathspecs: &[String],
 ) -> Result<(), GitAiError> {
+    filter_checkpoint_entries(path, |file| path_matches_any(file, pathspecs))
+}
+
+fn filter_checkpoint_entries(
+    path: &std::path::Path,
+    retain_file: impl Fn(&str) -> bool,
+) -> Result<(), GitAiError> {
     let Ok(content) = fs::read_to_string(path) else {
         return Ok(());
     };
@@ -209,7 +231,7 @@ fn filter_stash_checkpoints_to_pathspecs(
                 entry
                     .get("file")
                     .and_then(|f| f.as_str())
-                    .is_some_and(|f| path_matches_any(f, pathspecs))
+                    .is_some_and(&retain_file)
             });
             if entries.is_empty() {
                 continue;
