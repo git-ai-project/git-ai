@@ -932,6 +932,27 @@ fn flush_daemon_logs(events: Vec<DaemonLogEvent>, daemon_id: &str, install_id: &
     })
 }
 
+/// Best-effort synchronous daemon diagnostic upload for startup paths that
+/// intentionally exit before the telemetry worker is running.
+pub(crate) fn flush_daemon_log_event_now(event: DaemonLogEvent) -> bool {
+    if !daemon_log_upload_enabled() {
+        return false;
+    }
+
+    let context = ApiContext::new(None);
+    let api_base_url = context.base_url.clone();
+    let client = ApiClient::new(context);
+    if !daemon_logs_upload_allowed(&api_base_url, &client) {
+        return false;
+    }
+
+    let daemon_id = format!("startup-{}", std::process::id());
+    let install_id = get_or_create_distinct_id();
+    upload_daemon_log_chunk(vec![event], &daemon_id, &install_id, |request| {
+        client.upload_daemon_logs(request).map(|_| ())
+    }) == 0
+}
+
 fn upload_daemon_log_chunk<Upload>(
     events: Vec<DaemonLogEvent>,
     daemon_id: &str,
