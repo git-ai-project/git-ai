@@ -22,6 +22,23 @@ const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
+/// Maximum size of a serialized event JSON we will persist to the metrics DB.
+///
+/// Session events carry raw transcript JSON; assistant messages with full file
+/// contents routinely reach 50-150KB+. Persisting them verbatim turns the
+/// metrics DB into an unbounded sink during the transcript sweep (especially
+/// when upload is unavailable and rows never drain), driving the daemon's
+/// memory/disk footprint into the GBs. Events above this size have their heavy
+/// content field truncated before insertion; everything the local stats and
+/// server ETL read (token usage, model, ids, timestamps) lives in small
+/// sibling fields and is preserved. The original transcript `.jsonl` on disk
+/// always retains the full content.
+const MAX_PERSISTED_EVENT_JSON_BYTES: usize = 16 * 1024;
+
+/// Marker key added to a message whose `content` field was truncated, so
+/// downstream consumers can tell the stored content is partial.
+const TRUNCATED_CONTENT_MARKER: &str = "_git_ai_content_truncated";
+
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
     // Migration 0 -> 1: Initial schema with metrics table
@@ -495,6 +512,12 @@ impl MetricsDatabase {
             )?;
 
             for event_json in events {
+                // Bound the persisted payload so a single oversized transcript
+                // event cannot bloat the DB (and, transitively, daemon memory).
+                // Metadata is extracted from the (possibly truncated) JSON so the
+                // indexed columns stay consistent with what we store.
+                let event_json = truncate_oversized_event_json(event_json);
+                let event_json = event_json.as_ref();
                 let metadata = extract_metric_event_metadata(event_json);
                 let event_ts = metadata.as_ref().map(|m| i64::from(m.event_ts));
                 let event_kind = metadata.as_ref().map(|m| i64::from(m.event_kind));
@@ -1297,6 +1320,84 @@ fn extract_metric_event_ts_from_value(value: &Value) -> Option<u32> {
         .and_then(Value::as_u64)
         .filter(|ts| *ts <= u32::MAX as u64)
         .map(|ts| ts as u32)
+}
+
+/// Bound the size of an event JSON before persistence.
+///
+/// Returns the input unchanged (borrowed) when it is already within
+/// [`MAX_PERSISTED_EVENT_JSON_BYTES`]. Otherwise the heavy free-text fields in
+/// the event values are truncated and the event is re-serialized. The metadata
+/// fields the rest of the system relies on (event kind, timestamp, ids, token
+/// usage, model) are small and untouched. If the JSON cannot be parsed or stays
+/// oversized after truncation, it is returned as-is so callers never lose an
+/// event purely because it could not be shrunk.
+fn truncate_oversized_event_json(event_json: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    if event_json.len() <= MAX_PERSISTED_EVENT_JSON_BYTES {
+        return Cow::Borrowed(event_json);
+    }
+
+    let Ok(mut value) = serde_json::from_str::<Value>(event_json) else {
+        return Cow::Borrowed(event_json);
+    };
+
+    // Budget per text field so that even an event with several heavy fields
+    // stays comfortably bounded. Token usage / model / ids are separate small
+    // fields and are never touched.
+    let per_field_budget = MAX_PERSISTED_EVENT_JSON_BYTES / 4;
+    let mut truncated_any = false;
+    if let Some(values) = value.get_mut("v").and_then(Value::as_object_mut) {
+        for entry in values.values_mut() {
+            truncate_heavy_strings_in_value(entry, per_field_budget, &mut truncated_any);
+        }
+    }
+
+    if !truncated_any {
+        return Cow::Borrowed(event_json);
+    }
+
+    match serde_json::to_string(&value) {
+        Ok(serialized) => Cow::Owned(serialized),
+        Err(_) => Cow::Borrowed(event_json),
+    }
+}
+
+/// Recursively truncate oversized string values inside a transcript event value
+/// tree. Strings longer than `budget` bytes are shortened (on a UTF-8 boundary)
+/// and the enclosing object is flagged with [`TRUNCATED_CONTENT_MARKER`]. Object
+/// keys and numeric/boolean fields (token counts, model names, ids) are left
+/// intact.
+fn truncate_heavy_strings_in_value(value: &mut Value, budget: usize, truncated_any: &mut bool) {
+    match value {
+        Value::String(text) if text.len() > budget => {
+            let mut end = budget;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            *truncated_any = true;
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                truncate_heavy_strings_in_value(item, budget, truncated_any);
+            }
+        }
+        Value::Object(map) => {
+            let mut marked = false;
+            for child in map.values_mut() {
+                let before = *truncated_any;
+                truncate_heavy_strings_in_value(child, budget, truncated_any);
+                if *truncated_any && !before {
+                    marked = true;
+                }
+            }
+            if marked {
+                map.insert(TRUNCATED_CONTENT_MARKER.to_string(), Value::Bool(true));
+            }
+        }
+        _ => {}
+    }
 }
 
 fn extract_metric_event_metadata(event_json: &str) -> Option<MetricEventMetadata> {
@@ -2794,5 +2895,155 @@ mod tests {
             db.should_emit_agent_usage(prompt_id, 1_700_000_301, 300)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn test_insert_truncates_oversized_session_event_content_but_keeps_metadata() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_ts = days_ago(1);
+
+        // An assistant session event whose message.content is a multi-hundred-KB
+        // blob, exactly the shape that bloats the metrics DB during a transcript
+        // sweep. Token usage / model / id live in small sibling fields.
+        let huge_content = "x".repeat(500_000);
+        let event_json = format!(
+            r#"{{
+                "t":{event_ts},
+                "e":5,
+                "v":{{"0":{{"message":{{"role":"assistant","id":"msg-1","model":"claude-opus-4-8","content":"{huge_content}","usage":{{"input_tokens":10,"output_tokens":20}}}}}}}},
+                "a":{{"20":"claude","24":"session-1","25":"trace-1"}}
+            }}"#
+        );
+        assert!(event_json.len() > 500_000);
+
+        db.insert_events(&[event_json]).unwrap();
+
+        // The stored row must be bounded well below the raw blob size.
+        let stored_json: String = db
+            .conn
+            .query_row("SELECT event_json FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            stored_json.len() <= MAX_PERSISTED_EVENT_JSON_BYTES,
+            "stored event_json should be truncated, was {} bytes",
+            stored_json.len()
+        );
+
+        // Metadata that local usage stats + server ETL read must survive.
+        let value: Value = serde_json::from_str(&stored_json).unwrap();
+        let message = value.pointer("/v/0/message").expect("message preserved");
+        assert_eq!(
+            message.pointer("/role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert_eq!(
+            message.pointer("/id").and_then(Value::as_str),
+            Some("msg-1")
+        );
+        assert_eq!(
+            message.pointer("/model").and_then(Value::as_str),
+            Some("claude-opus-4-8")
+        );
+        assert_eq!(
+            message
+                .pointer("/usage/input_tokens")
+                .and_then(Value::as_u64),
+            Some(10)
+        );
+        assert_eq!(
+            message
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64),
+            Some(20)
+        );
+        // The heavy content field is truncated, not preserved in full.
+        let content_len = message
+            .pointer("/content")
+            .and_then(Value::as_str)
+            .map(str::len)
+            .unwrap_or(0);
+        assert!(
+            content_len < 500_000,
+            "content should be truncated, was {content_len} bytes"
+        );
+
+        // Event-kind metadata column is still populated for indexing/recovery.
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![(Some(event_ts as i64), Some(5))]
+        );
+    }
+
+    #[test]
+    fn test_insert_truncates_oversized_array_content_blocks() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_ts = days_ago(1);
+
+        // Claude content is frequently an array of blocks; a tool_result block can
+        // carry a huge string. Ensure array element truncation also bounds the row.
+        let huge_block = "y".repeat(400_000);
+        let event_json = format!(
+            r#"{{
+                "t":{event_ts},
+                "e":5,
+                "v":{{"0":{{"message":{{"role":"assistant","id":"msg-2","model":"m","content":[{{"type":"text","text":"{huge_block}"}}]}}}}}},
+                "a":{{"20":"claude","24":"session-2","25":"trace-2"}}
+            }}"#
+        );
+
+        db.insert_events(&[event_json]).unwrap();
+
+        let stored_json: String = db
+            .conn
+            .query_row("SELECT event_json FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            stored_json.len() <= MAX_PERSISTED_EVENT_JSON_BYTES,
+            "stored event_json should be truncated, was {} bytes",
+            stored_json.len()
+        );
+        let value: Value = serde_json::from_str(&stored_json).unwrap();
+        assert_eq!(
+            value.pointer("/v/0/message/id").and_then(Value::as_str),
+            Some("msg-2")
+        );
+        // Event metadata column still derived correctly from truncated JSON.
+        assert_eq!(
+            metric_metadata_rows(&db),
+            vec![(Some(event_ts as i64), Some(5))]
+        );
+    }
+
+    #[test]
+    fn test_truncate_oversized_event_json_borrows_when_small() {
+        let small = r#"{"t":1,"e":5,"v":{"0":"x"},"a":{}}"#;
+        assert!(matches!(
+            truncate_oversized_event_json(small),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn test_truncate_oversized_event_json_returns_unparseable_input_as_is() {
+        // Oversized but not valid JSON: must be returned unchanged (never dropped).
+        let junk = "z".repeat(MAX_PERSISTED_EVENT_JSON_BYTES + 10);
+        let out = truncate_oversized_event_json(&junk);
+        assert_eq!(out.as_ref(), junk.as_str());
+    }
+
+    #[test]
+    fn test_insert_leaves_small_events_unmodified() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_ts = days_ago(1);
+        let event_json = session_event_json(event_ts, "s1", "ext-s1", "claude", None);
+
+        db.insert_events(std::slice::from_ref(&event_json)).unwrap();
+
+        let stored_json: String = db
+            .conn
+            .query_row("SELECT event_json FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        // Small events are stored byte-for-byte (no rewrite).
+        assert_eq!(stored_json, event_json);
     }
 }

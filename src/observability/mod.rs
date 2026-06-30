@@ -74,11 +74,14 @@ pub fn log_metrics(
             return;
         }
 
-        // Split into chunks of MAX_METRICS_PER_ENVELOPE
-        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-            let envelope = crate::daemon::TelemetryEnvelope::Metrics {
-                events: chunk.to_vec(),
-            };
+        // Split into chunks of MAX_METRICS_PER_ENVELOPE, consuming the input so
+        // we never hold a second copy of the (potentially large) transcript
+        // events. `chunks(..).to_vec()` would clone every event; draining the
+        // owned Vec moves them instead, halving peak memory during a sweep.
+        let mut iter = events.into_iter().peekable();
+        while iter.peek().is_some() {
+            let chunk: Vec<MetricEvent> = iter.by_ref().take(MAX_METRICS_PER_ENVELOPE).collect();
+            let envelope = crate::daemon::TelemetryEnvelope::Metrics { events: chunk };
             submit_telemetry_envelope(vec![envelope]);
         }
     }
