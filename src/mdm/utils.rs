@@ -436,6 +436,17 @@ pub fn claude_config_dir() -> PathBuf {
     home_dir().join(".claude")
 }
 
+/// Codex home directory, respecting the CODEX_HOME env var.
+/// Falls back to ~/.codex when unset.
+pub fn codex_home_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CODEX_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    home_dir().join(".codex")
+}
+
 /// Write data to a file atomically (write to temp, then rename)
 /// If the path is a symlink, writes to the target file (preserving the symlink)
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
@@ -1335,6 +1346,58 @@ mod tests {
             std::env::remove_var("CLAUDE_CONFIG_DIR");
         }
         assert_eq!(dir, home_dir().join(".claude"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_codex_home_dir_defaults_to_home_dot_codex() {
+        let prev = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::remove_var("CODEX_HOME");
+        }
+        let dir = codex_home_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(dir, home_dir().join(".codex"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_codex_home_dir_respects_env_var() {
+        let prev = std::env::var_os("CODEX_HOME");
+        let custom = "/tmp/my-codex-home";
+        unsafe {
+            std::env::set_var("CODEX_HOME", custom);
+        }
+        let dir = codex_home_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(dir, PathBuf::from(custom));
+    }
+
+    #[test]
+    #[serial]
+    fn test_codex_home_dir_ignores_empty_env_var() {
+        let prev = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::set_var("CODEX_HOME", "");
+        }
+        let dir = codex_home_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(dir, home_dir().join(".codex"));
     }
 
     /// Regression test for #1039: write_atomic should create parent directories

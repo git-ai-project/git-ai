@@ -2,7 +2,7 @@ use crate::config::{CodexHooksFormat, Config};
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, codex_home_dir, generate_diff, is_git_ai_checkpoint_command, write_atomic,
 };
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
@@ -18,11 +18,11 @@ pub struct CodexInstaller;
 
 impl CodexInstaller {
     fn config_path() -> PathBuf {
-        home_dir().join(".codex").join("config.toml")
+        codex_home_dir().join("config.toml")
     }
 
     fn hooks_json_path() -> PathBuf {
-        home_dir().join(".codex").join("hooks.json")
+        codex_home_dir().join("hooks.json")
     }
 
     fn desired_command(binary_path: &Path) -> String {
@@ -679,7 +679,7 @@ impl HookInstaller for CodexInstaller {
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("codex");
-        let has_dotfiles = home_dir().join(".codex").exists();
+        let has_dotfiles = codex_home_dir().exists();
 
         if !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
@@ -969,11 +969,13 @@ mod tests {
 
         let prev_home = std::env::var_os("HOME");
         let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_codex_home = std::env::var_os("CODEX_HOME");
 
         // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
+            std::env::remove_var("CODEX_HOME");
         }
 
         f(&home);
@@ -987,6 +989,10 @@ mod tests {
             match prev_userprofile {
                 Some(v) => std::env::set_var("USERPROFILE", v),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match prev_codex_home {
+                Some(v) => std::env::set_var("CODEX_HOME", v),
+                None => std::env::remove_var("CODEX_HOME"),
             }
         }
     }
@@ -1422,6 +1428,65 @@ codex_hooks = true
             assert!(
                 CodexInstaller::config_has_inline_hooks(&parsed),
                 "inline hooks should be in config.toml"
+            );
+
+            let check = installer
+                .check_hooks(&params)
+                .expect("check should succeed");
+            assert!(check.tool_installed);
+            assert!(check.hooks_installed);
+            assert!(check.hooks_up_to_date);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_respects_codex_home() {
+        with_temp_home(|home| {
+            let default_codex_dir = home.join(".codex");
+            let custom_codex_home = home.join("custom-codex-home");
+            fs::create_dir_all(&custom_codex_home).unwrap();
+
+            // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+            unsafe {
+                std::env::set_var("CODEX_HOME", &custom_codex_home);
+            }
+
+            let config_path = custom_codex_home.join("config.toml");
+            fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let diff = installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+            assert!(diff.is_some(), "install should report a config diff");
+            assert!(
+                !default_codex_dir.exists(),
+                "default ~/.codex should not be touched when CODEX_HOME is set"
+            );
+
+            let content = fs::read_to_string(&config_path).unwrap();
+            let parsed = CodexInstaller::parse_config_toml(&content).unwrap();
+            assert!(
+                CodexInstaller::config_has_inline_hooks(&parsed),
+                "inline hooks should be in CODEX_HOME/config.toml"
+            );
+
+            let state = parsed
+                .get("hooks")
+                .and_then(|hooks| hooks.get("state"))
+                .and_then(|state| state.as_table())
+                .expect("hook trust state should be written");
+            let config_path_str = config_path.to_string_lossy();
+            assert!(
+                state
+                    .keys()
+                    .all(|key| key.starts_with(config_path_str.as_ref())),
+                "trust state keys should reference CODEX_HOME/config.toml"
             );
 
             let check = installer
