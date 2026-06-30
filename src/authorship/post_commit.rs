@@ -33,6 +33,8 @@ pub const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
 #[doc(hidden)]
 pub const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
 
+const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct StatsCostEstimate {
@@ -345,12 +347,13 @@ where
                 ),
             )
         } else {
-            let diff_base = if parent_sha == "initial" {
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            } else {
-                &parent_sha
-            };
-            repo.diff_added_lines(diff_base, &commit_sha, None)
+            // Same bounding as recovery: on the daemon fast-forward `update-ref`
+            // path `parent_sha` is the far-behind old branch tip, so diff against
+            // the finalized commit's immediate parent to avoid buffering the whole
+            // pulled range (PD-23 / #1677). No-hooks agents (Devin/Codex Cloud)
+            // can be active during a pull, so this path is exposed too.
+            let diff_base = single_commit_diff_base(&parent_sha, &commit_sha);
+            repo.diff_added_lines(&diff_base, &commit_sha, None)
                 .ok()
                 .map(|added_lines| {
                     added_lines
@@ -429,6 +432,7 @@ where
     let mut skip_reason = None;
 
     if options.compute_stats {
+        let stats_diff_base = single_commit_diff_base(&parent_sha, &commit_sha);
         let is_merge_commit = repo
             .find_commit(commit_sha.clone())
             .map(|commit| commit.parent_count().unwrap_or(0) > 1)
@@ -437,7 +441,7 @@ where
         skip_reason = if is_merge_commit {
             Some(StatsSkipReason::MergeCommit)
         } else {
-            estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
+            estimate_stats_cost(repo, &stats_diff_base, &commit_sha, &ignore_patterns)
                 .ok()
                 .and_then(|estimate| {
                     if should_skip_expensive_post_commit_stats(&estimate) {
@@ -449,14 +453,11 @@ where
         };
 
         if skip_reason.is_none() {
-            let diff_base = if parent_sha == "initial" {
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            } else {
-                &parent_sha
-            };
-
-            let diff_hunks =
-                crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+            let diff_hunks = crate::commands::diff::get_diff_with_line_numbers(
+                repo,
+                &stats_diff_base,
+                &commit_sha,
+            )?;
 
             let computed = stats_for_commit_stats_from_hunks(
                 repo,
@@ -479,6 +480,8 @@ where
             record_commit_metrics(
                 repo,
                 &commit_sha,
+                // Store the recorded parent as `base_commit_sha`, not the
+                // `<commit>^` diff rev-expression used for the diff spawns.
                 &parent_sha,
                 &human_author,
                 &authorship_note_str,
@@ -583,6 +586,33 @@ fn commit_tree_snapshot_for_files(
     Ok(snapshot)
 }
 
+/// Resolve the diff base for post-commit diff parsing so the diff is always
+/// bounded to the single commit being finalized — without any extra git spawn
+/// or object lookup.
+///
+/// The caller's `parent_sha` is normally the immediate parent already, but on
+/// the daemon's fast-forward `update-ref` path it is the *old branch tip* from
+/// before a `git pull` — potentially thousands of commits back. Diffing that
+/// full range buffers the entire history delta into memory (the 20GB+ blow-up
+/// in PD-23 / #1677).
+///
+/// Rather than resolving the parent OID (which costs `find_commit` +
+/// `parent(0)` git spawns on *every* post-commit), we express "the immediate
+/// first parent" as the rev-expression `<commit_sha>^`. Git resolves it inside
+/// the `git diff` spawn that already runs, so this adds zero spawns. For root
+/// commits there is no `^`, signalled by `parent_sha == "initial"`, in which
+/// case we diff against the empty tree exactly as before.
+fn single_commit_diff_base(parent_sha: &str, commit_sha: &str) -> String {
+    if parent_sha == "initial" {
+        EMPTY_TREE_SHA.to_string()
+    } else {
+        // `^` is `^1`, the first parent — matches the previous `parent(0)`
+        // resolution for merges (first-parent diff) and is identical to
+        // `parent_sha` on the normal/amend paths.
+        format!("{commit_sha}^")
+    }
+}
+
 fn recovery_committed_hunks(
     repo: &Repository,
     parent_sha: &str,
@@ -595,12 +625,10 @@ fn recovery_committed_hunks(
         );
     }
 
-    let diff_base = if parent_sha == "initial" {
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    } else {
-        parent_sha
-    };
-    let added_lines = repo.diff_added_lines(diff_base, commit_sha, None)?;
+    // Recovery only attributes lines added by the commit being finalized, so the
+    // diff must be bounded to that single commit (see `single_commit_diff_base`).
+    let diff_base = single_commit_diff_base(parent_sha, commit_sha);
+    let added_lines = repo.diff_added_lines(&diff_base, commit_sha, None)?;
     Ok(added_lines
         .into_iter()
         .filter(|(_, lines)| !lines.is_empty())
