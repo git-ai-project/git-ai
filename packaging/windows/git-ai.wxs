@@ -24,6 +24,13 @@
           Part="last"
           System="yes"
           Action="set" />
+        <RegistryValue
+          Id="GitAiRunAtLogin"
+          Root="HKLM"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="Git AI"
+          Value="&quot;[INSTALLFOLDER]git-ai.exe&quot; bg start"
+          Type="string" />
       </Component>
     </ComponentGroup>
 
