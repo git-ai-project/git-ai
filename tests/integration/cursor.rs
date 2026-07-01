@@ -1,6 +1,7 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, real_git_executable};
 use crate::test_utils::fixture_path;
+use git_ai::authorship::stats::CommitStats;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
 use git_ai::streams::agent::Agent;
@@ -12,6 +13,19 @@ const TEST_CONVERSATION_ID: &str = "de751938-f32b-4441-8239-a31d60aa4cf0";
 
 fn parse_cursor(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
     resolve_preset("cursor")?.parse(hook_input, "t_test")
+}
+
+fn extract_json_object(output: &str) -> String {
+    let start = output.find('{').unwrap_or(0);
+    let end = output.rfind('}').unwrap_or(output.len().saturating_sub(1));
+    output[start..=end].to_string()
+}
+
+fn stats_without_harness_pre_sync(repo: &TestRepo, args: &[&str]) -> CommitStats {
+    let raw = repo
+        .git_ai_without_pre_sync_for_test(args)
+        .expect("git-ai stats should succeed");
+    serde_json::from_str(&extract_json_object(&raw)).expect("valid stats json")
 }
 
 #[test]
@@ -245,6 +259,61 @@ fn test_cursor_checkpoint_stdin_with_utf8_bom() {
     );
 }
 
+fn utf16le_bytes(input: &str) -> Vec<u8> {
+    input
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
+}
+
+#[test]
+fn test_cursor_checkpoint_stdin_with_utf16le_odd_cjk_content() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let src_dir = repo.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let file_path = repo.path().join("src/文案文.js");
+    fs::write(&file_path, "const a = \"base\";\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("src/文案文.js");
+    file.assert_committed_lines(crate::lines!["const a = \"base\";".unattributed_human(),]);
+
+    let edited_content = "const a = \"文案文\"; // 3 chars\n";
+    fs::write(&file_path, edited_content).unwrap();
+
+    let hook_input = serde_json::json!({
+        "conversation_id": TEST_CONVERSATION_ID,
+        "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
+        "hook_event_name": "postToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path.to_string_lossy().to_string(),
+            "content": edited_content,
+        },
+        "model": "model-name-from-hook-test"
+    })
+    .to_string();
+
+    let output = repo
+        .git_ai_with_stdin(
+            &["checkpoint", "cursor", "--hook-input", "stdin"],
+            &utf16le_bytes(&hook_input),
+        )
+        .expect("checkpoint should parse UTF-16LE stdin payload with odd CJK content");
+
+    assert!(
+        !output.contains("Invalid JSON in hook_input"),
+        "Should not fail JSON parsing for odd CJK content in UTF-16LE stdin. Output: {output}"
+    );
+
+    repo.stage_all_and_commit("Add cursor CJK edit").unwrap();
+
+    file.assert_lines_and_blame(crate::lines!["const a = \"文案文\"; // 3 chars".ai(),]);
+}
+
 #[test]
 fn test_cursor_e2e_with_attribution() {
     use std::fs;
@@ -405,6 +474,63 @@ fn test_cursor_e2e_with_resync() {
         .expect("Should have at least one session record");
 
     // Note: Messages field has been removed from SessionRecord
+}
+
+#[test]
+fn test_cursor_editor_commit_immediate_stats_waits_for_daemon_note() {
+    use std::fs;
+
+    let repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=750",
+    )]);
+    let jsonl_fixture = fixture_path("cursor-session-simple.jsonl");
+    let jsonl_path_str = jsonl_fixture.to_string_lossy().to_string();
+
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    let file_path = repo.path().join("src/main.rs");
+    fs::write(&file_path, "fn main() {\n    println!(\"base\");\n}\n").unwrap();
+    repo.git(&["add", "src/main.rs"]).unwrap();
+    repo.commit("Initial commit").unwrap();
+    let mut file = repo.filename("src/main.rs");
+    file.assert_committed_lines(crate::lines![
+        "fn main() {".unattributed_human(),
+        "    println!(\"base\");".unattributed_human(),
+        "}".unattributed_human(),
+    ]);
+
+    fs::write(
+        &file_path,
+        "fn main() {\n    println!(\"base\");\n    println!(\"cursor chat edit\");\n}\n",
+    )
+    .unwrap();
+
+    let hook_input = serde_json::json!({
+        "conversation_id": TEST_CONVERSATION_ID,
+        "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
+        "hook_event_name": "postToolUse",
+        "tool_name": "Write",
+        "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
+        "model": "model-name-from-hook-test",
+        "transcript_path": jsonl_path_str
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "cursor", "--hook-input", &hook_input])
+        .unwrap();
+
+    let status_raw = repo.git_ai(&["status", "--json"]).unwrap();
+    let status: serde_json::Value =
+        serde_json::from_str(&extract_json_object(&status_raw)).expect("valid status json");
+    assert_eq!(status["stats"]["ai_additions"].as_u64(), Some(1));
+
+    repo.git(&["add", "src/main.rs"]).unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "Cursor chat commit"], &[])
+        .unwrap();
+
+    let stats = stats_without_harness_pre_sync(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
 }
 
 #[test]

@@ -1,4 +1,6 @@
+use crate::repos::test_file::ExpectedLineExt;
 use crate::test_utils::{fixture_path, load_fixture};
+use git_ai::authorship::stats::CommitStats;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
 use git_ai::streams::agent::Agent;
@@ -9,6 +11,19 @@ use std::{fs, io::Write};
 
 fn parse_copilot(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
     resolve_preset("github-copilot")?.parse(hook_input, "t_test")
+}
+
+fn extract_json_object(output: &str) -> String {
+    let start = output.find('{').unwrap_or(0);
+    let end = output.rfind('}').unwrap_or(output.len().saturating_sub(1));
+    output[start..=end].to_string()
+}
+
+fn stats_without_harness_pre_sync(repo: &crate::repos::test_repo::TestRepo) -> CommitStats {
+    let raw = repo
+        .git_ai_without_pre_sync_for_test(&["stats", "HEAD", "--json"])
+        .expect("git-ai stats should succeed");
+    serde_json::from_str(&extract_json_object(&raw)).expect("valid stats json")
 }
 
 /// Ensure CODESPACES and REMOTE_CONTAINERS are not set (they cause early return in transcript parsing)
@@ -638,6 +653,83 @@ fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
             .to_string()
             .contains("Claude transcript path")
     );
+}
+
+#[test]
+#[serial_test::serial(copilot_env)]
+fn test_copilot_vscode_commit_immediate_stats_waits_for_daemon_note() {
+    ensure_clean_env();
+
+    let repo = crate::repos::test_repo::TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=750",
+    )]);
+
+    let transcript_dir = tempfile::tempdir().unwrap();
+    let transcripts_dir = transcript_dir
+        .path()
+        .join("workspaceStorage")
+        .join("workspace-id")
+        .join("GitHub.copilot-chat")
+        .join("transcripts");
+    fs::create_dir_all(&transcripts_dir).unwrap();
+    let transcript_path = transcripts_dir.join("copilot-session.jsonl");
+    fs::write(&transcript_path, r#"{"requests": []}"#).unwrap();
+    let transcript_path_str = transcript_path.to_string_lossy().to_string();
+
+    fs::create_dir_all(repo.path().join("src")).unwrap();
+    let file_path = repo.path().join("src/main.ts");
+    fs::write(&file_path, "export const base = 1;\n").unwrap();
+    repo.git(&["add", "src/main.ts"]).unwrap();
+    repo.commit("Initial commit").unwrap();
+    let mut file = repo.filename("src/main.ts");
+    file.assert_committed_lines(crate::lines!["export const base = 1;".unattributed_human(),]);
+
+    let common_hook = |event_name: &str| {
+        json!({
+            "hookEventName": event_name,
+            "cwd": repo.canonical_path().to_string_lossy().to_string(),
+            "toolName": "copilot_replaceString",
+            "toolInput": { "file_path": file_path.to_string_lossy().to_string() },
+            "sessionId": "copilot-vscode-commit-stats",
+            "transcript_path": transcript_path_str
+        })
+        .to_string()
+    };
+
+    repo.git_ai(&[
+        "checkpoint",
+        "github-copilot",
+        "--hook-input",
+        &common_hook("PreToolUse"),
+    ])
+    .unwrap();
+    fs::write(
+        &file_path,
+        "export const base = 1;\nexport const fromCopilot = true;\n",
+    )
+    .unwrap();
+    repo.git_ai(&[
+        "checkpoint",
+        "github-copilot",
+        "--hook-input",
+        &common_hook("PostToolUse"),
+    ])
+    .unwrap();
+
+    let status_raw = repo.git_ai(&["status", "--json"]).unwrap();
+    let status: serde_json::Value =
+        serde_json::from_str(&extract_json_object(&status_raw)).expect("valid status json");
+    assert_eq!(status["stats"]["ai_additions"].as_u64(), Some(1));
+
+    repo.git(&["add", "src/main.ts"]).unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "Copilot VS Code commit"], &[])
+        .unwrap();
+
+    let stats = stats_without_harness_pre_sync(&repo);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
 }
 
 // ============================================================================
