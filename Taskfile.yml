@@ -52,6 +52,37 @@ tasks:
     cmds:
       - cargo build
 
+  package:msi:
+    desc: Build a Windows MSI from an existing release binary
+    cmds:
+      - powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1 -BinaryPath "{{.BINARY}}" -Architecture "{{.ARCH}}" -Version "{{.VERSION}}" -OutputPath "{{.OUTPUT}}"
+    platforms: [windows]
+    requires:
+      vars: [BINARY, ARCH, VERSION, OUTPUT]
+
+  package:pkg:
+    desc: Build a macOS PKG from an existing release binary
+    cmds:
+      - packaging/macos/build-pkg.sh --binary "{{.BINARY}}" --arch "{{.ARCH}}" --version "{{.VERSION}}" --output "{{.OUTPUT}}"
+    platforms: [darwin]
+    requires:
+      vars: [BINARY, ARCH, VERSION, OUTPUT]
+
+  package:deb:
+    desc: Build a Debian package from an existing release binary
+    cmds:
+      - packaging/debian/build-deb.sh --binary "{{.BINARY}}" --arch "{{.ARCH}}" --version "{{.VERSION}}" --output "{{.OUTPUT}}"
+    platforms: [linux]
+    requires:
+      vars: [BINARY, ARCH, VERSION, OUTPUT]
+
+  package:brew-formula:
+    desc: Render the Homebrew formula from release checksums
+    cmds:
+      - packaging/homebrew/update-formula.sh --version "{{.VERSION}}" --checksums "{{.CHECKSUMS}}" --output "{{.OUTPUT}}"
+    requires:
+      vars: [VERSION, CHECKSUMS, OUTPUT]
+
   test:base:
     internal: true
     cmds:

@@ -52,6 +52,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "upgrade"
             | "install-hooks"
             | "install"
+            | "setup-package"
             | "uninstall-hooks"
             | "usage"
     );
@@ -165,6 +166,17 @@ pub fn handle_git_ai(args: &[String]) {
             }
             Err(e) => {
                 eprintln!("Install hooks failed: {}", e);
+                std::process::exit(1);
+            }
+        },
+        "setup-package" => match commands::package_setup::run(&args[1..]) {
+            Ok(statuses) => {
+                if let Ok(statuses_value) = serde_json::to_value(&statuses) {
+                    log_message("setup-package", "info", Some(statuses_value));
+                }
+            }
+            Err(e) => {
+                eprintln!("Package setup failed: {}", e);
                 std::process::exit(1);
             }
         },
@@ -364,6 +376,7 @@ fn print_help() {
     eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
+    eprintln!("  setup-package      Complete per-user setup after a package-manager install");
     eprintln!("    --skills               Also install agent skill files");
     eprintln!("    --visual-studio-extension");
     eprintln!("                           Also install the Visual Studio extension on Windows");

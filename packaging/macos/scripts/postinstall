@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+GIT_AI_BIN="/opt/git-ai/bin/git-ai"
+
+if [ ! -x "$GIT_AI_BIN" ]; then
+  echo "git-ai binary missing at $GIT_AI_BIN" >&2
+  exit 1
+fi
+
+CONSOLE_USER="$(/usr/sbin/scutil <<'EOF' | /usr/bin/awk '/Name :/ { print $3 }'
+show State:/Users/ConsoleUser
+EOF
+)"
+
+if [ -n "${CONSOLE_USER:-}" ] && [ "$CONSOLE_USER" != "loginwindow" ] && [ "$CONSOLE_USER" != "_mbsetupuser" ] && /usr/bin/id "$CONSOLE_USER" >/dev/null 2>&1; then
+  /usr/bin/su - "$CONSOLE_USER" -c "$GIT_AI_BIN setup-package --manager pkg --target-user '$CONSOLE_USER'" || true
+else
+  echo "Git AI installed. Run 'git-ai install-hooks' as each developer user to enable trace2 integration and editor/agent setup."
+fi
+
+exit 0
