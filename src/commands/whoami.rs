@@ -219,14 +219,14 @@ fn login_status(auth: &AuthStatus, api_client: &ApiClient) -> String {
 
 fn metrics_delivery_status(api_base_url: &str, api_client: &ApiClient) -> String {
     if !metrics_upload_allowed(api_base_url, api_client) {
-        return "off (default API requires an API key or login)".to_string();
+        return "off (requires an API key or login)".to_string();
     }
 
     match (api_client.has_api_key(), api_client.is_logged_in()) {
         (true, true) => "on (API key and login connected)".to_string(),
         (true, false) => "on (API key configured)".to_string(),
         (false, true) => "on (login connected)".to_string(),
-        (false, false) => "on (custom API URL configured)".to_string(),
+        (false, false) => unreachable!("metrics_upload_allowed requires auth"),
     }
 }
 
@@ -431,8 +431,6 @@ mod tests {
             "API access: not connected (login credentials found, but no usable access token)"
         ));
         assert!(output.contains("Login: logged in"));
-        assert!(
-            output.contains("Metrics delivery: off (default API requires an API key or login)")
-        );
+        assert!(output.contains("Metrics delivery: off (requires an API key or login)"));
     }
 }

@@ -1,6 +1,7 @@
 //! Gemini agent implementation with sweep discovery.
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
+use crate::mdm::utils::gemini_config_dir;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
@@ -11,7 +12,8 @@ use std::time::Duration;
 
 /// Gemini agent that discovers conversations from Gemini CLI session storage.
 ///
-/// Gemini CLI stores JSONL chat transcripts under `~/.gemini/tmp/<project>/chats/`.
+/// Gemini CLI stores JSONL chat transcripts under `.gemini/tmp/<project>/chats/`
+/// within the configured Gemini CLI home.
 pub struct GeminiAgent {
     batch_size: usize,
 }
@@ -28,13 +30,12 @@ impl GeminiAgent {
 
     /// Scan for Gemini session files in standard locations.
     ///
-    /// Searches `~/.gemini/tmp/*/chats/session-*.jsonl`.
+    /// Searches `.gemini/tmp/*/chats/session-*.jsonl` under the configured Gemini CLI home.
     fn scan_session_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        if let Some(gemini_tmp) = dirs::home_dir().map(|p| p.join(".gemini/tmp"))
-            && gemini_tmp.exists()
-        {
+        let gemini_tmp = gemini_config_dir().join("tmp");
+        if gemini_tmp.exists() {
             let Ok(project_dirs) = fs::read_dir(&gemini_tmp) else {
                 return paths;
             };
@@ -236,6 +237,7 @@ impl Agent for GeminiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_sweep_strategy() {
@@ -244,6 +246,41 @@ mod tests {
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_session_files_respects_gemini_cli_home() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let gemini_home = temp_dir.path().join("gemini-home");
+        let chats_dir = gemini_home
+            .join(".gemini")
+            .join("tmp")
+            .join("project")
+            .join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        let session_path = chats_dir.join("session-test.jsonl");
+        let mut file = fs::File::create(&session_path).unwrap();
+        writeln!(file, "{}", make_gemini_line(0)).unwrap();
+
+        let prev = std::env::var_os("GEMINI_CLI_HOME");
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("GEMINI_CLI_HOME", &gemini_home);
+        }
+        let paths = GeminiAgent::scan_session_files();
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("GEMINI_CLI_HOME", value),
+                None => std::env::remove_var("GEMINI_CLI_HOME"),
+            }
+        }
+
+        assert_eq!(paths, vec![session_path]);
     }
 
     fn make_gemini_line(i: usize) -> String {

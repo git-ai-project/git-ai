@@ -2,12 +2,13 @@ use crate::authorship::attribution_recovery::{
     AttributionRecoveryContext, FileTimestampsByPath, UnknownLinesByFile,
 };
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::diff_base::single_commit_diff_base;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::rewrite::DiffTreeResult;
 use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
-use crate::authorship::virtual_attribution::VirtualAttributions;
+use crate::authorship::virtual_attribution::{AuthorshipLogDiffContext, VirtualAttributions};
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::Config;
 use crate::error::GitAiError;
@@ -314,6 +315,7 @@ where
         pathspecs.insert(file_path.clone());
     }
 
+    let committed_diff_base = single_commit_diff_base(&parent_sha, &commit_sha);
     let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
         .to_authorship_log_and_initial_working_log_with_precomputed_diff(
             repo,
@@ -321,7 +323,10 @@ where
             &commit_sha,
             Some(&pathspecs),
             Some(&observed_snapshot),
-            context.precomputed_parent_diff,
+            AuthorshipLogDiffContext {
+                precomputed_parent_diff: context.precomputed_parent_diff,
+                fallback_committed_diff_base: Some(&committed_diff_base),
+            },
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -345,12 +350,13 @@ where
                 ),
             )
         } else {
-            let diff_base = if parent_sha == "initial" {
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            } else {
-                &parent_sha
-            };
-            repo.diff_added_lines(diff_base, &commit_sha, None)
+            // Same bounding as recovery: on the daemon fast-forward `update-ref`
+            // path `parent_sha` is the far-behind old branch tip, so diff against
+            // the finalized commit's immediate parent to avoid buffering the whole
+            // pulled range (PD-23 / #1677). No-hooks agents (Devin/Codex Cloud)
+            // can be active during a pull, so this path is exposed too.
+            let diff_base = single_commit_diff_base(&parent_sha, &commit_sha);
+            repo.diff_added_lines(&diff_base, &commit_sha, None)
                 .ok()
                 .map(|added_lines| {
                     added_lines
@@ -429,6 +435,7 @@ where
     let mut skip_reason = None;
 
     if options.compute_stats {
+        let stats_diff_base = single_commit_diff_base(&parent_sha, &commit_sha);
         let is_merge_commit = repo
             .find_commit(commit_sha.clone())
             .map(|commit| commit.parent_count().unwrap_or(0) > 1)
@@ -437,7 +444,7 @@ where
         skip_reason = if is_merge_commit {
             Some(StatsSkipReason::MergeCommit)
         } else {
-            estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
+            estimate_stats_cost(repo, &stats_diff_base, &commit_sha, &ignore_patterns)
                 .ok()
                 .and_then(|estimate| {
                     if should_skip_expensive_post_commit_stats(&estimate) {
@@ -449,14 +456,11 @@ where
         };
 
         if skip_reason.is_none() {
-            let diff_base = if parent_sha == "initial" {
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            } else {
-                &parent_sha
-            };
-
-            let diff_hunks =
-                crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+            let diff_hunks = crate::commands::diff::get_diff_with_line_numbers(
+                repo,
+                &stats_diff_base,
+                &commit_sha,
+            )?;
 
             let computed = stats_for_commit_stats_from_hunks(
                 repo,
@@ -479,6 +483,8 @@ where
             record_commit_metrics(
                 repo,
                 &commit_sha,
+                // Store the recorded parent as `base_commit_sha`, not the
+                // `<commit>^` diff rev-expression used for the diff spawns.
                 &parent_sha,
                 &human_author,
                 &authorship_note_str,
@@ -595,12 +601,10 @@ fn recovery_committed_hunks(
         );
     }
 
-    let diff_base = if parent_sha == "initial" {
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    } else {
-        parent_sha
-    };
-    let added_lines = repo.diff_added_lines(diff_base, commit_sha, None)?;
+    // Recovery only attributes lines added by the commit being finalized, so the
+    // diff must be bounded to that single commit (see `single_commit_diff_base`).
+    let diff_base = single_commit_diff_base(parent_sha, commit_sha);
+    let added_lines = repo.diff_added_lines(&diff_base, commit_sha, None)?;
     Ok(added_lines
         .into_iter()
         .filter(|(_, lines)| !lines.is_empty())

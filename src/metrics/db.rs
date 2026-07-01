@@ -9,7 +9,7 @@ use crate::metrics::attrs::attr_pos;
 use crate::metrics::events::{checkpoint_pos, otel_trace_pos, session_event_pos};
 use crate::metrics::pos_encoded::sparse_get_string;
 use crate::metrics::types::{MetricEvent, MetricEventId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -1049,6 +1049,101 @@ impl MetricsDatabase {
             candidates.push(SessionEventRecoveryCandidate {
                 row_id,
                 event_ts,
+                session_id,
+                trace_id,
+                tool,
+                model,
+                external_session_id,
+                external_tool_use_id,
+                repo_url,
+            });
+        }
+
+        Ok(candidates)
+    }
+
+    pub(crate) fn latest_session_event_candidates_for_tools(
+        &self,
+        tools: &[&str],
+    ) -> Result<Vec<SessionEventRecoveryCandidate>, GitAiError> {
+        if tools.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", tools.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT
+                id,
+                event_json,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                external_session_id,
+                external_tool_use_id
+            FROM metrics
+            WHERE event_kind = ?1
+              AND tool IN ({placeholders})
+              AND event_ts IS NOT NULL
+              AND session_id IS NOT NULL
+              AND session_id != ''
+              AND tool IS NOT NULL
+              AND tool != ''
+              AND tool != 'mock_ai'
+              AND external_session_id IS NOT NULL
+              AND external_session_id != ''
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 100
+            "#
+        );
+
+        let mut values = Vec::with_capacity(tools.len() + 1);
+        values.push(rusqlite::types::Value::Integer(
+            MetricEventId::SessionEvent as i64,
+        ));
+        values.extend(
+            tools
+                .iter()
+                .map(|tool| rusqlite::types::Value::Text((*tool).to_string())),
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (
+                row_id,
+                event_json,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                external_session_id,
+                external_tool_use_id,
+            ) = row?;
+            if event_ts < 0 || event_ts > u32::MAX as i64 {
+                continue;
+            }
+
+            let (repo_url, model) = recovery_attrs_from_event_json(&event_json);
+            candidates.push(SessionEventRecoveryCandidate {
+                row_id,
+                event_ts: event_ts as u32,
                 session_id,
                 trace_id,
                 tool,

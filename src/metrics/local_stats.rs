@@ -1478,7 +1478,16 @@ mod tests {
 
     #[test]
     fn derived_summary_from_records() {
-        let now = now_ts();
+        let now = Local
+            .from_local_datetime(
+                &Local::now()
+                    .date_naive()
+                    .and_hms_opt(12, 0, 0)
+                    .expect("local noon should exist"),
+            )
+            .single()
+            .expect("local noon should be unambiguous")
+            .timestamp() as u32;
         let repo = "github.com/acme/project";
         // Two sessions: one spanning ~1h, one a single event.
         let session_start = now.saturating_sub(7200);
