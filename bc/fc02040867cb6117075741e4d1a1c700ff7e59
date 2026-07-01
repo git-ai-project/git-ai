@@ -19,6 +19,11 @@ src/authorship/mod.rs
   "git_ai_version": "development:1.6.5",
   "base_commit_sha": "bcfc02040867cb6117075741e4d1a1c700ff7e59",
   "prompts": {},
+  "humans": {
+    "h_55c03ed47cd416": {
+      "author": "Sasha Varlamov <sasha@sashavarlamov.com>"
+    }
+  },
   "sessions": {
     "s_265a605c5598a3": {
       "agent_id": {
@@ -27,6 +32,14 @@ src/authorship/mod.rs
         "model": "gpt-5.5"
       },
       "human_author": null
+    },
+    "s_ddd48773cb990e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "52faaf7a-10cf-40f8-98a8-fcc7f4f083b2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>"
     }
   }
 }
