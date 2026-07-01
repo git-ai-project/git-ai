@@ -2,6 +2,7 @@ name: Release Build
 
 permissions:
   contents: read
+  id-token: write
 
 on:
   workflow_dispatch:
@@ -195,6 +196,37 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/git-ai release/${{ matrix.artifact_name }}
 
+      - name: Sign macOS binary
+        if: contains(matrix.os, 'macos')
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_IDENTITY}" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+              echo "Skipping macOS binary signing for dry run because signing secrets are not configured."
+              exit 0
+            fi
+            echo "::error::Missing Apple Developer ID Application signing secrets."
+            exit 1
+          fi
+
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          echo "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > app-signing.p12
+          security import app-signing.p12 -k build.keychain -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          codesign --force --timestamp --options runtime --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" "release/${{ matrix.artifact_name }}"
+          codesign --verify --strict --verbose=2 "release/${{ matrix.artifact_name }}"
+
       - name: Upload artifact (Windows)
         if: contains(matrix.os, 'windows')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -271,6 +303,36 @@ jobs:
         run: |
           cp target/x86_64-apple-darwin/release/git-ai release/git-ai-macos-x64
 
+      - name: Sign macOS binary
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_IDENTITY}" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+              echo "Skipping macOS binary signing for dry run because signing secrets are not configured."
+              exit 0
+            fi
+            echo "::error::Missing Apple Developer ID Application signing secrets."
+            exit 1
+          fi
+
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          echo "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > app-signing.p12
+          security import app-signing.p12 -k build.keychain -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          codesign --force --timestamp --options runtime --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" release/git-ai-macos-x64
+          codesign --verify --strict --verbose=2 release/git-ai-macos-x64
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -278,9 +340,254 @@ jobs:
           path: release/git-ai-macos-x64
           retention-days: 30
 
+  package-msi:
+    name: Build Windows MSI installers
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Download Windows x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-windows-x64
+          path: artifacts
+
+      - name: Download Windows ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-windows-arm64
+          path: artifacts
+
+      - name: Build MSI installers
+        shell: pwsh
+        run: |
+          $version = "${{ needs.build.outputs.version }}".TrimStart('v')
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          .\packaging\windows\build-msi.ps1 -BinaryPath "artifacts\git-ai-windows-x64.exe" -Architecture x64 -Version $version -OutputPath "release\git-ai-windows-x64.msi"
+          .\packaging\windows\build-msi.ps1 -BinaryPath "artifacts\git-ai-windows-arm64.exe" -Architecture arm64 -Version $version -OutputPath "release\git-ai-windows-arm64.msi"
+
+      - name: Azure login for MSI signing
+        if: inputs.dry_run != true
+        uses: azure/login@2dd0bbf4064d5a1812889dc200bb8eed2597f82a # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign MSI installers
+        if: inputs.dry_run != true
+        uses: azure/artifact-signing-action@c0ae2c1d0c1847ab81ac0ab8521bee597cfedd30 # v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\release
+          files-folder-filter: msi
+          file-digest: SHA256
+
+      - name: Upload MSI artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-windows-msi
+          path: release/*.msi
+          retention-days: 30
+
+  package-pkg:
+    name: Build macOS PKG installers
+    needs: [build, build-macos-intel]
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Download macOS ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-macos-arm64
+          path: artifacts
+
+      - name: Download macOS x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-macos-x64
+          path: artifacts
+
+      - name: Import Apple installer certificate
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_INSTALLER_IDENTITY}" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+              echo "Skipping PKG signing for dry run because signing secrets are not configured."
+              exit 0
+            fi
+            echo "::error::Missing Apple Developer ID Installer signing secrets."
+            exit 1
+          fi
+
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          echo "$APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64" | base64 --decode > installer-signing.p12
+          security import installer-signing.p12 -k build.keychain -P "$APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD" -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+      - name: Build PKG installers
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${VERSION#v}"
+          mkdir -p release
+          chmod +x artifacts/git-ai-macos-arm64 artifacts/git-ai-macos-x64
+          packaging/macos/build-pkg.sh --binary artifacts/git-ai-macos-arm64 --arch arm64 --version "$VERSION" --output release/git-ai-macos-arm64.pkg
+          packaging/macos/build-pkg.sh --binary artifacts/git-ai-macos-x64 --arch x64 --version "$VERSION" --output release/git-ai-macos-x64.pkg
+
+      - name: Notarize PKG installers
+        if: inputs.dry_run != true
+        shell: bash
+        env:
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_NOTARY_KEY_ID}" || -z "${APPLE_NOTARY_ISSUER_ID}" || -z "${APPLE_NOTARY_KEY_P8_BASE64}" ]]; then
+            echo "::error::Missing Apple notarization secrets."
+            exit 1
+          fi
+          mkdir -p private_keys
+          echo "$APPLE_NOTARY_KEY_P8_BASE64" | base64 --decode > "private_keys/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          for pkg in release/*.pkg; do
+            xcrun notarytool submit "$pkg" --key "private_keys/AuthKey_${APPLE_NOTARY_KEY_ID}.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" --wait
+            xcrun stapler staple "$pkg"
+            xcrun stapler validate "$pkg"
+          done
+
+      - name: Upload PKG artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-macos-pkg
+          path: release/*.pkg
+          retention-days: 30
+
+  package-deb:
+    name: Build Debian packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Download Linux x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-x64
+          path: artifacts
+
+      - name: Download Linux ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-arm64
+          path: artifacts
+
+      - name: Build deb packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${VERSION#v}"
+          mkdir -p release
+          chmod +x artifacts/git-ai-linux-x64 artifacts/git-ai-linux-arm64
+          packaging/debian/build-deb.sh --binary artifacts/git-ai-linux-x64 --arch amd64 --version "$VERSION" --output "release/git-ai_${VERSION}_amd64.deb"
+          packaging/debian/build-deb.sh --binary artifacts/git-ai-linux-arm64 --arch arm64 --version "$VERSION" --output "release/git-ai_${VERSION}_arm64.deb"
+
+      - name: Upload deb artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-deb
+          path: release/*.deb
+          retention-days: 30
+
+  test-msi:
+    name: Test Windows MSI installer
+    needs: package-msi
+    runs-on: windows-latest
+    steps:
+      - name: Download MSI artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-windows-msi
+          path: release
+
+      - name: Install and uninstall MSI
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem release\git-ai-windows-x64.msi).FullName
+          $install = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "MSI install failed with exit code $($install.ExitCode)" }
+          & "C:\Program Files\Git AI\git-ai.exe" --version
+          if (Test-Path "C:\Program Files\Git AI\git.exe") { throw "MSI installed a git.exe shim" }
+          $uninstall = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn /norestart" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($uninstall.ExitCode)" }
+
+  test-pkg:
+    name: Test macOS PKG installer
+    needs: package-pkg
+    runs-on: macos-latest
+    steps:
+      - name: Download PKG artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-macos-pkg
+          path: release
+
+      - name: Install PKG
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            PKG=release/git-ai-macos-arm64.pkg
+          else
+            PKG=release/git-ai-macos-x64.pkg
+          fi
+          sudo installer -pkg "$PKG" -target /
+          /usr/local/bin/git-ai --version
+          test ! -e /usr/local/bin/git
+          pkgutil --pkg-info com.git-ai.git-ai
+
+  test-deb:
+    name: Test Debian package
+    needs: package-deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download deb artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-deb
+          path: release
+
+      - name: Install and remove deb
+        run: |
+          sudo dpkg -i release/*_amd64.deb
+          /usr/bin/git-ai --version
+          test ! -e /usr/bin/git
+          dpkg -L git-ai
+          sudo apt-get remove -y git-ai
+          test ! -e /usr/bin/git-ai
+
   create-release:
     name: Create Release
-    needs: [build, build-macos-intel]
+    needs: [build, build-macos-intel, package-msi, package-pkg, package-deb, test-msi, test-pkg, test-deb]
     runs-on: ubuntu-latest
     if: success() && inputs.dry_run != true
     environment: release
@@ -327,7 +634,7 @@ jobs:
 
       - name: Move artifacts to release directory
         run: |
-          find artifacts -name "git-ai-*" -exec cp {} release/ \;
+          find artifacts -type f \( -name "git-ai-*" -o -name "git-ai_*" \) -exec cp {} release/ \;
 
       - name: List available artifacts
         run: |
@@ -337,8 +644,10 @@ jobs:
       - name: Create checksums
         run: |
           cd release
-          if ls git-ai-* 1> /dev/null 2>&1; then
-            sha256sum git-ai-* > SHA256SUMS
+          shopt -s nullglob
+          artifacts=(git-ai-* git-ai_*)
+          if [ ${#artifacts[@]} -gt 0 ]; then
+            sha256sum "${artifacts[@]}" | sort > SHA256SUMS
           else
             echo "No binaries found to create checksums for"
             touch SHA256SUMS
@@ -348,6 +657,15 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           path: repo
+
+      - name: Generate Homebrew formula
+        run: |
+          VERSION="${{ steps.release-meta.outputs.tag_name }}"
+          VERSION="${VERSION#v}"
+          repo/packaging/homebrew/update-formula.sh \
+            --version "$VERSION" \
+            --checksums release/SHA256SUMS \
+            --output release/git-ai.rb
 
       - name: Generate version-pinned install script
         run: |
@@ -390,15 +708,17 @@ jobs:
       - name: Add install scripts to SHA256SUMS
         run: |
           cd release
-          sha256sum install.sh install.ps1 >> SHA256SUMS
+          sha256sum install.sh install.ps1 git-ai.rb >> SHA256SUMS
 
       - name: Generate attestations for release artifacts
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
             release/git-ai-*
+            release/git-ai_*
             release/install.sh
             release/install.ps1
+            release/git-ai.rb
             release/SHA256SUMS
 
       - name: Create Release
@@ -435,10 +755,17 @@ jobs:
             ### Downloads
             - **Linux (x64)**: `git-ai-linux-x64`
             - **Linux (ARM64)**: `git-ai-linux-arm64`
+            - **Linux deb (amd64)**: `git-ai_*_amd64.deb`
+            - **Linux deb (arm64)**: `git-ai_*_arm64.deb`
             - **Windows (x64)**: `git-ai-windows-x64.exe`
             - **Windows (ARM64)**: `git-ai-windows-arm64.exe`
+            - **Windows MSI (x64)**: `git-ai-windows-x64.msi`
+            - **Windows MSI (ARM64)**: `git-ai-windows-arm64.msi`
             - **macOS (Intel)**: `git-ai-macos-x64`
             - **macOS (Apple Silicon)**: `git-ai-macos-arm64`
+            - **macOS PKG (Intel)**: `git-ai-macos-x64.pkg`
+            - **macOS PKG (Apple Silicon)**: `git-ai-macos-arm64.pkg`
+            - **Homebrew formula**: `git-ai.rb`
 
             ### SHA256 Checksums
             ```
@@ -452,9 +779,11 @@ jobs:
             ```
           files: |
             release/git-ai-*
+            release/git-ai_*
             release/SHA256SUMS
             release/install.sh
             release/install.ps1
+            release/git-ai.rb
           draft: false
           prerelease: ${{ steps.release-meta.outputs.prerelease == 'true' }}
           make_latest: ${{ steps.release-meta.outputs.make_latest }}

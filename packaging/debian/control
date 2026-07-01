@@ -1,0 +1,10 @@
+Package: git-ai
+Version: @VERSION@
+Section: devel
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Git AI <support@usegitai.com>
+Depends: git
+Homepage: https://github.com/git-ai-project/git-ai
+Description: Git extension for AI authorship attribution
+ Git AI tracks AI-generated code attribution through Git notes and trace2.

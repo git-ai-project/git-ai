@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+echo "Git AI installed."
+echo "Run 'git-ai install-hooks' as each developer user to enable trace2 integration and editor/agent setup."
+
+if [ "${GIT_AI_RUN_PACKAGE_USER_SETUP:-}" = "1" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  su - "$SUDO_USER" -c "git-ai setup-package --manager apt --target-user '$SUDO_USER'" || true
+fi
+
+exit 0
