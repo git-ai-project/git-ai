@@ -2,12 +2,13 @@ use crate::authorship::attribution_recovery::{
     AttributionRecoveryContext, FileTimestampsByPath, UnknownLinesByFile,
 };
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::diff_base::single_commit_diff_base;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::rewrite::DiffTreeResult;
 use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
-use crate::authorship::virtual_attribution::VirtualAttributions;
+use crate::authorship::virtual_attribution::{AuthorshipLogDiffContext, VirtualAttributions};
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::Config;
 use crate::error::GitAiError;
@@ -32,8 +33,6 @@ pub const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
 /// near zero, so the cost was previously invisible to the estimator.
 #[doc(hidden)]
 pub const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
-
-const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
@@ -316,6 +315,7 @@ where
         pathspecs.insert(file_path.clone());
     }
 
+    let committed_diff_base = single_commit_diff_base(&parent_sha, &commit_sha);
     let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
         .to_authorship_log_and_initial_working_log_with_precomputed_diff(
             repo,
@@ -323,7 +323,10 @@ where
             &commit_sha,
             Some(&pathspecs),
             Some(&observed_snapshot),
-            context.precomputed_parent_diff,
+            AuthorshipLogDiffContext {
+                precomputed_parent_diff: context.precomputed_parent_diff,
+                fallback_committed_diff_base: Some(&committed_diff_base),
+            },
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -584,33 +587,6 @@ fn commit_tree_snapshot_for_files(
     }
 
     Ok(snapshot)
-}
-
-/// Resolve the diff base for post-commit diff parsing so the diff is always
-/// bounded to the single commit being finalized — without any extra git spawn
-/// or object lookup.
-///
-/// The caller's `parent_sha` is normally the immediate parent already, but on
-/// the daemon's fast-forward `update-ref` path it is the *old branch tip* from
-/// before a `git pull` — potentially thousands of commits back. Diffing that
-/// full range buffers the entire history delta into memory (the 20GB+ blow-up
-/// in PD-23 / #1677).
-///
-/// Rather than resolving the parent OID (which costs `find_commit` +
-/// `parent(0)` git spawns on *every* post-commit), we express "the immediate
-/// first parent" as the rev-expression `<commit_sha>^`. Git resolves it inside
-/// the `git diff` spawn that already runs, so this adds zero spawns. For root
-/// commits there is no `^`, signalled by `parent_sha == "initial"`, in which
-/// case we diff against the empty tree exactly as before.
-fn single_commit_diff_base(parent_sha: &str, commit_sha: &str) -> String {
-    if parent_sha == "initial" {
-        EMPTY_TREE_SHA.to_string()
-    } else {
-        // `^` is `^1`, the first parent — matches the previous `parent(0)`
-        // resolution for merges (first-parent diff) and is identical to
-        // `parent_sha` on the normal/amend paths.
-        format!("{commit_sha}^")
-    }
 }
 
 fn recovery_committed_hunks(

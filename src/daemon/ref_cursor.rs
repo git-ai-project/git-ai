@@ -2518,6 +2518,8 @@ fn pull_reflog_action(cmd: &NormalizedCommand) -> String {
     let parsed = parse_git_cli_args(&raw_args);
     let args = if parsed.command.as_deref() == Some("pull") {
         parsed.command_args
+    } else if cmd.invoked_command.as_deref() == Some("pull") {
+        cmd.invoked_args.clone()
     } else {
         command_args(cmd)
     };
@@ -5317,6 +5319,17 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn pull_reflog_action_uses_expanded_command_for_zero_arg_alias() {
+        let family = FamilyKey::new("/repo/.git".to_string());
+        let mut cmd = command_with_worktree(&family, None, &["up"]);
+        cmd.primary_command = Some("pull".to_string());
+        cmd.invoked_command = Some("pull".to_string());
+        cmd.invoked_args.clear();
+
+        assert_eq!(pull_reflog_action(&cmd), "pull");
     }
 
     #[test]

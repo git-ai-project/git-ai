@@ -18,6 +18,25 @@ pub trait GitBackend: Send + Sync + 'static {
         argv: &[String],
     ) -> Result<Option<String>, GitAiError>;
 
+    /// Resolve the fully alias-expanded invocation: the underlying command
+    /// token plus its command-line arguments after expanding any user aliases
+    /// (e.g. `up` → `pull --rebase`). Git expands aliases before it writes
+    /// reflog messages, so downstream analyzers that reconstruct a command's
+    /// reflog action from its args (notably the pull span matcher) must see the
+    /// expanded flags rather than the literal alias token.
+    ///
+    /// Returns `None` when no alias expansion applies (the command is a builtin
+    /// or unresolvable); callers then fall back to parsing the raw argv, which
+    /// is byte-identical to the pre-alias behavior. The default implementation
+    /// returns `None` so backends without config access keep current behavior.
+    fn resolve_invocation(
+        &self,
+        _worktree: &Path,
+        _argv: &[String],
+    ) -> Result<Option<(String, Vec<String>)>, GitAiError> {
+        Ok(None)
+    }
+
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
 
     fn init_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
@@ -146,6 +165,46 @@ impl SystemGitBackend {
         let repo = discover_repository_in_path_no_git_exec(worktree)?;
         let key = format!("alias.{}", alias_name);
         repo.config_get_str(&key)
+    }
+
+    /// Iteratively expand user aliases until reaching a builtin command (or an
+    /// unresolvable token / `!`-shell alias / alias cycle), mirroring how git
+    /// itself expands `git <alias> ...` before execution. Returns the resolved
+    /// command token together with its expanded command-line args, or `None`
+    /// when no command can be determined.
+    fn expand_alias_invocation(
+        &self,
+        worktree: &Path,
+        argv: &[String],
+    ) -> Result<Option<(String, Vec<String>)>, GitAiError> {
+        let mut current = parse_git_cli_args(git_invocation_tokens(argv));
+        let mut seen = HashSet::new();
+        loop {
+            let Some(command) = current.command.clone() else {
+                return Ok(None);
+            };
+            if !seen.insert(command.clone()) {
+                return Ok(None);
+            }
+            if is_builtin_primary_command(&command) {
+                return Ok(Some((command, current.command_args)));
+            }
+
+            let alias_value = match self.resolve_alias_cached(worktree, &command)? {
+                Some(value) => value,
+                None => return Ok(Some((command, current.command_args))),
+            };
+
+            let Some(alias_tokens) = parse_alias_tokens(&alias_value) else {
+                return Ok(None);
+            };
+
+            let mut expanded_args = Vec::new();
+            expanded_args.extend(current.global_args.iter().cloned());
+            expanded_args.extend(alias_tokens);
+            expanded_args.extend(current.command_args.iter().cloned());
+            current = parse_git_cli_args(&expanded_args);
+        }
     }
 }
 
@@ -282,34 +341,17 @@ impl GitBackend for SystemGitBackend {
         worktree: &Path,
         argv: &[String],
     ) -> Result<Option<String>, GitAiError> {
-        let mut current = parse_git_cli_args(git_invocation_tokens(argv));
-        let mut seen = HashSet::new();
-        loop {
-            let Some(command) = current.command.clone() else {
-                return Ok(None);
-            };
-            if !seen.insert(command.clone()) {
-                return Ok(None);
-            }
-            if is_builtin_primary_command(&command) {
-                return Ok(Some(command));
-            }
+        Ok(self
+            .expand_alias_invocation(worktree, argv)?
+            .map(|(command, _args)| command))
+    }
 
-            let alias_value = match self.resolve_alias_cached(worktree, &command)? {
-                Some(value) => value,
-                None => return Ok(Some(command)),
-            };
-
-            let Some(alias_tokens) = parse_alias_tokens(&alias_value) else {
-                return Ok(None);
-            };
-
-            let mut expanded_args = Vec::new();
-            expanded_args.extend(current.global_args.iter().cloned());
-            expanded_args.extend(alias_tokens);
-            expanded_args.extend(current.command_args.iter().cloned());
-            current = parse_git_cli_args(&expanded_args);
-        }
+    fn resolve_invocation(
+        &self,
+        worktree: &Path,
+        argv: &[String],
+    ) -> Result<Option<(String, Vec<String>)>, GitAiError> {
+        self.expand_alias_invocation(worktree, argv)
     }
 
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf> {

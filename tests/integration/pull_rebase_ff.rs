@@ -668,6 +668,90 @@ fn test_pull_rebase_via_git_config_preserves_committed_ai_authorship() {
     ]);
 }
 
+#[test]
+fn test_pull_rebase_via_alias_preserves_committed_ai_authorship() {
+    // Regression: `git up` where `up = pull --rebase`. Git expands the alias
+    // before writing the reflog (label `pull --rebase ... (start)`), but the
+    // daemon previously reconstructed the pull action from the literal alias
+    // token `up`, so the span matcher never matched and the rebased AI commit's
+    // authorship note was dropped. The invocation must expand to `pull
+    // --rebase` so attribution migrates with the rebase.
+    let setup = setup_divergent_pull_test();
+    let local = setup.local;
+
+    // Define an alias that expands to `pull --rebase`.
+    local
+        .git(&["config", "alias.up", "pull --rebase"])
+        .expect("set alias.up should succeed");
+
+    // Drive the rebase entirely through the alias (no explicit --rebase flag).
+    local.git(&["up"]).expect("aliased pull should succeed");
+
+    // Verify upstream changes arrived and the commit SHA changed (real rebase).
+    assert!(
+        local.read_file("upstream_change.txt").is_some(),
+        "Should have upstream_change.txt after aliased pull --rebase"
+    );
+
+    let new_head = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    assert_ne!(
+        new_head, setup.local_ai_commit_sha,
+        "HEAD should have a new SHA after rebase"
+    );
+
+    // Verify AI authorship survived the alias-driven rebase.
+    let mut ai_file = local.filename("ai_feature.txt");
+    ai_file.assert_lines_and_blame(vec![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+}
+
+#[test]
+fn test_pull_rebase_via_zero_arg_alias_and_git_config_preserves_committed_ai_authorship() {
+    // Regression: `git up` where `up = pull` and `pull.rebase=true`. The alias
+    // expands to `pull` with no explicit args, so the normalized invocation must
+    // still keep `pull` visible instead of falling back to the raw alias token.
+    let setup = setup_divergent_pull_test();
+    let local = setup.local;
+
+    local
+        .git(&["config", "alias.up", "pull"])
+        .expect("set alias.up should succeed");
+    local
+        .git(&["config", "pull.rebase", "true"])
+        .expect("set pull.rebase should succeed");
+
+    local.git(&["up"]).expect("aliased pull should succeed");
+
+    assert!(
+        local.read_file("upstream_change.txt").is_some(),
+        "Should have upstream_change.txt after aliased config-driven pull --rebase"
+    );
+
+    let new_head = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    assert_ne!(
+        new_head, setup.local_ai_commit_sha,
+        "HEAD should have a new SHA after rebase"
+    );
+
+    let mut ai_file = local.filename("ai_feature.txt");
+    ai_file.assert_lines_and_blame(vec![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+}
+
 // =============================================================================
 // Pull --rebase --autostash with uncommitted changes
 // =============================================================================
@@ -1897,6 +1981,7 @@ crate::reuse_tests_in_worktree!(
     test_fast_forward_pull_without_local_changes,
     test_pull_rebase_preserves_committed_ai_authorship,
     test_pull_rebase_via_git_config_preserves_committed_ai_authorship,
+    test_pull_rebase_via_zero_arg_alias_and_git_config_preserves_committed_ai_authorship,
     test_pull_rebase_autostash_preserves_uncommitted_ai_attribution,
     test_pull_rebase_autostash_with_mixed_attribution,
     test_pull_rebase_autostash_via_git_config,

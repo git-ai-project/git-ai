@@ -595,8 +595,33 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.worktree.as_deref(),
             pending.family_key.as_ref(),
         )?;
-        let (invoked_command, invoked_args) =
+        let (mut invoked_command, mut invoked_args) =
             canonical_invocation(&pending.raw_argv, primary_command.as_deref());
+        // Git expands user aliases (e.g. `up` → `pull --rebase`) before it runs
+        // the command and before it writes reflog messages, so the literal argv
+        // token and its trailing args do not reflect the flags that shaped the
+        // reflog. Surface the alias-expanded command+args when the invoked token
+        // was itself an alias, so downstream analyzers (notably the pull span
+        // matcher, which reconstructs a command's reflog action from its args)
+        // see the same flags git did.
+        //
+        // Fast path: only consult the backend when the resolved command differs
+        // from the literal invoked token — that mismatch is exactly the alias
+        // signature (git ignores an alias that shadows a builtin, so a plain
+        // `pull`/`status`/etc. always has primary == invoked and is skipped
+        // here). This keeps every common, non-aliased command off the
+        // alias-cache path entirely, so trace-ingestion finalize pays nothing
+        // extra for it.
+        if primary_command.as_deref() != invoked_command.as_deref()
+            && let Some(worktree) = pending.worktree.as_deref()
+            && let Some((expanded_command, expanded_args)) = self
+                .backend
+                .resolve_invocation(worktree, &pending.raw_argv)?
+            && Some(expanded_command.as_str()) != invoked_command.as_deref()
+        {
+            invoked_command = Some(expanded_command);
+            invoked_args = expanded_args;
+        }
         if primary_command.is_none() {
             primary_command = invoked_command.clone();
         }
@@ -1021,20 +1046,44 @@ mod tests {
             worktree: &Path,
             argv: &[String],
         ) -> Result<Option<String>, GitAiError> {
+            Ok(self
+                .resolve_invocation(worktree, argv)?
+                .map(|(command, _args)| command))
+        }
+
+        fn resolve_invocation(
+            &self,
+            worktree: &Path,
+            argv: &[String],
+        ) -> Result<Option<(String, Vec<String>)>, GitAiError> {
             let raw = argv_primary_command(argv);
             let Some(command) = raw else {
                 return Ok(None);
             };
             let worktree_key = normalize_path_key(worktree);
-            let resolved = self
+            // Stored alias targets may carry flags (e.g. "pull --rebase"); split
+            // them into a command token plus leading args, then append the
+            // invocation's own trailing args, mirroring real alias expansion.
+            let expansion = self
                 .alias_by_worktree_command
                 .lock()
                 .unwrap()
                 .get(&worktree_key)
                 .and_then(|commands| commands.get(&command))
-                .cloned()
-                .unwrap_or(command);
-            Ok(Some(resolved))
+                .cloned();
+            let trailing = args_after_command(argv, &command);
+            match expansion {
+                Some(target) => {
+                    let mut tokens = target.split_whitespace().map(str::to_string);
+                    let Some(resolved_command) = tokens.next() else {
+                        return Ok(Some((command, trailing)));
+                    };
+                    let mut args = tokens.collect::<Vec<_>>();
+                    args.extend(trailing);
+                    Ok(Some((resolved_command, args)))
+                }
+                None => Ok(Some((command, trailing))),
+            }
         }
 
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {
@@ -1372,6 +1421,107 @@ mod tests {
         assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
         let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn alias_pull_rebase_expands_invoked_args_with_flags() {
+        // `git up origin main` where `up = pull --rebase` must surface the
+        // alias-expanded flags so downstream reflog-action matching sees
+        // `pull --rebase ...` (matching git's reflog label) rather than the
+        // literal alias token `up`.
+        let backend = Arc::new(MockBackend::default());
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(worktree.join(".git")).expect("create git dir");
+        backend.set_alias(
+            worktree.to_str().expect("utf8 worktree"),
+            "up",
+            "pull --rebase",
+        );
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"alias-pull",
+            "ts":1,
+            "argv":["git","up","origin","main"],
+            "worktree":worktree
+        });
+        // git emits a child cmd_name of `pull` for the expanded alias, exactly
+        // as observed in real trace2 output, so the primary command is already
+        // resolved without consulting the backend.
+        let child = serde_json::json!({
+            "event":"cmd_name",
+            "sid":"alias-pull/child",
+            "ts":1,
+            "name":"pull",
+            "hierarchy":"_run_git_alias_/pull"
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"alias-pull",
+            "ts":2,
+            "code":0
+        });
+        let atexit = atexit_payload("alias-pull", 3);
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&child).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+
+        assert_eq!(cmd.primary_command.as_deref(), Some("pull"));
+        assert_eq!(cmd.invoked_command.as_deref(), Some("pull"));
+        assert_eq!(
+            cmd.invoked_args,
+            vec![
+                "--rebase".to_string(),
+                "origin".to_string(),
+                "main".to_string()
+            ],
+            "alias-expanded invocation must carry the --rebase flag and trailing args"
+        );
+    }
+
+    #[test]
+    fn non_alias_pull_invocation_is_unchanged() {
+        // A plain (non-alias) invocation must expand to the identical command
+        // token, leaving invoked_args byte-identical to the pre-alias behavior.
+        let backend = Arc::new(MockBackend::default());
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(worktree.join(".git")).expect("create git dir");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"plain-pull",
+            "ts":1,
+            "argv":["git","pull","--rebase","origin","main"],
+            "worktree":worktree
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"plain-pull",
+            "ts":2,
+            "code":0
+        });
+        let atexit = atexit_payload("plain-pull", 3);
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+
+        assert_eq!(cmd.primary_command.as_deref(), Some("pull"));
+        assert_eq!(cmd.invoked_command.as_deref(), Some("pull"));
+        assert_eq!(
+            cmd.invoked_args,
+            vec![
+                "--rebase".to_string(),
+                "origin".to_string(),
+                "main".to_string()
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 name: Test
 
 permissions:
+  actions: read
   contents: read
 
 on:
@@ -41,10 +42,50 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo 'matrix={"include":[{"name":"ubuntu-latest","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"full"},{"name":"macos-latest","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"full"}]}' >> "$GITHUB_OUTPUT"
+            matrix=$(cat <<'JSON'
+          {
+            "include": [
+              {"name":"ubuntu-latest core","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"unix-core"},
+              {"name":"ubuntu-latest integration 1/2","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"unix-integration","shard_index":0,"shard_count":2},
+              {"name":"ubuntu-latest integration 2/2","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"unix-integration","shard_index":1,"shard_count":2},
+              {"name":"macos-latest core","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-core"},
+              {"name":"macos-latest integration 1/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":0,"shard_count":4},
+              {"name":"macos-latest integration 2/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":1,"shard_count":4},
+              {"name":"macos-latest integration 3/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":2,"shard_count":4},
+              {"name":"macos-latest integration 4/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":3,"shard_count":4}
+            ]
+          }
+          JSON
+          )
           else
-            echo 'matrix={"include":[{"name":"ubuntu-latest","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"full"},{"name":"windows-latest core","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-core"},{"name":"windows-latest integration 1/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":0,"shard_count":6},{"name":"windows-latest integration 2/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":1,"shard_count":6},{"name":"windows-latest integration 3/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":2,"shard_count":6},{"name":"windows-latest integration 4/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":3,"shard_count":6},{"name":"windows-latest integration 5/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":4,"shard_count":6},{"name":"windows-latest integration 6/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":5,"shard_count":6},{"name":"macos-latest","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"full"}]}' >> "$GITHUB_OUTPUT"
+            matrix=$(cat <<'JSON'
+          {
+            "include": [
+              {"name":"ubuntu-latest core","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"unix-core"},
+              {"name":"ubuntu-latest integration 1/2","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"unix-integration","shard_index":0,"shard_count":2},
+              {"name":"ubuntu-latest integration 2/2","os":"ubuntu-latest","test_threads":4,"daemon_pool":4,"mode":"unix-integration","shard_index":1,"shard_count":2},
+              {"name":"windows-latest core","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-core"},
+              {"name":"windows-latest integration 1/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":0,"shard_count":6},
+              {"name":"windows-latest integration 2/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":1,"shard_count":6},
+              {"name":"windows-latest integration 3/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":2,"shard_count":6},
+              {"name":"windows-latest integration 4/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":3,"shard_count":6},
+              {"name":"windows-latest integration 5/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":4,"shard_count":6},
+              {"name":"windows-latest integration 6/6","os":"windows-latest","test_threads":4,"daemon_pool":4,"mode":"windows-integration","shard_index":5,"shard_count":6},
+              {"name":"macos-latest core","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-core"},
+              {"name":"macos-latest integration 1/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":0,"shard_count":4},
+              {"name":"macos-latest integration 2/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":1,"shard_count":4},
+              {"name":"macos-latest integration 3/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":2,"shard_count":4},
+              {"name":"macos-latest integration 4/4","os":"macos-latest","test_threads":2,"daemon_pool":2,"mode":"unix-integration","shard_index":3,"shard_count":4}
+            ]
+          }
+          JSON
+          )
           fi
+          {
+            echo 'matrix<<JSON'
+            echo "$matrix"
+            echo 'JSON'
+          } >> "$GITHUB_OUTPUT"
 
   test:
     name: Test on ${{ matrix.name }}
@@ -94,7 +135,99 @@ jobs:
 
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
-        run: task test TEST_THREADS=${{ matrix.test_threads }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mode="${{ matrix.mode }}"
+
+          if [ "$mode" = "full" ]; then
+            task test TEST_THREADS=${{ matrix.test_threads }}
+            exit 0
+          fi
+
+          if [ "$mode" = "unix-core" ]; then
+            test_targets=(--lib --bins)
+            while IFS= read -r path; do
+              test_targets+=(--test "$(basename "$path" .rs)")
+            done < <(find tests -maxdepth 1 -type f -name '*.rs' | sort)
+
+            task test CARGO_TEST_ARGS="${test_targets[*]}" TEST_THREADS=${{ matrix.test_threads }}
+            task test CARGO_TEST_ARGS="--doc" TEST_THREADS=${{ matrix.test_threads }}
+            exit 0
+          fi
+
+          if [ "$mode" != "unix-integration" ]; then
+            echo "Unsupported Unix test mode: $mode" >&2
+            exit 1
+          fi
+
+          shard_index=${{ matrix.shard_index }}
+          shard_count=${{ matrix.shard_count }}
+          module_infos=()
+          module_names=()
+
+          while IFS= read -r name; do
+            module_names+=("$name")
+            weight=0
+            path="tests/integration/$name.rs"
+            module_dir="tests/integration/$name"
+
+            if [ -f "$path" ]; then
+              count=$(grep -E -c '#\[test\]|#\[rstest\]|subdir_test_variants!|worktree_test_wrappers!' "$path" || true)
+              weight=$((weight + count))
+            fi
+
+            if [ -d "$module_dir" ]; then
+              while IFS= read -r file; do
+                count=$(grep -E -c '#\[test\]|#\[rstest\]|subdir_test_variants!|worktree_test_wrappers!' "$file" || true)
+                weight=$((weight + count))
+              done < <(find "$module_dir" -type f -name '*.rs' | sort)
+            fi
+
+            module_infos+=("$weight:$name")
+          done < <(sed -nE 's/^mod[[:space:]]+([A-Za-z0-9_]+);/\1/p' tests/integration/main.rs)
+
+          if [ "${#module_infos[@]}" -eq 0 ]; then
+            echo "No integration test modules found" >&2
+            exit 1
+          fi
+
+          shard_loads=()
+          shard_modules=()
+          for ((i = 0; i < shard_count; i++)); do
+            shard_loads[$i]=0
+            shard_modules[$i]=""
+          done
+
+          while IFS=: read -r weight name; do
+            target_shard=0
+            for ((i = 1; i < shard_count; i++)); do
+              if (( shard_loads[i] < shard_loads[target_shard] )); then
+                target_shard=$i
+              fi
+            done
+
+            shard_modules[$target_shard]="${shard_modules[$target_shard]} $name"
+            shard_loads[$target_shard]=$((shard_loads[target_shard] + weight))
+          done < <(printf '%s\n' "${module_infos[@]}" | sort -t: -k1,1nr -k2,2)
+
+          selected_modules=" ${shard_modules[$shard_index]} "
+          skip_args=()
+          for name in "${module_names[@]}"; do
+            if [[ "$selected_modules" != *" $name "* ]]; then
+              skip_args+=(--skip "$name::")
+            fi
+          done
+
+          echo "Running Unix integration shard $((shard_index + 1))/$shard_count"
+          echo "Estimated source-test load: ${shard_loads[$shard_index]}"
+          echo "Selected modules:"
+          for name in ${shard_modules[$shard_index]}; do
+            echo "  $name"
+          done | sort
+
+          task test CARGO_TEST_ARGS="--test integration" EXTRA_TEST_BINARY_ARGS="${skip_args[*]}" TEST_THREADS=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
@@ -193,6 +326,106 @@ jobs:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
 
+  ubuntu-test-complete:
+    name: Test on ubuntu-latest
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Ubuntu shards
+        env:
+          EXPECTED_JOBS: 3
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          JOB_PREFIX: 'Test on ubuntu-latest '
+        run: |
+          set -euo pipefail
+          jobs_json=$(gh run view "$GITHUB_RUN_ID" --json jobs)
+          JOBS_JSON="$jobs_json" python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          expected_jobs = int(os.environ["EXPECTED_JOBS"])
+          job_prefix = os.environ["JOB_PREFIX"]
+          jobs = json.loads(os.environ["JOBS_JSON"])["jobs"]
+          matching_jobs = sorted(
+              [job for job in jobs if job["name"].startswith(job_prefix)],
+              key=lambda job: job["name"],
+          )
+
+          if len(matching_jobs) != expected_jobs:
+              print(
+                  f"Expected {expected_jobs} jobs with prefix {job_prefix!r}, "
+                  f"found {len(matching_jobs)}",
+                  file=sys.stderr,
+              )
+              for job in matching_jobs:
+                  print(f"  {job['name']}: {job['status']} / {job['conclusion']}")
+              sys.exit(1)
+
+          failed_jobs = [
+              job for job in matching_jobs if job["conclusion"] != "success"
+          ]
+          for job in matching_jobs:
+              print(f"{job['name']}: {job['status']} / {job['conclusion']}")
+
+          if failed_jobs:
+              print("One or more Ubuntu test shards failed", file=sys.stderr)
+              sys.exit(1)
+          PY
+          echo "Ubuntu test shards completed successfully"
+
+  macos-test-complete:
+    name: Test on macos-latest
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check macOS shards
+        env:
+          EXPECTED_JOBS: 5
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          JOB_PREFIX: 'Test on macos-latest '
+        run: |
+          set -euo pipefail
+          jobs_json=$(gh run view "$GITHUB_RUN_ID" --json jobs)
+          JOBS_JSON="$jobs_json" python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          expected_jobs = int(os.environ["EXPECTED_JOBS"])
+          job_prefix = os.environ["JOB_PREFIX"]
+          jobs = json.loads(os.environ["JOBS_JSON"])["jobs"]
+          matching_jobs = sorted(
+              [job for job in jobs if job["name"].startswith(job_prefix)],
+              key=lambda job: job["name"],
+          )
+
+          if len(matching_jobs) != expected_jobs:
+              print(
+                  f"Expected {expected_jobs} jobs with prefix {job_prefix!r}, "
+                  f"found {len(matching_jobs)}",
+                  file=sys.stderr,
+              )
+              for job in matching_jobs:
+                  print(f"  {job['name']}: {job['status']} / {job['conclusion']}")
+              sys.exit(1)
+
+          failed_jobs = [
+              job for job in matching_jobs if job["conclusion"] != "success"
+          ]
+          for job in matching_jobs:
+              print(f"{job['name']}: {job['status']} / {job['conclusion']}")
+
+          if failed_jobs:
+              print("One or more macOS test shards failed", file=sys.stderr)
+              sys.exit(1)
+          PY
+          echo "macOS test shards completed successfully"
+
   windows-test-complete:
     name: Test on windows-latest
     needs: test
@@ -200,11 +433,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check Windows shards
+        env:
+          EXPECTED_JOBS: 7
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          JOB_PREFIX: 'Test on windows-latest '
         run: |
-          if [ "${{ needs.test.result }}" != "success" ]; then
-            echo "One or more test matrix jobs failed"
-            exit 1
-          fi
+          set -euo pipefail
+          jobs_json=$(gh run view "$GITHUB_RUN_ID" --json jobs)
+          JOBS_JSON="$jobs_json" python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          expected_jobs = int(os.environ["EXPECTED_JOBS"])
+          job_prefix = os.environ["JOB_PREFIX"]
+          jobs = json.loads(os.environ["JOBS_JSON"])["jobs"]
+          matching_jobs = sorted(
+              [job for job in jobs if job["name"].startswith(job_prefix)],
+              key=lambda job: job["name"],
+          )
+
+          if len(matching_jobs) != expected_jobs:
+              print(
+                  f"Expected {expected_jobs} jobs with prefix {job_prefix!r}, "
+                  f"found {len(matching_jobs)}",
+                  file=sys.stderr,
+              )
+              for job in matching_jobs:
+                  print(f"  {job['name']}: {job['status']} / {job['conclusion']}")
+              sys.exit(1)
+
+          failed_jobs = [
+              job for job in matching_jobs if job["conclusion"] != "success"
+          ]
+          for job in matching_jobs:
+              print(f"{job['name']}: {job['status']} / {job['conclusion']}")
+
+          if failed_jobs:
+              print("One or more Windows test shards failed", file=sys.stderr)
+              sys.exit(1)
+          PY
           echo "Windows test shards completed successfully"
 
   test-ignored:

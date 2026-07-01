@@ -34,6 +34,12 @@ pub struct VirtualAttributions {
     pub sessions: BTreeMap<String, SessionRecord>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AuthorshipLogDiffContext<'a> {
+    pub precomputed_parent_diff: Option<&'a crate::authorship::rewrite::DiffTreeResult>,
+    pub fallback_committed_diff_base: Option<&'a str>,
+}
+
 impl VirtualAttributions {
     /// Create a new VirtualAttributions for the given base commit with initial pathspecs
     pub async fn new_for_base_commit(
@@ -2073,7 +2079,7 @@ impl VirtualAttributions {
             commit_sha,
             pathspecs,
             final_state_snapshot,
-            None,
+            AuthorshipLogDiffContext::default(),
         )
     }
 
@@ -2081,8 +2087,11 @@ impl VirtualAttributions {
     /// pre-computed parent→commit `DiffTreeResult` so a batched caller (e.g. the
     /// rebase conflict-resolution driver) can supply renames + committed hunks
     /// from a single batched `diff-tree` instead of this method spawning its own
-    /// per-commit `git diff` / `git diff-tree`. When `None`, behavior is
-    /// identical to the unbatched path (used by every single-commit caller).
+    /// per-commit `git diff` / `git diff-tree`.
+    ///
+    /// When the context has no precomputed diff, it may override the diff base
+    /// used only for committed-hunk and rename classification. Other
+    /// reconciliation still uses `parent_sha`.
     pub(crate) fn to_authorship_log_and_initial_working_log_with_precomputed_diff(
         &self,
         repo: &Repository,
@@ -2090,7 +2099,7 @@ impl VirtualAttributions {
         commit_sha: &str,
         pathspecs: Option<&HashSet<String>>,
         final_state_snapshot: Option<&HashMap<String, String>>,
-        precomputed_parent_diff: Option<&crate::authorship::rewrite::DiffTreeResult>,
+        diff_context: AuthorshipLogDiffContext<'_>,
     ) -> Result<
         (
             crate::authorship::authorship_log_serialization::AuthorshipLog,
@@ -2129,10 +2138,19 @@ impl VirtualAttributions {
         // Detect renames so we can look up committed hunks by new path when
         // the working log references the old path. A batched caller may supply
         // the parent→commit diff (renames included); otherwise spawn per-commit.
+        //
+        // The persisted working-log base can be an older ref tip on daemon
+        // fast-forward paths. Diff classification must still be bounded to the
+        // finalized commit, while carryover reconciliation below continues to
+        // use the original working-log base.
+        let precomputed_parent_diff = diff_context.precomputed_parent_diff;
+        let fallback_diff_base = diff_context
+            .fallback_committed_diff_base
+            .unwrap_or(parent_sha);
         let rename_map = if let Some(diff) = precomputed_parent_diff {
             diff.renames.iter().cloned().collect()
         } else if parent_sha != "initial" {
-            detect_renames_in_commit(repo, parent_sha, commit_sha).unwrap_or_default()
+            detect_renames_in_commit(repo, fallback_diff_base, commit_sha).unwrap_or_default()
         } else {
             HashMap::new()
         };
@@ -2158,7 +2176,7 @@ impl VirtualAttributions {
         let committed_hunks = if let Some(diff) = precomputed_parent_diff {
             committed_hunks_from_diff_result(diff, effective_pathspecs)
         } else {
-            collect_committed_hunks(repo, parent_sha, commit_sha, effective_pathspecs)?
+            collect_committed_hunks(repo, fallback_diff_base, commit_sha, effective_pathspecs)?
         };
         let carryover_snapshot = if let Some(snapshot) = final_state_snapshot {
             Some(build_carryover_snapshot(
