@@ -2,7 +2,7 @@ use crate::daemon::analyzers::{command_args, normalized_args};
 use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
 use crate::error::GitAiError;
 use crate::git::cli_parser::{
-    explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
+    explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args, summarize_restore_args,
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
@@ -190,6 +190,7 @@ impl RefCursor {
             "pull" => self.consume_pull_transition(cmd, state),
             "branch" => self.enrich_branch(cmd, state),
             "stash" => self.enrich_stash(cmd, state),
+            "restore" => self.enrich_restore(cmd, state),
             "update-ref" => self.enrich_update_ref(cmd, state),
             _ => Ok(()),
         }?;
@@ -855,6 +856,30 @@ impl RefCursor {
             }
         }
 
+        Ok(())
+    }
+
+    /// `git restore` never moves refs, so there is no reflog transition to
+    /// consume. We only resolve the `--source <rev>` argument to a full commit
+    /// OID (against the sequenced ref snapshot) so the workspace analyzer can
+    /// emit a `RestorePaths` event that carries the source commit. Resolving
+    /// against the live worktree is safe because restore leaves HEAD untouched.
+    fn enrich_restore(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let summary = summarize_restore_args(&command_args(cmd));
+        let Some(source) = summary.source else {
+            return Ok(());
+        };
+        let Some(worktree) = cmd.worktree.clone() else {
+            return Ok(());
+        };
+        let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+        let resolved =
+            resolve_cherry_pick_sources_with_cat_file(&repo, &[source.as_str()], &state.refs)?;
+        cmd.restore_source_oid = resolved.into_iter().next();
         Ok(())
     }
 
@@ -3405,6 +3430,7 @@ fn command_uses_ref_cursor(primary: &str) -> bool {
             | "pull"
             | "branch"
             | "stash"
+            | "restore"
             | "update-ref"
     )
 }
@@ -3598,6 +3624,7 @@ mod tests {
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
+            restore_source_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }

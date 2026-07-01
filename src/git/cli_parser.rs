@@ -141,6 +141,89 @@ pub fn is_flag_with_value(flag: &str) -> bool {
     )
 }
 
+/// Parsed shape of a `git restore` invocation, limited to the parts that matter
+/// for attribution: the `--source` revision (if any) and the restored pathspecs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RestoreArgsSummary {
+    /// The `--source <rev>` / `--source=<rev>` / `-s <rev>` value, if present.
+    pub source: Option<String>,
+    /// The files being restored. Tokens after `--`, or trailing positionals when
+    /// no `--` separator is given.
+    pub pathspecs: Vec<String>,
+}
+
+/// Parse `git restore` arguments (the args AFTER the `restore` subcommand).
+/// Consumes `--source`'s value so it is never mistaken for a pathspec, and
+/// collects pathspecs from after `--` (or trailing positionals if absent).
+///
+/// Note: pathspecs supplied via `--pathspec-from-file` live in a file and never
+/// appear in argv, so `pathspecs` is empty for that form and attribution carry
+/// is skipped — the same limitation the stash handler has.
+pub fn summarize_restore_args(command_args: &[String]) -> RestoreArgsSummary {
+    let args = if command_args.first().is_some_and(|arg| arg == "restore") {
+        &command_args[1..]
+    } else {
+        command_args
+    };
+
+    let mut source: Option<String> = None;
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+
+        if arg == "--" {
+            positionals.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+
+        if let Some(rev) = arg.strip_prefix("--source=") {
+            source = Some(rev.to_string());
+            i += 1;
+            continue;
+        }
+        if arg == "--source" || arg == "-s" {
+            if let Some(next) = args.get(i + 1) {
+                source = Some(next.clone());
+                i += 2;
+                continue;
+            }
+            break;
+        }
+        // Combined short form: `-sHEAD~1` (value concatenated, no space).
+        if let Some(rev) = arg.strip_prefix("-s")
+            && !rev.is_empty()
+        {
+            source = Some(rev.to_string());
+            i += 1;
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            // Flags that take a space-separated value (`--conflict <style>`,
+            // `--pathspec-from-file <file>`); skip the value so it is not
+            // mistaken for a pathspec. The `=` forms are self-contained.
+            let takes_value = matches!(arg, "--conflict" | "--pathspec-from-file");
+            if takes_value && !arg.contains('=') {
+                i += 2;
+                continue;
+            }
+            // Other restore flags (--staged, --worktree, --ours, --theirs, ...)
+            // are value-less; skip the flag itself.
+            i += 1;
+            continue;
+        }
+
+        positionals.push(arg.to_string());
+        i += 1;
+    }
+
+    RestoreArgsSummary {
+        source,
+        pathspecs: positionals,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseArgsSummary {
     pub is_control_mode: bool,
@@ -733,6 +816,94 @@ fn derive_directory_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn restore(args: &[&str]) -> RestoreArgsSummary {
+        summarize_restore_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn restore_args_separated_source_and_pathspecs() {
+        let s = restore(&[
+            "restore",
+            "--source",
+            "abc",
+            "--staged",
+            "--worktree",
+            "--",
+            "f.ts",
+        ]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_equals_source_form() {
+        let s = restore(&["restore", "--source=abc", "--", "a.ts", "b.ts"]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["a.ts".to_string(), "b.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_short_source_flag_consumes_value() {
+        // `-s abc` must consume `abc` as the source, not treat it as a pathspec.
+        let s = restore(&["restore", "-s", "abc", "--", "f.ts"]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_combined_short_source_flag() {
+        // Combined `-sabc` form (value concatenated without a space).
+        let s = restore(&["restore", "-sHEAD~1", "--", "f.ts"]);
+        assert_eq!(s.source.as_deref(), Some("HEAD~1"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_value_taking_flags_do_not_become_pathspecs() {
+        // `--conflict <style>` and `--pathspec-from-file <file>` take a
+        // space-separated value that must not be collected as a pathspec.
+        let s = restore(&[
+            "restore",
+            "--source",
+            "abc",
+            "--conflict",
+            "merge",
+            "--",
+            "f.ts",
+        ]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+
+        let s = restore(&[
+            "restore",
+            "--source",
+            "abc",
+            "--pathspec-from-file",
+            "paths.txt",
+        ]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert!(
+            s.pathspecs.is_empty(),
+            "the pathspec-from-file argument must not be treated as a pathspec, got {:?}",
+            s.pathspecs
+        );
+    }
+
+    #[test]
+    fn restore_args_no_source() {
+        let s = restore(&["restore", "--", "f.ts"]);
+        assert_eq!(s.source, None);
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
+
+    #[test]
+    fn restore_args_pathspecs_without_separator() {
+        // No `--`: trailing positionals are pathspecs; --source value is consumed.
+        let s = restore(&["restore", "--source", "abc", "f.ts"]);
+        assert_eq!(s.source.as_deref(), Some("abc"));
+        assert_eq!(s.pathspecs, vec!["f.ts".to_string()]);
+    }
 
     #[test]
     fn test_pos_command_basic() {
