@@ -376,10 +376,10 @@ fn print_help() {
     eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
-    eprintln!("  setup-package      Complete per-user setup after a package-manager install");
     eprintln!("    --skills               Also install agent skill files");
     eprintln!("    --visual-studio-extension");
     eprintln!("                           Also install the Visual Studio extension on Windows");
+    eprintln!("  setup-package      Complete per-user setup after a package-manager install");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
