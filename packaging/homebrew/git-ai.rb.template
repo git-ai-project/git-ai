@@ -1,0 +1,44 @@
+class GitAi < Formula
+  desc "Git extension that tracks AI-generated code attribution"
+  homepage "https://github.com/git-ai-project/git-ai"
+  license "Apache-2.0"
+  version "@VERSION@"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/git-ai-project/git-ai/releases/download/v@VERSION@/git-ai-macos-arm64"
+      sha256 "@SHA256_MACOS_ARM64@"
+    end
+
+    on_intel do
+      url "https://github.com/git-ai-project/git-ai/releases/download/v@VERSION@/git-ai-macos-x64"
+      sha256 "@SHA256_MACOS_X64@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/git-ai-project/git-ai/releases/download/v@VERSION@/git-ai-linux-arm64"
+      sha256 "@SHA256_LINUX_ARM64@"
+    end
+
+    on_intel do
+      url "https://github.com/git-ai-project/git-ai/releases/download/v@VERSION@/git-ai-linux-x64"
+      sha256 "@SHA256_LINUX_X64@"
+    end
+  end
+
+  def install
+    bin.install Dir["git-ai-*"].first => "git-ai"
+  end
+
+  def caveats
+    <<~EOS
+      Run `git-ai install-hooks` as each developer user to enable trace2 integration and editor/agent setup.
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/git-ai --version")
+  end
+end
