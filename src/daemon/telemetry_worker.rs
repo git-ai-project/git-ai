@@ -511,6 +511,10 @@ fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonL
     // Flush metrics (always processed — uploaded or stored in SQLite)
     if !batch.metrics.is_empty() {
         flush_metrics(&batch.metrics);
+        // Best-effort: additionally export to a user-configured OTLP backend when enabled.
+        if config.otel_metrics_enabled() {
+            crate::daemon::otel_exporter::flush_otel_metrics(config, &batch.metrics);
+        }
     }
 
     // Flush Sentry events (errors, performance, messages)
