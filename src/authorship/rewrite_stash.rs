@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,8 +19,22 @@ pub struct StashMetadata {
     pub pathspecs: Vec<String>,
 }
 
+// Versioned so upgrades can't resurrect pre-fix stash data: v1 ("stashes")
+// could balloon to GBs (push copied the working log without clearing it and
+// pop re-appended it, doubling checkpoints.jsonl per cycle). Restoring such a
+// worklog would slurp it all into memory, so we abandon the old dir entirely.
 fn stashes_dir(repo: &Repository) -> PathBuf {
-    repo.storage.ai_dir.join("stashes")
+    repo.storage.ai_dir.join("stashes_v2")
+}
+
+/// Delete the legacy (pre-versioning) stash dir if present, sacrificing any
+/// attribution stashed by pre-fix versions in exchange for guaranteeing its
+/// potentially multi-GB worklogs are never restored or loaded again.
+fn cleanup_legacy_stashes_dir(repo: &Repository) {
+    let legacy_dir = repo.storage.ai_dir.join("stashes");
+    if legacy_dir.exists() {
+        let _ = fs::remove_dir_all(&legacy_dir);
+    }
 }
 
 fn path_matches_any(path: &str, pathspecs: &[String]) -> bool {
@@ -53,6 +67,11 @@ fn clean_working_log_for_stash(
     if pathspecs.is_empty() {
         initial.files.clear();
         initial.file_blobs.clear();
+        // A full stash leaves the tree matching HEAD, so the live log must be
+        // emptied too -- the stash copy carries the attribution until restore.
+        // Truncate without reading so a push on an already-bloated log never
+        // loads it into memory.
+        persisted.write_all_checkpoints(&[])?;
     } else {
         initial
             .files
@@ -60,6 +79,17 @@ fn clean_working_log_for_stash(
         initial
             .file_blobs
             .retain(|path, _| !path_matches_any(path, pathspecs));
+        // Complement of filter_stash_checkpoints_to_pathspecs: the stash copy
+        // keeps the matching paths, the live log keeps everything else.
+        persisted.mutate_all_checkpoints(|checkpoints| {
+            for checkpoint in checkpoints.iter_mut() {
+                checkpoint
+                    .entries
+                    .retain(|entry| !path_matches_any(&entry.file, pathspecs));
+            }
+            checkpoints.retain(|checkpoint| !checkpoint.entries.is_empty());
+            Ok(())
+        })?;
     }
 
     persisted.write_initial(initial)?;
@@ -72,6 +102,8 @@ pub fn handle_stash_create(
     head_sha: &str,
     pathspecs: Vec<String>,
 ) -> Result<(), GitAiError> {
+    cleanup_legacy_stashes_dir(repo);
+
     let metadata = StashMetadata {
         base_commit: head_sha.to_string(),
         timestamp: SystemTime::now()
@@ -102,6 +134,8 @@ pub fn handle_stash_pop_or_apply_with_head(
     is_pop: bool,
     target_head: Option<&str>,
 ) -> Result<(), GitAiError> {
+    cleanup_legacy_stashes_dir(repo);
+
     let dir = stashes_dir(repo);
     let metadata_path = dir.join(format!("{}.json", stash_sha));
 
@@ -134,6 +168,8 @@ pub fn handle_stash_pop_or_apply_with_head(
 }
 
 pub fn handle_stash_drop(repo: &Repository, stash_sha: &str) -> Result<(), GitAiError> {
+    cleanup_legacy_stashes_dir(repo);
+
     let dir = stashes_dir(repo);
     let metadata_path = dir.join(format!("{}.json", stash_sha));
     if metadata_path.exists() {
@@ -250,6 +286,47 @@ fn filter_stash_initial_to_pathspecs(
     Ok(())
 }
 
+/// Append stash-copy checkpoint lines onto the live log, skipping lines the
+/// live log already contains byte-identically. `Checkpoint.diff` is a content
+/// hash and lines carry timestamps, so distinct checkpoints never collide;
+/// this keeps repeated `stash apply` (and the conflict-tolerant re-restore
+/// after a non-zero git exit) from duplicating checkpoints. Known bounded
+/// imprecision: the 7->16-char hash migration in read_all_checkpoints can
+/// rewrite a live line so the stash copy differs byte-wise -- worst case one
+/// extra copy, cleared by the next stash push.
+fn append_checkpoint_lines_deduped(
+    dst_path: &std::path::Path,
+    stash_content: &str,
+) -> Result<(), GitAiError> {
+    use std::io::Write;
+
+    let existing = fs::read_to_string(dst_path).unwrap_or_default();
+    let existing_lines: HashSet<&str> = existing
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut to_append = String::new();
+    for line in stash_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || existing_lines.contains(trimmed) {
+            continue;
+        }
+        to_append.push_str(line);
+        to_append.push('\n');
+    }
+
+    if !to_append.is_empty() {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dst_path)?;
+        f.write_all(to_append.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn restore_stash_attributions(
     repo: &Repository,
     stash_sha: &str,
@@ -275,12 +352,7 @@ fn restore_stash_attributions(
                 let _ = copy_dir_recursive(&src_path, &dst_path);
             } else if file_name == "checkpoints.jsonl" {
                 if let Ok(stash_content) = fs::read_to_string(&src_path) {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&dst_path)?;
-                    f.write_all(stash_content.as_bytes())?;
+                    append_checkpoint_lines_deduped(&dst_path, &stash_content)?;
                 }
             } else if file_name == "INITIAL" && dst_path.exists() {
                 merge_initial_files(&src_path, &dst_path)?;
