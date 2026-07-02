@@ -70,6 +70,28 @@ fn assert_note_has_ai_for_file(repo: &TestRepo, commit_sha: &str, file_path: &st
     );
 }
 
+fn ai_attested_lines_for_file(
+    log: &AuthorshipLog,
+    file_path: &str,
+) -> std::collections::BTreeSet<u32> {
+    log.attestations
+        .iter()
+        .find(|attestation| attestation.file_path == file_path)
+        .map(|attestation| {
+            attestation
+                .entries
+                .iter()
+                .filter(|entry| {
+                    let author_id = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    log.metadata.sessions.contains_key(author_id)
+                        || log.metadata.prompts.contains_key(&entry.hash)
+                })
+                .flat_map(|entry| entry.line_ranges.iter().flat_map(|range| range.expand()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn raw_traced_git(repo: &TestRepo, args: &[&str]) -> String {
     let mut command = Command::new(real_git_executable());
     command.arg("-C").arg(repo.path()).args(args);
@@ -1753,6 +1775,85 @@ fn test_update_ref_current_branch_with_new_content_preserves_attribution() {
 
     let mut feature_file = repo.filename("branch-plumbing.txt");
     feature_file.assert_lines_and_blame(lines!["branch ai".ai()]);
+}
+
+#[test]
+fn test_update_ref_fast_forward_bounds_committed_hunks_to_final_commit() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    let file_rel = "ff-overlap.txt";
+    let file_path = repo.path().join(file_rel);
+    fs::write(&file_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", file_rel])
+        .unwrap();
+    repo.stage_all_and_commit("add fast-forward overlap base")
+        .unwrap();
+    let mut file = repo.filename(file_rel);
+    file.assert_committed_lines(lines!["base".human()]);
+
+    let old_tip = head_sha(&repo);
+    let final_content = "base\nintermediate pulled line\nfinal checkpointed line\n";
+    fs::write(&file_path, final_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", file_rel]).unwrap();
+    repo.sync_daemon();
+
+    fs::write(&file_path, "base\nintermediate pulled line\n").unwrap();
+    raw_untraced_git(&repo, &["add", file_rel]);
+    let intermediate_tree = raw_untraced_git(&repo, &["write-tree"]).trim().to_string();
+    let intermediate_commit = raw_untraced_git(
+        &repo,
+        &[
+            "commit-tree",
+            &intermediate_tree,
+            "-p",
+            &old_tip,
+            "-m",
+            "intermediate pulled commit",
+        ],
+    )
+    .trim()
+    .to_string();
+
+    fs::write(&file_path, final_content).unwrap();
+    raw_untraced_git(&repo, &["add", file_rel]);
+    let final_tree = raw_untraced_git(&repo, &["write-tree"]).trim().to_string();
+    let final_commit = raw_untraced_git(
+        &repo,
+        &[
+            "commit-tree",
+            &final_tree,
+            "-p",
+            &intermediate_commit,
+            "-m",
+            "final pulled commit",
+        ],
+    )
+    .trim()
+    .to_string();
+
+    repo.git(&["update-ref", "HEAD", &final_commit, &old_tip])
+        .unwrap();
+    let note = repo
+        .read_authorship_note(&final_commit)
+        .expect("fast-forward final commit should have an authorship note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse authorship note");
+    let ai_lines = ai_attested_lines_for_file(&log, file_rel);
+
+    assert!(
+        !ai_lines.contains(&2),
+        "intermediate pulled line must not be attributed from the old-tip..new-head diff: {ai_lines:?}"
+    );
+    assert!(
+        ai_lines.contains(&3),
+        "final commit line should remain attributed to the checkpointed AI edit: {ai_lines:?}"
+    );
+
+    file.assert_committed_lines(lines![
+        "base".human(),
+        "intermediate pulled line".human(),
+        "final checkpointed line".ai(),
+    ]);
 }
 
 #[test]

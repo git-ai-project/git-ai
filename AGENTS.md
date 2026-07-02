@@ -1,3 +1,19 @@
+## Non-Negotiable Rules
+
+These are hard constraints. Violating any of them will get a PR rejected outright.
+
+1. **All Git integration/processing is trace2-driven -- we do NOT wrap git.** All git command processing is based on trace2, so EVERYTHING we do must be fully async. As a result, we cannot rely on repo/git state at processing time being reflective of the state whenever the given operation actually occurred. We have a highly latency-sensitive trace2 ingestion flow that gathers/estimates the minimal possible state and orders events for later async processing.
+
+2. **No new work on the critical ingestion path.** You CANNOT add git spawns, git object lookups, ref checks, etc. in the critical ingestion path of the daemon. It is EXTREMELY latency-sensitive -- even additional file reads have meaningful overhead on this path, which is sensitive to sub-millisecond latency increases.
+
+3. **No non-constant-time git work anywhere.** You CANNOT add git spawns, git object lookups, ref checks, etc. that are not constant-time (e.g., must be O(2)/O(3), not O(n)). You cannot have any operation that calls git per commit, per file, per object, or per ref -- that is not constant time. You can still call git outside of latency-sensitive paths, but instead of calling it once per item, find a constant-time alternative: a plumbing command, a command that accepts batched inputs, etc., so you avoid the massive overhead of N process spawns. Rule of thumb: if you're calling git or looking up objects/refs "for each `<thing>`," you're doing it wrong.
+
+4. **Unbounded git spawns are an automatic rejection.** Changes/PRs with unbounded git spawns will NOT be accepted.
+
+5. **Reuse existing code.** This is a large codebase. For nearly any operation you need, there is almost certainly a helper function already available and tested. Reuse code as much as practical -- it also keeps diffs small. PRs that fail to reuse existing code where applicable will be rejected immediately.
+
+6. **Follow STRICT TDD.** PRs that are not clearly TDD-driven with high-quality `TestRepo`-based tests will be rejected immediately.
+
 ## Build & Test Commands
 
 ```bash
@@ -71,7 +87,7 @@ Signal forwarding: On Unix, the git proxy installs signal handlers (SIGTERM, SIG
 
 `Config` is a global `OnceLock` singleton accessed via `Config::get()`. It reads from `~/.git-ai/config.json`. In tests, `GIT_AI_TEST_CONFIG_PATCH` env var allows overriding specific config fields without a real config file. Feature flags follow precedence: environment vars (`GIT_AI_*` prefix via `envy`) > config file > defaults.
 
-Feature flags have separate debug/release defaults defined via the `define_feature_flags!` macro in `src/feature_flags.rs`. Currently: `auth_keyring` (false/false), `transcript_streaming` (true/true), `transcript_sweep` (true/true), `checkpoint_debug_log` (false/false).
+Feature flags have separate debug/release defaults defined via the `define_feature_flags!` macro in `src/feature_flags.rs`. Currently: `auth_keyring` (false/false), `transcript_streaming` (true/true), `transcript_sweep` (true/true), `checkpoint_debug_log` (false/false), `daemon_log_upload` (true/true).
 
 ### Error handling
 
@@ -224,9 +240,3 @@ Uses `insta` crate. Snapshots live in `tests/integration/snapshots/` and `tests/
 - **Working log base commit**: Working logs are keyed by the HEAD commit at checkpoint time (`.git/ai/working_logs/<sha>/`). Git AI must ensure that HEAD changes update/copy over the working log accordingly.
 
 - **Large source files**: Several core files exceed 5-10k lines. Navigate with grep, not scrolling.
-
-- **Git notes namespace**: Authorship data lives in `refs/notes/ai`. Running `git notes` (default namespace) won't show it -- use `git notes --ref=ai list` or `git log --notes=ai`.
-
-- **Snapshot tests can cascade**: Changing attribution logic can invalidate many snapshots at once. Use `cargo insta review` rather than manually editing `.snap` files.
-
-- **SQLite WAL files**: Test DB paths are placed as siblings to the repo directory (not inside `.git/`) to prevent WAL/SHM files from interfering with git operations.

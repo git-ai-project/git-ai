@@ -1,6 +1,7 @@
 //! Codex agent implementation with sweep discovery.
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
+use crate::mdm::utils::codex_home_dir;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
@@ -78,10 +79,7 @@ impl CodexAgent {
     fn scan_session_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        let codex_home = match dirs::home_dir() {
-            Some(home) => home.join(".codex"),
-            None => return paths,
-        };
+        let codex_home = codex_home_dir();
 
         for subdir in &["sessions", "archived_sessions"] {
             let search_dir = codex_home.join(subdir);

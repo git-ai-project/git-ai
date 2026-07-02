@@ -115,6 +115,11 @@ fn print_config_help() {
     println!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
     println!("  default_prompt_storage       Fallback storage mode for non-included repos");
     println!("  quiet                        Suppress chart output after commits (bool)");
+    println!("  allow_superuser              Allow running git-ai as root/superuser (bool)");
+    println!(
+        "  transcript_streaming_lookback_days  Days to look back when sweeping transcripts (0 = unlimited)"
+    );
+    println!("  custom_attributes            Custom telemetry attributes, string->string (object)");
     println!("  git_ai_hooks                 Hook name -> shell commands map (object)");
     println!("  codex_hooks_format           Codex hook install format (config_toml/hooks_json)");
     println!("  notes_backend.kind           Notes backend kind (git_notes/http)");
@@ -146,6 +151,10 @@ fn print_config_help() {
     println!("  git-ai config --add feature_flags.my_flag true");
     println!("  git-ai config --add git_ai_hooks.post_notes_updated \"./my-hook.sh\"");
     println!("  git-ai config set codex_hooks_format hooks_json");
+    println!("  git-ai config set allow_superuser true");
+    println!("  git-ai config set transcript_streaming_lookback_days 1");
+    println!("  git-ai config set custom_attributes '{{\"team\":\"platform\"}}'");
+    println!("  git-ai config --add custom_attributes.team platform");
     println!("  git-ai config unset exclude_repositories");
     println!();
     std::process::exit(0);
@@ -194,6 +203,7 @@ pub fn handle_config(args: &[String]) {
             }
             if key == "feature_flags.transcript_streaming"
                 || key == "feature_flags.transcript_sweep"
+                || key == "transcript_streaming_lookback_days"
             {
                 println!("Run `git-ai bg restart` for changes to take effect.");
             }
@@ -347,6 +357,29 @@ fn show_all_config() -> Result<(), String> {
         Value::String(runtime_config.codex_hooks_format().as_str().to_string()),
     );
 
+    effective_config.insert(
+        "allow_superuser".to_string(),
+        Value::Bool(runtime_config.allow_superuser()),
+    );
+
+    // transcript_streaming_lookback_days: runtime normalizes 0 -> None (unlimited).
+    // Surface unlimited as 0 so it round-trips through `config set`.
+    effective_config.insert(
+        "transcript_streaming_lookback_days".to_string(),
+        Value::Number(
+            runtime_config
+                .transcript_streaming_lookback_days()
+                .unwrap_or(0)
+                .into(),
+        ),
+    );
+
+    effective_config.insert(
+        "custom_attributes".to_string(),
+        serde_json::to_value(runtime_config.custom_attributes())
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+
     // Feature flags - show effective flags with defaults applied
     let flags_value = serde_json::to_value(runtime_config.get_feature_flags())
         .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
@@ -463,6 +496,15 @@ fn get_config_value(key: &str) -> Result<(), String> {
             "codex_hooks_format" => {
                 Value::String(runtime_config.codex_hooks_format().as_str().to_string())
             }
+            "allow_superuser" => Value::Bool(runtime_config.allow_superuser()),
+            "transcript_streaming_lookback_days" => Value::Number(
+                runtime_config
+                    .transcript_streaming_lookback_days()
+                    .unwrap_or(0)
+                    .into(),
+            ),
+            "custom_attributes" => serde_json::to_value(runtime_config.custom_attributes())
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "notes_backend" => {
                 let nb = runtime_config.notes_backend();
                 let mut map = serde_json::Map::new();
@@ -554,8 +596,27 @@ fn get_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    if key_path[0] == "custom_attributes" {
+        if key_path.len() != 2 {
+            return Err(
+                "custom_attributes requires an attribute name (e.g., custom_attributes.team)"
+                    .to_string(),
+            );
+        }
+        let attr_key = key_path[1].trim();
+        let value = runtime_config
+            .custom_attributes()
+            .get(attr_key)
+            .map(|v| Value::String(v.clone()))
+            .unwrap_or(Value::Null);
+        let json = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("Failed to serialize value: {}", e))?;
+        println!("{}", json);
+        return Ok(());
+    }
+
     Err(
-        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, and author"
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, and custom_attributes"
             .to_string(),
     )
 }
@@ -729,6 +790,35 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 crate::config::save_file_config(&file_config)?;
                 println!("[codex_hooks_format]: {}", format.as_str());
             }
+            "allow_superuser" => {
+                let bool_value = parse_bool(value)?;
+                file_config.allow_superuser = Some(bool_value);
+                crate::config::save_file_config(&file_config)?;
+                println!("[allow_superuser]: {}", bool_value);
+            }
+            "transcript_streaming_lookback_days" => {
+                let days = value.trim().parse::<u32>().map_err(|_| {
+                    format!(
+                        "Invalid transcript_streaming_lookback_days value '{}'. Expected a non-negative integer (0 = unlimited)",
+                        value
+                    )
+                })?;
+                file_config.transcript_streaming_lookback_days = Some(days);
+                crate::config::save_file_config(&file_config)?;
+                println!("[transcript_streaming_lookback_days]: {}", days);
+            }
+            "custom_attributes" => {
+                if add_mode {
+                    return Err("Cannot use --add with custom_attributes at top level. Use dot notation: custom_attributes.key".to_string());
+                }
+                let attrs = parse_custom_attributes_object(value)?;
+                // Mirror the `author`/`git_ai_hooks` convention: an empty object
+                // is stored as None so the key is omitted from the config file
+                // rather than persisted as a redundant `{}`.
+                file_config.custom_attributes = if attrs.is_empty() { None } else { Some(attrs) };
+                crate::config::save_file_config(&file_config)?;
+                println!("[custom_attributes]: {}", value);
+            }
             _ => return Err(format!("Unknown config key: {}", key)),
         }
 
@@ -872,8 +962,28 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
         return Ok(());
     }
 
+    if key_path[0] == "custom_attributes" {
+        if key_path.len() != 2 {
+            return Err(
+                "custom_attributes requires an attribute name (e.g., custom_attributes.team)"
+                    .to_string(),
+            );
+        }
+        let attr_name = key_path[1].trim();
+        if attr_name.is_empty() {
+            return Err("custom_attributes attribute name cannot be empty".to_string());
+        }
+        let mut attrs = file_config.custom_attributes.unwrap_or_default();
+        attrs.insert(attr_name.to_string(), value.to_string());
+        file_config.custom_attributes = Some(attrs);
+        crate::config::save_file_config(&file_config)?;
+        let prefix = if add_mode { "+ " } else { "" };
+        println!("{}[custom_attributes.{}]: {}", prefix, attr_name, value);
+        return Ok(());
+    }
+
     Err(
-        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, and author"
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, and custom_attributes"
             .to_string(),
     )
 }
@@ -1022,6 +1132,27 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     println!("- [codex_hooks_format]: {}", v);
                 }
             }
+            "allow_superuser" => {
+                let old_value = file_config.allow_superuser.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [allow_superuser]: {}", v);
+                }
+            }
+            "transcript_streaming_lookback_days" => {
+                let old_value = file_config.transcript_streaming_lookback_days.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [transcript_streaming_lookback_days]: {}", v);
+                }
+            }
+            "custom_attributes" => {
+                let old_value = file_config.custom_attributes.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [custom_attributes]: {:?}", v);
+                }
+            }
             _ => return Err(format!("Unknown config key: {}", key)),
         }
 
@@ -1167,8 +1298,35 @@ fn unset_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    if key_path[0] == "custom_attributes" {
+        if key_path.len() != 2 {
+            return Err(
+                "custom_attributes requires an attribute name (e.g., custom_attributes.team)"
+                    .to_string(),
+            );
+        }
+        // Trim to match the nested `set` path, which stores the trimmed name;
+        // otherwise an attribute set as `custom_attributes. team` (stored as
+        // `team`) could not be removed by the same dotted key.
+        let attr_name = key_path[1].trim();
+        let mut attrs = file_config
+            .custom_attributes
+            .ok_or_else(|| format!("Config key not found: {}", key))?;
+        let old_value = attrs.remove(attr_name);
+        if old_value.is_none() {
+            return Err(format!("Config key not found: {}", key));
+        }
+
+        file_config.custom_attributes = if attrs.is_empty() { None } else { Some(attrs) };
+        crate::config::save_file_config(&file_config)?;
+        if let Some(v) = old_value {
+            println!("- [custom_attributes.{}]: {}", attr_name, v);
+        }
+        return Ok(());
+    }
+
     Err(
-        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, and author"
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, and custom_attributes"
             .to_string(),
     )
 }
@@ -1284,6 +1442,42 @@ fn parse_git_ai_hooks_object(value: &str) -> Result<HashMap<String, Vec<String>>
         hooks.insert(name.to_string(), commands);
     }
     Ok(hooks)
+}
+
+/// Parse a JSON object of custom telemetry attributes.
+///
+/// String/number/bool values are coerced to strings using the same rules as the
+/// `GIT_AI_CUSTOM_ATTRIBUTES` env var override (see `build_custom_attributes`).
+/// Unlike the env path, which silently drops non-scalar values, the CLI rejects
+/// them so a malformed `config set` fails loudly rather than persisting a
+/// partially-applied object.
+fn parse_custom_attributes_object(value: &str) -> Result<HashMap<String, String>, String> {
+    let parsed: Value = serde_json::from_str(value)
+        .map_err(|e| format!("Invalid JSON for custom_attributes: {}", e))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| "custom_attributes must be a JSON object".to_string())?;
+
+    let mut attrs = HashMap::new();
+    for (attr_name, attr_value) in obj {
+        let name = attr_name.trim();
+        if name.is_empty() {
+            return Err("custom_attributes contains an empty attribute name".to_string());
+        }
+        let coerced = match attr_value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            _ => {
+                return Err(format!(
+                    "custom_attributes value for '{}' must be a string, number, or boolean",
+                    name
+                ));
+            }
+        };
+        attrs.insert(name.to_string(), coerced);
+    }
+    Ok(attrs)
 }
 
 fn parse_hook_command_values(value: &str) -> Result<Vec<String>, String> {
@@ -1512,6 +1706,38 @@ mod tests {
             hooks.get("post_notes_updated"),
             Some(&vec!["./hook-a.sh".to_string(), "./hook-b.sh".to_string()])
         );
+    }
+
+    #[test]
+    fn test_parse_custom_attributes_object_string_values() {
+        let attrs = parse_custom_attributes_object(r#"{"team":"platform","env":"prod"}"#).unwrap();
+        assert_eq!(attrs.get("team"), Some(&"platform".to_string()));
+        assert_eq!(attrs.get("env"), Some(&"prod".to_string()));
+    }
+
+    #[test]
+    fn test_parse_custom_attributes_object_coerces_number_and_bool() {
+        let attrs = parse_custom_attributes_object(r#"{"count":3,"enabled":true}"#).unwrap();
+        assert_eq!(attrs.get("count"), Some(&"3".to_string()));
+        assert_eq!(attrs.get("enabled"), Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn test_parse_custom_attributes_object_rejects_non_object() {
+        let err = parse_custom_attributes_object(r#"["a","b"]"#).unwrap_err();
+        assert!(err.contains("custom_attributes must be a JSON object"));
+    }
+
+    #[test]
+    fn test_parse_custom_attributes_object_rejects_nested_value() {
+        let err = parse_custom_attributes_object(r#"{"team":{"nested":"x"}}"#).unwrap_err();
+        assert!(err.contains("must be a string, number, or boolean"));
+    }
+
+    #[test]
+    fn test_parse_custom_attributes_object_rejects_empty_name() {
+        let err = parse_custom_attributes_object(r#"{"  ":"x"}"#).unwrap_err();
+        assert!(err.contains("empty attribute name"));
     }
 
     // --- Additional comprehensive tests ---

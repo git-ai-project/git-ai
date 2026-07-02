@@ -8,6 +8,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
+use crate::mdm::utils::codex_home_dir;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -36,10 +37,9 @@ impl CodexPreset {
             return Some(tp.to_string());
         }
 
-        let codex_home = dirs::home_dir()?.join(".codex");
         crate::streams::agents::CodexAgent::find_rollout_path_for_session_in_home(
             session_id,
-            &codex_home,
+            &codex_home_dir(),
         )
         .ok()
         .flatten()

@@ -7,7 +7,7 @@ use crate::commands::checkpoint_agent::bash_tool::StatEntry;
 use crate::daemon::bash_history_db::{BashCheckpointCall, distance_to_call_window};
 use crate::error::GitAiError;
 use crate::git::repo_state::worktree_root_for_path;
-use crate::git::repository::Repository;
+use crate::git::repository::{Repository, exec_git};
 use crate::metrics::db::SessionEventRecoveryCandidate;
 use crate::metrics::{CheckpointValues, EventAttributes, MetricEvent, PosEncoded};
 use serde_json::json;
@@ -22,8 +22,176 @@ pub(crate) const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
+const CODEX_TOOLS: &[&str] = &["codex", "codex-cloud"];
+const CLAUDE_TOOLS: &[&str] = &["claude", "claude-web"];
+const CURSOR_TOOLS: &[&str] = &["cursor", "cursor-agent"];
+const COPILOT_TOOLS: &[&str] = &[
+    "github-copilot",
+    "github-copilot-cli",
+    "github-copilot-agent",
+    "copilot",
+];
+const DEVIN_TOOLS: &[&str] = &["devin"];
+const DROID_TOOLS: &[&str] = &["droid"];
+const WINDSURF_TOOLS: &[&str] = &["windsurf"];
+const AMP_TOOLS: &[&str] = &["amp"];
+const OPENCODE_TOOLS: &[&str] = &["opencode"];
+const GEMINI_TOOLS: &[&str] = &["gemini"];
+const CONTINUE_TOOLS: &[&str] = &["continue-cli"];
+
+const CODEX_EMAILS: &[&str] = &["codex@openai.com"];
+const CLAUDE_EMAILS: &[&str] = &[];
+const CURSOR_EMAILS: &[&str] = &["cursoragent@cursor.com"];
+const COPILOT_EMAILS: &[&str] = &["+copilot@users.noreply.github.com"];
+const DEVIN_EMAILS: &[&str] = &["+devin-ai-integration[bot]@users.noreply.github.com"];
+const DROID_EMAILS: &[&str] = &["+factory-droid[bot]@users.noreply.github.com"];
+const WINDSURF_EMAILS: &[&str] = &["noreply@windsurf.com", "noreply@codeium.com"];
+const AMP_EMAILS: &[&str] = &[];
+const OPENCODE_EMAILS: &[&str] = &[];
+const GEMINI_EMAILS: &[&str] = &[];
+const CONTINUE_EMAILS: &[&str] = &[];
+
+const CODEX_MARKER_EMAILS: &[&str] = &["noreply@openai.com"];
+const CLAUDE_MARKER_EMAILS: &[&str] = &["noreply@anthropic.com"];
+const CURSOR_MARKER_EMAILS: &[&str] = &[];
+const COPILOT_MARKER_EMAILS: &[&str] = &[];
+const DEVIN_MARKER_EMAILS: &[&str] = &[];
+const DROID_MARKER_EMAILS: &[&str] = &[];
+const WINDSURF_MARKER_EMAILS: &[&str] = &[];
+const AMP_MARKER_EMAILS: &[&str] = &[];
+const OPENCODE_MARKER_EMAILS: &[&str] = &[];
+const GEMINI_MARKER_EMAILS: &[&str] = &[];
+const CONTINUE_MARKER_EMAILS: &[&str] = &[];
+
+const CODEX_MARKERS: &[&str] = &["codex"];
+const CLAUDE_MARKERS: &[&str] = &["claude"];
+const CURSOR_MARKERS: &[&str] = &["cursor"];
+const COPILOT_MARKERS: &[&str] = &["copilot", "github copilot"];
+const DEVIN_MARKERS: &[&str] = &["devin"];
+const DROID_MARKERS: &[&str] = &["droid", "factory-droid"];
+const WINDSURF_MARKERS: &[&str] = &["windsurf"];
+const AMP_MARKERS: &[&str] = &["ampcode", "amp code"];
+const OPENCODE_MARKERS: &[&str] = &["opencode", "open code"];
+const GEMINI_MARKERS: &[&str] = &["gemini"];
+const CONTINUE_MARKERS: &[&str] = &["continue-cli"];
+
+const KNOWN_COMMIT_AGENT_KINDS: &[CommitAgentKind] = &[
+    CommitAgentKind {
+        key: "codex",
+        tools: CODEX_TOOLS,
+        emails: CODEX_EMAILS,
+        marker_emails: CODEX_MARKER_EMAILS,
+        markers: CODEX_MARKERS,
+    },
+    CommitAgentKind {
+        key: "claude",
+        tools: CLAUDE_TOOLS,
+        emails: CLAUDE_EMAILS,
+        marker_emails: CLAUDE_MARKER_EMAILS,
+        markers: CLAUDE_MARKERS,
+    },
+    CommitAgentKind {
+        key: "cursor",
+        tools: CURSOR_TOOLS,
+        emails: CURSOR_EMAILS,
+        marker_emails: CURSOR_MARKER_EMAILS,
+        markers: CURSOR_MARKERS,
+    },
+    CommitAgentKind {
+        key: "github-copilot",
+        tools: COPILOT_TOOLS,
+        emails: COPILOT_EMAILS,
+        marker_emails: COPILOT_MARKER_EMAILS,
+        markers: COPILOT_MARKERS,
+    },
+    CommitAgentKind {
+        key: "devin",
+        tools: DEVIN_TOOLS,
+        emails: DEVIN_EMAILS,
+        marker_emails: DEVIN_MARKER_EMAILS,
+        markers: DEVIN_MARKERS,
+    },
+    CommitAgentKind {
+        key: "droid",
+        tools: DROID_TOOLS,
+        emails: DROID_EMAILS,
+        marker_emails: DROID_MARKER_EMAILS,
+        markers: DROID_MARKERS,
+    },
+    CommitAgentKind {
+        key: "windsurf",
+        tools: WINDSURF_TOOLS,
+        emails: WINDSURF_EMAILS,
+        marker_emails: WINDSURF_MARKER_EMAILS,
+        markers: WINDSURF_MARKERS,
+    },
+    CommitAgentKind {
+        key: "amp",
+        tools: AMP_TOOLS,
+        emails: AMP_EMAILS,
+        marker_emails: AMP_MARKER_EMAILS,
+        markers: AMP_MARKERS,
+    },
+    CommitAgentKind {
+        key: "opencode",
+        tools: OPENCODE_TOOLS,
+        emails: OPENCODE_EMAILS,
+        marker_emails: OPENCODE_MARKER_EMAILS,
+        markers: OPENCODE_MARKERS,
+    },
+    CommitAgentKind {
+        key: "gemini",
+        tools: GEMINI_TOOLS,
+        emails: GEMINI_EMAILS,
+        marker_emails: GEMINI_MARKER_EMAILS,
+        markers: GEMINI_MARKERS,
+    },
+    CommitAgentKind {
+        key: "continue-cli",
+        tools: CONTINUE_TOOLS,
+        emails: CONTINUE_EMAILS,
+        marker_emails: CONTINUE_MARKER_EMAILS,
+        markers: CONTINUE_MARKERS,
+    },
+];
+
 pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
 pub(crate) type UnknownLinesByFile = BTreeMap<String, Vec<u32>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CommitAgentKind {
+    key: &'static str,
+    tools: &'static [&'static str],
+    emails: &'static [&'static str],
+    marker_emails: &'static [&'static str],
+    markers: &'static [&'static str],
+}
+
+#[derive(Clone, Debug)]
+struct CommitAgentDetection {
+    kind: CommitAgentKind,
+    source: &'static str,
+    marker: String,
+}
+
+#[derive(Debug)]
+struct CommitMetadata {
+    message: String,
+    author_name: String,
+    author_email: String,
+}
+
+#[derive(Clone, Debug)]
+struct CommitMetadataSessionSelection {
+    session_id: String,
+    agent_id: AgentId,
+    tier: &'static str,
+    metric_row_id: Option<i64>,
+    distance_ns: Option<u128>,
+    event_ts: Option<u32>,
+    repo_url: Option<String>,
+    external_tool_use_id: Option<String>,
+}
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct AttributionRecoveryContext<'a> {
@@ -75,6 +243,16 @@ pub(crate) fn recover_attribution(
     }
 
     recover_session_event_mtime(
+        repo,
+        parent_sha,
+        commit_sha,
+        human_author,
+        authorship_log,
+        committed_hunks,
+        context.file_timestamps,
+    )?;
+
+    recover_commit_metadata(
         repo,
         parent_sha,
         commit_sha,
@@ -334,6 +512,608 @@ fn recover_session_event_mtime(
     }
 
     Ok(())
+}
+
+fn recover_commit_metadata(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    human_author: &str,
+    authorship_log: &mut AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
+) -> Result<(), GitAiError> {
+    let unknown_by_file = unknown_lines_by_file(authorship_log, committed_hunks);
+    if unknown_by_file.is_empty() {
+        return Ok(());
+    }
+
+    let commit_metadata = read_commit_metadata(repo, commit_sha)?;
+    let detections = detect_commit_metadata_agents(&commit_metadata);
+    if detections.is_empty() {
+        return Ok(());
+    }
+
+    let workdir = repo.workdir()?;
+    let target_repo_url = crate::repo_url::resolve_repo_url_from_repo(repo);
+    let (timestamps_by_file, latest_timestamps) =
+        latest_timestamps_for_unknown_files(&workdir, &unknown_by_file, captured_file_timestamps);
+    let Some(selection) = select_commit_metadata_session(
+        authorship_log,
+        &detections,
+        &latest_timestamps,
+        target_repo_url.as_deref(),
+    )?
+    else {
+        return Ok(());
+    };
+
+    authorship_log
+        .metadata
+        .sessions
+        .entry(selection.session_id.clone())
+        .or_insert_with(|| SessionRecord {
+            agent_id: selection.agent_id.clone(),
+            human_author: Some(human_author.to_string()),
+            custom_attributes: None,
+        });
+
+    let detected_agents = detections
+        .iter()
+        .map(|detection| {
+            json!({
+                "agent": detection.kind.key,
+                "source": detection.source,
+                "marker": detection.marker,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for (file_path, unknown_lines) in unknown_by_file {
+        let trace_id = generate_trace_id();
+        let author_id = format!("{}::{}", selection.session_id, trace_id);
+        add_attestation(authorship_log, &file_path, &author_id, &unknown_lines);
+
+        let file_timestamps = timestamps_by_file
+            .get(&file_path)
+            .cloned()
+            .unwrap_or_default();
+        let metadata = json!({
+            "solver": "commit_metadata",
+            "file_path": file_path.as_str(),
+            "unknown_lines": &unknown_lines,
+            "detected_agents": &detected_agents,
+            "commit_author_name": commit_metadata.author_name.as_str(),
+            "commit_author_email": commit_metadata.author_email.as_str(),
+            "selection_tier": selection.tier,
+            "selected_session_id": selection.session_id.as_str(),
+            "selected_tool": selection.agent_id.tool.as_str(),
+            "selected_model": selection.agent_id.model.as_str(),
+            "selected_external_session_id": selection.agent_id.id.as_str(),
+            "selected_external_tool_use_id": selection.external_tool_use_id.as_deref(),
+            "selected_repo_url": selection.repo_url.as_deref(),
+            "target_repo_url": target_repo_url.as_deref(),
+            "selected_metric_row_id": selection.metric_row_id,
+            "selected_event_ts": selection.event_ts,
+            "distance_ns": selection.distance_ns,
+            "file_timestamps_ns": file_timestamps,
+            "latest_file_timestamps_ns": latest_timestamps,
+        });
+        record_recovery_metric(RecoveryMetricInput {
+            repo,
+            parent_sha,
+            commit_sha,
+            file_path: &file_path,
+            author_id: &author_id,
+            session_id: &selection.session_id,
+            trace_id: &trace_id,
+            tool: &selection.agent_id.tool,
+            model: &selection.agent_id.model,
+            external_session_id: &selection.agent_id.id,
+            external_tool_use_id: selection.external_tool_use_id.as_deref(),
+            edit_kind: "attribution_recovery_commit_metadata",
+            checkpoint_type: "recovered_commit_metadata",
+            recovered_line_count: unknown_lines.len() as u32,
+            metadata,
+            event_ts: selection.event_ts,
+        });
+    }
+
+    Ok(())
+}
+
+fn read_commit_metadata(repo: &Repository, commit_sha: &str) -> Result<CommitMetadata, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "show".to_string(),
+        "-s".to_string(),
+        "--format=%an%x00%ae%x00%B".to_string(),
+        commit_sha.to_string(),
+    ]);
+    let output = exec_git(&args)?;
+    let raw = String::from_utf8(output.stdout)?;
+    let mut parts = raw.splitn(3, '\0');
+    let author_name = parts.next().unwrap_or_default().trim().to_string();
+    let author_email = parts.next().unwrap_or_default().trim().to_string();
+    let message = parts.next().unwrap_or_default().to_string();
+
+    Ok(CommitMetadata {
+        message,
+        author_name,
+        author_email,
+    })
+}
+
+fn detect_commit_metadata_agents(metadata: &CommitMetadata) -> Vec<CommitAgentDetection> {
+    let mut detections = Vec::new();
+    for line in metadata.message.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some((name, value)) = trimmed.split_once(':') {
+            let name_lower = name.trim().to_ascii_lowercase();
+            if name_lower == "co-authored-by" {
+                if let Some(kind) = detect_agent_from_identity(value) {
+                    push_commit_agent_detection(
+                        &mut detections,
+                        kind,
+                        "co_authored_by",
+                        value.trim(),
+                    );
+                }
+                continue;
+            }
+        }
+
+        if lower.starts_with("claude-session:") {
+            push_commit_agent_detection(
+                &mut detections,
+                commit_agent_kind_by_key("claude"),
+                "session_trailer",
+                trimmed,
+            );
+        } else if lower.starts_with("codex-session:") {
+            push_commit_agent_detection(
+                &mut detections,
+                commit_agent_kind_by_key("codex"),
+                "session_trailer",
+                trimmed,
+            );
+        } else if lower.starts_with("cursor-session:") {
+            push_commit_agent_detection(
+                &mut detections,
+                commit_agent_kind_by_key("cursor"),
+                "session_trailer",
+                trimmed,
+            );
+        }
+    }
+
+    let author_identity = format!("{} <{}>", metadata.author_name, metadata.author_email);
+    if let Some(kind) = detect_agent_from_identity(&author_identity) {
+        push_commit_agent_detection(&mut detections, kind, "author_identity", &author_identity);
+    }
+
+    detections
+}
+
+fn commit_agent_kind_by_key(key: &str) -> CommitAgentKind {
+    KNOWN_COMMIT_AGENT_KINDS
+        .iter()
+        .copied()
+        .find(|kind| kind.key == key)
+        .expect("known commit agent key should exist")
+}
+
+fn push_commit_agent_detection(
+    detections: &mut Vec<CommitAgentDetection>,
+    kind: CommitAgentKind,
+    source: &'static str,
+    marker: &str,
+) {
+    if detections
+        .iter()
+        .any(|detection| detection.kind.key == kind.key)
+    {
+        return;
+    }
+    detections.push(CommitAgentDetection {
+        kind,
+        source,
+        marker: marker.to_string(),
+    });
+}
+
+fn detect_agent_from_identity(identity: &str) -> Option<CommitAgentKind> {
+    let lower = identity.to_ascii_lowercase();
+    let email = email_from_identity(identity);
+    if let Some(email) = email.as_deref()
+        && let Some(kind) = detect_agent_from_email(email)
+    {
+        return Some(kind);
+    }
+
+    KNOWN_COMMIT_AGENT_KINDS.iter().copied().find(|kind| {
+        let marker_matches = kind
+            .markers
+            .iter()
+            .any(|marker| contains_identity_marker(&lower, marker));
+        if !marker_matches {
+            return false;
+        }
+
+        match email.as_deref() {
+            Some(email) => kind
+                .marker_emails
+                .iter()
+                .any(|pattern| email_matches_pattern(email, pattern)),
+            None => true,
+        }
+    })
+}
+
+fn contains_identity_marker(identity_lower: &str, marker: &str) -> bool {
+    let marker_lower = marker.to_ascii_lowercase();
+    let mut search_start = 0;
+    while let Some(relative_start) = identity_lower[search_start..].find(&marker_lower) {
+        let start = search_start + relative_start;
+        let end = start + marker_lower.len();
+        let before = identity_lower[..start].chars().next_back();
+        let after = identity_lower[end..].chars().next();
+        let before_boundary = before.is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        let after_boundary = after.is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        if before_boundary && after_boundary {
+            return true;
+        }
+        search_start = end;
+    }
+    false
+}
+
+fn detect_agent_from_email(email: &str) -> Option<CommitAgentKind> {
+    let email = email.trim().trim_matches('<').trim_matches('>');
+    if email.is_empty() {
+        return None;
+    }
+
+    KNOWN_COMMIT_AGENT_KINDS.iter().copied().find(|kind| {
+        kind.emails
+            .iter()
+            .any(|pattern| email_matches_pattern(email, pattern))
+    })
+}
+
+fn email_matches_pattern(email: &str, pattern: &str) -> bool {
+    let email_lower = email.trim().to_ascii_lowercase();
+    let pattern_lower = pattern.to_ascii_lowercase();
+    if pattern_lower.starts_with('+') {
+        email_lower.ends_with(&pattern_lower)
+    } else {
+        email_lower == pattern_lower
+    }
+}
+
+fn email_from_identity(identity: &str) -> Option<String> {
+    let start = identity.find('<')?;
+    let end = identity[start + 1..].find('>')? + start + 1;
+    Some(identity[start + 1..end].trim().to_string())
+}
+
+fn latest_timestamps_for_unknown_files(
+    workdir: &std::path::Path,
+    unknown_by_file: &UnknownLinesByFile,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
+) -> (HashMap<String, Vec<u128>>, Vec<u128>) {
+    let mut timestamps_by_file = HashMap::new();
+    let mut latest_timestamp = None;
+    for file_path in unknown_by_file.keys() {
+        let timestamps = captured_file_timestamps
+            .and_then(|timestamps| timestamps.get(file_path))
+            .filter(|timestamps| !timestamps.is_empty())
+            .cloned()
+            .unwrap_or_else(|| file_timestamps_ns(workdir, file_path));
+        if let Some(file_latest) = timestamps.iter().copied().max() {
+            latest_timestamp = Some(
+                latest_timestamp.map_or(file_latest, |current: u128| current.max(file_latest)),
+            );
+            timestamps_by_file.insert(file_path.clone(), timestamps);
+        }
+    }
+
+    let latest_timestamps = latest_timestamp
+        .map(|latest| {
+            let mut timestamps = timestamps_by_file
+                .values()
+                .filter(|file_timestamps| file_timestamps.iter().copied().max() == Some(latest))
+                .flat_map(|file_timestamps| file_timestamps.iter().copied())
+                .collect::<Vec<_>>();
+            timestamps.sort_unstable();
+            timestamps.dedup();
+            timestamps
+        })
+        .unwrap_or_default();
+
+    (timestamps_by_file, latest_timestamps)
+}
+
+fn select_commit_metadata_session(
+    authorship_log: &AuthorshipLog,
+    detections: &[CommitAgentDetection],
+    latest_timestamps: &[u128],
+    target_repo_url: Option<&str>,
+) -> Result<Option<CommitMetadataSessionSelection>, GitAiError> {
+    if detections.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(selection) = select_existing_commit_metadata_session(authorship_log, detections) {
+        return Ok(Some(selection));
+    }
+    if let Some(selection) = select_nearest_commit_metadata_metric_session(
+        detections,
+        latest_timestamps,
+        target_repo_url,
+    )? {
+        return Ok(Some(selection));
+    }
+    if let Some(selection) =
+        select_latest_commit_metadata_metric_session(detections, target_repo_url)?
+    {
+        return Ok(Some(selection));
+    }
+
+    Ok(Some(synthesized_commit_metadata_session(
+        &detections[0].kind,
+    )))
+}
+
+fn select_existing_commit_metadata_session(
+    authorship_log: &AuthorshipLog,
+    detections: &[CommitAgentDetection],
+) -> Option<CommitMetadataSessionSelection> {
+    let mut best: Option<(usize, usize, String, AgentId)> = None;
+    for (detection_index, detection) in detections.iter().enumerate() {
+        for (session_id, session) in &authorship_log.metadata.sessions {
+            if !agent_kind_matches_tool(&detection.kind, &session.agent_id.tool) {
+                continue;
+            }
+            let attested_count = attested_line_count_for_session(authorship_log, session_id);
+            let replace = best.as_ref().is_none_or(
+                |(best_detection_index, best_attested_count, best_session_id, _)| {
+                    detection_index < *best_detection_index
+                        || (detection_index == *best_detection_index
+                            && (attested_count > *best_attested_count
+                                || (attested_count == *best_attested_count
+                                    && session_id < best_session_id)))
+                },
+            );
+            if replace {
+                best = Some((
+                    detection_index,
+                    attested_count,
+                    session_id.clone(),
+                    session.agent_id.clone(),
+                ));
+            }
+        }
+    }
+
+    best.map(
+        |(_, _, session_id, agent_id)| CommitMetadataSessionSelection {
+            session_id,
+            agent_id,
+            tier: "existing_commit_session",
+            metric_row_id: None,
+            distance_ns: None,
+            event_ts: None,
+            repo_url: None,
+            external_tool_use_id: None,
+        },
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitMetadataMetricRepoTier {
+    SameRepoUrl,
+    UnknownRepoUrl,
+}
+
+impl CommitMetadataMetricRepoTier {
+    fn score(self) -> u8 {
+        match self {
+            Self::SameRepoUrl => 0,
+            Self::UnknownRepoUrl => 1,
+        }
+    }
+}
+
+fn commit_metadata_metric_repo_tier(
+    candidate: &SessionEventRecoveryCandidate,
+    target_repo_url: Option<&str>,
+) -> Option<CommitMetadataMetricRepoTier> {
+    match (target_repo_url, candidate.repo_url.as_deref()) {
+        (Some(target), Some(candidate_url)) if candidate_url == target => {
+            Some(CommitMetadataMetricRepoTier::SameRepoUrl)
+        }
+        (Some(_), Some(_)) => None,
+        _ => Some(CommitMetadataMetricRepoTier::UnknownRepoUrl),
+    }
+}
+
+fn attested_line_count_for_session(authorship_log: &AuthorshipLog, session_id: &str) -> usize {
+    authorship_log
+        .attestations
+        .iter()
+        .flat_map(|attestation| &attestation.entries)
+        .filter(|entry| ai_session_key(&entry.hash) == session_id)
+        .flat_map(|entry| entry.line_ranges.iter().flat_map(LineRange::expand))
+        .count()
+}
+
+fn select_nearest_commit_metadata_metric_session(
+    detections: &[CommitAgentDetection],
+    latest_timestamps: &[u128],
+    target_repo_url: Option<&str>,
+) -> Result<Option<CommitMetadataSessionSelection>, GitAiError> {
+    if latest_timestamps.is_empty() {
+        return Ok(None);
+    }
+
+    let candidates = match crate::metrics::db::MetricsDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(db) => db.session_event_candidates_near_timestamps(
+                latest_timestamps,
+                SESSION_EVENT_RECOVERY_WINDOW_NS,
+            )?,
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+
+    let mut best: Option<(
+        usize,
+        CommitMetadataMetricRepoTier,
+        u128,
+        i64,
+        CommitMetadataSessionSelection,
+    )> = None;
+    for candidate in &candidates {
+        let Some((detection_index, _)) = detections
+            .iter()
+            .enumerate()
+            .find(|(_, detection)| agent_kind_matches_tool(&detection.kind, &candidate.tool))
+        else {
+            continue;
+        };
+        let Some(distance_ns) = session_event_distance(candidate, latest_timestamps) else {
+            continue;
+        };
+        if distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
+            continue;
+        }
+        let Some(repo_tier) = commit_metadata_metric_repo_tier(candidate, target_repo_url) else {
+            continue;
+        };
+
+        let selection = commit_metadata_selection_from_metric_candidate(
+            candidate,
+            "nearest_file_timestamp",
+            Some(distance_ns),
+        );
+        let replace = best.as_ref().is_none_or(
+            |(best_detection_index, best_repo_tier, best_distance_ns, best_row_id, _)| {
+                detection_index < *best_detection_index
+                    || (detection_index == *best_detection_index
+                        && (repo_tier.score() < best_repo_tier.score()
+                            || (repo_tier.score() == best_repo_tier.score()
+                                && (distance_ns < *best_distance_ns
+                                    || (distance_ns == *best_distance_ns
+                                        && candidate.row_id > *best_row_id)))))
+            },
+        );
+        if replace {
+            best = Some((
+                detection_index,
+                repo_tier,
+                distance_ns,
+                candidate.row_id,
+                selection,
+            ));
+        }
+    }
+
+    Ok(best.map(|(_, _, _, _, selection)| selection))
+}
+
+fn select_latest_commit_metadata_metric_session(
+    detections: &[CommitAgentDetection],
+    target_repo_url: Option<&str>,
+) -> Result<Option<CommitMetadataSessionSelection>, GitAiError> {
+    let db = match crate::metrics::db::MetricsDatabase::global() {
+        Ok(db) => db,
+        Err(_) => return Ok(None),
+    };
+    let db = match db.lock() {
+        Ok(db) => db,
+        Err(_) => return Ok(None),
+    };
+
+    for detection in detections {
+        let candidates = db.latest_session_event_candidates_for_tools(detection.kind.tools)?;
+        if let Some((candidate, _)) = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let repo_tier = commit_metadata_metric_repo_tier(candidate, target_repo_url)?;
+                Some((candidate, repo_tier))
+            })
+            .min_by(
+                |(left_candidate, left_tier), (right_candidate, right_tier)| {
+                    left_tier
+                        .score()
+                        .cmp(&right_tier.score())
+                        .then_with(|| right_candidate.event_ts.cmp(&left_candidate.event_ts))
+                        .then_with(|| right_candidate.row_id.cmp(&left_candidate.row_id))
+                },
+            )
+        {
+            return Ok(Some(commit_metadata_selection_from_metric_candidate(
+                candidate,
+                "latest_matching_tool_session",
+                None,
+            )));
+        }
+    }
+
+    Ok(None)
+}
+
+fn commit_metadata_selection_from_metric_candidate(
+    candidate: &SessionEventRecoveryCandidate,
+    tier: &'static str,
+    distance_ns: Option<u128>,
+) -> CommitMetadataSessionSelection {
+    CommitMetadataSessionSelection {
+        session_id: candidate.session_id.clone(),
+        agent_id: AgentId {
+            tool: candidate.tool.clone(),
+            id: candidate.external_session_id.clone(),
+            model: session_event_model(candidate),
+        },
+        tier,
+        metric_row_id: Some(candidate.row_id),
+        distance_ns,
+        event_ts: Some(candidate.event_ts),
+        repo_url: candidate.repo_url.clone(),
+        external_tool_use_id: candidate.external_tool_use_id.clone(),
+    }
+}
+
+fn synthesized_commit_metadata_session(kind: &CommitAgentKind) -> CommitMetadataSessionSelection {
+    let session_id = generate_random_session_id();
+    CommitMetadataSessionSelection {
+        session_id: session_id.clone(),
+        agent_id: AgentId {
+            tool: kind.tools.first().copied().unwrap_or(kind.key).to_string(),
+            id: session_id,
+            model: "unknown".to_string(),
+        },
+        tier: "synthesized_session",
+        metric_row_id: None,
+        distance_ns: None,
+        event_ts: None,
+        repo_url: None,
+        external_tool_use_id: None,
+    }
+}
+
+fn generate_random_session_id() -> String {
+    let trace_id = generate_trace_id();
+    format!("s_{}", &trace_id[2..])
+}
+
+fn agent_kind_matches_tool(kind: &CommitAgentKind, tool: &str) -> bool {
+    kind.tools
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(tool))
 }
 
 fn recover_adjacent_edges(

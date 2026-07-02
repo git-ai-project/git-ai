@@ -9,7 +9,7 @@ use crate::metrics::attrs::attr_pos;
 use crate::metrics::events::{checkpoint_pos, otel_trace_pos, session_event_pos};
 use crate::metrics::pos_encoded::sparse_get_string;
 use crate::metrics::types::{MetricEvent, MetricEventId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -158,7 +158,8 @@ impl MetricsDatabase {
                     eprintln!("[Error] Failed to initialize metrics database: {}", e);
                     // Create a dummy connection that will fail on any operation
                     let temp_path = std::env::temp_dir().join("git-ai-metrics-db-failed");
-                    let conn = Connection::open(&temp_path).expect("Failed to create temp DB");
+                    let conn = crate::sqlite::open_with_memory_limits(&temp_path)
+                        .expect("Failed to create temp DB");
                     Mutex::new(MetricsDatabase { conn })
                 }
             }
@@ -177,12 +178,11 @@ impl MetricsDatabase {
         }
 
         // Open with WAL mode and performance optimizations
-        let conn = Connection::open(&db_path)?;
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -194,8 +194,10 @@ impl MetricsDatabase {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_in_memory_for_tests() -> Result<Self, GitAiError> {
-        let conn = Connection::open_in_memory()?;
+    pub(crate) fn new_temp_for_tests() -> Result<(Self, tempfile::TempDir), GitAiError> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let db_path = temp_dir.path().join("metrics.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
@@ -206,7 +208,7 @@ impl MetricsDatabase {
         let mut db = Self { conn };
         db.initialize_schema()?;
 
-        Ok(db)
+        Ok((db, temp_dir))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -214,12 +216,11 @@ impl MetricsDatabase {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let conn = crate::sqlite::open_with_memory_limits(path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -1062,6 +1063,101 @@ impl MetricsDatabase {
         Ok(candidates)
     }
 
+    pub(crate) fn latest_session_event_candidates_for_tools(
+        &self,
+        tools: &[&str],
+    ) -> Result<Vec<SessionEventRecoveryCandidate>, GitAiError> {
+        if tools.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", tools.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT
+                id,
+                event_json,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                external_session_id,
+                external_tool_use_id
+            FROM metrics
+            WHERE event_kind = ?1
+              AND tool IN ({placeholders})
+              AND event_ts IS NOT NULL
+              AND session_id IS NOT NULL
+              AND session_id != ''
+              AND tool IS NOT NULL
+              AND tool != ''
+              AND tool != 'mock_ai'
+              AND external_session_id IS NOT NULL
+              AND external_session_id != ''
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 100
+            "#
+        );
+
+        let mut values = Vec::with_capacity(tools.len() + 1);
+        values.push(rusqlite::types::Value::Integer(
+            MetricEventId::SessionEvent as i64,
+        ));
+        values.extend(
+            tools
+                .iter()
+                .map(|tool| rusqlite::types::Value::Text((*tool).to_string())),
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (
+                row_id,
+                event_json,
+                event_ts,
+                session_id,
+                trace_id,
+                tool,
+                external_session_id,
+                external_tool_use_id,
+            ) = row?;
+            if event_ts < 0 || event_ts > u32::MAX as i64 {
+                continue;
+            }
+
+            let (repo_url, model) = recovery_attrs_from_event_json(&event_json);
+            candidates.push(SessionEventRecoveryCandidate {
+                row_id,
+                event_ts: event_ts as u32,
+                session_id,
+                trace_id,
+                tool,
+                model,
+                external_session_id,
+                external_tool_use_id,
+                repo_url,
+            });
+        }
+
+        Ok(candidates)
+    }
+
     /// Backfill cached event metadata for one bounded batch of legacy rows.
     pub fn backfill_event_metadata_batch(
         &mut self,
@@ -1386,7 +1482,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test-metrics.db");
 
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
 
         let mut db = MetricsDatabase { conn };
@@ -1578,7 +1674,7 @@ mod tests {
     fn test_initialize_schema_handles_preexisting_agent_usage_table() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("concurrent-init.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         // Simulate a partial migration state from a concurrent process:
         // schema version indicates agent_usage_throttle is missing, but it already exists.
@@ -1620,7 +1716,7 @@ mod tests {
     fn test_migrates_version_2_to_row_level_retry_schema() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v2.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
@@ -1661,7 +1757,7 @@ mod tests {
     fn test_migrates_version_2_with_preexisting_retry_columns() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v2-partial-retry.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
@@ -1725,7 +1821,7 @@ mod tests {
     fn test_migrates_version_3_to_event_metadata_schema_without_sync_backfill() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v3.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
