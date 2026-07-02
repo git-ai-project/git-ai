@@ -29,12 +29,16 @@ pub struct StorageStats {
 }
 
 /// Register a .git/ai directory path for storage tracking.
-/// Called when the daemon discovers a repo through trace2 ingestion.
+/// Called from the trace ingestion hot path — uses `try_write()` so it never
+/// blocks. If the lock is contended (e.g. during a storage scan), the
+/// registration is silently skipped; the same dir will be registered on the
+/// next trace event from that repo.
 pub fn register_ai_dir(ai_dir: PathBuf) {
-    if let Ok(mut guard) = KNOWN_AI_DIRS.write() {
-        let set = guard.get_or_insert_with(HashSet::new);
-        set.insert(ai_dir);
-    }
+    let Ok(mut guard) = KNOWN_AI_DIRS.try_write() else {
+        return;
+    };
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.insert(ai_dir);
 }
 
 /// Compute aggregate storage statistics across all known repo ai_dirs.
