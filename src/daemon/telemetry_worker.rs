@@ -475,7 +475,10 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
             }
             let resource_stats = resource_sampler.drain_stats();
-            let storage_stats = crate::daemon::storage_sampler::scan_storage();
+            let storage_stats =
+                tokio::task::spawn_blocking(crate::daemon::storage_sampler::scan_storage)
+                    .await
+                    .unwrap_or(None);
             Some(daemon_heartbeat_event(
                 started_at.elapsed(),
                 resource_stats,
