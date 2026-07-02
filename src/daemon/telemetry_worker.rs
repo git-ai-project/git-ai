@@ -29,6 +29,9 @@ const DAEMON_LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MAX_DAEMON_LOG_EVENTS_PER_UPLOAD: usize = 1000;
 const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
 
+/// How often to sample CPU/memory (in flush ticks). 10 ticks × 3s = 30s.
+const RESOURCE_SAMPLE_TICK_INTERVAL: u32 = 10;
+
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
 static DAEMON_LOG_UPLOAD_IN_FLIGHT: std::sync::OnceLock<Arc<AtomicBool>> =
@@ -451,18 +454,28 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
     let mut ticker = interval(FLUSH_INTERVAL);
     let started_at = std::time::Instant::now();
     let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
+    let mut resource_sampler = crate::daemon::resource_sampler::ResourceSampler::new();
+    let mut sample_tick_counter: u32 = 0;
     // The first tick completes immediately; skip it.
     ticker.tick().await;
 
     loop {
         ticker.tick().await;
 
+        // Sample CPU/memory at a lower cadence than the flush interval.
+        sample_tick_counter += 1;
+        if sample_tick_counter >= RESOURCE_SAMPLE_TICK_INTERVAL {
+            sample_tick_counter = 0;
+            resource_sampler.sample();
+        }
+
         let now = std::time::Instant::now();
         let heartbeat = if now >= next_heartbeat_at && daemon_log_upload_enabled() {
             while next_heartbeat_at <= now {
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
             }
-            Some(daemon_heartbeat_event(started_at.elapsed()))
+            let resource_stats = resource_sampler.drain_stats();
+            Some(daemon_heartbeat_event(started_at.elapsed(), resource_stats))
         } else {
             None
         };
@@ -801,7 +814,10 @@ fn daemon_log_upload_enabled() -> bool {
     Config::fresh().get_feature_flags().daemon_log_upload
 }
 
-fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
+fn daemon_heartbeat_event(
+    uptime: std::time::Duration,
+    resource_stats: Option<crate::daemon::resource_sampler::ResourceStats>,
+) -> DaemonLogEvent {
     let mut fields = BTreeMap::new();
     fields.insert(
         "uptime_seconds".to_string(),
@@ -815,6 +831,49 @@ fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
         "arch".to_string(),
         DaemonLogFieldValue::from(std::env::consts::ARCH),
     );
+
+    if let Some(stats) = resource_stats {
+        fields.insert(
+            "cpu_percent_min".to_string(),
+            DaemonLogFieldValue::from_f64(stats.cpu_percent_min),
+        );
+        fields.insert(
+            "cpu_percent_max".to_string(),
+            DaemonLogFieldValue::from_f64(stats.cpu_percent_max),
+        );
+        fields.insert(
+            "cpu_percent_mean".to_string(),
+            DaemonLogFieldValue::from_f64(stats.cpu_percent_mean),
+        );
+        fields.insert(
+            "cpu_percent_median".to_string(),
+            DaemonLogFieldValue::from_f64(stats.cpu_percent_median),
+        );
+        fields.insert(
+            "rss_bytes_min".to_string(),
+            DaemonLogFieldValue::from(stats.rss_bytes_min),
+        );
+        fields.insert(
+            "rss_bytes_max".to_string(),
+            DaemonLogFieldValue::from(stats.rss_bytes_max),
+        );
+        fields.insert(
+            "rss_bytes_mean".to_string(),
+            DaemonLogFieldValue::from(stats.rss_bytes_mean),
+        );
+        fields.insert(
+            "rss_bytes_median".to_string(),
+            DaemonLogFieldValue::from(stats.rss_bytes_median),
+        );
+        fields.insert(
+            "rss_bytes_current".to_string(),
+            DaemonLogFieldValue::from(stats.rss_bytes_current),
+        );
+        fields.insert(
+            "resource_sample_count".to_string(),
+            DaemonLogFieldValue::from(stats.sample_count as u64),
+        );
+    }
 
     DaemonLogEvent {
         id: Some(crate::uuid::generate_v4()),
@@ -2036,7 +2095,7 @@ mod tests {
 
     #[test]
     fn daemon_heartbeat_event_uses_upload_contract_shape() {
-        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900));
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), None);
 
         assert!(event.id.is_some());
         assert_eq!(event.kind, DaemonLogKind::Heartbeat);
@@ -2049,5 +2108,75 @@ mod tests {
         );
         assert!(event.fields.contains_key("os"));
         assert!(event.fields.contains_key("arch"));
+        // No resource stats when None is passed
+        assert!(!event.fields.contains_key("cpu_percent_mean"));
+        assert!(!event.fields.contains_key("rss_bytes_current"));
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_includes_resource_stats() {
+        let stats = crate::daemon::resource_sampler::ResourceStats {
+            cpu_percent_min: 1.5,
+            cpu_percent_max: 25.0,
+            cpu_percent_mean: 10.0,
+            cpu_percent_median: 8.5,
+            rss_bytes_min: 50_000_000,
+            rss_bytes_max: 100_000_000,
+            rss_bytes_mean: 75_000_000,
+            rss_bytes_median: 72_000_000,
+            rss_bytes_current: 80_000_000,
+            sample_count: 30,
+        };
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), Some(stats));
+
+        // Core heartbeat fields are still present
+        assert_eq!(
+            event.fields.get("uptime_seconds"),
+            Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert!(event.fields.contains_key("os"));
+        assert!(event.fields.contains_key("arch"));
+
+        // Resource fields are present
+        assert_eq!(
+            event.fields.get("cpu_percent_min"),
+            Some(&DaemonLogFieldValue::from_f64(1.5))
+        );
+        assert_eq!(
+            event.fields.get("cpu_percent_max"),
+            Some(&DaemonLogFieldValue::from_f64(25.0))
+        );
+        assert_eq!(
+            event.fields.get("cpu_percent_mean"),
+            Some(&DaemonLogFieldValue::from_f64(10.0))
+        );
+        assert_eq!(
+            event.fields.get("cpu_percent_median"),
+            Some(&DaemonLogFieldValue::from_f64(8.5))
+        );
+        assert_eq!(
+            event.fields.get("rss_bytes_min"),
+            Some(&DaemonLogFieldValue::from(50_000_000_u64))
+        );
+        assert_eq!(
+            event.fields.get("rss_bytes_max"),
+            Some(&DaemonLogFieldValue::from(100_000_000_u64))
+        );
+        assert_eq!(
+            event.fields.get("rss_bytes_mean"),
+            Some(&DaemonLogFieldValue::from(75_000_000_u64))
+        );
+        assert_eq!(
+            event.fields.get("rss_bytes_median"),
+            Some(&DaemonLogFieldValue::from(72_000_000_u64))
+        );
+        assert_eq!(
+            event.fields.get("rss_bytes_current"),
+            Some(&DaemonLogFieldValue::from(80_000_000_u64))
+        );
+        assert_eq!(
+            event.fields.get("resource_sample_count"),
+            Some(&DaemonLogFieldValue::from(30_u64))
+        );
     }
 }
