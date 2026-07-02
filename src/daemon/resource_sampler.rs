@@ -41,6 +41,7 @@ pub struct ResourceStats {
 /// a heartbeat to extract aggregate statistics and reset the buffer.
 pub struct ResourceSampler {
     samples: VecDeque<ResourceSample>,
+    /// Cached value from the last successful CPU read, or initial baseline.
     last_cpu_secs: f64,
     last_wall: Instant,
 }
@@ -55,12 +56,13 @@ impl ResourceSampler {
     pub fn new() -> Self {
         Self {
             samples: VecDeque::with_capacity(MAX_SAMPLES),
-            last_cpu_secs: process_cpu_seconds(),
+            last_cpu_secs: process_cpu_seconds().unwrap_or(0.0),
             last_wall: Instant::now(),
         }
     }
 
     /// Collect a single sample of CPU and RSS usage.
+    /// Skips the sample entirely when either read fails (e.g. unsupported OS).
     pub fn sample(&mut self) {
         let now = Instant::now();
         let wall_delta = now.duration_since(self.last_wall).as_secs_f64();
@@ -68,14 +70,18 @@ impl ResourceSampler {
             return;
         }
 
-        let cpu_now = process_cpu_seconds();
+        let Some(cpu_now) = process_cpu_seconds() else {
+            return;
+        };
         let cpu_delta = cpu_now - self.last_cpu_secs;
         let cpu_percent = (cpu_delta / wall_delta) * 100.0;
 
+        let Some(rss_bytes) = process_rss_bytes() else {
+            return;
+        };
+
         self.last_cpu_secs = cpu_now;
         self.last_wall = now;
-
-        let rss_bytes = process_rss_bytes();
 
         if self.samples.len() >= MAX_SAMPLES {
             self.samples.pop_front();
@@ -150,59 +156,55 @@ fn median_u64(sorted: &[u64]) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Returns cumulative user+system CPU seconds for the current process.
+/// Returns `None` on unsupported platforms or syscall failure.
 #[cfg(unix)]
-fn process_cpu_seconds() -> f64 {
+fn process_cpu_seconds() -> Option<f64> {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     if ret != 0 {
-        return 0.0;
+        return None;
     }
     let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
     let sys = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
-    user + sys
+    Some(user + sys)
 }
 
 #[cfg(not(unix))]
-fn process_cpu_seconds() -> f64 {
-    0.0
+fn process_cpu_seconds() -> Option<f64> {
+    None
 }
 
 /// Returns the current resident set size in bytes.
+/// Returns `None` on unsupported platforms or read failure.
 #[cfg(target_os = "linux")]
-fn process_rss_bytes() -> u64 {
+fn process_rss_bytes() -> Option<u64> {
     // /proc/self/statm fields: size resident shared text lib data dt (in pages)
-    let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
-        return 0;
-    };
-    let Some(rss_pages_str) = statm.split_whitespace().nth(1) else {
-        return 0;
-    };
-    let Ok(rss_pages) = rss_pages_str.parse::<u64>() else {
-        return 0;
-    };
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss_pages_str = statm.split_whitespace().nth(1)?;
+    let rss_pages = rss_pages_str.parse::<u64>().ok()?;
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_size <= 0 {
-        return rss_pages * 4096; // common default
+        return Some(rss_pages * 4096); // common default
     }
-    rss_pages * page_size as u64
+    Some(rss_pages * page_size as u64)
 }
 
 #[cfg(target_os = "macos")]
-fn process_rss_bytes() -> u64 {
+fn process_rss_bytes() -> Option<u64> {
     // On macOS, getrusage ru_maxrss is in bytes and reports peak RSS.
     // For current RSS we would need mach task_info; peak is a reasonable
     // upper-bound proxy for a long-running daemon.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     if ret != 0 {
-        return 0;
+        return None;
     }
-    usage.ru_maxrss as u64
+    Some(usage.ru_maxrss as u64)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_rss_bytes() -> u64 {
-    0
+fn process_rss_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
@@ -321,18 +323,27 @@ mod tests {
     }
 
     #[test]
-    fn process_cpu_seconds_returns_nonnegative() {
+    fn process_cpu_seconds_returns_value_on_supported_platforms() {
         let cpu = process_cpu_seconds();
-        assert!(cpu >= 0.0);
+        #[cfg(unix)]
+        {
+            assert!(cpu.is_some());
+            assert!(cpu.unwrap() >= 0.0);
+        }
+        #[cfg(not(unix))]
+        assert!(cpu.is_none());
     }
 
     #[test]
-    fn process_rss_bytes_returns_value() {
+    fn process_rss_bytes_returns_value_on_supported_platforms() {
         let rss = process_rss_bytes();
-        // On real Unix systems the test process has nonzero RSS
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        assert!(rss > 0);
-        let _ = rss; // suppress unused warning on other platforms
+        {
+            assert!(rss.is_some());
+            assert!(rss.unwrap() > 0);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert!(rss.is_none());
     }
 
     #[test]
