@@ -24,6 +24,20 @@ fn single_stash_v2_initial(repo: &TestRepo) -> InitialAttributions {
     serde_json::from_str(&initial).expect("stash INITIAL is valid")
 }
 
+fn stash_v2_initial_containing(repo: &TestRepo, file: &str) -> InitialAttributions {
+    let stashes = stash_v2_dir(repo);
+    fs::read_dir(&stashes)
+        .expect("stashes_v2 dir exists")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .find_map(|entry| {
+            let initial = fs::read_to_string(entry.path().join("INITIAL")).ok()?;
+            let initial: InitialAttributions = serde_json::from_str(&initial).ok()?;
+            initial.files.contains_key(file).then_some(initial)
+        })
+        .unwrap_or_else(|| panic!("a compact stash dir should contain {file}"))
+}
+
 fn current_checkpoint_files(repo: &TestRepo) -> BTreeSet<String> {
     repo.current_working_logs()
         .read_all_checkpoints()
@@ -1378,70 +1392,65 @@ fn test_repeated_stash_pop_does_not_duplicate_checkpoints() {
 }
 
 #[test]
-fn test_stash_pop_quiet_flag_restores_attribution() {
+fn test_stash_quiet_flags_and_compaction_recovery() {
     let repo = TestRepo::new();
-    let file_path = repo.path().join("example.txt");
-    fs::write(&file_path, "base\n").unwrap();
+    let pop_path = repo.path().join("quiet-pop.txt");
+    let apply_path = repo.path().join("quiet-apply.txt");
+    let compact_path = repo.path().join("compacted.txt");
+    fs::write(&pop_path, "base\n").unwrap();
+    fs::write(&apply_path, "base\n").unwrap();
+    fs::write(&compact_path, "base\n").unwrap();
     repo.stage_all_and_commit("initial").unwrap();
 
-    fs::write(&file_path, "base\nAI line\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+    fs::write(&pop_path, "base\nAI pop line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "quiet-pop.txt"])
         .unwrap();
-
-    repo.git(&["stash", "push", "-q"]).expect("stash push -q");
+    repo.git(&["stash", "push", "-q", "--", "quiet-pop.txt"])
+        .expect("stash push -q");
     repo.git(&["stash", "pop", "-q"]).expect("stash pop -q");
     repo.sync_daemon_force();
-
     repo.stage_all_and_commit("commit quiet pop result")
         .unwrap();
-    let mut file = repo.filename("example.txt");
-    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "AI line".ai(),]);
-}
+    let mut pop_file = repo.filename("quiet-pop.txt");
+    pop_file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI pop line".ai(),
+    ]);
 
-#[test]
-fn test_stash_apply_quiet_flag_restores_attribution() {
-    let repo = TestRepo::new();
-    let file_path = repo.path().join("example.txt");
-    fs::write(&file_path, "base\n").unwrap();
-    repo.stage_all_and_commit("initial").unwrap();
-
-    fs::write(&file_path, "base\nAI line\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+    fs::write(&apply_path, "base\nAI apply line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "quiet-apply.txt"])
         .unwrap();
-
-    repo.git(&["stash", "push", "-q"]).expect("stash push -q");
+    repo.git(&["stash", "push", "-q", "--", "quiet-apply.txt"])
+        .expect("stash push -q");
     repo.git(&["stash", "apply", "-q"]).expect("stash apply -q");
     repo.sync_daemon_force();
-
     repo.stage_all_and_commit("commit quiet apply result")
         .unwrap();
-    let mut file = repo.filename("example.txt");
-    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "AI line".ai(),]);
-}
-
-#[test]
-fn test_stash_compaction_recovers_from_duplicated_checkpoint_log() {
-    let repo = TestRepo::new();
-    let file_path = repo.path().join("example.txt");
-    fs::write(&file_path, "base\n").unwrap();
-    repo.stage_all_and_commit("initial").unwrap();
-
-    fs::write(&file_path, "base\nAI line\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
-        .unwrap();
+    let mut apply_file = repo.filename("quiet-apply.txt");
+    apply_file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI apply line".ai(),
+    ]);
+    repo.git(&["stash", "drop"])
+        .expect("drop applied quiet stash");
     repo.sync_daemon_force();
 
+    fs::write(&compact_path, "base\nAI compacted line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "compacted.txt"])
+        .unwrap();
+    repo.sync_daemon_force();
     let original_count = duplicate_current_checkpoints(&repo, 32);
     assert!(
         current_checkpoint_count(&repo) > original_count,
         "test setup should simulate checkpoint log growth"
     );
 
-    repo.git(&["stash", "push"]).expect("stash push");
+    repo.git(&["stash", "push", "--", "compacted.txt"])
+        .expect("stash push");
     repo.sync_daemon_force();
-    let stash_initial = single_stash_v2_initial(&repo);
+    let stash_initial = stash_v2_initial_containing(&repo, "compacted.txt");
     assert!(
-        stash_initial.files.contains_key("example.txt"),
+        stash_initial.files.contains_key("compacted.txt"),
         "compact stash should retain attribution for the stashed file"
     );
 
@@ -1454,8 +1463,11 @@ fn test_stash_compaction_recovers_from_duplicated_checkpoint_log() {
 
     repo.stage_all_and_commit("commit compacted stash result")
         .unwrap();
-    let mut file = repo.filename("example.txt");
-    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "AI line".ai(),]);
+    let mut compact_file = repo.filename("compacted.txt");
+    compact_file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI compacted line".ai(),
+    ]);
 }
 
 #[test]
