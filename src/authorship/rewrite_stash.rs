@@ -208,6 +208,11 @@ fn save_stash_attributions(
         return Ok(());
     }
 
+    let source_log = repo.storage.working_log_for_base_commit(head_sha)?;
+    if pathspecs.is_empty() && !has_duplicate_checkpoint_records(&source_log)? {
+        return compact_stash_attributions_from_working_log(repo, stash_sha, head_sha, head_sha);
+    }
+
     let compact_base = compaction_working_log_base(stash_sha);
     if let Err(err) = write_compaction_working_log(repo, head_sha, &compact_base, pathspecs) {
         let _ = fs::remove_dir_all(repo.storage.working_logs.join(&compact_base));
@@ -220,6 +225,28 @@ fn save_stash_attributions(
     let _ = fs::remove_dir_all(repo.storage.working_logs.join(compact_base));
 
     result
+}
+
+fn has_duplicate_checkpoint_records(working_log: &PersistedWorkingLog) -> Result<bool, GitAiError> {
+    let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
+    if !checkpoints_file.exists() {
+        return Ok(false);
+    }
+
+    let input = fs::File::open(checkpoints_file)?;
+    let mut seen = HashSet::new();
+    for line in BufReader::new(input).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if !seen.insert(line) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn compact_stash_attributions_from_working_log(
