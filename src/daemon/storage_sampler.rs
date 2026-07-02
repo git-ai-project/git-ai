@@ -74,10 +74,34 @@ fn scan_storage_dirs(dirs: &[PathBuf]) -> StorageStats {
             dir_size_bounded(ai_dir, &mut entries_visited, MAX_ENTRIES_PER_DIR, deadline);
         total_ai_bytes = total_ai_bytes.saturating_add(ai_bytes);
 
-        let wl_dir = ai_dir.join("working_logs");
-        if wl_dir.is_dir()
-            && let Ok(rd) = std::fs::read_dir(&wl_dir)
-        {
+        // Collect working_logs dirs: direct ai_dir/working_logs plus
+        // ai_dir/worktrees/*/working_logs for linked worktrees.
+        let mut wl_dirs = vec![ai_dir.join("working_logs")];
+        let worktrees_dir = ai_dir.join("worktrees");
+        if worktrees_dir.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&worktrees_dir) {
+                for entry in rd.flatten() {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    let wt_wl = entry.path().join("working_logs");
+                    if wt_wl.is_dir() {
+                        wl_dirs.push(wt_wl);
+                    }
+                }
+            }
+        }
+
+        for wl_dir in &wl_dirs {
+            if Instant::now() >= deadline {
+                break;
+            }
+            if !wl_dir.is_dir() {
+                continue;
+            }
+            let Ok(rd) = std::fs::read_dir(wl_dir) else {
+                continue;
+            };
             for entry in rd.flatten() {
                 if Instant::now() >= deadline {
                     break;
@@ -232,6 +256,33 @@ mod tests {
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         let _ = dir_size_bounded(tmp.path(), &mut visited, 5, deadline);
         assert!(visited <= 5);
+    }
+
+    #[test]
+    fn scan_storage_dirs_includes_linked_worktree_working_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("ai");
+
+        // Direct working_logs
+        fs::create_dir_all(ai_dir.join("working_logs").join("main-log")).unwrap();
+        fs::write(
+            ai_dir.join("working_logs").join("main-log").join("data"),
+            "main",
+        )
+        .unwrap();
+
+        // Linked worktree working_logs at ai/worktrees/feature/working_logs
+        let wt_wl = ai_dir
+            .join("worktrees")
+            .join("feature")
+            .join("working_logs");
+        fs::create_dir_all(wt_wl.join("wt-log")).unwrap();
+        fs::write(wt_wl.join("wt-log").join("data"), "worktree data!").unwrap();
+
+        let stats = scan_storage_dirs(&[ai_dir]);
+        // Should find both: 1 from direct + 1 from linked worktree
+        assert_eq!(stats.working_logs_count, 2);
+        assert!(stats.working_logs_dir_bytes > 0);
     }
 
     #[cfg(unix)]
