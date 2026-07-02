@@ -9,7 +9,8 @@
 # Expects: relevant API key env var to be set by caller
 set -euo pipefail
 
-AGENT="${1:?Usage: $0 <agent>}"
+AGENT="${1:?Usage: $0 <agent> [binary_name]}"
+BINARY_NAME="${2:-$AGENT}"
 REPO_DIR="${TEST_REPO_DIR:-/tmp/test-repo}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/test-results}"
 mkdir -p "$RESULTS_DIR"
@@ -87,12 +88,12 @@ case "$AGENT" in
     ;;
 
   droid)
-    timeout 300 droid exec --auto high "$PROMPT" 2>&1 | tee -a "$LOG" \
+    timeout 300 "$BINARY_NAME" exec --auto high "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "droid exited with non-zero status"
     ;;
 
   opencode)
-    timeout 240 opencode run --command "$PROMPT" 2>&1 | tee -a "$LOG" \
+    timeout 240 "$BINARY_NAME" run --command "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "opencode exited with non-zero status"
     ;;
 

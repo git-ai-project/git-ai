@@ -1,6 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use crate::mdm::utils::{
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+};
 use jsonc_parser::ParseOptions;
 use serde_json::{Value, json};
 use std::fs;
@@ -350,9 +352,10 @@ impl HookInstaller for DroidInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+        let has_binary = binary_exists("droid");
         let has_dotfiles = home_dir().join(".factory").exists();
 
-        if !has_dotfiles {
+        if !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,

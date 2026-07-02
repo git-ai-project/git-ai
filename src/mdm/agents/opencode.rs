@@ -39,11 +39,11 @@ impl HookInstaller for OpenCodeInstaller {
     }
 
     fn process_names(&self) -> Vec<&str> {
-        vec!["opencode"]
+        vec!["opencode", "opencode2"]
     }
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("opencode");
+        let has_binary = binary_exists("opencode") || binary_exists("opencode2");
         let has_global_config = home_dir().join(".config").join("opencode").exists();
         let has_local_config = Path::new(".opencode").exists();
 
