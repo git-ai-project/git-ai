@@ -115,7 +115,8 @@ impl InternalDatabase {
                     // Create a dummy connection that will fail on any operation
                     // This allows the program to continue even if DB init fails
                     let temp_path = std::env::temp_dir().join("git-ai-db-failed");
-                    let conn = Connection::open(&temp_path).expect("Failed to create temp DB");
+                    let conn = crate::sqlite::open_with_memory_limits(&temp_path)
+                        .expect("Failed to create temp DB");
                     Mutex::new(InternalDatabase {
                         conn,
                         _db_path: temp_path,
@@ -152,12 +153,11 @@ impl InternalDatabase {
         }
 
         // Open with WAL mode and performance optimizations
-        let conn = Connection::open(&db_path)?;
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -531,7 +531,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
 
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
 
         let mut db = InternalDatabase {
@@ -574,7 +574,7 @@ mod tests {
     fn test_initialize_schema_handles_preexisting_cas_cache_table() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("concurrent-init.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         // Simulate a partial migration state from a concurrent process:
         // schema version indicates cas_cache is missing, but the table already exists.

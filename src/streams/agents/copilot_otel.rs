@@ -350,7 +350,7 @@ mod tests {
     fn create_test_otel_db() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("traces.db");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE spans (
                 span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn test_reads_spans_after_watermark() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         insert_span(&conn, "span1", 1000, 100, 50);
         insert_span(&conn, "span2", 2000, 200, 100);
         insert_span(&conn, "span3", 3000, 300, 150);
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn test_batch_size_limits_results() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         for i in 1..=5 {
             insert_span(&conn, &format!("span{}", i), i * 1000, i * 100, i * 50);
         }
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn test_batch_resume_no_loss_no_repeats() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         for i in 1..=5 {
             insert_span(&conn, &format!("span{}", i), i * 1000, i * 100, i * 50);
         }
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn test_no_data_loss_with_duplicate_end_time_ms() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         // 5 spans all sharing the same end_time_ms
         for i in 1..=5 {
             insert_span(&conn, &format!("span{}", i), 3000, i * 100, i * 50);
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn test_attributes_denormalized() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         insert_span(&conn, "span1", 1000, 100, 50);
         conn.execute(
             "INSERT INTO span_attributes (span_id, key, value) VALUES ('span1', 'gen_ai.request.model', 'gpt-4.1')",
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn test_span_events_denormalized() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         insert_span(&conn, "span1", 1000, 100, 50);
         conn.execute(
             "INSERT INTO span_events (span_id, name, timestamp_ms, attributes) VALUES ('span1', 'tool_call', 500, '{\"tool\":\"read_file\"}')",
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn test_spans_without_session_ids_are_filtered() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         // Span WITH session ID (should be included)
         conn.execute(
@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn test_watermark_advances_correctly_after_batch() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         insert_span(&conn, "span-a", 5000, 100, 50);
         insert_span(&conn, "span-b", 7000, 200, 100);
         drop(conn);
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn test_otel_json_structure_has_all_span_fields() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute(
             "INSERT INTO spans (span_id, trace_id, parent_span_id, name, start_time_ms, end_time_ms, \
              status_code, status_message, operation_name, provider_name, agent_name, \
@@ -876,7 +876,7 @@ mod tests {
     #[test]
     fn test_initial_watermark_uses_simple_greater_than() {
         let (_dir, db_path) = create_test_otel_db();
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         // Span at time 0 should still be found with initial watermark (end_time_ms > 0 fails for this!)
         // Actually initial watermark is timestamp_millis=0, so end_time_ms > 0 catches spans at ms=1+
         // Span at ms=0 would NOT be found since > 0 excludes it. This is OK since ms=0 means epoch.
@@ -898,7 +898,7 @@ mod tests {
     fn test_fractional_real_end_time_ms_no_infinite_loop() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("traces.db");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE spans (
                 span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,
@@ -962,7 +962,7 @@ mod tests {
     fn test_fractional_real_watermark_roundtrip_prevents_reread() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("traces.db");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE spans (
                 span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,

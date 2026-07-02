@@ -344,7 +344,7 @@ mod tests {
     fn test_extract_model_opencode_assistant_message_format() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("opencode.db");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
              INSERT INTO message VALUES ('msg-1', 'sess-1', 1000, 1000, '{\"role\":\"assistant\",\"modelID\":\"claude-opus-4-6\",\"providerID\":\"anthropic\"}');",
