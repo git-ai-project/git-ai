@@ -51,6 +51,7 @@ tests/integration/windsurf.rs
 src/git/repo_storage.rs
   s_1eeb4f6def9ecf::t_9baf06c163a0c9 981-1007
   s_1eeb4f6def9ecf::t_758a6b17e79896 338,494-495,502-503,513,684
+  s_1eeb4f6def9ecf::t_134349f64893c4 354-372
 tests/integration/gemini.rs
   s_1eeb4f6def9ecf::t_6ad69c576a52fe 16
   s_1eeb4f6def9ecf::t_e90586e5e9f62d 17-29,370
