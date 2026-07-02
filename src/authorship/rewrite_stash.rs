@@ -46,8 +46,8 @@ fn stash_metadata_path(repo: &Repository, stash_sha: &str) -> PathBuf {
     stash_entry_dir(repo, stash_sha).join("metadata.json")
 }
 
-fn filtered_stash_working_log_base(stash_sha: &str) -> String {
-    format!("_stash_filter_{}", stash_sha)
+fn compaction_working_log_base(stash_sha: &str) -> String {
+    format!("_stash_compact_{}", stash_sha)
 }
 
 fn working_log_for_dir(repo: &Repository, dir: PathBuf, base_commit: &str) -> PersistedWorkingLog {
@@ -208,25 +208,16 @@ fn save_stash_attributions(
         return Ok(());
     }
 
-    let filtered_base = if pathspecs.is_empty() {
-        None
-    } else {
-        let filtered_base = filtered_stash_working_log_base(stash_sha);
-        if let Err(err) = write_path_filtered_working_log(repo, head_sha, &filtered_base, pathspecs)
-        {
-            let _ = fs::remove_dir_all(repo.storage.working_logs.join(&filtered_base));
-            return Err(err);
-        }
-        Some(filtered_base)
-    };
-
-    let base_commit = filtered_base.as_deref().unwrap_or(head_sha);
-    let result =
-        compact_stash_attributions_from_working_log(repo, stash_sha, head_sha, base_commit);
-
-    if let Some(filtered_base) = filtered_base {
-        let _ = fs::remove_dir_all(repo.storage.working_logs.join(filtered_base));
+    let compact_base = compaction_working_log_base(stash_sha);
+    if let Err(err) = write_compaction_working_log(repo, head_sha, &compact_base, pathspecs) {
+        let _ = fs::remove_dir_all(repo.storage.working_logs.join(&compact_base));
+        return Err(err);
     }
+
+    let result =
+        compact_stash_attributions_from_working_log(repo, stash_sha, head_sha, &compact_base);
+
+    let _ = fs::remove_dir_all(repo.storage.working_logs.join(compact_base));
 
     result
 }
@@ -267,50 +258,53 @@ fn compact_stash_attributions_from_working_log(
     )
 }
 
-fn write_path_filtered_working_log(
+fn write_compaction_working_log(
     repo: &Repository,
     source_base_commit: &str,
-    filtered_base_commit: &str,
+    compact_base_commit: &str,
     pathspecs: &[String],
 ) -> Result<(), GitAiError> {
     let source_log = repo
         .storage
         .working_log_for_base_commit(source_base_commit)?;
-    let filtered_dir = repo.storage.working_logs.join(filtered_base_commit);
-    let _ = fs::remove_dir_all(&filtered_dir);
-    let filtered_log = repo
+    let compact_dir = repo.storage.working_logs.join(compact_base_commit);
+    let _ = fs::remove_dir_all(&compact_dir);
+    let compact_log = repo
         .storage
-        .working_log_for_base_commit(filtered_base_commit)?;
+        .working_log_for_base_commit(compact_base_commit)?;
 
     let mut initial = source_log.read_initial_attributions();
-    initial
-        .files
-        .retain(|path, _| path_matches_any(path, pathspecs));
-    initial
-        .file_blobs
-        .retain(|path, _| path_matches_any(path, pathspecs));
+    if !pathspecs.is_empty() {
+        initial
+            .files
+            .retain(|path, _| path_matches_any(path, pathspecs));
+        initial
+            .file_blobs
+            .retain(|path, _| path_matches_any(path, pathspecs));
+    }
     trim_initial_metadata_to_referenced_authors(&mut initial);
-    copy_initial_blobs(&source_log, &filtered_log, &initial)?;
-    filtered_log.write_initial(initial)?;
+    copy_initial_blobs(&source_log, &compact_log, &initial)?;
+    compact_log.write_initial(initial)?;
 
-    write_path_filtered_checkpoints(&source_log, &filtered_log, pathspecs)
+    write_compaction_checkpoints(&source_log, &compact_log, pathspecs)
 }
 
-fn write_path_filtered_checkpoints(
+fn write_compaction_checkpoints(
     source_log: &PersistedWorkingLog,
-    filtered_log: &PersistedWorkingLog,
+    compact_log: &PersistedWorkingLog,
     pathspecs: &[String],
 ) -> Result<(), GitAiError> {
     let source_checkpoints = source_log.dir.join("checkpoints.jsonl");
-    let filtered_checkpoints = filtered_log.dir.join("checkpoints.jsonl");
+    let compact_checkpoints = compact_log.dir.join("checkpoints.jsonl");
     if !source_checkpoints.exists() {
-        return filtered_log.write_all_checkpoints(&[]);
+        return compact_log.write_all_checkpoints(&[]);
     }
 
-    fs::create_dir_all(&filtered_log.dir)?;
+    fs::create_dir_all(&compact_log.dir)?;
     let input = fs::File::open(source_checkpoints)?;
-    let mut output = BufWriter::new(fs::File::create(filtered_checkpoints)?);
+    let mut output = BufWriter::new(fs::File::create(compact_checkpoints)?);
     let mut copied_blobs = HashSet::new();
+    let mut seen_checkpoints = HashSet::new();
 
     for line in BufReader::new(input).lines() {
         let line = line?;
@@ -319,19 +313,26 @@ fn write_path_filtered_checkpoints(
         }
 
         let mut checkpoint: Checkpoint = serde_json::from_str(&line)?;
-        checkpoint
-            .entries
-            .retain(|entry| path_matches_any(&entry.file, pathspecs));
+        if !pathspecs.is_empty() {
+            checkpoint
+                .entries
+                .retain(|entry| path_matches_any(&entry.file, pathspecs));
+            checkpoint.diff.clear();
+        }
         if checkpoint.entries.is_empty() {
             continue;
         }
 
-        checkpoint.diff.clear();
-        for entry in &checkpoint.entries {
-            copy_blob_sha(source_log, filtered_log, &entry.blob_sha, &mut copied_blobs)?;
+        let checkpoint_line = serde_json::to_string(&checkpoint)?;
+        if !seen_checkpoints.insert(checkpoint_line.clone()) {
+            continue;
         }
 
-        serde_json::to_writer(&mut output, &checkpoint)?;
+        for entry in &checkpoint.entries {
+            copy_blob_sha(source_log, compact_log, &entry.blob_sha, &mut copied_blobs)?;
+        }
+
+        output.write_all(checkpoint_line.as_bytes())?;
         output.write_all(b"\n")?;
     }
 

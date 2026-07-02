@@ -33,6 +33,29 @@ fn current_checkpoint_files(repo: &TestRepo) -> BTreeSet<String> {
         .collect()
 }
 
+fn current_checkpoint_count(repo: &TestRepo) -> usize {
+    repo.current_working_logs()
+        .read_all_checkpoints()
+        .expect("read current checkpoints")
+        .len()
+}
+
+fn duplicate_current_checkpoints(repo: &TestRepo, copies: usize) -> usize {
+    let working_log = repo.current_working_logs();
+    let checkpoints_path = working_log.dir.join("checkpoints.jsonl");
+    let original = fs::read_to_string(&checkpoints_path).expect("checkpoint file exists");
+    let original_count = original
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    assert!(
+        original_count > 0,
+        "test setup should create checkpoint lines before duplicating"
+    );
+    fs::write(checkpoints_path, original.repeat(copies)).expect("duplicate checkpoint log");
+    original_count
+}
+
 fn joke_lines(file_idx: usize, count: usize) -> Vec<String> {
     (0..count)
         .map(|line_idx| format!("joke file {file_idx} line {line_idx}: boilerplate punchline"))
@@ -1352,6 +1375,87 @@ fn test_repeated_stash_pop_does_not_duplicate_checkpoints() {
             .map(|line| line.ai())
             .collect::<Vec<_>>(),
     );
+}
+
+#[test]
+fn test_stash_pop_quiet_flag_restores_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("example.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(&file_path, "base\nAI line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
+
+    repo.git(&["stash", "push", "-q"]).expect("stash push -q");
+    repo.git(&["stash", "pop", "-q"]).expect("stash pop -q");
+    repo.sync_daemon_force();
+
+    repo.stage_all_and_commit("commit quiet pop result")
+        .unwrap();
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "AI line".ai(),]);
+}
+
+#[test]
+fn test_stash_apply_quiet_flag_restores_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("example.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(&file_path, "base\nAI line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
+
+    repo.git(&["stash", "push", "-q"]).expect("stash push -q");
+    repo.git(&["stash", "apply", "-q"]).expect("stash apply -q");
+    repo.sync_daemon_force();
+
+    repo.stage_all_and_commit("commit quiet apply result")
+        .unwrap();
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "AI line".ai(),]);
+}
+
+#[test]
+fn test_stash_compaction_recovers_from_duplicated_checkpoint_log() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("example.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(&file_path, "base\nAI line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
+    repo.sync_daemon_force();
+
+    let original_count = duplicate_current_checkpoints(&repo, 32);
+    assert!(
+        current_checkpoint_count(&repo) > original_count,
+        "test setup should simulate checkpoint log growth"
+    );
+
+    repo.git(&["stash", "push"]).expect("stash push");
+    repo.sync_daemon_force();
+    let stash_initial = single_stash_v2_initial(&repo);
+    assert!(
+        stash_initial.files.contains_key("example.txt"),
+        "compact stash should retain attribution for the stashed file"
+    );
+
+    repo.git(&["stash", "pop"]).expect("stash pop");
+    repo.sync_daemon_force();
+    assert!(
+        current_checkpoint_count(&repo) <= original_count,
+        "stash restore should not reintroduce duplicated checkpoint history"
+    );
+
+    repo.stage_all_and_commit("commit compacted stash result")
+        .unwrap();
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "AI line".ai(),]);
 }
 
 #[test]
