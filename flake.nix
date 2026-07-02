@@ -240,8 +240,8 @@ GITOGEOF
 
             export PATH="$GITWRAP_DIR:$PATH"
 
-            # Install hooks if binary is already built
-            if [ -x "$BINARY" ]; then
+            # Install hooks only when explicitly enabled and the binary is already built.
+            if [ "''${GIT_AI_INSTALL_DEV_HOOKS:-1}" = "1" ] && [ -x "$BINARY" ]; then
               "$GITWRAP_DIR/git-ai" install-hooks 2>/dev/null || true
             fi
 
