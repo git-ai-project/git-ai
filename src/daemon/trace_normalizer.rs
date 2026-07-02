@@ -278,13 +278,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         let family_key = if let Some(worktree) = worktree.as_deref() {
             if let Some(common_dir) = common_dir_for_worktree(worktree) {
-                let family = FamilyKey::new(
-                    common_dir
-                        .canonicalize()
-                        .unwrap_or(common_dir)
-                        .to_string_lossy()
-                        .to_string(),
-                );
+                let resolved = common_dir.canonicalize().unwrap_or(common_dir);
+                crate::daemon::storage_sampler::register_ai_dir(resolved.join("ai"));
+                let family = FamilyKey::new(resolved.to_string_lossy().to_string());
                 self.state
                     .sid_to_family
                     .insert(root_sid.to_string(), family.clone());

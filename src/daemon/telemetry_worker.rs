@@ -475,7 +475,12 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
             }
             let resource_stats = resource_sampler.drain_stats();
-            Some(daemon_heartbeat_event(started_at.elapsed(), resource_stats))
+            let storage_stats = crate::daemon::storage_sampler::scan_storage();
+            Some(daemon_heartbeat_event(
+                started_at.elapsed(),
+                resource_stats,
+                storage_stats,
+            ))
         } else {
             None
         };
@@ -817,6 +822,7 @@ fn daemon_log_upload_enabled() -> bool {
 fn daemon_heartbeat_event(
     uptime: std::time::Duration,
     resource_stats: Option<crate::daemon::resource_sampler::ResourceStats>,
+    storage_stats: Option<crate::daemon::storage_sampler::StorageStats>,
 ) -> DaemonLogEvent {
     let mut fields = BTreeMap::new();
     fields.insert(
@@ -872,6 +878,25 @@ fn daemon_heartbeat_event(
         fields.insert(
             "resource_sample_count".to_string(),
             DaemonLogFieldValue::from(stats.sample_count as u64),
+        );
+    }
+
+    if let Some(storage) = storage_stats {
+        fields.insert(
+            "git_ai_dir_bytes".to_string(),
+            DaemonLogFieldValue::from(storage.git_ai_dir_bytes),
+        );
+        fields.insert(
+            "working_logs_dir_bytes".to_string(),
+            DaemonLogFieldValue::from(storage.working_logs_dir_bytes),
+        );
+        fields.insert(
+            "working_logs_count".to_string(),
+            DaemonLogFieldValue::from(storage.working_logs_count),
+        );
+        fields.insert(
+            "working_log_largest_bytes".to_string(),
+            DaemonLogFieldValue::from(storage.working_log_largest_bytes),
         );
     }
 
@@ -2095,7 +2120,7 @@ mod tests {
 
     #[test]
     fn daemon_heartbeat_event_uses_upload_contract_shape() {
-        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), None);
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), None, None);
 
         assert!(event.id.is_some());
         assert_eq!(event.kind, DaemonLogKind::Heartbeat);
@@ -2111,6 +2136,8 @@ mod tests {
         // No resource stats when None is passed
         assert!(!event.fields.contains_key("cpu_percent_mean"));
         assert!(!event.fields.contains_key("rss_bytes_current"));
+        // No storage stats when None is passed
+        assert!(!event.fields.contains_key("git_ai_dir_bytes"));
     }
 
     #[test]
@@ -2127,7 +2154,7 @@ mod tests {
             rss_bytes_current: 80_000_000,
             sample_count: 30,
         };
-        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), Some(stats));
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), Some(stats), None);
 
         // Core heartbeat fields are still present
         assert_eq!(
@@ -2177,6 +2204,35 @@ mod tests {
         assert_eq!(
             event.fields.get("resource_sample_count"),
             Some(&DaemonLogFieldValue::from(30_u64))
+        );
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_includes_storage_stats() {
+        let storage = crate::daemon::storage_sampler::StorageStats {
+            git_ai_dir_bytes: 1_048_576,
+            working_logs_dir_bytes: 524_288,
+            working_logs_count: 3,
+            working_log_largest_bytes: 262_144,
+        };
+        let event =
+            daemon_heartbeat_event(std::time::Duration::from_secs(900), None, Some(storage));
+
+        assert_eq!(
+            event.fields.get("git_ai_dir_bytes"),
+            Some(&DaemonLogFieldValue::from(1_048_576_u64))
+        );
+        assert_eq!(
+            event.fields.get("working_logs_dir_bytes"),
+            Some(&DaemonLogFieldValue::from(524_288_u64))
+        );
+        assert_eq!(
+            event.fields.get("working_logs_count"),
+            Some(&DaemonLogFieldValue::from(3_u64))
+        );
+        assert_eq!(
+            event.fields.get("working_log_largest_bytes"),
+            Some(&DaemonLogFieldValue::from(262_144_u64))
         );
     }
 }
