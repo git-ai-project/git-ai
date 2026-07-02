@@ -78,16 +78,16 @@ fn scan_storage_dirs(dirs: &[PathBuf]) -> StorageStats {
         // ai_dir/worktrees/*/working_logs for linked worktrees.
         let mut wl_dirs = vec![ai_dir.join("working_logs")];
         let worktrees_dir = ai_dir.join("worktrees");
-        if worktrees_dir.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(&worktrees_dir) {
-                for entry in rd.flatten() {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    let wt_wl = entry.path().join("working_logs");
-                    if wt_wl.is_dir() {
-                        wl_dirs.push(wt_wl);
-                    }
+        if worktrees_dir.is_dir()
+            && let Ok(rd) = std::fs::read_dir(&worktrees_dir)
+        {
+            for entry in rd.flatten() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let wt_wl = entry.path().join("working_logs");
+                if wt_wl.is_dir() {
+                    wl_dirs.push(wt_wl);
                 }
             }
         }
