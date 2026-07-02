@@ -39,7 +39,6 @@ pub fn register_ai_dir(ai_dir: PathBuf) {
 
 /// Compute aggregate storage statistics across all known repo ai_dirs.
 /// Returns `None` if no repos are registered or on lock failure.
-/// Bounded: skips symlinks, caps entry count, and enforces a time limit.
 pub fn scan_storage() -> Option<StorageStats> {
     let dirs: Vec<PathBuf> = {
         let guard = KNOWN_AI_DIRS.read().ok()?;
@@ -50,13 +49,19 @@ pub fn scan_storage() -> Option<StorageStats> {
         set.iter().cloned().collect()
     };
 
+    Some(scan_storage_dirs(&dirs))
+}
+
+/// Compute aggregate storage statistics for a given set of ai_dir paths.
+/// Bounded: skips symlinks, caps entry count, and enforces a time limit.
+fn scan_storage_dirs(dirs: &[PathBuf]) -> StorageStats {
     let deadline = Instant::now() + MAX_SCAN_DURATION;
     let mut total_ai_bytes: u64 = 0;
     let mut total_wl_bytes: u64 = 0;
     let mut total_wl_count: u64 = 0;
     let mut largest_wl_bytes: u64 = 0;
 
-    for ai_dir in &dirs {
+    for ai_dir in dirs {
         if Instant::now() >= deadline {
             break;
         }
@@ -71,40 +76,41 @@ pub fn scan_storage() -> Option<StorageStats> {
 
         let wl_dir = ai_dir.join("working_logs");
         if wl_dir.is_dir()
-            && let Ok(rd) = std::fs::read_dir(&wl_dir) {
-                for entry in rd.flatten() {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-                    if path
-                        .file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("old-"))
-                    {
-                        continue;
-                    }
+            && let Ok(rd) = std::fs::read_dir(&wl_dir)
+        {
+            for entry in rd.flatten() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("old-"))
+                {
+                    continue;
+                }
 
-                    total_wl_count += 1;
-                    let mut wl_entries: usize = 0;
-                    let wl_size =
-                        dir_size_bounded(&path, &mut wl_entries, MAX_ENTRIES_PER_DIR, deadline);
-                    total_wl_bytes = total_wl_bytes.saturating_add(wl_size);
-                    if wl_size > largest_wl_bytes {
-                        largest_wl_bytes = wl_size;
-                    }
+                total_wl_count += 1;
+                let mut wl_entries: usize = 0;
+                let wl_size =
+                    dir_size_bounded(&path, &mut wl_entries, MAX_ENTRIES_PER_DIR, deadline);
+                total_wl_bytes = total_wl_bytes.saturating_add(wl_size);
+                if wl_size > largest_wl_bytes {
+                    largest_wl_bytes = wl_size;
                 }
             }
+        }
     }
 
-    Some(StorageStats {
+    StorageStats {
         git_ai_dir_bytes: total_ai_bytes,
         working_logs_dir_bytes: total_wl_bytes,
         working_logs_count: total_wl_count,
         working_log_largest_bytes: largest_wl_bytes,
-    })
+    }
 }
 
 /// Recursively compute directory size, bounded by max entries and deadline.
@@ -157,33 +163,15 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn reset_known_dirs() {
-        if let Ok(mut guard) = KNOWN_AI_DIRS.write() {
-            *guard = None;
-        }
-    }
-
     #[test]
-    fn scan_storage_returns_none_when_no_dirs_registered() {
-        reset_known_dirs();
-        assert!(scan_storage().is_none());
-    }
-
-    #[test]
-    fn scan_storage_returns_none_for_nonexistent_dir() {
-        reset_known_dirs();
-        register_ai_dir(PathBuf::from("/tmp/nonexistent-ai-dir-test-12345"));
-        // Should return Some with zeros since the dir doesn't exist
-        let stats = scan_storage();
-        assert!(stats.is_some());
-        let stats = stats.unwrap();
+    fn scan_storage_dirs_returns_zeros_for_nonexistent_dir() {
+        let stats = scan_storage_dirs(&[PathBuf::from("/tmp/nonexistent-ai-dir-test-12345")]);
         assert_eq!(stats.git_ai_dir_bytes, 0);
+        assert_eq!(stats.working_logs_count, 0);
     }
 
     #[test]
-    fn scan_storage_computes_basic_stats() {
-        reset_known_dirs();
-
+    fn scan_storage_dirs_computes_basic_stats() {
         let tmp = tempfile::tempdir().unwrap();
         let ai_dir = tmp.path().join("ai");
         fs::create_dir_all(ai_dir.join("working_logs").join("abc123")).unwrap();
@@ -197,9 +185,7 @@ mod tests {
         .unwrap();
         fs::write(ai_dir.join("config.json"), "{}").unwrap();
 
-        register_ai_dir(ai_dir);
-
-        let stats = scan_storage().unwrap();
+        let stats = scan_storage_dirs(&[ai_dir]);
         assert!(stats.git_ai_dir_bytes > 0);
         assert!(stats.working_logs_dir_bytes > 0);
         assert_eq!(stats.working_logs_count, 1);
@@ -207,9 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_storage_skips_old_working_logs() {
-        reset_known_dirs();
-
+    fn scan_storage_dirs_skips_old_working_logs() {
         let tmp = tempfile::tempdir().unwrap();
         let ai_dir = tmp.path().join("ai");
         let wl = ai_dir.join("working_logs");
@@ -218,16 +202,12 @@ mod tests {
         fs::create_dir_all(wl.join("old-def456")).unwrap();
         fs::write(wl.join("old-def456").join("data.json"), "archived").unwrap();
 
-        register_ai_dir(ai_dir);
-
-        let stats = scan_storage().unwrap();
+        let stats = scan_storage_dirs(&[ai_dir]);
         assert_eq!(stats.working_logs_count, 1);
     }
 
     #[test]
-    fn scan_storage_finds_largest_working_log() {
-        reset_known_dirs();
-
+    fn scan_storage_dirs_finds_largest_working_log() {
         let tmp = tempfile::tempdir().unwrap();
         let ai_dir = tmp.path().join("ai");
         let wl = ai_dir.join("working_logs");
@@ -236,9 +216,7 @@ mod tests {
         fs::create_dir_all(wl.join("large")).unwrap();
         fs::write(wl.join("large").join("data"), "x".repeat(1000)).unwrap();
 
-        register_ai_dir(ai_dir);
-
-        let stats = scan_storage().unwrap();
+        let stats = scan_storage_dirs(&[ai_dir]);
         assert_eq!(stats.working_logs_count, 2);
         assert!(stats.working_log_largest_bytes >= 1000);
     }
