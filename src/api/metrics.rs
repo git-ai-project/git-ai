@@ -16,11 +16,21 @@ static LAST_METRICS_UPLOAD_STARTED_AT: OnceLock<Mutex<Option<Instant>>> = OnceLo
 
 /// Returns whether metrics are allowed to upload for the current API context.
 ///
-/// The server always requires authentication (API key or OAuth login).
-/// Without credentials the request will be rejected with 401, so we skip
-/// the upload entirely to avoid wasteful retries and memory pressure.
+/// Two independent conditions must hold:
+/// - The server always requires authentication (API key or OAuth login).
+///   Without credentials the request will be rejected with 401, so we skip
+///   the upload entirely to avoid wasteful retries and memory pressure.
+/// - OSS telemetry must not be disabled. When `telemetry_oss` is off, the user
+///   has opted out of sending any data externally, which includes the metrics
+///   pipeline, not just Sentry/PostHog.
 pub fn metrics_upload_allowed(_api_base_url: &str, client: &ApiClient) -> bool {
-    client.is_logged_in() || client.has_api_key()
+    let has_credentials = client.is_logged_in() || client.has_api_key();
+    let telemetry_oss_disabled = crate::config::Config::get().is_telemetry_oss_disabled();
+    metrics_upload_allowed_with(has_credentials, telemetry_oss_disabled)
+}
+
+fn metrics_upload_allowed_with(has_credentials: bool, telemetry_oss_disabled: bool) -> bool {
+    has_credentials && !telemetry_oss_disabled
 }
 
 fn wait_for_metrics_upload_rate_limit() -> Result<(), GitAiError> {
@@ -301,6 +311,17 @@ mod tests {
         );
         assert_eq!(sleeps.borrow().len(), 1);
         assert_eq!(last_started_at, Some(base + Duration::from_millis(1000)));
+    }
+
+    #[test]
+    fn metrics_upload_allowed_requires_credentials_and_oss_telemetry_enabled() {
+        // Credentials present, telemetry enabled -> upload allowed.
+        assert!(metrics_upload_allowed_with(true, false));
+        // No credentials -> never allowed regardless of telemetry setting.
+        assert!(!metrics_upload_allowed_with(false, false));
+        assert!(!metrics_upload_allowed_with(false, true));
+        // Credentials present but OSS telemetry disabled -> not allowed.
+        assert!(!metrics_upload_allowed_with(true, true));
     }
 
     #[test]
