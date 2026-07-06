@@ -6,8 +6,12 @@ use crate::git::cli_parser::{
     ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
-use crate::git::repo_state::{common_dir_for_worktree, worktree_root_for_path};
-use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
+use crate::git::repo_state::{
+    common_dir_for_worktree, git_dir_for_worktree, worktree_root_for_path,
+};
+use crate::git::repository::{
+    Repository, discover_repository_in_path_no_git_exec, exec_git, exec_git_stdin,
+};
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
 use crate::{
@@ -46,16 +50,19 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::time::Duration;
 
 pub mod analyzers;
+pub mod bash_history_db;
 pub mod bash_sessions;
 pub mod checkpoint;
 pub mod control_api;
 pub mod coordinator;
+pub mod daemon_log_layer;
 pub mod domain;
 pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
 pub mod ref_cursor;
+pub mod rewrite_metrics;
 pub mod sentry_layer;
 pub mod stream_worker;
 pub mod sweep_coordinator;
@@ -671,14 +678,20 @@ fn stash_base_head(repo: &Repository, stash_sha: &str) -> Option<String> {
 /// After a rebase completes, check if any newly-rebased commits were created
 /// from conflict resolution with AI checkpoints. If so, merge those resolution
 /// checkpoints into the already-shifted source authorship note for the new commit.
+#[derive(Default)]
+struct RewriteMetricContext {
+    parent_by_commit: HashMap<String, String>,
+    parent_diff_by_commit: HashMap<String, crate::authorship::rewrite::DiffTreeResult>,
+}
+
 fn process_conflict_resolution_working_logs(
     repo: &Repository,
     new_tip: &str,
     onto: Option<&str>,
-) -> Result<(), GitAiError> {
+) -> Result<RewriteMetricContext, GitAiError> {
     let onto_sha = match onto {
         Some(s) if !s.is_empty() => s,
-        _ => return Ok(()),
+        _ => return Ok(RewriteMetricContext::default()),
     };
 
     // Walk rebased commits between onto and new_tip
@@ -702,6 +715,18 @@ fn process_conflict_resolution_working_logs(
         .iter()
         .map(|(commit_sha, _)| commit_sha.clone())
         .collect::<Vec<_>>();
+    let collect_metric_context = crate::authorship::rewrite::rewrite_metrics_enabled();
+    let mut metric_context = if collect_metric_context {
+        RewriteMetricContext {
+            parent_by_commit: commit_parent_pairs
+                .iter()
+                .map(|(commit_sha, parent_sha)| (commit_sha.clone(), parent_sha.clone()))
+                .collect(),
+            parent_diff_by_commit: HashMap::new(),
+        }
+    } else {
+        RewriteMetricContext::default()
+    };
     let existing_notes = crate::git::notes_api::read_notes_batch(repo, &commit_shas)?;
     let author = repo.effective_author_identity().formatted_or_unknown();
 
@@ -727,6 +752,13 @@ fn process_conflict_resolution_working_logs(
         .zip(diff_results.iter())
         .map(|((commit_sha, _), result)| (commit_sha.as_str(), result))
         .collect();
+    if collect_metric_context {
+        metric_context.parent_diff_by_commit = qualifying
+            .iter()
+            .zip(diff_results.iter())
+            .map(|((commit_sha, _), result)| (commit_sha.clone(), result.clone()))
+            .collect();
+    }
 
     for (commit_sha, parent_sha) in &commit_parent_pairs {
         let existing_shifted_log = existing_notes
@@ -741,7 +773,25 @@ fn process_conflict_resolution_working_logs(
             diff_by_commit.get(commit_sha.as_str()).copied(),
         )?;
     }
-    Ok(())
+    Ok(metric_context)
+}
+
+fn rewrite_metric_commits_with_context(
+    metric_commits: Vec<crate::authorship::rewrite::RewriteMetricCommit>,
+    context: RewriteMetricContext,
+) -> Vec<crate::authorship::rewrite::RewriteMetricCommit> {
+    metric_commits
+        .into_iter()
+        .map(|mut commit| {
+            if let Some(parent_sha) = context.parent_by_commit.get(&commit.new_sha) {
+                commit = commit.with_parent_sha(parent_sha.clone());
+            }
+            if let Some(diff) = context.parent_diff_by_commit.get(&commit.new_sha) {
+                commit = commit.with_parent_diff(diff.clone());
+            }
+            commit
+        })
+        .collect()
 }
 
 fn post_conflict_resolution_working_log(
@@ -765,6 +815,7 @@ fn post_conflict_resolution_working_log(
         crate::authorship::post_commit::PostCommitOptions {
             supress_output: true,
             compute_stats: false,
+            recover_attribution: false,
         },
         precomputed_parent_diff,
         move |resolution_log| {
@@ -948,6 +999,25 @@ fn compute_watermarks_from_stat(
     watermarks
 }
 
+fn capture_commit_file_timestamps(
+    worktree: &Path,
+    commit_sha: &str,
+) -> Result<crate::authorship::attribution_recovery::FileTimestampsByPath, GitAiError> {
+    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let workdir = repo.workdir()?;
+    let files = repo.list_commit_files(commit_sha, None)?;
+    let mut timestamps_by_path = HashMap::new();
+    for file_path in files {
+        let timestamps = crate::authorship::attribution_recovery::file_timestamps_for_path(
+            &workdir.join(&file_path),
+        );
+        if !timestamps.is_empty() {
+            timestamps_by_path.insert(file_path, timestamps);
+        }
+    }
+    Ok(timestamps_by_path)
+}
+
 fn parsed_invocation_for_side_effect(
     command: Option<&str>,
     args: &[String],
@@ -1051,16 +1121,49 @@ fn apply_pull_notes_sync_side_effect(
     command: Option<&str>,
     args: &[String],
 ) -> Result<(), GitAiError> {
+    use crate::config::NotesBackendKind;
+
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
     let remote = fetch_remote_from_args(&repo, &parsed)?;
+    let notes_backend = crate::config::Config::fresh().notes_backend_kind();
+
+    tracing::info!(
+        command = command.unwrap_or("pull"),
+        remote = %remote,
+        backend = %notes_backend,
+        worktree = %worktree,
+        "handling pull notes sync"
+    );
+
+    if notes_backend == NotesBackendKind::Http {
+        return crate::git::notes_api::warm_cache_for_remote(&repo, &remote);
+    }
+
     fetch_authorship_notes(&repo, &remote)?;
     Ok(())
 }
 
 fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
+    use crate::config::NotesBackendKind;
+
     let repo = find_repository_in_path(worktree)?;
-    fetch_authorship_notes(&repo, "origin")?;
+    let remote = "origin";
+    let notes_backend = crate::config::Config::fresh().notes_backend_kind();
+
+    tracing::info!(
+        command = "clone",
+        remote = %remote,
+        backend = %notes_backend,
+        worktree = %worktree,
+        "handling clone notes sync"
+    );
+
+    if notes_backend == NotesBackendKind::Http {
+        return crate::git::notes_api::warm_cache_for_remote(&repo, remote);
+    }
+
+    fetch_authorship_notes(&repo, remote)?;
     Ok(())
 }
 
@@ -1313,6 +1416,44 @@ fn valid_non_zero_ref_change(change: &crate::daemon::domain::RefChange) -> bool 
         && change.old != change.new
 }
 
+fn rewrite_metric_branch_for_ref(reference: &str) -> Option<String> {
+    crate::authorship::rewrite::branch_name_from_ref(reference)
+}
+
+fn rewrite_metric_branch_for_transition(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    old_tip: &str,
+    new_tip: &str,
+    reference_hint: Option<&str>,
+) -> Option<String> {
+    reference_hint
+        .and_then(rewrite_metric_branch_for_ref)
+        .or_else(|| {
+            cmd.ref_changes
+                .iter()
+                .rev()
+                .find(|change| {
+                    change.reference.starts_with("refs/heads/")
+                        && change.old == old_tip
+                        && change.new == new_tip
+                })
+                .and_then(|change| rewrite_metric_branch_for_ref(&change.reference))
+        })
+}
+
+fn rewrite_metric_commits_with_branch(
+    metric_commits: Vec<crate::authorship::rewrite::RewriteMetricCommit>,
+    branch: Option<String>,
+) -> Vec<crate::authorship::rewrite::RewriteMetricCommit> {
+    match branch {
+        Some(branch) => metric_commits
+            .into_iter()
+            .map(|commit| commit.with_branch(branch.clone()))
+            .collect(),
+        None => metric_commits,
+    }
+}
+
 fn rebase_new_tip_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     original_head: &str,
@@ -1329,6 +1470,10 @@ fn rebase_new_tip_from_command(
         .map(|change| change.new.clone())
     {
         return Some(new_tip);
+    }
+
+    if !rebase_is_control_mode(cmd) {
+        return None;
     }
 
     let branch_ref_names = cmd
@@ -1374,7 +1519,7 @@ fn cherry_pick_destination_commits(cmd: &crate::daemon::domain::NormalizedComman
         .collect()
 }
 
-fn cherry_pick_original_head(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<String> {
+fn first_head_transition_old(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<String> {
     cmd.ref_changes
         .iter()
         .find(|change| {
@@ -1386,6 +1531,310 @@ fn cherry_pick_original_head(cmd: &crate::daemon::domain::NormalizedCommand) -> 
                 && change.old != change.new
         })
         .map(|change| change.old.clone())
+}
+
+fn cherry_pick_original_head(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<String> {
+    first_head_transition_old(cmd)
+}
+
+fn revert_original_head(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<String> {
+    first_head_transition_old(cmd)
+}
+
+fn cherry_pick_source_args_for_side_effect(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Vec<String> {
+    let parsed = parsed_invocation_for_normalized_command(cmd);
+    if parsed.command.as_deref() != Some("cherry-pick")
+        && cmd.primary_command.as_deref() != Some("cherry-pick")
+    {
+        return Vec::new();
+    }
+
+    cherry_pick_source_args_from_command_args(&parsed.command_args)
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn cherry_pick_command_has_flag(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    flag: &str,
+) -> bool {
+    let parsed = parsed_invocation_for_normalized_command(cmd);
+    if parsed.command.as_deref() != Some("cherry-pick")
+        && cmd.primary_command.as_deref() != Some("cherry-pick")
+    {
+        return false;
+    }
+
+    parsed.command_args.iter().any(|arg| arg == flag)
+}
+
+fn cherry_pick_source_args_from_command_args(args: &[String]) -> Vec<&str> {
+    let mut sources = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            sources.extend(args[idx + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
+            return Vec::new();
+        }
+        if matches!(
+            arg,
+            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy"
+        ) {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with("--mainline=")
+            || arg.starts_with("--strategy=")
+            || arg.starts_with("--strategy-option=")
+            || arg == "--gpg-sign"
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-m")
+            || arg.starts_with("-X")
+            || arg.starts_with("-S")
+        {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if !arg.is_empty() {
+            sources.push(arg);
+        }
+        idx += 1;
+    }
+    sources
+}
+
+fn cherry_pick_source_is_range(source: &str) -> bool {
+    source.contains("..")
+}
+
+fn cherry_pick_range_has_omitted_side(source: &str) -> bool {
+    if let Some((left, right)) = source.split_once("...") {
+        left.is_empty() || right.is_empty()
+    } else if let Some((left, right)) = source.split_once("..") {
+        left.is_empty() || right.is_empty()
+    } else {
+        false
+    }
+}
+
+fn resolve_cherry_pick_source_args_with_git_in_head_context(
+    repo: &Repository,
+    source_args: &[String],
+    head_context: Option<&str>,
+) -> Result<Vec<String>, GitAiError> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+
+    for source in source_args {
+        let source = head_context
+            .map(|head| rewrite_head_source_arg_for_side_effect(source, head))
+            .unwrap_or_else(|| source.clone());
+        let oids = if cherry_pick_source_is_range(&source) {
+            if cherry_pick_range_has_omitted_side(&source) {
+                Vec::new()
+            } else {
+                resolve_cherry_pick_range_source_with_git(repo, &source)?
+            }
+        } else {
+            resolve_cherry_pick_single_source_with_git(repo, &source)?
+        };
+
+        for oid in oids {
+            if seen.insert(oid.clone()) {
+                resolved.push(oid);
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn rewrite_head_source_arg_for_side_effect(source: &str, head_context: &str) -> String {
+    if head_context.is_empty() || !is_valid_oid(head_context) {
+        return source.to_string();
+    }
+    if let Some((left, right)) = source.split_once("...") {
+        return format!(
+            "{}...{}",
+            rewrite_head_source_term_for_side_effect(left, head_context),
+            rewrite_head_source_term_for_side_effect(right, head_context)
+        );
+    }
+    if let Some((left, right)) = source.split_once("..") {
+        return format!(
+            "{}..{}",
+            rewrite_head_source_term_for_side_effect(left, head_context),
+            rewrite_head_source_term_for_side_effect(right, head_context)
+        );
+    }
+    rewrite_head_source_term_for_side_effect(source, head_context)
+}
+
+fn rewrite_head_source_term_for_side_effect(term: &str, head_context: &str) -> String {
+    if term == "HEAD" || term == "@" {
+        return head_context.to_string();
+    }
+    if let Some(suffix) = term.strip_prefix("HEAD")
+        && (suffix.starts_with('~') || suffix.starts_with('^'))
+    {
+        return format!("{head_context}{suffix}");
+    }
+    if let Some(suffix) = term.strip_prefix('@')
+        && (suffix.starts_with('~') || suffix.starts_with('^'))
+    {
+        return format!("{head_context}{suffix}");
+    }
+    term.to_string()
+}
+
+fn resolve_cherry_pick_single_source_with_git(
+    repo: &Repository,
+    source: &str,
+) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "cat-file".to_string(),
+        "--batch-check=%(objectname) %(objecttype)".to_string(),
+    ]);
+    let stdin_data = format!("{source}^{{commit}}\n");
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let oid = parts.next()?;
+            (parts.next() == Some("commit") && is_valid_oid(oid)).then(|| oid.to_string())
+        })
+        .collect())
+}
+
+fn resolve_cherry_pick_range_source_with_git(
+    repo: &Repository,
+    source: &str,
+) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        "--reverse".to_string(),
+        source.to_string(),
+    ]);
+    let output = exec_git(&args)?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_valid_oid(line))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn resolve_explicit_cherry_pick_sources_for_side_effect(
+    repo: &Repository,
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Result<Vec<String>, GitAiError> {
+    let source_args = cherry_pick_source_args_for_side_effect(cmd);
+    if source_args.is_empty() {
+        return Ok(Vec::new());
+    }
+    let original_head = cherry_pick_original_head(cmd);
+    resolve_cherry_pick_source_args_with_git_in_head_context(
+        repo,
+        &source_args,
+        original_head.as_deref(),
+    )
+}
+
+fn revert_source_args_for_side_effect(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Vec<String> {
+    let parsed = parsed_invocation_for_normalized_command(cmd);
+    if parsed.command.as_deref() != Some("revert")
+        && cmd.primary_command.as_deref() != Some("revert")
+    {
+        return Vec::new();
+    }
+
+    revert_source_args_from_command_args(&parsed.command_args)
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn revert_source_args_from_command_args(args: &[String]) -> Vec<&str> {
+    let args = if args.first().is_some_and(|arg| arg == "revert") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut sources = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            sources.extend(args[idx + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
+            return Vec::new();
+        }
+        if matches!(arg, "-m" | "--mainline") {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with("--mainline=")
+            || arg == "--gpg-sign"
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-S")
+        {
+            idx += 1;
+            continue;
+        }
+        if matches!(arg, "-n" | "--no-commit" | "--no-edit" | "-e" | "--edit") {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if !arg.is_empty() {
+            sources.push(arg);
+        }
+        idx += 1;
+    }
+    sources
+}
+
+fn resolve_explicit_revert_sources_for_side_effect(
+    repo: &Repository,
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Result<Vec<String>, GitAiError> {
+    let source_args = revert_source_args_for_side_effect(cmd);
+    if source_args.is_empty() {
+        return Ok(Vec::new());
+    }
+    let original_head = revert_original_head(cmd);
+    resolve_cherry_pick_source_args_with_git_in_head_context(
+        repo,
+        &source_args,
+        original_head.as_deref(),
+    )
+}
+
+fn cherry_pick_state_exists_for_worktree(worktree: &Path) -> bool {
+    git_dir_for_worktree(worktree).is_some_and(|git_dir| {
+        git_dir.join("CHERRY_PICK_HEAD").exists() || git_dir.join("sequencer").join("todo").exists()
+    })
 }
 
 fn revert_destination_changes(
@@ -1407,6 +1856,7 @@ fn revert_destination_changes(
 fn apply_revert_complete_rewrite(
     repo: &crate::git::repository::Repository,
     cmd: &crate::daemon::domain::NormalizedCommand,
+    source_oids: &[String],
 ) -> Result<(), GitAiError> {
     let specs: Vec<crate::authorship::rewrite_revert::RevertSpec> = revert_destination_changes(cmd)
         .into_iter()
@@ -1415,11 +1865,14 @@ fn apply_revert_complete_rewrite(
             |(index, change)| crate::authorship::rewrite_revert::RevertSpec {
                 revert_commit: change.new.clone(),
                 parent: Some(change.old.clone()),
-                reverted_commit: cmd.revert_source_oids.get(index).cloned(),
+                reverted_commit: source_oids.get(index).cloned(),
             },
         )
         .collect();
-    crate::authorship::rewrite_revert::handle_revert_commits(repo, &specs)
+    let metric_commits =
+        crate::authorship::rewrite_revert::handle_revert_commits_with_metrics(repo, &specs)?;
+    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(repo, metric_commits);
+    Ok(())
 }
 
 fn apply_cherry_pick_complete_rewrite(
@@ -1433,15 +1886,17 @@ fn apply_cherry_pick_complete_rewrite(
         sources,
         new_commits,
     )?;
+    let mut rewrite_metric_commits = Vec::new();
     if !pairs.is_empty() {
         let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        crate::authorship::rewrite::handle_rewrite_event(
+        let outcome = crate::authorship::rewrite::handle_rewrite_event_with_metrics(
             repo,
             crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
                 sources: src,
                 new_commits: dst,
             },
         )?;
+        rewrite_metric_commits.extend(outcome.metric_commits);
     }
 
     let existing_notes = crate::git::notes_api::read_notes_batch(repo, new_commits)?;
@@ -1491,12 +1946,35 @@ fn apply_cherry_pick_complete_rewrite(
         )?;
     }
 
+    let rewrite_metric_commits = if rewrite_metric_commits.is_empty() {
+        rewrite_metric_commits
+    } else {
+        let parent_by_commit: HashMap<&str, &str> = commit_parent_pairs
+            .iter()
+            .map(|(commit_sha, parent_sha)| (commit_sha.as_str(), parent_sha.as_str()))
+            .collect();
+        rewrite_metric_commits
+            .into_iter()
+            .map(|mut commit| {
+                if let Some(parent_sha) = parent_by_commit.get(commit.new_sha.as_str()) {
+                    commit = commit.with_parent_sha((*parent_sha).to_string());
+                }
+                if let Some(diff) = diff_by_commit.get(commit.new_sha.as_str()) {
+                    commit = commit.with_parent_diff((*diff).clone());
+                }
+                commit
+            })
+            .collect()
+    };
+    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(repo, rewrite_metric_commits);
+
     Ok(())
 }
 
 fn apply_cherry_pick_no_commit_rewrite(
     repo: &crate::git::repository::Repository,
     sources: &[String],
+    parent_head: &str,
     new_head: &str,
 ) -> Result<(), GitAiError> {
     if sources.is_empty() || new_head.is_empty() {
@@ -1507,7 +1985,26 @@ fn apply_cherry_pick_no_commit_rewrite(
         .map(|source| (source.clone(), new_head.to_string()))
         .collect::<Vec<_>>();
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, sources)?;
-    crate::authorship::rewrite::shift_authorship_notes_merging_existing(repo, &mappings)
+    let shifted_notes =
+        crate::authorship::rewrite::shift_authorship_notes_merging_existing_with_notes(
+            repo, &mappings,
+        )?;
+    if crate::authorship::rewrite::rewrite_metrics_enabled() {
+        let mut metric_commit = crate::authorship::rewrite::RewriteMetricCommit::new(
+            new_head.to_string(),
+            sources.to_vec(),
+            crate::authorship::rewrite::RewriteMetricOperation::CherryPickNoCommit,
+        )
+        .with_parent_sha(parent_head.to_string());
+        if let Some((_, note)) = shifted_notes
+            .into_iter()
+            .find(|(commit_sha, _)| commit_sha == new_head)
+        {
+            metric_commit = metric_commit.with_authorship_note(note);
+        }
+        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(repo, vec![metric_commit]);
+    }
+    Ok(())
 }
 
 fn strict_rebase_original_head_from_command(
@@ -1921,6 +2418,24 @@ struct PendingRootSlot {
     order: FamilySequencerOrder,
 }
 
+type CommitFileTimestampSnapshotHandle =
+    tokio::task::JoinHandle<Option<crate::authorship::attribution_recovery::FileTimestampsByPath>>;
+type CommitFileTimestampSnapshotHandles = HashMap<String, CommitFileTimestampSnapshotHandle>;
+
+const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
+const SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT: Duration = Duration::from_secs(2);
+const SESSION_EVENT_RECOVERY_PREFLIGHT_POLL: Duration = Duration::from_millis(100);
+
+fn run_blocking_side_effect<T>(operation: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingSquashMerge {
     source_head: String,
@@ -1985,6 +2500,8 @@ pub struct ActorDaemonCoordinator {
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
+    commit_file_timestamp_snapshots_by_root:
+        Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
     recent_replay_prerequisites_by_family:
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
@@ -2069,6 +2586,7 @@ impl ActorDaemonCoordinator {
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
+            commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
@@ -2119,6 +2637,169 @@ impl ActorDaemonCoordinator {
             tracing::info!(trigger = %trigger, "transcript sweep trigger enqueued");
         } else {
             tracing::debug!(trigger = %trigger, "transcript sweep trigger not enqueued");
+        }
+    }
+
+    fn trigger_transcript_sweep_for_recovery(
+        &self,
+        trigger: crate::daemon::stream_worker::SweepTrigger,
+    ) -> Option<std::sync::mpsc::Receiver<Result<(), String>>> {
+        let Some(worker) = &self.stream_worker else {
+            tracing::debug!(trigger = %trigger, "recovery transcript sweep skipped; worker is not running");
+            return None;
+        };
+
+        let completion = worker.trigger_sweep_for_recovery(trigger);
+        if completion.is_some() {
+            tracing::info!(trigger = %trigger, "recovery transcript sweep enqueued");
+        } else {
+            tracing::debug!(trigger = %trigger, "recovery transcript sweep not enqueued");
+        }
+        completion
+    }
+
+    fn wait_for_session_event_recovery_candidate(
+        &self,
+        repo: &Repository,
+        commit_sha: &str,
+        recovery_file_timestamps: Option<
+            &crate::authorship::attribution_recovery::FileTimestampsByPath,
+        >,
+        unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile,
+    ) {
+        if unknown_by_file.is_empty() {
+            return;
+        }
+        let unknown_files = unknown_by_file
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut timestamps = recovery_file_timestamps
+            .map(|recovery_file_timestamps| {
+                recovery_file_timestamps
+                    .iter()
+                    .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
+                    .flat_map(|(_, values)| values.iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if timestamps.is_empty()
+            && let Ok(workdir) = repo.workdir()
+            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+        {
+            timestamps = fallback_timestamps
+                .iter()
+                .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
+                .flat_map(|(_, values)| values.iter().copied())
+                .collect::<Vec<_>>();
+        }
+        if timestamps.is_empty() {
+            timestamps = recovery_file_timestamps
+                .map(|recovery_file_timestamps| {
+                    recovery_file_timestamps
+                        .values()
+                        .flat_map(|values| values.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
+        if timestamps.is_empty()
+            && let Ok(workdir) = repo.workdir()
+            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+        {
+            timestamps = fallback_timestamps
+                .values()
+                .flat_map(|values| values.iter().copied())
+                .collect::<Vec<_>>();
+        }
+        if timestamps.is_empty() {
+            return;
+        }
+        timestamps.sort_unstable();
+        timestamps.dedup();
+
+        let Some(target_repo_url) = crate::repo_url::resolve_repo_url_from_repo(repo) else {
+            return;
+        };
+
+        let has_candidate = || {
+            crate::authorship::attribution_recovery::matching_session_event_candidate_exists(
+                &timestamps,
+                &target_repo_url,
+            )
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "failed checking session-event recovery candidates");
+                false
+            })
+        };
+        if has_candidate() {
+            return;
+        }
+
+        let deadline = std::time::Instant::now() + SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT;
+        let sweep_completion = self.trigger_transcript_sweep_for_recovery(
+            crate::daemon::stream_worker::SweepTrigger::PostCommit,
+        );
+
+        let Some(sweep_completion) = sweep_completion else {
+            return;
+        };
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::debug!(
+                wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                "recovery transcript sweep wait expired"
+            );
+            return;
+        }
+        match sweep_completion.recv_timeout(remaining) {
+            Ok(Ok(())) => {
+                tracing::debug!("recovery transcript sweep completed before post-commit");
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    %error,
+                    "recovery transcript sweep failed before post-commit"
+                );
+                return;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "recovery transcript sweep wait expired"
+                );
+                return;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::debug!("recovery transcript sweep completion channel disconnected");
+                return;
+            }
+        }
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "session-event recovery preflight wait expired"
+                );
+                return;
+            }
+            std::thread::sleep(remaining.min(SESSION_EVENT_RECOVERY_PREFLIGHT_POLL));
+            if has_candidate() {
+                tracing::debug!(
+                    "session-event recovery candidate became visible before post-commit"
+                );
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "session-event recovery preflight wait expired"
+                );
+                return;
+            }
         }
     }
 
@@ -3415,11 +4096,15 @@ impl ActorDaemonCoordinator {
                     // does not kill the daemon process.
                     let side_effect_result = {
                         let future = async {
+                            let root_sid = command.root_sid.clone();
+                            let mut commit_file_timestamp_snapshots =
+                                self.take_cached_commit_file_timestamp_snapshots(&root_sid)?;
                             let applied = self.coordinator.route_command(*command).await?;
                             let side_effect = self
                                 .maybe_apply_side_effects_for_applied_command(
                                     Some(family),
                                     &applied,
+                                    &mut commit_file_timestamp_snapshots,
                                 )
                                 .await;
                             Ok::<_, GitAiError>((applied, side_effect))
@@ -3816,6 +4501,22 @@ impl ActorDaemonCoordinator {
             .unwrap_or_default())
     }
 
+    fn pending_cherry_pick_sources_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<Vec<String>, GitAiError> {
+        let map = self
+            .pending_cherry_pick_sources_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
+            })?;
+        Ok(map
+            .get(&Self::worktree_state_key(worktree))
+            .cloned()
+            .unwrap_or_default())
+    }
+
     fn set_pending_cherry_pick_no_commit_for_worktree(
         &self,
         worktree: &Path,
@@ -4058,12 +4759,10 @@ impl ActorDaemonCoordinator {
         // with the branch ref update as new_tip. This handles rebase --skip/--continue
         // where HEAD can contain extra checkout/detach movement that is not the
         // rebased branch tip.
-        if let Some((original_head, stored_onto)) = pending_original_head {
-            let new_tip = rebase_new_tip_from_command(cmd, &original_head);
-            if let Some(new_tip) = new_tip
-                && original_head != new_tip
-                && !is_ancestor_commit(&repo, &original_head, &new_tip)
-            {
+        if let Some((original_head, stored_onto)) = pending_original_head
+            && let Some(new_tip) = rebase_new_tip_from_command(cmd, &original_head)
+        {
+            if original_head != new_tip && !is_ancestor_commit(&repo, &original_head, &new_tip) {
                 let command_rebase_onto =
                     rebase_onto_from_command(cmd, &repo, &original_head, &new_tip);
                 let rebase_onto = stored_onto
@@ -4073,24 +4772,36 @@ impl ActorDaemonCoordinator {
                             && is_ancestor_commit(&repo, onto, &new_tip)
                     })
                     .or(command_rebase_onto);
-                crate::authorship::rewrite::handle_non_fast_forward_rewrite(
-                    &repo,
-                    &original_head,
-                    &new_tip,
-                    rebase_onto.as_deref(),
-                )?;
+                let outcome =
+                    crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                        &repo,
+                        &original_head,
+                        &new_tip,
+                        rebase_onto.as_deref(),
+                        crate::authorship::rewrite::RewriteMetricOperation::Rebase,
+                    )?;
                 repo.storage.rename_working_log(&original_head, &new_tip)?;
                 let conflict_base = rebase_onto.clone();
-                process_conflict_resolution_working_logs(
+                let metric_context = process_conflict_resolution_working_logs(
                     &repo,
                     &new_tip,
                     conflict_base.as_deref(),
                 )?;
+                let metric_commits =
+                    rewrite_metric_commits_with_context(outcome.metric_commits, metric_context);
+                if !metric_commits.is_empty() {
+                    let branch =
+                        rewrite_metric_branch_for_transition(cmd, &original_head, &new_tip, None);
+                    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                        &repo,
+                        rewrite_metric_commits_with_branch(metric_commits, branch),
+                    );
+                }
             }
             return Ok(());
         }
 
-        for (old_tip, new_tip) in collapsed.values() {
+        for (reference, (old_tip, new_tip)) in &collapsed {
             if *old_tip == *new_tip {
                 continue;
             }
@@ -4105,26 +4816,154 @@ impl ActorDaemonCoordinator {
             } else {
                 onto_hint.clone()
             };
-            crate::authorship::rewrite::handle_non_fast_forward_rewrite(
-                &repo,
-                old_tip,
-                new_tip,
-                rewrite_onto.as_deref(),
-            )?;
+            let outcome = if is_rebase_cmd {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                    &repo,
+                    old_tip,
+                    new_tip,
+                    rewrite_onto.as_deref(),
+                    crate::authorship::rewrite::RewriteMetricOperation::Rebase,
+                )?
+            } else if cmd.primary_command.as_deref() == Some("update-ref") {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                    &repo,
+                    old_tip,
+                    new_tip,
+                    rewrite_onto.as_deref(),
+                    crate::authorship::rewrite::RewriteMetricOperation::UpdateRef,
+                )?
+            } else {
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                    &repo,
+                    old_tip,
+                    new_tip,
+                    rewrite_onto.as_deref(),
+                    crate::authorship::rewrite::RewriteMetricOperation::NonFastForward,
+                )?
+            };
             repo.storage.rename_working_log(old_tip, new_tip)?;
-            if is_rebase_cmd {
+            let metric_context = if is_rebase_cmd {
                 let conflict_base = rewrite_onto.clone().or_else(|| onto_hint.clone());
-                process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref())?;
+                process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref())?
+            } else {
+                RewriteMetricContext::default()
+            };
+            let metric_commits =
+                rewrite_metric_commits_with_context(outcome.metric_commits, metric_context);
+            if !metric_commits.is_empty() {
+                let branch =
+                    rewrite_metric_branch_for_transition(cmd, old_tip, new_tip, Some(reference));
+                crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                    &repo,
+                    rewrite_metric_commits_with_branch(metric_commits, branch),
+                );
             }
         }
 
         Ok(())
     }
 
+    fn start_commit_file_timestamp_snapshots_for_command(
+        command: &crate::daemon::domain::NormalizedCommand,
+    ) -> CommitFileTimestampSnapshotHandles {
+        let Some(worktree) = command.worktree.clone() else {
+            return HashMap::new();
+        };
+        if command.exit_code != 0 || command.primary_command.as_deref() != Some("commit") {
+            return HashMap::new();
+        }
+
+        let (_, new_head) = Self::resolve_heads_for_command(command);
+        if new_head.is_empty() || !is_valid_oid(&new_head) || is_zero_oid(&new_head) {
+            return HashMap::new();
+        }
+
+        let mut handles = HashMap::new();
+        let task_commit_sha = new_head.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            match capture_commit_file_timestamps(&worktree, &task_commit_sha) {
+                Ok(timestamps) => Some(timestamps),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        commit_sha = %task_commit_sha,
+                        "failed to capture commit-time file timestamps"
+                    );
+                    None
+                }
+            }
+        });
+        handles.insert(new_head, handle);
+
+        handles
+    }
+
+    fn cache_commit_file_timestamp_snapshots_for_command(
+        &self,
+        command: &crate::daemon::domain::NormalizedCommand,
+    ) -> Result<(), GitAiError> {
+        let handles = Self::start_commit_file_timestamp_snapshots_for_command(command);
+        if handles.is_empty() {
+            return Ok(());
+        }
+        let mut cache = self
+            .commit_file_timestamp_snapshots_by_root
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "commit file timestamp snapshot cache lock poisoned".to_string(),
+                )
+            })?;
+        cache.insert(command.root_sid.clone(), handles);
+        Ok(())
+    }
+
+    fn take_cached_commit_file_timestamp_snapshots(
+        &self,
+        root_sid: &str,
+    ) -> Result<CommitFileTimestampSnapshotHandles, GitAiError> {
+        let mut cache = self
+            .commit_file_timestamp_snapshots_by_root
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "commit file timestamp snapshot cache lock poisoned".to_string(),
+                )
+            })?;
+        Ok(cache.remove(root_sid).unwrap_or_default())
+    }
+
+    async fn take_commit_file_timestamps(
+        handles: &mut CommitFileTimestampSnapshotHandles,
+        commit_sha: &str,
+    ) -> Option<crate::authorship::attribution_recovery::FileTimestampsByPath> {
+        let handle = handles.remove(commit_sha)?;
+        match tokio::time::timeout(COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT, handle).await {
+            Ok(Ok(Some(timestamps))) if !timestamps.is_empty() => Some(timestamps),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    %error,
+                    %commit_sha,
+                    "commit-time file timestamp task failed"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    %commit_sha,
+                    "commit-time file timestamp task timed out"
+                );
+                None
+            }
+        }
+    }
+
     async fn maybe_apply_side_effects_for_applied_command(
         &self,
         family: Option<&str>,
         applied: &crate::daemon::domain::AppliedCommand,
+        commit_file_timestamp_snapshots: &mut CommitFileTimestampSnapshotHandles,
     ) -> Result<(), GitAiError> {
         // Test-only: allow inducing a panic in the side-effect pipeline to verify
         // that the daemon's catch_unwind recovery keeps the process alive.
@@ -4326,7 +5165,29 @@ impl ActorDaemonCoordinator {
                     self.clear_pending_cherry_pick_no_commit_for_worktree(worktree)?;
                 } else if cmd.exit_code != 0 {
                     let new_commits = cherry_pick_destination_commits(cmd);
-                    if !new_commits.is_empty() && !cmd.cherry_pick_source_oids.is_empty() {
+                    let is_continue = cherry_pick_command_has_flag(cmd, "--continue");
+                    let is_skip = cherry_pick_command_has_flag(cmd, "--skip");
+                    let mut source_oids = cmd.cherry_pick_source_oids.clone();
+                    let mut source_oids_from_daemon_pending = false;
+                    if source_oids.is_empty()
+                        && (!new_commits.is_empty()
+                            || cherry_pick_state_exists_for_worktree(worktree))
+                    {
+                        let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                        source_oids =
+                            resolve_explicit_cherry_pick_sources_for_side_effect(&repo, cmd)?;
+                    }
+                    if source_oids.is_empty() && (is_continue || is_skip) {
+                        source_oids = self.pending_cherry_pick_sources_for_worktree(worktree)?;
+                        source_oids_from_daemon_pending = !source_oids.is_empty();
+                    }
+                    let skipped_sources = usize::from(is_skip && source_oids_from_daemon_pending);
+                    let applied_source_oids = source_oids
+                        .iter()
+                        .skip(skipped_sources)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !new_commits.is_empty() && !applied_source_oids.is_empty() {
                         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
                         let original_head = cherry_pick_original_head(cmd).ok_or_else(|| {
                             GitAiError::Generic(format!(
@@ -4337,17 +5198,22 @@ impl ActorDaemonCoordinator {
                         apply_cherry_pick_complete_rewrite(
                             &repo,
                             &original_head,
-                            &cmd.cherry_pick_source_oids,
+                            &applied_source_oids,
                             &new_commits,
                         )?;
                     }
-                    let remaining = cmd
-                        .cherry_pick_source_oids
-                        .iter()
-                        .skip(new_commits.len().min(cmd.cherry_pick_source_oids.len()))
-                        .cloned()
-                        .collect();
-                    self.set_pending_cherry_pick_sources_for_worktree(worktree, remaining)?;
+                    if !source_oids.is_empty() || is_continue || is_skip {
+                        let applied_sources = new_commits
+                            .len()
+                            .min(source_oids.len().saturating_sub(skipped_sources));
+                        let consumed_sources = skipped_sources + applied_sources;
+                        let remaining = source_oids
+                            .iter()
+                            .skip(consumed_sources.min(source_oids.len()))
+                            .cloned()
+                            .collect();
+                        self.set_pending_cherry_pick_sources_for_worktree(worktree, remaining)?;
+                    }
                 }
             }
             // Fix #957: `checkout/switch --merge` exits with code 1 when it produces
@@ -4427,14 +5293,30 @@ impl ActorDaemonCoordinator {
                         if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
                             let mut sources = source_commits.clone();
-                            if sources.is_empty() {
-                                sources = self.take_pending_cherry_pick_sources_for_worktree(
-                                    worktree.as_ref(),
-                                )?;
-                            } else {
+                            let is_skip = cherry_pick_command_has_flag(cmd, "--skip");
+                            let explicit_source_args = cherry_pick_source_args_for_side_effect(cmd);
+                            if !sources.is_empty() {
                                 self.clear_pending_cherry_pick_sources_for_worktree(
                                     worktree.as_ref(),
                                 )?;
+                            } else if !explicit_source_args.is_empty() {
+                                let head_context =
+                                    (!original_head.is_empty()).then_some(original_head.as_str());
+                                sources = resolve_cherry_pick_source_args_with_git_in_head_context(
+                                    &repo,
+                                    &explicit_source_args,
+                                    head_context,
+                                )?;
+                                self.clear_pending_cherry_pick_sources_for_worktree(
+                                    worktree.as_ref(),
+                                )?;
+                            } else {
+                                sources = self.take_pending_cherry_pick_sources_for_worktree(
+                                    worktree.as_ref(),
+                                )?;
+                                if is_skip && !sources.is_empty() {
+                                    sources.remove(0);
+                                }
                             }
                             let destinations = if new_commits.is_empty() {
                                 vec![new_head.clone()]
@@ -4461,10 +5343,16 @@ impl ActorDaemonCoordinator {
                         source_commits,
                         head,
                     } => {
-                        if !head.is_empty() && !source_commits.is_empty() {
+                        let mut sources = source_commits.clone();
+                        if sources.is_empty() {
+                            let repo = find_repository_in_path(&worktree)?;
+                            sources =
+                                resolve_explicit_cherry_pick_sources_for_side_effect(&repo, cmd)?;
+                        }
+                        if !head.is_empty() && !sources.is_empty() {
                             self.set_pending_cherry_pick_no_commit_for_worktree(
                                 worktree.as_ref(),
-                                source_commits.clone(),
+                                sources,
                                 head.clone(),
                             )?;
                         }
@@ -4566,14 +5454,19 @@ impl ActorDaemonCoordinator {
                         {
                             if base.as_deref().is_some_and(|base| base == pending.onto) {
                                 let repo = find_repository_in_path(&worktree)?;
-                                crate::authorship::rewrite::handle_rewrite_event(
+                                let outcome =
+                                    crate::authorship::rewrite::handle_rewrite_event_with_metrics(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::SquashMerge {
+                                            source_head: pending.source_head,
+                                            squash_commit: new_head.clone(),
+                                            onto: pending.onto,
+                                        },
+                                    )?;
+                                crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
                                     &repo,
-                                    crate::authorship::rewrite::RewriteEvent::SquashMerge {
-                                        source_head: pending.source_head,
-                                        squash_commit: new_head.clone(),
-                                        onto: pending.onto,
-                                    },
-                                )?;
+                                    outcome.metric_commits,
+                                );
                                 handled_as_squash_merge = true;
                             } else {
                                 self.set_pending_squash_merge_for_worktree(
@@ -4598,21 +5491,47 @@ impl ActorDaemonCoordinator {
                                 // Reconstruct each destination from the matching HEAD transition
                                 // instead of treating the command as one final CommitCreated event.
                                 let repo = find_repository_in_path(&worktree)?;
-                                apply_revert_complete_rewrite(&repo, cmd)?;
+                                let mut source_oids = cmd.revert_source_oids.clone();
+                                if source_oids.is_empty() {
+                                    source_oids = resolve_explicit_revert_sources_for_side_effect(
+                                        &repo, cmd,
+                                    )?;
+                                }
+                                apply_revert_complete_rewrite(&repo, cmd, &source_oids)?;
                                 handled_revert_commits = true;
                             }
                         } else if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.effective_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
+                            let recovery_file_timestamps = Self::take_commit_file_timestamps(
+                                commit_file_timestamp_snapshots,
+                                new_head,
+                            )
+                            .await;
+                            let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
+                                self.wait_for_session_event_recovery_candidate(
+                                    &repo,
+                                    new_head,
+                                    recovery_file_timestamps.as_ref(),
+                                    unknown_by_file,
+                                );
+                            };
 
-                            crate::authorship::post_commit::post_commit_from_working_log(
-                                &repo,
-                                base_opt.clone(),
-                                new_head.clone(),
-                                author,
-                                true,
-                            )?;
+                            // Post-commit note generation does synchronous git/filesystem work
+                            // and may briefly wait for transcript recovery. Mark it as blocking
+                            // so the transcript worker can process the recovery sweep promptly.
+                            run_blocking_side_effect(|| {
+                                crate::authorship::post_commit::post_commit_from_working_log_with_recovery_timestamps(
+                                    &repo,
+                                    base_opt.clone(),
+                                    new_head.clone(),
+                                    author,
+                                    true,
+                                    recovery_file_timestamps.as_ref(),
+                                    Some(&recovery_preflight),
+                                )
+                            })?;
 
                             if cmd.primary_command.as_deref() == Some("commit")
                                 && let Some(pending) = self
@@ -4624,6 +5543,7 @@ impl ActorDaemonCoordinator {
                                     apply_cherry_pick_no_commit_rewrite(
                                         &repo,
                                         &pending.source_commits,
+                                        &pending.head,
                                         new_head,
                                     )?;
                                 } else {
@@ -4647,9 +5567,46 @@ impl ActorDaemonCoordinator {
                         {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.effective_author_identity().formatted_or_unknown();
-                            crate::authorship::post_commit::post_commit_amend(
-                                &repo, old_head, new_head, author,
-                            )?;
+                            let recovery_file_timestamps = Self::take_commit_file_timestamps(
+                                commit_file_timestamp_snapshots,
+                                new_head,
+                            )
+                            .await;
+                            let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
+                                self.wait_for_session_event_recovery_candidate(
+                                    &repo,
+                                    new_head,
+                                    recovery_file_timestamps.as_ref(),
+                                    unknown_by_file,
+                                );
+                            };
+                            // Post-commit note generation does synchronous git/filesystem work
+                            // and may briefly wait for transcript recovery. Mark it as blocking
+                            // so the transcript worker can process the recovery sweep promptly.
+                            let amend_result = run_blocking_side_effect(|| {
+                                crate::authorship::post_commit::post_commit_amend_with_recovery_timestamps_detailed(
+                                    &repo,
+                                    old_head,
+                                    new_head,
+                                    author,
+                                    recovery_file_timestamps.as_ref(),
+                                    Some(&recovery_preflight),
+                                )
+                            })?;
+                            if crate::authorship::rewrite::rewrite_metrics_enabled() {
+                                crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                    &repo,
+                                    vec![
+                                        crate::authorship::rewrite::RewriteMetricCommit::new(
+                                            new_head.to_string(),
+                                            vec![old_head.to_string()],
+                                            crate::authorship::rewrite::RewriteMetricOperation::Amend,
+                                        )
+                                        .with_parent_sha(amend_result.parent_sha)
+                                        .with_authorship_note(amend_result.authorship_note),
+                                    ],
+                                );
+                            }
                         }
                     }
                     crate::daemon::domain::SemanticEvent::Reset {
@@ -4669,7 +5626,8 @@ impl ActorDaemonCoordinator {
                                             &repo, old_head, new_head,
                                         )?;
                                     } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                        crate::authorship::rewrite::handle_rewrite_event(
+                                        let outcome =
+                                            crate::authorship::rewrite::handle_rewrite_event_with_metrics(
                                             &repo,
                                             crate::authorship::rewrite::RewriteEvent::NonFastForward {
                                                 old_tip: old_head.to_string(),
@@ -4677,6 +5635,10 @@ impl ActorDaemonCoordinator {
                                                 onto: None,
                                             },
                                         )?;
+                                        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                            &repo,
+                                            outcome.metric_commits,
+                                        );
                                     }
                                 }
                             }
@@ -4855,6 +5817,7 @@ impl ActorDaemonCoordinator {
             )
             .await?
         {
+            self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
             family_to_drain_after_clear = Some(family);
             TracePayloadApplyOutcome::QueuedFamily
         } else if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
@@ -4863,6 +5826,7 @@ impl ActorDaemonCoordinator {
                 &command.raw_argv,
             )
         {
+            self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
             self.append_ready_command_entry(&family, command).await?;
             family_to_drain_after_clear = Some(family);
             TracePayloadApplyOutcome::QueuedFamily
@@ -4890,8 +5854,14 @@ impl ActorDaemonCoordinator {
             TracePayloadApplyOutcome::Applied(applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
+                    let mut commit_file_timestamp_snapshots =
+                        Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
                     let result = self
-                        .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
+                        .maybe_apply_side_effects_for_applied_command(
+                            Some(&family),
+                            &applied,
+                            &mut commit_file_timestamp_snapshots,
+                        )
                         .await;
                     let _ = self.end_family_effect(&family);
                     if let Err(error) = &result {
@@ -5064,29 +6034,182 @@ impl ActorDaemonCoordinator {
             }
             ControlRequest::BashSessionStart {
                 repo_work_dir,
+                original_cwd,
                 session_id,
                 tool_use_id,
                 agent_id,
                 metadata,
                 stat_snapshot,
+                trace_id,
+                started_at_ns,
+                command,
             } => {
+                let worktree_key = Self::worktree_state_key(Path::new(&repo_work_dir));
+                let original_cwd = original_cwd.unwrap_or_else(|| repo_work_dir.clone());
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_start(&crate::daemon::bash_history_db::BashCallStart {
+                            original_cwd: Self::worktree_state_key(Path::new(&original_cwd)),
+                            repo_work_dir: Some(worktree_key.clone()),
+                            repo_discovery_error: None,
+                            session_id: session_id.clone(),
+                            tool_use_id: tool_use_id.clone(),
+                            agent_id: agent_id.clone(),
+                            start_trace_id: trace_id.clone(),
+                            started_at_ns,
+                            command: command.clone(),
+                            metadata: metadata.clone(),
+                        })
+                {
+                    tracing::debug!("failed to persist bash session start: {}", e);
+                }
+
                 let mut state = self.bash_sessions.lock().unwrap();
-                state.start_session(
+                state.start_session(crate::daemon::bash_sessions::BashSessionStart {
                     session_id,
                     tool_use_id,
-                    Self::worktree_state_key(Path::new(&repo_work_dir)),
+                    repo_work_dir: worktree_key,
                     agent_id,
                     metadata,
-                    *stat_snapshot,
-                );
+                    stat_snapshot: *stat_snapshot,
+                    start_trace_id: trace_id,
+                    started_at_ns,
+                    command,
+                });
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionEnd {
+                repo_work_dir,
+                original_cwd,
                 session_id,
                 tool_use_id,
+                agent_id,
+                metadata,
+                trace_id,
+                ended_at_ns,
+                command,
             } => {
                 let mut state = self.bash_sessions.lock().unwrap();
-                state.end_session(&session_id, &tool_use_id);
+                let session = state.end_session(&session_id, &tool_use_id);
+                drop(state);
+
+                let worktree_key = session
+                    .as_ref()
+                    .map(|s| s.repo_work_dir.clone())
+                    .unwrap_or_else(|| Self::worktree_state_key(Path::new(&repo_work_dir)));
+                let original_cwd = original_cwd
+                    .map(|cwd| Self::worktree_state_key(Path::new(&cwd)))
+                    .unwrap_or_else(|| worktree_key.clone());
+                let start_trace_id = session.as_ref().map(|s| s.start_trace_id.clone());
+                let started_at_ns = session.as_ref().map(|s| s.started_at_ns);
+                let command = command.or_else(|| session.as_ref().and_then(|s| s.command.clone()));
+                let agent_id = session
+                    .as_ref()
+                    .map(|s| s.agent_id.clone())
+                    .unwrap_or(agent_id);
+                let metadata = if metadata.is_empty() {
+                    session
+                        .as_ref()
+                        .map(|s| s.metadata.clone())
+                        .unwrap_or_default()
+                } else {
+                    metadata
+                };
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_end(&crate::daemon::bash_history_db::BashCallEnd {
+                            original_cwd,
+                            repo_work_dir: Some(worktree_key),
+                            repo_discovery_error: None,
+                            session_id,
+                            tool_use_id,
+                            agent_id,
+                            start_trace_id,
+                            end_trace_id: trace_id,
+                            started_at_ns,
+                            ended_at_ns,
+                            command,
+                            metadata,
+                        })
+                {
+                    tracing::debug!("failed to persist bash session end: {}", e);
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::BashHookAttemptStart {
+                original_cwd,
+                discovered_repo_work_dir,
+                repo_discovery_error,
+                session_id,
+                tool_use_id,
+                agent_id,
+                metadata,
+                trace_id,
+                started_at_ns,
+                command,
+            } => {
+                let discovered_repo_work_dir = discovered_repo_work_dir
+                    .as_deref()
+                    .map(Path::new)
+                    .map(Self::worktree_state_key);
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_start(&crate::daemon::bash_history_db::BashCallStart {
+                            original_cwd: Self::worktree_state_key(Path::new(&original_cwd)),
+                            repo_work_dir: discovered_repo_work_dir,
+                            repo_discovery_error,
+                            session_id,
+                            tool_use_id,
+                            agent_id,
+                            start_trace_id: trace_id,
+                            started_at_ns,
+                            command,
+                            metadata,
+                        })
+                {
+                    tracing::debug!("failed to persist bash hook attempt start: {}", e);
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::BashHookAttemptEnd {
+                original_cwd,
+                discovered_repo_work_dir,
+                repo_discovery_error,
+                session_id,
+                tool_use_id,
+                agent_id,
+                metadata,
+                trace_id,
+                ended_at_ns,
+                command,
+            } => {
+                let discovered_repo_work_dir = discovered_repo_work_dir
+                    .as_deref()
+                    .map(Path::new)
+                    .map(Self::worktree_state_key);
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_end(&crate::daemon::bash_history_db::BashCallEnd {
+                            original_cwd: Self::worktree_state_key(Path::new(&original_cwd)),
+                            repo_work_dir: discovered_repo_work_dir,
+                            repo_discovery_error,
+                            session_id,
+                            tool_use_id,
+                            agent_id,
+                            start_trace_id: None,
+                            end_trace_id: trace_id,
+                            started_at_ns: None,
+                            ended_at_ns,
+                            command,
+                            metadata,
+                        })
+                {
+                    tracing::debug!("failed to persist bash hook attempt end: {}", e);
+                }
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionQuery { repo_work_dir } => {
@@ -5857,17 +6980,10 @@ fn spawn_self_restart() -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        use crate::utils::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS};
         use std::os::windows::process::CommandExt;
-        // Match the detachment flags used by the wrapper's daemon spawn
-        // (commands::daemon::spawn_daemon_run_detached): DETACHED_PROCESS gives
-        // the child no inherited console, CREATE_NO_WINDOW suppresses any
-        // console window, and CREATE_NEW_PROCESS_GROUP isolates it from parent
-        // signals. No NonInheritableStdHandles guard is needed here: the daemon
-        // is configured with null stdio, so it holds no pipe handles a spawned
-        // child could inherit (the guard only matters when a parent captured our
-        // stdout/stderr via a pipe).
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
 
     cmd.spawn()
@@ -6066,9 +7182,11 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
                 tracing_subscriber::fmt::layer()
                     .with_target(false)
                     .with_thread_ids(false)
-                    .with_ansi(false),
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr),
             )
             .with(crate::daemon::sentry_layer::SentryLayer)
+            .with(crate::daemon::daemon_log_layer::DaemonLogUploadLayer)
             .init();
     }
 
@@ -6705,6 +7823,44 @@ mod tests {
         assert!(
             result.is_err(),
             "corrupt destination notes must fail closed instead of being treated as absent"
+        );
+    }
+
+    #[test]
+    fn revert_source_args_do_not_treat_bare_gpg_sign_as_value_option() {
+        assert_eq!(
+            revert_source_args_from_command_args(&["--gpg-sign".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            revert_source_args_from_command_args(&["-S".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            revert_source_args_from_command_args(&["-Smy-key".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+    }
+
+    #[test]
+    fn cherry_pick_source_args_do_not_treat_bare_gpg_sign_as_value_option() {
+        assert_eq!(
+            cherry_pick_source_args_from_command_args(&[
+                "--gpg-sign".to_string(),
+                "HEAD~1".to_string()
+            ]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            cherry_pick_source_args_from_command_args(&["-S".to_string(), "HEAD~1".to_string()]),
+            vec!["HEAD~1"]
+        );
+        assert_eq!(
+            cherry_pick_source_args_from_command_args(&[
+                "-Smy-key".to_string(),
+                "HEAD~1".to_string()
+            ]),
+            vec!["HEAD~1"]
         );
     }
 

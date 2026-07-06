@@ -1988,8 +1988,11 @@ fn test_diff_parsing_is_stable_under_hostile_diff_config() {
 fn test_checkpoint_and_commit_ignore_repo_external_diff_helper() {
     let repo = TestRepo::new();
 
+    let file_path = repo.path().join("tracked.txt");
+    std::fs::write(&file_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "tracked.txt"])
+        .unwrap();
     let mut file = repo.filename("tracked.txt");
-    file.set_contents(crate::lines!["base".human()]);
     repo.stage_all_and_commit("initial").unwrap();
 
     file.set_contents(crate::lines!["base".human(), "added by ai".ai()]);

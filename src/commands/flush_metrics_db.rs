@@ -16,7 +16,7 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
     let client = ApiClient::new(context);
 
     if !metrics_upload_allowed(&api_base_url, &client) {
-        eprintln!("flush-metrics-db: skipping (not logged in and using default API)");
+        eprintln!("flush-metrics-db: skipping (requires an API key or login)");
         return;
     }
 

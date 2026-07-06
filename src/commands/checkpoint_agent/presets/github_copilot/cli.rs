@@ -85,14 +85,18 @@ pub(super) fn parse_cli_hooks(
         external_parent_session_id: None,
     });
 
+    let bash_command = parse::bash_command_from_hook_input(data);
+
     match (hook_event_name, class) {
         ("PreToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
             context,
             tool_use_id,
+            command: bash_command,
         })]),
         ("PostToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
             context,
             tool_use_id,
+            command: bash_command,
             stream_source,
         })]),
         ("PreToolUse", ToolClass::FileEdit) => {
@@ -216,6 +220,10 @@ mod tests {
                     Some(&"copilot-cli".to_string())
                 );
                 assert_eq!(e.tool_use_id, "cli-sess-cli-bash");
+                assert_eq!(
+                    e.command.as_deref(),
+                    Some("cd /Users/a/project && cat > new.txt")
+                );
             }
             other => panic!("Expected PreBashCall, got {:?}", other),
         }
@@ -239,6 +247,7 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert!(e.stream_source.is_none());
                 assert_eq!(e.tool_use_id, "cli-sess-cli-bash");
+                assert_eq!(e.command.as_deref(), Some("ls"));
             }
             other => panic!("Expected PostBashCall, got {:?}", other),
         }

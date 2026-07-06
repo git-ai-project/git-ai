@@ -197,11 +197,19 @@ impl AgentPreset for FirebenderPreset {
             dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         let tool_use_id_str = tool_use_id.unwrap_or_else(|| "bash".to_string());
+        let bash_command = tool_input
+            .get("command")
+            .or_else(|| tool_input.get("cmd"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
 
         let event = match (hook_event_name.as_str(), is_bash) {
             ("preToolUse", true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
             }),
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -212,6 +220,7 @@ impl AgentPreset for FirebenderPreset {
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
+                command: bash_command,
                 stream_source: None,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {

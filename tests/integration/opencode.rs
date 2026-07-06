@@ -19,7 +19,7 @@ fn test_opencode_raw_event_fidelity() {
     use git_ai::streams::agent::Agent;
     use git_ai::streams::agents::OpenCodeAgent;
     use git_ai::streams::watermark::TimestampWatermark;
-    use rusqlite::{Connection, OpenFlags};
+    use rusqlite::OpenFlags;
 
     let opencode_root = opencode_sqlite_fixture_path();
     let fixture = opencode_root.join("opencode.db");
@@ -32,7 +32,11 @@ fn test_opencode_raw_event_fidelity() {
         .unwrap();
 
     // Independently query the SQLite DB to construct the same expected events.
-    let conn = Connection::open_with_flags(&fixture, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let conn = git_ai::sqlite::open_with_flags_and_memory_limits(
+        &fixture,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
 
     let watermark_millis = DateTime::<Utc>::UNIX_EPOCH.timestamp_millis();
 

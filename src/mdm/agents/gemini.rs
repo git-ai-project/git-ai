@@ -1,7 +1,7 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, gemini_config_dir, generate_diff, is_git_ai_checkpoint_command, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -16,7 +16,7 @@ pub struct GeminiInstaller;
 
 impl GeminiInstaller {
     fn settings_path() -> PathBuf {
-        home_dir().join(".gemini").join("settings.json")
+        gemini_config_dir().join("settings.json")
     }
 
     /// Returns `(hooks_installed, hooks_up_to_date)` from a parsed settings value.
@@ -325,7 +325,7 @@ impl HookInstaller for GeminiInstaller {
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("gemini");
-        let has_dotfiles = home_dir().join(".gemini").exists();
+        let has_dotfiles = gemini_config_dir().exists();
 
         if !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
@@ -375,6 +375,7 @@ impl HookInstaller for GeminiInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -383,6 +384,40 @@ mod tests {
         let settings_path = temp_dir.path().join(".gemini").join("settings.json");
         fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         (temp_dir, settings_path)
+    }
+
+    fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().to_path_buf();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_gemini_cli_home = std::env::var_os("GEMINI_CLI_HOME");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            std::env::remove_var("GEMINI_CLI_HOME");
+        }
+
+        f(&home);
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match prev_gemini_cli_home {
+                Some(v) => std::env::set_var("GEMINI_CLI_HOME", v),
+                None => std::env::remove_var("GEMINI_CLI_HOME"),
+            }
+        }
     }
 
     fn binary_path() -> PathBuf {
@@ -457,6 +492,49 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_respects_gemini_cli_home() {
+        with_temp_home(|home| {
+            let default_gemini_dir = home.join(".gemini");
+            let custom_gemini_home = home.join("custom-gemini-home");
+            fs::create_dir_all(&custom_gemini_home).unwrap();
+
+            // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+            unsafe {
+                std::env::set_var("GEMINI_CLI_HOME", &custom_gemini_home);
+            }
+
+            let settings_path = custom_gemini_home.join(".gemini").join("settings.json");
+            fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            fs::write(&settings_path, "{}").unwrap();
+
+            let installer = GeminiInstaller;
+            let result = installer.install_hooks(&params(), false).unwrap();
+            assert!(result.is_some(), "install should report a settings diff");
+            assert!(
+                !default_gemini_dir.exists(),
+                "default ~/.gemini should not be touched when GEMINI_CLI_HOME is set"
+            );
+
+            let settings = read_settings(&settings_path);
+            assert_eq!(settings["tools"]["enableHooks"], true);
+            assert_eq!(
+                hooks_in_catch_all(&settings, "BeforeTool")[0]["command"],
+                expected_before_cmd()
+            );
+            assert_eq!(
+                hooks_in_catch_all(&settings, "AfterTool")[0]["command"],
+                expected_after_cmd()
+            );
+
+            let check = installer.check_hooks(&params()).unwrap();
+            assert!(check.tool_installed);
+            assert!(check.hooks_installed);
+            assert!(check.hooks_up_to_date);
+        });
     }
 
     #[test]

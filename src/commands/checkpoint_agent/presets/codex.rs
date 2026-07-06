@@ -8,6 +8,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
+use crate::mdm::utils::codex_home_dir;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -36,10 +37,9 @@ impl CodexPreset {
             return Some(tp.to_string());
         }
 
-        let codex_home = dirs::home_dir()?.join(".codex");
         crate::streams::agents::CodexAgent::find_rollout_path_for_session_in_home(
             session_id,
-            &codex_home,
+            &codex_home_dir(),
         )
         .ok()
         .flatten()
@@ -138,12 +138,14 @@ impl AgentPreset for CodexPreset {
             external_parent_session_id: None,
         });
 
+        let bash_command = parse::bash_command_from_hook_input(&data);
         let event = match hook_event {
             Some("PreToolUse") => {
                 if is_bash {
                     ParsedHookEvent::PreBashCall(PreBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
+                        command: bash_command,
                     })
                 } else if is_file_edit {
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -164,6 +166,7 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PostBashCall(PostBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
+                        command: bash_command,
                         stream_source,
                     })
                 } else if is_file_edit {
@@ -216,6 +219,7 @@ mod tests {
             "session_id": "codex-sess-1",
             "tool_use_id": "tu-1",
             "model": "o3",
+            "tool_input": {"command": "echo hello"},
             "transcript_path": "/home/user/.codex/sessions/test.jsonl"
         })
         .to_string();
@@ -227,6 +231,7 @@ mod tests {
                 assert_eq!(e.context.external_session_id, "codex-sess-1");
                 assert_eq!(e.context.agent_id.model, "o3");
                 assert_eq!(e.tool_use_id, "tu-1");
+                assert_eq!(e.command.as_deref(), Some("echo hello"));
             }
             _ => panic!("Expected PreBashCall"),
         }
@@ -240,6 +245,7 @@ mod tests {
             "tool_name": "Bash",
             "session_id": "codex-sess-1",
             "tool_use_id": "tu-1",
+            "tool_input": {"command": "echo hello"},
             "transcript_path": "/home/user/.codex/sessions/test.jsonl"
         })
         .to_string();
@@ -255,6 +261,7 @@ mod tests {
                         ..
                     })
                 ));
+                assert_eq!(e.command.as_deref(), Some("echo hello"));
             }
             _ => panic!("Expected PostBashCall"),
         }

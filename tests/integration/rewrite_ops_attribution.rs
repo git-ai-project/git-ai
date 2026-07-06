@@ -156,6 +156,40 @@ fn test_revert_older_commit_restores_original_ai_attribution() {
     file.assert_committed_lines(crate::lines!["keep".human(), "restored ai".ai()]);
 }
 
+#[test]
+fn test_revert_revision_expression_restores_original_ai_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("revert_expr.txt");
+
+    fs::write(&file_path, "keep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "revert_expr.txt"])
+        .unwrap();
+    fs::write(&file_path, "keep\nrestored ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "revert_expr.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial mixed attribution")
+        .unwrap();
+
+    let mut file = repo.filename("revert_expr.txt");
+    file.assert_committed_lines(crate::lines!["keep".human(), "restored ai".ai()]);
+
+    fs::write(&file_path, "keep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "revert_expr.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("delete ai line").unwrap();
+    file.assert_committed_lines(crate::lines!["keep".human()]);
+
+    fs::write(repo.path().join("advance.txt"), "later human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "advance.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("later unrelated commit").unwrap();
+    repo.filename("advance.txt")
+        .assert_committed_lines(crate::lines!["later human".human()]);
+
+    repo.git(&["revert", "HEAD~1"]).unwrap();
+    file.assert_committed_lines(crate::lines!["keep".human(), "restored ai".ai()]);
+}
+
 /// Multi-commit `git revert <del_a> <del_b> <del_c>` (one invocation, several
 /// destinations) exercises the per-destination revert loop. Each reverted
 /// "delete" commit must restore its file's original AI attribution. This pins

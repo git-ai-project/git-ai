@@ -1,9 +1,46 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use crate::mdm::utils::{
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+};
+use jsonc_parser::ParseOptions;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Droid's settings.json uses JSONC (JSON with `//` line comments, `/* */` block
+/// comments, and trailing commas). Standard `serde_json` rejects these, so we
+/// parse through `jsonc_parser` first and convert to `serde_json::Value`.
+/// NOTE: This parse-to-serde-Value approach discards JSONC comments and trailing
+/// commas. If comment preservation becomes important, migrate to CstRootNode
+/// (as used in utils.rs::update_vscode_chat_hook_settings).
+fn parse_jsonc_settings(content: &str) -> Result<Value, GitAiError> {
+    let parsed = jsonc_parser::parse_to_value(content, &ParseOptions::default())
+        .map_err(|e| GitAiError::Generic(format!("Failed to parse Droid settings: {e}")))?;
+    Ok(match parsed {
+        Some(val) => jsonc_to_serde(val),
+        None => json!({}),
+    })
+}
+
+fn jsonc_to_serde(val: jsonc_parser::JsonValue<'_>) -> Value {
+    match val {
+        jsonc_parser::JsonValue::Null => Value::Null,
+        jsonc_parser::JsonValue::Boolean(b) => Value::Bool(b),
+        jsonc_parser::JsonValue::Number(n) => serde_json::from_str(n).unwrap_or(Value::Null),
+        jsonc_parser::JsonValue::String(s) => Value::String(s.into_owned()),
+        jsonc_parser::JsonValue::Array(arr) => {
+            Value::Array(arr.into_iter().map(jsonc_to_serde).collect())
+        }
+        jsonc_parser::JsonValue::Object(obj) => {
+            let map: serde_json::Map<String, Value> = obj
+                .into_iter()
+                .map(|(k, v)| (k, jsonc_to_serde(v)))
+                .collect();
+            Value::Object(map)
+        }
+    }
+}
 
 const DROID_PRE_TOOL_CMD: &str = "checkpoint droid --hook-input stdin";
 const DROID_POST_TOOL_CMD: &str = "checkpoint droid --hook-input stdin";
@@ -81,7 +118,7 @@ impl DroidInstaller {
         let existing: Value = if existing_content.trim().is_empty() {
             json!({})
         } else {
-            serde_json::from_str(&existing_content)?
+            parse_jsonc_settings(&existing_content)?
         };
 
         let binary_path = params.binary_path.to_string_lossy().to_string();
@@ -247,7 +284,7 @@ impl DroidInstaller {
         }
 
         let existing_content = fs::read_to_string(settings_path)?;
-        let existing: Value = serde_json::from_str(&existing_content)?;
+        let existing: Value = parse_jsonc_settings(&existing_content)?;
 
         let mut merged = existing.clone();
         let mut hooks_obj = match merged.get("hooks").cloned() {
@@ -315,9 +352,10 @@ impl HookInstaller for DroidInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+        let has_binary = binary_exists("droid");
         let has_dotfiles = home_dir().join(".factory").exists();
 
-        if !has_dotfiles {
+        if !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
@@ -335,7 +373,7 @@ impl HookInstaller for DroidInstaller {
         }
 
         let content = fs::read_to_string(&settings_path)?;
-        let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+        let existing: Value = parse_jsonc_settings(&content).unwrap_or_else(|_| json!({}));
         let (hooks_installed, hooks_up_to_date) = Self::hook_status(&existing);
 
         Ok(HookCheckResult {
@@ -365,6 +403,7 @@ impl HookInstaller for DroidInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -373,6 +412,72 @@ mod tests {
         let settings_path = temp_dir.path().join(".factory").join("settings.json");
         fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         (temp_dir, settings_path)
+    }
+
+    fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().to_path_buf();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+        }
+
+        f(&home);
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    fn with_fake_binary_on_path<F: FnOnce(&Path)>(binary_name: &str, f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let bin_dir = temp_dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_bin = bin_dir.join(binary_name);
+        fs::write(&fake_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var_os("PATH");
+        let new_path = match &prev_path {
+            Some(p) => {
+                let mut paths = vec![bin_dir.clone()];
+                paths.extend(std::env::split_paths(p));
+                std::env::join_paths(paths).unwrap()
+            }
+            None => bin_dir.clone().into(),
+        };
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        f(temp_dir.path());
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
     }
 
     fn binary_path() -> PathBuf {
@@ -925,6 +1030,87 @@ mod tests {
     // ---- check_hooks scenarios ----
 
     #[test]
+    fn s11_install_into_jsonc_settings_with_comments() {
+        let (_td, path) = setup_test_env();
+        let jsonc_content = r#"// Factory CLI Settings
+// This file contains your Factory CLI configuration.
+{
+  "model": "claude-opus-4-5-20251101",
+  // Some inline comment
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {"type": "command", "command": "echo existing"}
+        ]
+      }
+    ]
+  }
+}"#;
+        fs::write(&path, jsonc_content).unwrap();
+
+        let diff = DroidInstaller::install_hooks_at(&path, &params(), false).unwrap();
+        assert!(diff.is_some());
+
+        let settings = read_settings(&path);
+        let catch_all = hooks_in_catch_all(&settings, "PreToolUse");
+        assert_eq!(catch_all.len(), 2);
+        assert_eq!(
+            catch_all[0]
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap(),
+            "echo existing"
+        );
+        assert!(is_git_ai_checkpoint_command(
+            catch_all[1]
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn s12_install_into_jsonc_settings_with_trailing_commas() {
+        let (_td, path) = setup_test_env();
+        let jsonc_content = r#"{
+  "allowlist": ["a", "b",],
+  "hooks": {},
+}"#;
+        fs::write(&path, jsonc_content).unwrap();
+
+        let diff = DroidInstaller::install_hooks_at(&path, &params(), false).unwrap();
+        assert!(diff.is_some());
+
+        let settings = read_settings(&path);
+        let catch_all = hooks_in_catch_all(&settings, "PreToolUse");
+        assert_eq!(catch_all.len(), 1);
+    }
+
+    #[test]
+    fn u5_uninstall_from_jsonc_settings_with_comments() {
+        let (_td, path) = setup_test_env();
+        let cmd = expected_cmd();
+        let jsonc_content = format!(
+            r#"// Factory CLI Settings
+{{
+  "hooks": {{
+    "PreToolUse": [{{"matcher": "*", "hooks": [{{"type":"command","command": "{cmd}"}}]}}],
+    "PostToolUse": [{{"matcher": "*", "hooks": [{{"type":"command","command": "{cmd}"}}]}}],
+    "claudeHooksImported": true
+  }}
+}}"#
+        );
+        fs::write(&path, jsonc_content).unwrap();
+
+        let diff = DroidInstaller::uninstall_hooks_at(&path, false).unwrap();
+        assert!(diff.is_some());
+    }
+
+    // ---- check_hooks scenarios ----
+
+    #[test]
     fn c1_no_hooks_returns_not_installed() {
         let (installed, up_to_date) = DroidInstaller::hook_status(&json!({}));
         assert!(!installed);
@@ -947,5 +1133,109 @@ mod tests {
         let (installed, up_to_date) = DroidInstaller::hook_status(&settings);
         assert!(installed);
         assert!(!up_to_date);
+    }
+
+    // ---- JSONC parsing ----
+
+    #[test]
+    fn jsonc_parse_with_line_comments() {
+        let input = r#"// header comment
+{
+  "key": "value", // inline comment
+  "num": 42
+}"#;
+        let val = parse_jsonc_settings(input).unwrap();
+        assert_eq!(val.get("key").and_then(|v| v.as_str()), Some("value"));
+        assert_eq!(val.get("num").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    #[test]
+    fn jsonc_parse_with_block_comments() {
+        let input = r#"{ /* block */ "key": "value" }"#;
+        let val = parse_jsonc_settings(input).unwrap();
+        assert_eq!(val.get("key").and_then(|v| v.as_str()), Some("value"));
+    }
+
+    #[test]
+    fn jsonc_parse_with_trailing_commas() {
+        let input = r#"{ "a": [1, 2,], "b": 3, }"#;
+        let val = parse_jsonc_settings(input).unwrap();
+        assert_eq!(val.get("b").and_then(|v| v.as_i64()), Some(3));
+    }
+
+    #[test]
+    fn jsonc_parse_empty_returns_empty_object() {
+        let val = parse_jsonc_settings("").unwrap();
+        assert_eq!(val, json!({}));
+    }
+
+    // ---- Detection / check_hooks ----
+
+    #[test]
+    #[serial]
+    fn c4_binary_on_path_without_dotfiles_detects_tool() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("droid", |_| {
+                let installer = DroidInstaller;
+                let result = installer.check_hooks(&params()).unwrap();
+                assert!(
+                    result.tool_installed,
+                    "droid binary on PATH should be detected even without ~/.factory"
+                );
+                assert!(!result.hooks_installed);
+                assert!(!result.hooks_up_to_date);
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn c5_no_binary_no_dotfiles_not_detected() {
+        with_temp_home(|_home| {
+            let installer = DroidInstaller;
+            let result = installer.check_hooks(&params()).unwrap();
+            assert!(
+                !result.tool_installed,
+                "no binary and no ~/.factory should mean tool_installed=false"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn c6_dotfiles_without_binary_detects_tool() {
+        with_temp_home(|home| {
+            fs::create_dir_all(home.join(".factory")).unwrap();
+            let installer = DroidInstaller;
+            let result = installer.check_hooks(&params()).unwrap();
+            assert!(
+                result.tool_installed,
+                "~/.factory dir should be enough to detect tool even without binary"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn c7_binary_on_path_install_creates_settings() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("droid", |_| {
+                let installer = DroidInstaller;
+                let result = installer.install_hooks(&params(), false).unwrap();
+                assert!(result.is_some(), "install_hooks should produce a diff");
+
+                let settings_path = DroidInstaller::settings_path();
+                assert!(
+                    settings_path.exists(),
+                    "install_hooks should create ~/.factory/settings.json"
+                );
+
+                let content = fs::read_to_string(&settings_path).unwrap();
+                assert!(
+                    content.contains("checkpoint droid"),
+                    "settings.json should contain the checkpoint hook command"
+                );
+            });
+        });
     }
 }

@@ -156,12 +156,15 @@ impl AgentPreset for DroidPreset {
             external_parent_session_id: None,
         });
 
+        let bash_command = parse::bash_command_from_hook_input(&data);
+
         // PreToolUse
         if hook_event_name == "PreToolUse" {
             if is_bash {
                 return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id,
+                    command: bash_command,
                 })]);
             }
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -177,6 +180,7 @@ impl AgentPreset for DroidPreset {
             return Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id,
+                command: bash_command,
                 stream_source,
             })]);
         }

@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::hunk_shift::{DiffHunk, parse_hunk_header};
+use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::notes_api;
 use crate::git::repo_state::is_valid_git_oid;
 use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
+
+const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Debug)]
 pub enum RewriteEvent {
@@ -25,12 +28,370 @@ pub enum RewriteEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiffTreeResult {
     pub hunks_by_file: HashMap<String, Vec<DiffHunk>>,
+    pub added_lines_by_file: HashMap<String, Vec<u32>>,
     pub renames: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RewriteMetricOperation {
+    Rebase,
+    SquashMerge,
+    CherryPick,
+    CherryPickNoCommit,
+    Amend,
+    Revert,
+    UpdateRef,
+    NonFastForward,
+}
+
+impl RewriteMetricOperation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase",
+            Self::SquashMerge => "squash_merge",
+            Self::CherryPick => "cherry_pick",
+            Self::CherryPickNoCommit => "cherry_pick_no_commit",
+            Self::Amend => "amend",
+            Self::Revert => "revert",
+            Self::UpdateRef => "update_ref",
+            Self::NonFastForward => "non_fast_forward",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RewriteMetricCommit {
+    pub new_sha: String,
+    pub original_shas: Vec<String>,
+    pub operation: RewriteMetricOperation,
+    pub branch: Option<String>,
+    pub parent_sha: Option<String>,
+    pub authorship_note: Option<String>,
+    pub parent_diff: Option<DiffTreeResult>,
+}
+
+impl RewriteMetricCommit {
+    pub(crate) fn new(
+        new_sha: impl Into<String>,
+        original_shas: Vec<String>,
+        operation: RewriteMetricOperation,
+    ) -> Self {
+        let mut deduped = Vec::with_capacity(original_shas.len());
+        for sha in original_shas {
+            if !sha.is_empty() && !deduped.contains(&sha) {
+                deduped.push(sha);
+            }
+        }
+        Self {
+            new_sha: new_sha.into(),
+            original_shas: deduped,
+            operation,
+            branch: None,
+            parent_sha: None,
+            authorship_note: None,
+            parent_diff: None,
+        }
+    }
+
+    pub(crate) fn with_branch(mut self, branch: impl Into<String>) -> Self {
+        let branch = branch.into();
+        if !branch.is_empty() {
+            self.branch = Some(branch);
+        }
+        self
+    }
+
+    pub(crate) fn with_parent_sha(mut self, parent_sha: impl Into<String>) -> Self {
+        let parent_sha = parent_sha.into();
+        if !parent_sha.is_empty() {
+            self.parent_sha = Some(parent_sha);
+        }
+        self
+    }
+
+    pub(crate) fn with_authorship_note(mut self, authorship_note: impl Into<String>) -> Self {
+        self.authorship_note = Some(authorship_note.into());
+        self
+    }
+
+    pub(crate) fn with_parent_diff(mut self, parent_diff: DiffTreeResult) -> Self {
+        self.parent_diff = Some(parent_diff);
+        self
+    }
+}
+
+pub(crate) fn branch_name_from_ref(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RewriteOutcome {
+    pub(crate) metric_commits: Vec<RewriteMetricCommit>,
+}
+
+impl RewriteOutcome {
+    fn empty() -> Self {
+        Self::default()
+    }
+
+    fn from_metric_commits(metric_commits: Vec<RewriteMetricCommit>) -> Self {
+        Self { metric_commits }
+    }
+}
+
+pub(crate) fn rewrite_metrics_enabled() -> bool {
+    Config::get().get_feature_flags().rewrite_metrics_events
+}
+
+pub(crate) fn metric_commits_from_mappings(
+    mappings: &[(String, String)],
+    operation: RewriteMetricOperation,
+) -> Vec<RewriteMetricCommit> {
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
+    for (source_sha, new_sha) in mappings {
+        if source_sha.is_empty() || new_sha.is_empty() {
+            continue;
+        }
+        if !seen_pairs.insert((new_sha.clone(), source_sha.clone())) {
+            continue;
+        }
+        if !grouped.contains_key(new_sha) {
+            order.push(new_sha.clone());
+        }
+        grouped
+            .entry(new_sha.clone())
+            .or_default()
+            .push(source_sha.clone());
+    }
+
+    order
+        .into_iter()
+        .filter_map(|new_sha| {
+            grouped
+                .remove(&new_sha)
+                .map(|original_shas| RewriteMetricCommit::new(new_sha, original_shas, operation))
+        })
+        .collect()
+}
+
+fn attach_authorship_notes(
+    metric_commits: Vec<RewriteMetricCommit>,
+    notes: Vec<(String, String)>,
+) -> Vec<RewriteMetricCommit> {
+    if notes.is_empty() {
+        return metric_commits;
+    }
+    let mut notes_by_commit: HashMap<String, String> = notes.into_iter().collect();
+    metric_commits
+        .into_iter()
+        .map(|mut commit| {
+            if let Some(note) = notes_by_commit.remove(&commit.new_sha) {
+                commit = commit.with_authorship_note(note);
+            }
+            commit
+        })
+        .collect()
+}
+
+fn attach_authorship_note(
+    mut metric_commit: RewriteMetricCommit,
+    note: Option<String>,
+) -> RewriteMetricCommit {
+    if let Some(note) = note {
+        metric_commit = metric_commit.with_authorship_note(note);
+    }
+    metric_commit
+}
+
+fn write_authorship_log_for_metrics(
+    repo: &Repository,
+    commit_sha: &str,
+    log: &AuthorshipLog,
+) -> Result<Option<String>, GitAiError> {
+    let serialized = write_authorship_log(repo, commit_sha, log)?;
+    if rewrite_metrics_enabled() {
+        Ok(Some(serialized))
+    } else {
+        Ok(None)
+    }
+}
+
+fn post_squash_metric_note_from_result(
+    result: crate::authorship::post_commit::PostCommitDetailedResult,
+) -> Option<String> {
+    if rewrite_metrics_enabled() {
+        Some(result.authorship_note)
+    } else {
+        None
+    }
+}
+
+fn empty_tree_sha() -> &'static str {
+    EMPTY_TREE_SHA
+}
+
+fn tree_revision_arg(sha: &str) -> Option<String> {
+    if sha == "initial" {
+        None
+    } else {
+        Some(format!("{}^{{tree}}", sha))
+    }
+}
+
+fn insert_known_tree(sha_to_tree: &mut HashMap<String, String>, sha: &str) -> bool {
+    if sha == "initial" {
+        sha_to_tree.insert(sha.to_string(), empty_tree_sha().to_string());
+        true
+    } else {
+        false
+    }
+}
+
+fn unique_pair_shas(pairs: &[(String, String)]) -> Vec<String> {
+    let mut unique_shas = Vec::new();
+    let mut seen = HashSet::new();
+    for (src, dst) in pairs {
+        if seen.insert(src.clone()) {
+            unique_shas.push(src.clone());
+        }
+        if seen.insert(dst.clone()) {
+            unique_shas.push(dst.clone());
+        }
+    }
+    unique_shas
+}
+
+fn resolve_tree_shas(
+    repo: &Repository,
+    unique_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let mut sha_to_tree = HashMap::new();
+    let mut shas_to_resolve = Vec::new();
+
+    for sha in unique_shas {
+        if !insert_known_tree(&mut sha_to_tree, sha) {
+            shas_to_resolve.push(sha.clone());
+        }
+    }
+
+    if shas_to_resolve.is_empty() {
+        return Ok(sha_to_tree);
+    }
+
+    let mut rev_parse_args = repo.global_args_for_exec();
+    rev_parse_args.push("rev-parse".to_string());
+    for sha in &shas_to_resolve {
+        if let Some(arg) = tree_revision_arg(sha) {
+            rev_parse_args.push(arg);
+        }
+    }
+    let rev_output = exec_git(&rev_parse_args)?;
+    let rev_stdout = String::from_utf8_lossy(&rev_output.stdout);
+    let tree_shas: Vec<&str> = rev_stdout.lines().collect();
+
+    if tree_shas.len() != shas_to_resolve.len() {
+        return Err(GitAiError::Generic(format!(
+            "rev-parse returned {} trees for {} commits",
+            tree_shas.len(),
+            shas_to_resolve.len()
+        )));
+    }
+
+    for (commit, tree) in shas_to_resolve.into_iter().zip(tree_shas) {
+        sha_to_tree.insert(commit, tree.to_string());
+    }
+
+    Ok(sha_to_tree)
+}
+
+fn tree_for_commit<'a>(
+    sha_to_tree: &'a HashMap<String, String>,
+    sha: &str,
+) -> Result<&'a str, GitAiError> {
+    sha_to_tree
+        .get(sha)
+        .map(String::as_str)
+        .ok_or_else(|| GitAiError::Generic(format!("missing tree for commit {}", sha)))
+}
+
+fn build_diff_tree_stdin(
+    pairs: &[(String, String)],
+    sha_to_tree: &HashMap<String, String>,
+) -> Result<(String, Vec<(String, String)>), GitAiError> {
+    let mut stdin_data = String::new();
+    let mut tree_pair_keys: Vec<(String, String)> = Vec::with_capacity(pairs.len());
+    for (src, dst) in pairs {
+        let src_tree = tree_for_commit(sha_to_tree, src)?;
+        let dst_tree = tree_for_commit(sha_to_tree, dst)?;
+        stdin_data.push_str(src_tree);
+        stdin_data.push(' ');
+        stdin_data.push_str(dst_tree);
+        stdin_data.push('\n');
+        tree_pair_keys.push((src_tree.to_string(), dst_tree.to_string()));
+    }
+    Ok((stdin_data, tree_pair_keys))
+}
+
+fn parse_batched_diff_tree_output_for_owned_keys(
+    output: &str,
+    tree_pair_keys: &[(String, String)],
+) -> Result<Vec<DiffTreeResult>, GitAiError> {
+    let key_refs: Vec<(&str, &str)> = tree_pair_keys
+        .iter()
+        .map(|(src, dst)| (src.as_str(), dst.as_str()))
+        .collect();
+    parse_batched_diff_tree_output(output, &key_refs)
+}
+
+fn compute_diff_tree_stdin(
+    repo: &Repository,
+    stdin_data: String,
+    tree_pair_keys: Vec<(String, String)>,
+) -> Result<Vec<DiffTreeResult>, GitAiError> {
+    // Single git diff-tree --stdin call.
+    //
+    // We intentionally use the General profile (no PatchParse prefix forcing)
+    // here: `diff-tree` is plumbing and -- unlike the `git diff` porcelain --
+    // ignores the user's diff.{noprefix,mnemonicPrefix,srcPrefix,dstPrefix},
+    // diff.external, and per-path textconv attributes. It always emits raw
+    // content with default `a/`..`b/` prefixes, which is exactly what
+    // extract_b_path / parse_diff_tree_output expect. (Contrast diff_added_lines
+    // in repository.rs, which DOES run `git diff` and therefore must force
+    // InternalGitProfile::PatchParse.)
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "diff-tree".to_string(),
+        "--stdin".to_string(),
+        "-p".to_string(),
+        "-U0".to_string(),
+        "-M".to_string(),
+        "--no-color".to_string(),
+        "-r".to_string(),
+    ]);
+
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse output: each pair's result starts with a "tree1 tree2\n" separator line
+    parse_batched_diff_tree_output_for_owned_keys(&stdout, &tree_pair_keys)
+}
+
 pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError> {
+    handle_rewrite_event_with_metrics(repo, event).map(|_| ())
+}
+
+pub(crate) fn handle_rewrite_event_with_metrics(
+    repo: &Repository,
+    event: RewriteEvent,
+) -> Result<RewriteOutcome, GitAiError> {
     match event {
         RewriteEvent::SquashMerge {
             ref source_head,
@@ -41,18 +402,33 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             ref old_tip,
             ref new_tip,
             ref onto,
-        } => handle_non_fast_forward_rewrite(repo, old_tip, new_tip, onto.as_deref()),
+        } => handle_non_fast_forward_rewrite_with_operation(
+            repo,
+            old_tip,
+            new_tip,
+            onto.as_deref(),
+            RewriteMetricOperation::NonFastForward,
+        ),
         RewriteEvent::CherryPickComplete {
             sources,
             new_commits,
         } => {
             let mappings: Vec<(String, String)> = sources.into_iter().zip(new_commits).collect();
             if mappings.is_empty() {
-                return Ok(());
+                return Ok(RewriteOutcome::empty());
             }
             let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
             crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas)?;
-            shift_authorship_notes_merging_existing(repo, &mappings)
+            let shifted_notes =
+                shift_authorship_notes_merging_existing_with_notes(repo, &mappings)?;
+            if !rewrite_metrics_enabled() {
+                return Ok(RewriteOutcome::empty());
+            }
+            let metric_commits =
+                metric_commits_from_mappings(&mappings, RewriteMetricOperation::CherryPick);
+            Ok(RewriteOutcome::from_metric_commits(
+                attach_authorship_notes(metric_commits, shifted_notes),
+            ))
         }
     }
 }
@@ -63,14 +439,37 @@ pub fn handle_non_fast_forward_rewrite(
     new_tip: &str,
     onto: Option<&str>,
 ) -> Result<(), GitAiError> {
+    handle_non_fast_forward_rewrite_with_operation(
+        repo,
+        old_tip,
+        new_tip,
+        onto,
+        RewriteMetricOperation::NonFastForward,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn handle_non_fast_forward_rewrite_with_operation(
+    repo: &Repository,
+    old_tip: &str,
+    new_tip: &str,
+    onto: Option<&str>,
+    operation: RewriteMetricOperation,
+) -> Result<RewriteOutcome, GitAiError> {
     let mappings = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto)?;
     if mappings.is_empty() {
-        return Ok(());
+        return Ok(RewriteOutcome::empty());
     }
     let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas)?;
-    shift_authorship_notes_merging_existing(repo, &mappings)?;
-    Ok(())
+    let shifted_notes = shift_authorship_notes_merging_existing_with_notes(repo, &mappings)?;
+    if !rewrite_metrics_enabled() {
+        return Ok(RewriteOutcome::empty());
+    }
+    let metric_commits = metric_commits_from_mappings(&mappings, operation);
+    Ok(RewriteOutcome::from_metric_commits(
+        attach_authorship_notes(metric_commits, shifted_notes),
+    ))
 }
 
 fn handle_squash_merge(
@@ -78,7 +477,7 @@ fn handle_squash_merge(
     source_head: &str,
     squash_commit: &str,
     onto: &str,
-) -> Result<(), GitAiError> {
+) -> Result<RewriteOutcome, GitAiError> {
     use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 
     let target_notes = notes_api::read_notes_batch(repo, &[squash_commit.to_string()])?;
@@ -132,9 +531,12 @@ fn handle_squash_merge(
         if let Some(existing_log) = existing_target_log.as_ref()
             && !repo.storage.has_working_log(onto)
         {
-            return write_authorship_log(repo, squash_commit, existing_log);
+            let note = write_authorship_log_for_metrics(repo, squash_commit, existing_log)?;
+            return Ok(squash_metric_outcome(squash_commit, &sources, onto, note));
         }
-        return post_squash_resolution_working_log(repo, onto, squash_commit, existing_target_log);
+        let note =
+            post_squash_resolution_working_log(repo, onto, squash_commit, existing_target_log)?;
+        return Ok(squash_metric_outcome(squash_commit, &sources, onto, note));
     }
 
     // Add the final source_head→squash_commit pair
@@ -178,7 +580,7 @@ fn handle_squash_merge(
     }
 
     let Some(mut final_log) = merged_log else {
-        return Ok(());
+        return Ok(RewriteOutcome::empty());
     };
 
     // Phase 2: Shift merged log from source_head to squash_commit
@@ -217,10 +619,32 @@ fn handle_squash_merge(
     };
 
     if repo.storage.has_working_log(onto) {
-        post_squash_resolution_working_log(repo, onto, squash_commit, Some(shifted_log))
+        let note =
+            post_squash_resolution_working_log(repo, onto, squash_commit, Some(shifted_log))?;
+        Ok(squash_metric_outcome(squash_commit, &sources, onto, note))
     } else {
-        write_authorship_log(repo, squash_commit, &shifted_log)
+        let note = write_authorship_log_for_metrics(repo, squash_commit, &shifted_log)?;
+        Ok(squash_metric_outcome(squash_commit, &sources, onto, note))
     }
+}
+
+fn squash_metric_outcome(
+    squash_commit: &str,
+    sources: &[String],
+    onto: &str,
+    note: Option<String>,
+) -> RewriteOutcome {
+    if !rewrite_metrics_enabled() {
+        return RewriteOutcome::empty();
+    }
+    let mut metric_commit = RewriteMetricCommit::new(
+        squash_commit.to_string(),
+        sources.to_vec(),
+        RewriteMetricOperation::SquashMerge,
+    )
+    .with_parent_sha(onto.to_string());
+    metric_commit = attach_authorship_note(metric_commit, note);
+    RewriteOutcome::from_metric_commits(vec![metric_commit])
 }
 
 fn post_squash_resolution_working_log(
@@ -228,60 +652,75 @@ fn post_squash_resolution_working_log(
     onto: &str,
     squash_commit: &str,
     existing_shifted_log: Option<AuthorshipLog>,
-) -> Result<(), GitAiError> {
+) -> Result<Option<String>, GitAiError> {
     if !repo.storage.has_working_log(onto) {
         if let Some(log) = existing_shifted_log {
-            return write_authorship_log(repo, squash_commit, &log);
+            return write_authorship_log_for_metrics(repo, squash_commit, &log);
         }
-        return Ok(());
+        return Ok(None);
     }
 
     let commit_for_transform = squash_commit.to_string();
     let author = repo.effective_author_identity().formatted_or_unknown();
-    crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
-        repo,
-        Some(onto.to_string()),
-        squash_commit.to_string(),
-        author,
-        crate::authorship::post_commit::PostCommitOptions {
-            supress_output: true,
-            compute_stats: false,
-        },
-        move |resolution_log| {
-            Ok(
-                crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
-                    existing_shifted_log,
-                    resolution_log,
-                    &commit_for_transform,
-                ),
-            )
-        },
-    )
-    .map(|_| ())
+    let post_commit_result =
+        crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options_detailed(
+            repo,
+            Some(onto.to_string()),
+            squash_commit.to_string(),
+            author,
+            crate::authorship::post_commit::PostCommitOptions {
+                supress_output: true,
+                compute_stats: false,
+                recover_attribution: false,
+            },
+            move |resolution_log| {
+                Ok(
+                    crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
+                        existing_shifted_log,
+                        resolution_log,
+                        &commit_for_transform,
+                    ),
+                )
+            },
+        )?;
+    Ok(post_squash_metric_note_from_result(post_commit_result))
 }
 
 fn write_authorship_log(
     repo: &Repository,
     commit_sha: &str,
     log: &AuthorshipLog,
-) -> Result<(), GitAiError> {
+) -> Result<String, GitAiError> {
     let serialized = log.serialize_to_string().map_err(|e| {
         GitAiError::Generic(format!("failed to serialize rewrite authorship log: {}", e))
     })?;
-    notes_api::write_notes_batch(repo, &[(commit_sha.to_string(), serialized)])
+    let entries = vec![(commit_sha.to_string(), serialized)];
+    notes_api::write_notes_batch(repo, &entries)?;
+    Ok(entries
+        .into_iter()
+        .next()
+        .map(|(_, note)| note)
+        .unwrap_or_default())
 }
 
 pub fn shift_authorship_notes(
     repo: &Repository,
     mappings: &[(String, String)],
 ) -> Result<(), GitAiError> {
-    shift_authorship_notes_with_existing_mode(repo, mappings, false)
+    shift_authorship_notes_with_existing_mode(repo, mappings, false).map(|_| ())
 }
 
 pub fn shift_authorship_notes_merging_existing(
     repo: &Repository,
     mappings: &[(String, String)],
 ) -> Result<(), GitAiError> {
+    shift_authorship_notes_with_existing_mode(repo, mappings, true).map(|_| ())
+}
+
+pub(crate) fn shift_authorship_notes_merging_existing_with_notes(
+    repo: &Repository,
+    mappings: &[(String, String)],
+) -> Result<Vec<(String, String)>, GitAiError> {
     shift_authorship_notes_with_existing_mode(repo, mappings, true)
 }
 
@@ -289,13 +728,13 @@ fn shift_authorship_notes_with_existing_mode(
     repo: &Repository,
     mappings: &[(String, String)],
     merge_existing_targets: bool,
-) -> Result<(), GitAiError> {
+) -> Result<Vec<(String, String)>, GitAiError> {
     use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 
     tracing::debug!("shift_authorship_notes: {} mappings", mappings.len());
 
     if mappings.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Batch-read all notes for source and target commits in O(1) git calls
@@ -355,7 +794,7 @@ fn shift_authorship_notes_with_existing_mode(
     }
 
     if pending.is_empty() && verbatim_writes.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Single batched diff-tree call for all pairs
@@ -412,7 +851,7 @@ fn shift_authorship_notes_with_existing_mode(
     // Single batched write for all notes
     notes_api::write_notes_batch(repo, &all_writes)?;
 
-    Ok(())
+    Ok(all_writes)
 }
 
 fn merge_authorship_logs(target: &mut AuthorshipLog, source: &AuthorshipLog) {
@@ -804,80 +1243,10 @@ pub(crate) fn compute_diff_trees_batch(
         return Ok(Vec::new());
     }
 
-    // Collect unique commit SHAs and resolve them all to tree SHAs in one rev-parse call
-    let mut unique_shas: Vec<String> = Vec::new();
-    for (src, dst) in pairs {
-        if !unique_shas.contains(src) {
-            unique_shas.push(src.clone());
-        }
-        if !unique_shas.contains(dst) {
-            unique_shas.push(dst.clone());
-        }
-    }
-
-    let mut rev_parse_args = repo.global_args_for_exec();
-    rev_parse_args.push("rev-parse".to_string());
-    for sha in &unique_shas {
-        rev_parse_args.push(format!("{}^{{tree}}", sha));
-    }
-    let rev_output = exec_git(&rev_parse_args)?;
-    let rev_stdout = String::from_utf8_lossy(&rev_output.stdout);
-    let tree_shas: Vec<&str> = rev_stdout.lines().collect();
-
-    if tree_shas.len() != unique_shas.len() {
-        return Err(GitAiError::Generic(format!(
-            "rev-parse returned {} trees for {} commits",
-            tree_shas.len(),
-            unique_shas.len()
-        )));
-    }
-
-    // Build commit→tree lookup
-    let sha_to_tree: HashMap<&str, &str> = unique_shas
-        .iter()
-        .zip(tree_shas.iter())
-        .map(|(commit, tree)| (commit.as_str(), *tree))
-        .collect();
-
-    // Build stdin: one "tree1 tree2\n" line per pair
-    let mut stdin_data = String::new();
-    let mut tree_pair_keys: Vec<(&str, &str)> = Vec::with_capacity(pairs.len());
-    for (src, dst) in pairs {
-        let src_tree = sha_to_tree[src.as_str()];
-        let dst_tree = sha_to_tree[dst.as_str()];
-        stdin_data.push_str(src_tree);
-        stdin_data.push(' ');
-        stdin_data.push_str(dst_tree);
-        stdin_data.push('\n');
-        tree_pair_keys.push((src_tree, dst_tree));
-    }
-
-    // Single git diff-tree --stdin call.
-    //
-    // We intentionally use the General profile (no PatchParse prefix forcing)
-    // here: `diff-tree` is plumbing and -- unlike the `git diff` porcelain --
-    // ignores the user's diff.{noprefix,mnemonicPrefix,srcPrefix,dstPrefix},
-    // diff.external, and per-path textconv attributes. It always emits raw
-    // content with default `a/`..`b/` prefixes, which is exactly what
-    // extract_b_path / parse_diff_tree_output expect. (Contrast diff_added_lines
-    // in repository.rs, which DOES run `git diff` and therefore must force
-    // InternalGitProfile::PatchParse.)
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "diff-tree".to_string(),
-        "--stdin".to_string(),
-        "-p".to_string(),
-        "-U0".to_string(),
-        "-M".to_string(),
-        "--no-color".to_string(),
-        "-r".to_string(),
-    ]);
-
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse output: each pair's result starts with a "tree1 tree2\n" separator line
-    parse_batched_diff_tree_output(&stdout, &tree_pair_keys)
+    let unique_shas = unique_pair_shas(pairs);
+    let sha_to_tree = resolve_tree_shas(repo, &unique_shas)?;
+    let (stdin_data, tree_pair_keys) = build_diff_tree_stdin(pairs, &sha_to_tree)?;
+    compute_diff_tree_stdin(repo, stdin_data, tree_pair_keys)
 }
 
 /// Parse the output of `git diff-tree --stdin` which produces multiple results
@@ -914,6 +1283,7 @@ fn parse_batched_diff_tree_output(
     while results.len() < tree_pair_keys.len() {
         results.push(DiffTreeResult {
             hunks_by_file: HashMap::new(),
+            added_lines_by_file: HashMap::new(),
             renames: Vec::new(),
         });
     }
@@ -934,17 +1304,21 @@ fn is_tree_pair_separator(line: &str) -> bool {
 
 fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
     let mut hunks_by_file: HashMap<String, Vec<DiffHunk>> = HashMap::new();
+    let mut added_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
     let mut renames: Vec<(String, String)> = Vec::new();
     let mut current_file: Option<String> = None;
     let mut current_rename_from: Option<String> = None;
+    let mut active_hunk_new_line: Option<u32> = None;
 
     for line in output.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             // Extract the b/ path from "a/old b/new"
             current_file = extract_b_path(rest);
             current_rename_from = None;
+            active_hunk_new_line = None;
         } else if let Some(from_path) = line.strip_prefix("rename from ") {
             current_rename_from = Some(from_path.to_string());
+            active_hunk_new_line = None;
         } else if let Some(to_path) = line.strip_prefix("rename to ") {
             if let Some(from_path) = current_rename_from.take() {
                 renames.push((from_path, to_path.to_string()));
@@ -953,12 +1327,34 @@ fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
             && let Some(ref file) = current_file
             && let Some(hunk) = parse_hunk_header(line)
         {
+            active_hunk_new_line = Some(hunk.new_start);
             hunks_by_file.entry(file.clone()).or_default().push(hunk);
+        } else if let Some(new_line) = active_hunk_new_line.as_mut() {
+            if line.starts_with('+') {
+                if let Some(ref file) = current_file {
+                    added_lines_by_file
+                        .entry(file.clone())
+                        .or_default()
+                        .push(*new_line);
+                }
+                *new_line += 1;
+            } else if line.starts_with('-') || line.starts_with('\\') {
+                // Removed lines and "\ No newline at end of file" markers do
+                // not advance the new-file line cursor.
+            } else {
+                *new_line += 1;
+            }
         }
+    }
+
+    for lines in added_lines_by_file.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
     }
 
     DiffTreeResult {
         hunks_by_file,
+        added_lines_by_file,
         renames,
     }
 }
@@ -974,6 +1370,54 @@ fn extract_b_path(diff_header: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metric_commits_from_mappings_groups_squashed_sources() {
+        let mappings = vec![
+            ("old1".to_string(), "new".to_string()),
+            ("old2".to_string(), "new".to_string()),
+            ("old1".to_string(), "new".to_string()),
+        ];
+
+        let commits = metric_commits_from_mappings(&mappings, RewriteMetricOperation::Rebase);
+
+        assert_eq!(
+            commits,
+            vec![RewriteMetricCommit::new(
+                "new",
+                vec!["old1".to_string(), "old2".to_string()],
+                RewriteMetricOperation::Rebase,
+            )]
+        );
+    }
+
+    #[test]
+    fn branch_name_from_ref_only_accepts_local_branch_refs() {
+        assert_eq!(
+            branch_name_from_ref("refs/heads/feature").as_deref(),
+            Some("feature")
+        );
+        assert_eq!(branch_name_from_ref("HEAD"), None);
+        assert_eq!(branch_name_from_ref("refs/tags/v1"), None);
+    }
+
+    #[test]
+    fn rewrite_metric_operation_strings_are_stable() {
+        assert_eq!(RewriteMetricOperation::Rebase.as_str(), "rebase");
+        assert_eq!(RewriteMetricOperation::SquashMerge.as_str(), "squash_merge");
+        assert_eq!(RewriteMetricOperation::CherryPick.as_str(), "cherry_pick");
+        assert_eq!(
+            RewriteMetricOperation::CherryPickNoCommit.as_str(),
+            "cherry_pick_no_commit"
+        );
+        assert_eq!(RewriteMetricOperation::Amend.as_str(), "amend");
+        assert_eq!(RewriteMetricOperation::Revert.as_str(), "revert");
+        assert_eq!(RewriteMetricOperation::UpdateRef.as_str(), "update_ref");
+        assert_eq!(
+            RewriteMetricOperation::NonFastForward.as_str(),
+            "non_fast_forward"
+        );
+    }
 
     #[test]
     fn test_extract_b_path_simple() {

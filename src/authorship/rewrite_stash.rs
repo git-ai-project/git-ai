@@ -1,11 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::authorship::attribution_tracker::LineAttribution;
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
+use crate::authorship::working_log::{Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
+use crate::git::repo_storage::{InitialAttributions, PersistedWorkingLog};
 use crate::git::repository::{
     Repository, batch_read_paths_at_treeishes, disable_internal_git_hooks,
     exec_git_allow_nonzero_with_env,
@@ -21,6 +25,44 @@ pub struct StashMetadata {
 
 fn stashes_dir(repo: &Repository) -> PathBuf {
     repo.storage.ai_dir.join("stashes")
+}
+
+fn stashes_v2_dir(repo: &Repository) -> PathBuf {
+    repo.storage.ai_dir.join("stashes_v2")
+}
+
+fn cleanup_legacy_stashes_dir(repo: &Repository) {
+    let legacy = stashes_dir(repo);
+    if legacy.exists() {
+        let _ = fs::remove_dir_all(legacy);
+    }
+}
+
+fn stash_entry_dir(repo: &Repository, stash_sha: &str) -> PathBuf {
+    stashes_v2_dir(repo).join(stash_sha)
+}
+
+fn stash_metadata_path(repo: &Repository, stash_sha: &str) -> PathBuf {
+    stash_entry_dir(repo, stash_sha).join("metadata.json")
+}
+
+fn filtered_stash_working_log_base(stash_sha: &str) -> String {
+    format!("_stash_filter_{}", stash_sha)
+}
+
+fn working_log_for_dir(repo: &Repository, dir: PathBuf, base_commit: &str) -> PersistedWorkingLog {
+    let canonical_workdir = repo
+        .storage
+        .repo_workdir
+        .canonicalize()
+        .unwrap_or_else(|_| repo.storage.repo_workdir.clone());
+    PersistedWorkingLog::new(
+        dir,
+        base_commit,
+        repo.storage.repo_workdir.clone(),
+        canonical_workdir,
+        None,
+    )
 }
 
 fn path_matches_any(path: &str, pathspecs: &[String]) -> bool {
@@ -62,7 +104,25 @@ fn clean_working_log_for_stash(
             .retain(|path, _| !path_matches_any(path, pathspecs));
     }
 
+    trim_initial_metadata_to_referenced_authors(&mut initial);
     persisted.write_initial(initial)?;
+
+    if pathspecs.is_empty() {
+        return persisted.write_all_checkpoints(&[]);
+    }
+
+    let checkpoints = persisted.read_all_checkpoints()?;
+    let filtered = checkpoints
+        .into_iter()
+        .map(|mut checkpoint| {
+            checkpoint
+                .entries
+                .retain(|entry| !path_matches_any(&entry.file, pathspecs));
+            checkpoint
+        })
+        .filter(|checkpoint| !checkpoint.entries.is_empty())
+        .collect::<Vec<_>>();
+    persisted.write_all_checkpoints(&filtered)?;
     Ok(())
 }
 
@@ -72,6 +132,8 @@ pub fn handle_stash_create(
     head_sha: &str,
     pathspecs: Vec<String>,
 ) -> Result<(), GitAiError> {
+    cleanup_legacy_stashes_dir(repo);
+
     let metadata = StashMetadata {
         base_commit: head_sha.to_string(),
         timestamp: SystemTime::now()
@@ -81,14 +143,14 @@ pub fn handle_stash_create(
         pathspecs: pathspecs.clone(),
     };
 
-    let dir = stashes_dir(repo);
-    fs::create_dir_all(&dir)?;
+    let stash_dir = stash_entry_dir(repo, stash_sha);
+    fs::create_dir_all(&stash_dir)?;
 
-    let metadata_path = dir.join(format!("{}.json", stash_sha));
+    let metadata_path = stash_metadata_path(repo, stash_sha);
     let json = serde_json::to_string_pretty(&metadata)?;
     fs::write(&metadata_path, json)?;
 
-    // Save stashed file attributions before cleaning them from the working log
+    // Save compact stashed file attributions before cleaning them from the working log.
     save_stash_attributions(repo, stash_sha, head_sha, &pathspecs)?;
 
     clean_working_log_for_stash(repo, head_sha, &pathspecs)?;
@@ -102,8 +164,9 @@ pub fn handle_stash_pop_or_apply_with_head(
     is_pop: bool,
     target_head: Option<&str>,
 ) -> Result<(), GitAiError> {
-    let dir = stashes_dir(repo);
-    let metadata_path = dir.join(format!("{}.json", stash_sha));
+    cleanup_legacy_stashes_dir(repo);
+
+    let metadata_path = stash_metadata_path(repo, stash_sha);
 
     if !metadata_path.exists() {
         return Ok(());
@@ -123,30 +186,15 @@ pub fn handle_stash_pop_or_apply_with_head(
     }
 
     if is_pop {
-        let _ = fs::remove_file(&metadata_path);
-        let attr_path = dir.join(format!("{}_attrs.json", stash_sha));
-        let _ = fs::remove_file(&attr_path);
-        let worklog_dir = dir.join(format!("{}_worklog", stash_sha));
-        let _ = fs::remove_dir_all(&worklog_dir);
+        let _ = fs::remove_dir_all(stash_entry_dir(repo, stash_sha));
     }
 
     Ok(())
 }
 
 pub fn handle_stash_drop(repo: &Repository, stash_sha: &str) -> Result<(), GitAiError> {
-    let dir = stashes_dir(repo);
-    let metadata_path = dir.join(format!("{}.json", stash_sha));
-    if metadata_path.exists() {
-        let _ = fs::remove_file(&metadata_path);
-    }
-    let attr_path = dir.join(format!("{}_attrs.json", stash_sha));
-    if attr_path.exists() {
-        let _ = fs::remove_file(&attr_path);
-    }
-    let worklog_dir = dir.join(format!("{}_worklog", stash_sha));
-    if worklog_dir.exists() {
-        let _ = fs::remove_dir_all(&worklog_dir);
-    }
+    cleanup_legacy_stashes_dir(repo);
+    let _ = fs::remove_dir_all(stash_entry_dir(repo, stash_sha));
     Ok(())
 }
 
@@ -160,94 +208,188 @@ fn save_stash_attributions(
         return Ok(());
     }
 
-    let src_dir = repo.storage.working_logs.join(head_sha);
-    let dir = stashes_dir(repo);
-    let stash_log_dir = dir.join(format!("{}_worklog", stash_sha));
-
-    if src_dir.exists() {
-        let _ = copy_dir_recursive(&src_dir, &stash_log_dir);
-    }
-
-    // A partial `git stash push -- <pathspec>` only stashes the matching paths,
-    // so the saved attribution must be scoped to them too. Otherwise the stash
-    // carries checkpoints/INITIAL entries for files that were never stashed,
-    // and a later (cross-branch / shifted) pop resurrects their attribution.
-    // The realistic AI flow keeps attribution in checkpoints.jsonl (INITIAL is
-    // often absent), so we filter both. Orphan content blobs left in blobs/ are
-    // harmless -- restore only reads blobs referenced by surviving checkpoints.
-    if !pathspecs.is_empty() {
-        filter_stash_checkpoints_to_pathspecs(&stash_log_dir.join("checkpoints.jsonl"), pathspecs)?;
-        filter_stash_initial_to_pathspecs(&stash_log_dir.join("INITIAL"), pathspecs)?;
-    }
-
-    Ok(())
-}
-
-/// Retain only checkpoint entries whose file matches one of `pathspecs`,
-/// dropping checkpoints left with no entries. Round-trips each JSONL line
-/// through serde_json::Value so all non-`entries` fields are preserved exactly.
-fn filter_stash_checkpoints_to_pathspecs(
-    path: &std::path::Path,
-    pathspecs: &[String],
-) -> Result<(), GitAiError> {
-    let Ok(content) = fs::read_to_string(path) else {
-        return Ok(());
+    let filtered_base = if pathspecs.is_empty() {
+        None
+    } else {
+        let filtered_base = filtered_stash_working_log_base(stash_sha);
+        if let Err(err) = write_path_filtered_working_log(repo, head_sha, &filtered_base, pathspecs)
+        {
+            let _ = fs::remove_dir_all(repo.storage.working_logs.join(&filtered_base));
+            return Err(err);
+        }
+        Some(filtered_base)
     };
 
-    let mut kept_lines: Vec<String> = Vec::new();
-    for line in content.lines() {
+    let base_commit = filtered_base.as_deref().unwrap_or(head_sha);
+    let result =
+        compact_stash_attributions_from_working_log(repo, stash_sha, head_sha, base_commit);
+
+    if let Some(filtered_base) = filtered_base {
+        let _ = fs::remove_dir_all(repo.storage.working_logs.join(filtered_base));
+    }
+
+    result
+}
+
+fn compact_stash_attributions_from_working_log(
+    repo: &Repository,
+    stash_sha: &str,
+    stash_base_commit: &str,
+    working_log_base_commit: &str,
+) -> Result<(), GitAiError> {
+    use crate::authorship::virtual_attribution::VirtualAttributions;
+
+    let va = VirtualAttributions::from_persisted_working_log(
+        repo.clone(),
+        working_log_base_commit.to_string(),
+        None,
+    )?;
+    let initial = va.to_initial_working_log_only();
+
+    if initial.files.is_empty() {
+        return Ok(());
+    }
+
+    let mut file_contents = HashMap::new();
+    for file_path in initial.files.keys() {
+        if let Some(content) = va.get_file_content(file_path).cloned() {
+            file_contents.insert(file_path.clone(), content);
+        }
+    }
+
+    let stash_log = working_log_for_dir(repo, stash_entry_dir(repo, stash_sha), stash_base_commit);
+    stash_log.write_initial_attributions_with_contents(
+        initial.files,
+        initial.prompts,
+        initial.humans,
+        file_contents,
+        initial.sessions,
+    )
+}
+
+fn write_path_filtered_working_log(
+    repo: &Repository,
+    source_base_commit: &str,
+    filtered_base_commit: &str,
+    pathspecs: &[String],
+) -> Result<(), GitAiError> {
+    let source_log = repo
+        .storage
+        .working_log_for_base_commit(source_base_commit)?;
+    let filtered_dir = repo.storage.working_logs.join(filtered_base_commit);
+    let _ = fs::remove_dir_all(&filtered_dir);
+    let filtered_log = repo
+        .storage
+        .working_log_for_base_commit(filtered_base_commit)?;
+
+    let mut initial = source_log.read_initial_attributions();
+    initial
+        .files
+        .retain(|path, _| path_matches_any(path, pathspecs));
+    initial
+        .file_blobs
+        .retain(|path, _| path_matches_any(path, pathspecs));
+    trim_initial_metadata_to_referenced_authors(&mut initial);
+    copy_initial_blobs(&source_log, &filtered_log, &initial)?;
+    filtered_log.write_initial(initial)?;
+
+    write_path_filtered_checkpoints(&source_log, &filtered_log, pathspecs)
+}
+
+fn write_path_filtered_checkpoints(
+    source_log: &PersistedWorkingLog,
+    filtered_log: &PersistedWorkingLog,
+    pathspecs: &[String],
+) -> Result<(), GitAiError> {
+    let source_checkpoints = source_log.dir.join("checkpoints.jsonl");
+    let filtered_checkpoints = filtered_log.dir.join("checkpoints.jsonl");
+    source_log.ensure_checkpoints_file_size_limit()?;
+    if !source_checkpoints.exists() {
+        return filtered_log.write_all_checkpoints(&[]);
+    }
+
+    fs::create_dir_all(&filtered_log.dir)?;
+    let input = fs::File::open(source_checkpoints)?;
+    let mut output = BufWriter::new(fs::File::create(filtered_checkpoints)?);
+    let mut copied_blobs = HashSet::new();
+
+    for line in BufReader::new(input).lines() {
+        let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
-            // Preserve any line we can't parse rather than silently dropping it.
-            kept_lines.push(line.to_string());
+
+        let mut checkpoint: Checkpoint = serde_json::from_str(&line)?;
+        checkpoint
+            .entries
+            .retain(|entry| path_matches_any(&entry.file, pathspecs));
+        if checkpoint.entries.is_empty() {
             continue;
-        };
-        if let Some(entries) = value.get_mut("entries").and_then(|e| e.as_array_mut()) {
-            entries.retain(|entry| {
-                entry
-                    .get("file")
-                    .and_then(|f| f.as_str())
-                    .is_some_and(|f| path_matches_any(f, pathspecs))
-            });
-            if entries.is_empty() {
-                continue;
-            }
         }
-        kept_lines.push(serde_json::to_string(&value)?);
+
+        checkpoint.diff.clear();
+        for entry in &checkpoint.entries {
+            copy_blob_sha(source_log, filtered_log, &entry.blob_sha, &mut copied_blobs)?;
+        }
+
+        serde_json::to_writer(&mut output, &checkpoint)?;
+        output.write_all(b"\n")?;
     }
 
-    let mut out = kept_lines.join("\n");
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    fs::write(path, out)?;
+    output.flush()?;
     Ok(())
 }
 
-/// Retain only INITIAL `files`/`file_blobs` whose path matches one of
-/// `pathspecs` (inverse of clean_working_log_for_stash, which drops them).
-fn filter_stash_initial_to_pathspecs(
-    path: &std::path::Path,
-    pathspecs: &[String],
+fn copy_blob_sha(
+    source_log: &PersistedWorkingLog,
+    target_log: &PersistedWorkingLog,
+    blob_sha: &str,
+    copied_blobs: &mut HashSet<String>,
 ) -> Result<(), GitAiError> {
-    use crate::git::repo_storage::InitialAttributions;
-
-    let Ok(content) = fs::read_to_string(path) else {
+    if blob_sha.is_empty() || !copied_blobs.insert(blob_sha.to_string()) {
         return Ok(());
-    };
-    let Ok(mut initial) = serde_json::from_str::<InitialAttributions>(&content) else {
-        return Ok(());
-    };
+    }
 
-    initial.files.retain(|p, _| path_matches_any(p, pathspecs));
-    initial
-        .file_blobs
-        .retain(|p, _| path_matches_any(p, pathspecs));
-
-    fs::write(path, serde_json::to_string(&initial)?)?;
+    let source = source_log.dir.join("blobs").join(blob_sha);
+    let target_blobs = target_log.dir.join("blobs");
+    fs::create_dir_all(&target_blobs)?;
+    fs::copy(source, target_blobs.join(blob_sha))?;
     Ok(())
+}
+
+fn trim_initial_metadata_to_referenced_authors(initial: &mut InitialAttributions) {
+    let human_sentinel = CheckpointKind::Human.to_str();
+    let mut referenced_authors = HashSet::new();
+    let mut referenced_sessions = HashSet::new();
+
+    for attrs in initial.files.values() {
+        for attr in attrs {
+            if attr.author_id == human_sentinel {
+                continue;
+            }
+
+            referenced_authors.insert(attr.author_id.clone());
+            if attr.author_id.starts_with("s_") {
+                let session_key = attr
+                    .author_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&attr.author_id)
+                    .to_string();
+                referenced_sessions.insert(session_key);
+            }
+        }
+    }
+
+    initial
+        .prompts
+        .retain(|author_id, _| referenced_authors.contains(author_id));
+    initial
+        .humans
+        .retain(|author_id, _| referenced_authors.contains(author_id));
+    initial
+        .sessions
+        .retain(|session_id, _| referenced_sessions.contains(session_id));
 }
 
 fn restore_stash_attributions(
@@ -255,41 +397,20 @@ fn restore_stash_attributions(
     stash_sha: &str,
     current_head: &str,
 ) -> Result<(), GitAiError> {
-    let dir = stashes_dir(repo);
-    let stash_log_dir = dir.join(format!("{}_worklog", stash_sha));
-
-    if !stash_log_dir.exists() {
+    let stash_log = working_log_for_dir(repo, stash_entry_dir(repo, stash_sha), current_head);
+    if !stash_log.initial_file.exists() {
         return Ok(());
     }
 
-    let dst_dir = repo.storage.working_logs.join(current_head);
-    fs::create_dir_all(&dst_dir)?;
-
-    if let Ok(entries) = fs::read_dir(&stash_log_dir) {
-        for entry in entries.flatten() {
-            let src_path = entry.path();
-            let file_name = entry.file_name();
-            let dst_path = dst_dir.join(&file_name);
-
-            if src_path.is_dir() {
-                let _ = copy_dir_recursive(&src_path, &dst_path);
-            } else if file_name == "checkpoints.jsonl" {
-                if let Ok(stash_content) = fs::read_to_string(&src_path) {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&dst_path)?;
-                    f.write_all(stash_content.as_bytes())?;
-                }
-            } else if file_name == "INITIAL" && dst_path.exists() {
-                merge_initial_files(&src_path, &dst_path)?;
-            } else {
-                let _ = fs::copy(&src_path, &dst_path);
-            }
-        }
+    let initial = stash_log.read_initial_attributions();
+    if initial.files.is_empty() {
+        return Ok(());
     }
 
+    let working_log = repo.storage.working_log_for_base_commit(current_head)?;
+    copy_initial_blobs(&stash_log, &working_log, &initial)?;
+    remove_checkpoint_entries_for_files(&working_log, initial.files.keys().cloned())?;
+    merge_initial_replacing_paths(&working_log, initial)?;
     Ok(())
 }
 
@@ -298,86 +419,35 @@ fn restore_stash_attributions_with_shift(
     stash_sha: &str,
     current_head: &str,
 ) -> Result<(), GitAiError> {
-    use crate::authorship::virtual_attribution::VirtualAttributions;
-
-    let dir = stashes_dir(repo);
-    let stash_log_dir = dir.join(format!("{}_worklog", stash_sha));
-
-    if !stash_log_dir.exists() {
+    let stash_log = working_log_for_dir(repo, stash_entry_dir(repo, stash_sha), current_head);
+    if !stash_log.initial_file.exists() {
         return Ok(());
     }
 
-    // Temporarily restore the stash worklog to a temp base_commit path so we can
-    // use VirtualAttributions to consolidate checkpoints into line attributions.
-    let temp_base = format!("_stash_restore_{}", stash_sha);
-    let temp_dir = repo.storage.working_logs.join(&temp_base);
-    let _ = copy_dir_recursive(&stash_log_dir, &temp_dir);
+    let initial = stash_log.read_initial_attributions();
+    if initial.files.is_empty() {
+        return Ok(());
+    }
 
-    // Build a snapshot of file contents from the blob storage in the stash worklog.
-    // This gives us the file content as it was at stash time.
-    let blobs_dir = temp_dir.join("blobs");
-    let working_log = repo.storage.working_log_for_base_commit(&temp_base)?;
-    let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
-
-    // For each file, find the last blob SHA from checkpoints to determine content at stash time
     let mut stash_file_contents: HashMap<String, String> = HashMap::new();
-    for checkpoint in &checkpoints {
-        for entry in &checkpoint.entries {
-            if !entry.blob_sha.is_empty() {
-                let blob_path = blobs_dir.join(&entry.blob_sha);
-                if let Ok(content) = fs::read_to_string(&blob_path) {
-                    stash_file_contents.insert(entry.file.clone(), content);
-                }
-            }
+    for file_path in initial.files.keys() {
+        if let Some(content) = stash_log.stored_initial_file_content_from(&initial, file_path) {
+            stash_file_contents.insert(file_path.clone(), content);
         }
     }
 
-    // Use from_working_log_snapshot with the stash content as the snapshot
-    let va_result = VirtualAttributions::from_working_log_snapshot(
-        repo.clone(),
-        temp_base.clone(),
-        None,
-        &stash_file_contents,
-    );
-
-    // Clean up temp dir
-    let _ = fs::remove_dir_all(&temp_dir);
-
-    let va = va_result?;
-
-    // Extract file attributions and reconstruct the applied content from immutable trees.
+    // Reconstruct the applied content from immutable trees.
     let mut files: HashMap<String, Vec<LineAttribution>> = HashMap::new();
-    let mut file_blobs: HashMap<String, String> = HashMap::new();
-    let mut prompts = HashMap::new();
-    let mut sessions = std::collections::BTreeMap::new();
-    let mut humans = std::collections::BTreeMap::new();
+    let mut file_contents: HashMap<String, String> = HashMap::new();
 
-    let authorship_log = va.to_authorship_log()?;
-
-    for (key, record) in &authorship_log.metadata.prompts {
-        prompts.insert(key.clone(), record.clone());
-    }
-    for (key, record) in &authorship_log.metadata.sessions {
-        sessions.insert(key.clone(), record.clone());
-    }
-    for (key, record) in &authorship_log.metadata.humans {
-        humans.insert(key.clone(), record.clone());
-    }
-
-    let applied_paths: Vec<String> = authorship_log
-        .attestations
-        .iter()
-        .map(|fa| fa.file_path.clone())
-        .collect();
+    let applied_paths: Vec<String> = initial.files.keys().cloned().collect();
     let applied_contents =
         reconstruct_stash_applied_contents(repo, stash_sha, current_head, &applied_paths)?;
 
-    for fa in &authorship_log.attestations {
-        let file_path = &fa.file_path;
+    for (file_path, attrs) in &initial.files {
         let stash_content = stash_file_contents
             .get(file_path)
             .cloned()
-            .or_else(|| va.get_file_content(file_path).cloned())
             .unwrap_or_default();
         let current_content = applied_contents.get(file_path).cloned().unwrap_or_default();
 
@@ -385,21 +455,9 @@ fn restore_stash_attributions_with_shift(
             continue;
         }
 
-        // Build line attributions from attestation entries
-        let mut attrs: Vec<LineAttribution> = Vec::new();
-        for entry in &fa.entries {
-            for range in &entry.line_ranges {
-                let (start, end) = match range {
-                    crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
-                    crate::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
-                };
-                attrs.push(LineAttribution::new(start, end, entry.hash.clone(), None));
-            }
-        }
-
         if stash_content == current_content {
-            files.insert(file_path.clone(), attrs);
-            file_blobs.insert(file_path.clone(), current_content);
+            files.insert(file_path.clone(), attrs.clone());
+            file_contents.insert(file_path.clone(), current_content);
             continue;
         }
 
@@ -423,22 +481,22 @@ fn restore_stash_attributions_with_shift(
         }
 
         let shifted: Vec<LineAttribution> = attrs
-            .into_iter()
+            .iter()
             .filter_map(|attr| {
                 let new_start = line_map.get(&attr.start_line).copied()?;
                 let new_end = line_map.get(&attr.end_line).copied()?;
                 Some(LineAttribution::new(
                     new_start,
                     new_end,
-                    attr.author_id,
-                    attr.overrode,
+                    attr.author_id.clone(),
+                    attr.overrode.clone(),
                 ))
             })
             .collect();
 
         if !shifted.is_empty() {
             files.insert(file_path.clone(), shifted);
-            file_blobs.insert(file_path.clone(), current_content);
+            file_contents.insert(file_path.clone(), current_content);
         }
     }
 
@@ -447,10 +505,133 @@ fn restore_stash_attributions_with_shift(
     }
 
     let working_log = repo.storage.working_log_for_base_commit(current_head)?;
-    working_log
-        .write_initial_attributions_with_contents(files, prompts, humans, file_blobs, sessions)?;
+    remove_checkpoint_entries_for_files(&working_log, files.keys().cloned())?;
+    merge_initial_replacing_paths_with_contents(
+        &working_log,
+        files,
+        initial.prompts,
+        initial.humans,
+        file_contents,
+        initial.sessions,
+    )?;
 
     Ok(())
+}
+
+fn copy_initial_blobs(
+    src_log: &PersistedWorkingLog,
+    dst_log: &PersistedWorkingLog,
+    initial: &InitialAttributions,
+) -> Result<(), GitAiError> {
+    if initial.file_blobs.is_empty() {
+        return Ok(());
+    }
+
+    let dst_blobs = dst_log.dir.join("blobs");
+    fs::create_dir_all(&dst_blobs)?;
+    for blob_sha in initial.file_blobs.values() {
+        let src = src_log.dir.join("blobs").join(blob_sha);
+        let dst = dst_blobs.join(blob_sha);
+        if src.exists() && !dst.exists() {
+            fs::copy(src, dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_checkpoint_entries_for_files<I>(
+    working_log: &PersistedWorkingLog,
+    files: I,
+) -> Result<(), GitAiError>
+where
+    I: IntoIterator<Item = String>,
+{
+    let files: HashSet<String> = files.into_iter().collect();
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let checkpoints = working_log.read_all_checkpoints()?;
+    if checkpoints.is_empty() {
+        return Ok(());
+    }
+
+    let filtered = checkpoints
+        .into_iter()
+        .map(|mut checkpoint| {
+            checkpoint
+                .entries
+                .retain(|entry| !files.contains(&entry.file));
+            checkpoint
+        })
+        .filter(|checkpoint| !checkpoint.entries.is_empty())
+        .collect::<Vec<_>>();
+    working_log.write_all_checkpoints(&filtered)?;
+    Ok(())
+}
+
+fn merge_initial_replacing_paths(
+    working_log: &PersistedWorkingLog,
+    mut source: InitialAttributions,
+) -> Result<(), GitAiError> {
+    if source.files.is_empty() {
+        return Ok(());
+    }
+
+    let restored_paths: HashSet<String> = source.files.keys().cloned().collect();
+    let mut target = working_log.read_initial_attributions();
+    for path in &restored_paths {
+        target.files.remove(path);
+        target.file_blobs.remove(path);
+    }
+
+    target.files.extend(source.files.drain());
+    target.file_blobs.extend(source.file_blobs.drain());
+    target.prompts.extend(source.prompts.drain());
+    target.humans.extend(source.humans);
+    target.sessions.extend(source.sessions);
+    working_log.write_initial(target)?;
+    Ok(())
+}
+
+fn merge_initial_replacing_paths_with_contents(
+    working_log: &PersistedWorkingLog,
+    files: HashMap<String, Vec<LineAttribution>>,
+    prompts: HashMap<String, PromptRecord>,
+    humans: BTreeMap<String, HumanRecord>,
+    file_contents: HashMap<String, String>,
+    sessions: BTreeMap<String, SessionRecord>,
+) -> Result<(), GitAiError> {
+    let files: HashMap<String, Vec<LineAttribution>> = files
+        .into_iter()
+        .filter(|(_, attrs)| !attrs.is_empty())
+        .collect();
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let mut file_blobs = HashMap::new();
+    for file_path in files.keys() {
+        let content = file_contents.get(file_path).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "stash restore missing file content snapshot for {}",
+                file_path
+            ))
+        })?;
+        let blob_sha = working_log.persist_file_version(content)?;
+        file_blobs.insert(file_path.clone(), blob_sha);
+    }
+
+    merge_initial_replacing_paths(
+        working_log,
+        InitialAttributions {
+            files,
+            prompts,
+            file_blobs,
+            humans,
+            sessions,
+        },
+    )
 }
 
 fn reconstruct_stash_applied_contents(
@@ -555,62 +736,6 @@ fn run_isolated_git(
         });
     }
     Ok(output)
-}
-
-fn merge_initial_files(
-    src_path: &std::path::Path,
-    dst_path: &std::path::Path,
-) -> Result<(), GitAiError> {
-    use crate::git::repo_storage::InitialAttributions;
-
-    let src_content = fs::read_to_string(src_path)?;
-    let dst_content = fs::read_to_string(dst_path)?;
-
-    let src_initial: InitialAttributions = match serde_json::from_str(&src_content) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-    let mut dst_initial: InitialAttributions = match serde_json::from_str(&dst_content) {
-        Ok(v) => v,
-        Err(_) => {
-            fs::copy(src_path, dst_path)?;
-            return Ok(());
-        }
-    };
-
-    for (path, attrs) in src_initial.files {
-        dst_initial.files.entry(path).or_insert(attrs);
-    }
-    for (path, blob) in src_initial.file_blobs {
-        dst_initial.file_blobs.entry(path).or_insert(blob);
-    }
-    for (key, record) in src_initial.prompts {
-        dst_initial.prompts.entry(key).or_insert(record);
-    }
-    for (key, record) in src_initial.humans {
-        dst_initial.humans.entry(key).or_insert(record);
-    }
-    for (key, record) in src_initial.sessions {
-        dst_initial.sessions.entry(key).or_insert(record);
-    }
-
-    let merged = serde_json::to_string(&dst_initial)?;
-    fs::write(dst_path, merged)?;
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), GitAiError> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)?.flatten() {
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

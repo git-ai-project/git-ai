@@ -62,25 +62,24 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
 /// Log a batch of metric events (via daemon telemetry worker).
 ///
 /// Events are batched into envelopes of up to 1000 events each.
-pub fn log_metrics(
-    #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
-) {
+pub fn log_metrics(events: Vec<MetricEvent>) {
     #[cfg(any(test, feature = "test-support"))]
-    return;
-
-    #[cfg(not(any(test, feature = "test-support")))]
     {
-        if events.is_empty() {
+        if std::env::var_os("GIT_AI_TEST_METRICS_DB_PATH").is_none() {
             return;
         }
+    }
 
-        // Split into chunks of MAX_METRICS_PER_ENVELOPE
-        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-            let envelope = crate::daemon::TelemetryEnvelope::Metrics {
-                events: chunk.to_vec(),
-            };
-            submit_telemetry_envelope(vec![envelope]);
-        }
+    if events.is_empty() {
+        return;
+    }
+
+    // Split into chunks of MAX_METRICS_PER_ENVELOPE
+    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let envelope = crate::daemon::TelemetryEnvelope::Metrics {
+            events: chunk.to_vec(),
+        };
+        submit_telemetry_envelope(vec![envelope]);
     }
 }
 
