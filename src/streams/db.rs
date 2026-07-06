@@ -149,8 +149,10 @@ pub struct StreamsDatabase {
 impl StreamsDatabase {
     /// Open or create the transcripts database at the given path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StreamError> {
-        let conn = Connection::open(path.as_ref()).map_err(|e| StreamError::Fatal {
-            message: format!("Failed to open database: {}", e),
+        let conn = crate::sqlite::open_with_memory_limits(path.as_ref()).map_err(|e| {
+            StreamError::Fatal {
+                message: format!("Failed to open database: {}", e),
+            }
         })?;
 
         // Enable WAL mode for better concurrency and crash resistance
@@ -163,10 +165,6 @@ impl StreamsDatabase {
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| StreamError::Fatal {
                 message: format!("Failed to set synchronous mode: {}", e),
-            })?;
-        conn.pragma_update(None, "cache_size", -2000)
-            .map_err(|e| StreamError::Fatal {
-                message: format!("Failed to set cache size: {}", e),
             })?;
         conn.pragma_update(None, "temp_store", "MEMORY")
             .map_err(|e| StreamError::Fatal {
@@ -997,7 +995,7 @@ mod tests {
 
         // Manually create a v3 database
         {
-            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
             // Run migrations 0..=2 (versions 1, 2, 3)
             for migration in &MIGRATIONS[..3] {
                 conn.execute_batch(migration).unwrap();
@@ -1068,7 +1066,7 @@ mod tests {
 
         // Create v3 DB with multiple sessions
         {
-            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
             for migration in &MIGRATIONS[..3] {
                 conn.execute_batch(migration).unwrap();
             }

@@ -8,8 +8,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+pub const MAX_CHECKPOINTS_JSONL_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[cfg(feature = "test-support")]
+const TEST_CHECKPOINTS_JSONL_MAX_BYTES_ENV: &str = "GIT_AI_TEST_CHECKPOINTS_JSONL_MAX_BYTES";
 
 /// Initial attributions data structure stored in the INITIAL file
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -329,7 +335,7 @@ impl PersistedWorkingLog {
         }
 
         // Clear checkpoints by truncating the JSONL file
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let checkpoints_file = self.checkpoints_file();
         fs::write(&checkpoints_file, "")?;
 
         // Clear INITIAL attributions file so stale attributions from a
@@ -339,6 +345,10 @@ impl PersistedWorkingLog {
         }
 
         Ok(())
+    }
+
+    pub fn checkpoints_file(&self) -> PathBuf {
+        self.dir.join("checkpoints.jsonl")
     }
 
     /* blob storage */
@@ -461,22 +471,47 @@ impl PersistedWorkingLog {
     }
 
     pub fn read_all_checkpoints(&self) -> Result<Vec<Checkpoint>, GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        self.read_all_checkpoints_with_size_limit(Self::checkpoints_file_size_limit_bytes())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn read_all_checkpoints_with_size_limit_for_test(
+        &self,
+        max_bytes: u64,
+    ) -> Result<Vec<Checkpoint>, GitAiError> {
+        self.read_all_checkpoints_with_size_limit(max_bytes)
+    }
+
+    pub fn ensure_checkpoints_file_size_limit(&self) -> Result<(), GitAiError> {
+        self.truncate_oversized_checkpoints_file(Self::checkpoints_file_size_limit_bytes())?;
+        Ok(())
+    }
+
+    fn read_all_checkpoints_with_size_limit(
+        &self,
+        max_bytes: u64,
+    ) -> Result<Vec<Checkpoint>, GitAiError> {
+        let checkpoints_file = self.checkpoints_file();
 
         if !checkpoints_file.exists() {
             return Ok(Vec::new());
         }
 
-        let content = fs::read_to_string(&checkpoints_file)?;
+        if self.truncate_oversized_checkpoints_file(max_bytes)? {
+            return Ok(Vec::new());
+        }
+
+        let input = fs::File::open(&checkpoints_file)?;
         let mut checkpoints = Vec::new();
 
         // Parse JSONL file - each line is a separate JSON object
-        for line in content.lines() {
+        for line in BufReader::new(input).lines() {
+            let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
 
-            let checkpoint: Checkpoint = serde_json::from_str(line)
+            let checkpoint: Checkpoint = serde_json::from_str(&line)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             if checkpoint.api_version != CHECKPOINT_API_VERSION {
@@ -537,6 +572,63 @@ impl PersistedWorkingLog {
         Ok(migrated_checkpoints)
     }
 
+    fn checkpoints_file_size_limit_bytes() -> u64 {
+        #[cfg(feature = "test-support")]
+        if let Ok(raw) = std::env::var(TEST_CHECKPOINTS_JSONL_MAX_BYTES_ENV)
+            && let Ok(value) = raw.parse::<u64>()
+            && value > 0
+        {
+            return value;
+        }
+
+        MAX_CHECKPOINTS_JSONL_BYTES
+    }
+
+    fn truncate_oversized_checkpoints_file(&self, max_bytes: u64) -> Result<bool, GitAiError> {
+        let checkpoints_file = self.checkpoints_file();
+        let metadata = match fs::metadata(&checkpoints_file) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let size_bytes = metadata.len();
+        if size_bytes <= max_bytes {
+            return Ok(false);
+        }
+
+        let message = format!(
+            "checkpoints.jsonl exceeded maximum size: {} bytes > {} bytes; deleting and recreating {}",
+            size_bytes,
+            max_bytes,
+            checkpoints_file.display()
+        );
+        tracing::error!(
+            base_commit = %self.base_commit,
+            path = %checkpoints_file.display(),
+            size_bytes,
+            max_bytes,
+            "checkpoints.jsonl exceeded maximum size; deleting and recreating empty file"
+        );
+        crate::observability::log_error(
+            &GitAiError::Generic(message),
+            Some(serde_json::json!({
+                "event": "checkpoints_jsonl_oversized_reset",
+                "base_commit": self.base_commit,
+                "path": checkpoints_file.to_string_lossy(),
+                "size_bytes": size_bytes,
+                "max_bytes": max_bytes,
+            })),
+        );
+
+        match fs::remove_file(&checkpoints_file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::File::create(&checkpoints_file)?;
+        Ok(true)
+    }
+
     /// Remove char-level attributions from all but the most recent checkpoint per file.
     /// This reduces storage size while preserving precision for the entries that matter.
     /// Only the most recent checkpoint entry for each file is used when computing new entries.
@@ -570,23 +662,15 @@ impl PersistedWorkingLog {
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
     pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let checkpoints_file = self.checkpoints_file();
+        let mut output = BufWriter::new(fs::File::create(&checkpoints_file)?);
 
-        // Serialize all checkpoints to JSONL
-        let mut lines = Vec::new();
         for checkpoint in checkpoints {
-            let json_line = serde_json::to_string(checkpoint)?;
-            lines.push(json_line);
+            serde_json::to_writer(&mut output, checkpoint)?;
+            output.write_all(b"\n")?;
         }
 
-        // Write all lines to file
-        let content = lines.join("\n");
-        if !content.is_empty() {
-            fs::write(&checkpoints_file, format!("{}\n", content))?;
-        } else {
-            fs::write(&checkpoints_file, "")?;
-        }
-
+        output.flush()?;
         Ok(())
     }
 

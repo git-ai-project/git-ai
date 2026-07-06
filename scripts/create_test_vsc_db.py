@@ -43,6 +43,8 @@ def create_test_database(source_db: str, target_db: str, data_filters: dict):
     # Connect to both databases
     source_conn = sqlite3.connect(source_db)
     target_conn = sqlite3.connect(target_db)
+    for conn in (source_conn, target_conn):
+        conn.execute("PRAGMA cache_size = -2000")
 
     source_cursor = source_conn.cursor()
     target_cursor = target_conn.cursor()

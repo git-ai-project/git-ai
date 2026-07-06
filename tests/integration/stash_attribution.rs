@@ -1,6 +1,70 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::attribution_tracker::LineAttribution;
+use git_ai::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
+use git_ai::authorship::working_log::AgentId;
+use git_ai::git::repo_storage::InitialAttributions;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::path::PathBuf;
+
+fn stash_v2_dir(repo: &TestRepo) -> PathBuf {
+    repo.path().join(".git").join("ai").join("stashes_v2")
+}
+
+fn single_stash_v2_initial(repo: &TestRepo) -> InitialAttributions {
+    let stashes = stash_v2_dir(repo);
+    let stash_dir = fs::read_dir(&stashes)
+        .expect("stashes_v2 dir exists")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("a compact stash dir should exist");
+    let initial = fs::read_to_string(stash_dir.join("INITIAL")).expect("stash INITIAL exists");
+    serde_json::from_str(&initial).expect("stash INITIAL is valid")
+}
+
+fn current_checkpoint_files(repo: &TestRepo) -> BTreeSet<String> {
+    repo.current_working_logs()
+        .read_all_checkpoints()
+        .expect("read current checkpoints")
+        .into_iter()
+        .flat_map(|checkpoint| checkpoint.entries.into_iter().map(|entry| entry.file))
+        .collect()
+}
+
+fn joke_lines(file_idx: usize, count: usize) -> Vec<String> {
+    (0..count)
+        .map(|line_idx| format!("joke file {file_idx} line {line_idx}: boilerplate punchline"))
+        .collect()
+}
+
+fn lines_to_content(lines: &[String]) -> String {
+    let mut content = lines.join("\n");
+    content.push('\n');
+    content
+}
+
+fn test_agent(id: &str) -> AgentId {
+    AgentId {
+        tool: "test".to_string(),
+        id: id.to_string(),
+        model: "test-model".to_string(),
+    }
+}
+
+fn test_prompt(id: &str) -> PromptRecord {
+    PromptRecord {
+        agent_id: test_agent(id),
+        human_author: None,
+        messages_url: None,
+        total_additions: 0,
+        total_deletions: 0,
+        accepted_lines: 0,
+        overriden_lines: 0,
+        custom_attributes: None,
+    }
+}
 
 #[test]
 fn test_stash_pop_with_ai_attribution() {
@@ -1219,11 +1283,281 @@ fn test_stash_apply_shift_uses_final_commit_tree_after_later_edit() {
     ]);
 }
 
+#[test]
+fn test_repeated_stash_pop_does_not_duplicate_checkpoints() {
+    let repo = TestRepo::new();
+    for file_idx in 0..10 {
+        fs::write(repo.path().join(format!("jokes_{file_idx}.txt")), "base\n").unwrap();
+    }
+    repo.stage_all_and_commit("initial jokes").unwrap();
+
+    let expected_first_file = joke_lines(0, 300);
+    for file_idx in 0..10 {
+        let lines = joke_lines(file_idx, 300);
+        fs::write(
+            repo.path().join(format!("jokes_{file_idx}.txt")),
+            lines_to_content(&lines),
+        )
+        .unwrap();
+    }
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    let initial_working_log = repo.current_working_logs();
+    let initial_checkpoint_count = initial_working_log
+        .read_all_checkpoints()
+        .expect("read checkpoints before stash")
+        .len();
+    let initial_size = fs::metadata(initial_working_log.dir.join("checkpoints.jsonl"))
+        .expect("checkpoints file exists before stash")
+        .len();
+    assert!(
+        initial_checkpoint_count > 0,
+        "test setup should create at least one checkpoint"
+    );
+
+    for round in 0..5 {
+        repo.git(&["stash", "push", "-m", &format!("round {round}")])
+            .expect("stash push should succeed");
+        repo.git(&["stash", "pop"])
+            .expect("stash pop should succeed");
+    }
+
+    let final_working_log = repo.current_working_logs();
+    let final_checkpoints = final_working_log
+        .read_all_checkpoints()
+        .expect("read checkpoints after repeated stash");
+    let final_size = fs::metadata(final_working_log.dir.join("checkpoints.jsonl"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    assert!(
+        final_checkpoints.len() <= initial_checkpoint_count,
+        "stash/pop should not duplicate checkpoint history: initial={}, final={}",
+        initial_checkpoint_count,
+        final_checkpoints.len()
+    );
+    assert!(
+        final_size <= initial_size.max(1),
+        "checkpoints.jsonl should not grow across stash/pop cycles: initial={} final={}",
+        initial_size,
+        final_size
+    );
+
+    repo.stage_all_and_commit("commit repeated stash result")
+        .expect("commit should succeed");
+    let mut file = repo.filename("jokes_0.txt");
+    file.assert_committed_lines(
+        expected_first_file
+            .into_iter()
+            .map(|line| line.ai())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn test_partial_stash_truncates_oversized_live_checkpoints_before_filtering() {
+    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_CHECKPOINTS_JSONL_MAX_BYTES", "64")]);
+    fs::write(repo.path().join("a.txt"), "base a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "base b\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(repo.path().join("a.txt"), "base a\nai a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "base b\nai b\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    let working_log = repo.current_working_logs();
+    let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
+    let checkpoint_line = fs::read_to_string(&checkpoints_file)
+        .expect("checkpoint file exists")
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("checkpoint fixture should contain one line")
+        .to_string();
+    fs::write(
+        &checkpoints_file,
+        (0..8)
+            .map(|_| checkpoint_line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .expect("inflate checkpoint file above test limit");
+    assert!(
+        fs::metadata(&checkpoints_file).unwrap().len() > 64,
+        "test setup should exceed the daemon's test checkpoint size limit"
+    );
+
+    repo.git(&["stash", "push", "--", "a.txt"])
+        .expect("partial stash should survive oversized checkpoints.jsonl");
+    repo.sync_daemon_force();
+
+    let reset_size = fs::metadata(&checkpoints_file)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    assert_eq!(
+        reset_size, 0,
+        "oversized live checkpoints file should be reset before path filtering"
+    );
+    assert!(
+        repo.current_working_logs()
+            .read_all_checkpoints()
+            .expect("read reset checkpoints")
+            .is_empty(),
+        "oversized checkpoint history should be discarded"
+    );
+
+    repo.git(&["stash", "pop"])
+        .expect("stash pop after oversized checkpoint recovery should succeed");
+    repo.stage_all_and_commit("commit recovered stash").unwrap();
+
+    let mut a = repo.filename("a.txt");
+    a.assert_committed_lines(crate::lines![
+        "base a".unattributed_human(),
+        "ai a".unattributed_human(),
+    ]);
+    let mut b = repo.filename("b.txt");
+    b.assert_committed_lines(crate::lines![
+        "base b".unattributed_human(),
+        "ai b".unattributed_human(),
+    ]);
+}
+
+#[test]
+fn test_stash_operation_deletes_legacy_stashes_dir() {
+    let repo = TestRepo::new();
+    fs::write(repo.path().join("example.txt"), "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(repo.path().join("example.txt"), "base\nai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
+
+    let legacy_dir = repo.path().join(".git").join("ai").join("stashes");
+    fs::create_dir_all(legacy_dir.join("old_stash_worklog")).unwrap();
+    fs::write(
+        legacy_dir
+            .join("old_stash_worklog")
+            .join("checkpoints.jsonl"),
+        "legacy checkpoint data\n".repeat(1024),
+    )
+    .unwrap();
+
+    repo.git(&["stash", "push", "-m", "legacy cleanup"])
+        .expect("stash push should succeed");
+    repo.sync_daemon_force();
+
+    assert!(
+        !legacy_dir.exists(),
+        "legacy .git/ai/stashes must be deleted instead of read or appended"
+    );
+    assert!(
+        stash_v2_dir(&repo).exists(),
+        "new stash data should be stored under stashes_v2"
+    );
+}
+
+#[test]
+fn test_partial_stash_trims_unstashed_initial_metadata() {
+    let repo = TestRepo::new();
+    fs::write(repo.path().join("a.txt"), "base a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "base b\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let a_content = "a ai\n";
+    let b_content = "b prompt\nb human\nb session\n";
+    fs::write(repo.path().join("a.txt"), a_content).unwrap();
+    fs::write(repo.path().join("b.txt"), b_content).unwrap();
+
+    let mut files = HashMap::new();
+    files.insert(
+        "a.txt".to_string(),
+        vec![LineAttribution::new(1, 1, "prompt_a".to_string(), None)],
+    );
+    files.insert(
+        "b.txt".to_string(),
+        vec![
+            LineAttribution::new(1, 1, "prompt_b".to_string(), None),
+            LineAttribution::new(2, 2, "h_b".to_string(), None),
+            LineAttribution::new(3, 3, "s_b::t_1".to_string(), None),
+        ],
+    );
+
+    let mut prompts = HashMap::new();
+    prompts.insert("prompt_a".to_string(), test_prompt("prompt-a"));
+    prompts.insert("prompt_b".to_string(), test_prompt("prompt-b"));
+
+    let mut humans = BTreeMap::new();
+    humans.insert(
+        "h_b".to_string(),
+        HumanRecord {
+            author: "B Human <b@example.com>".to_string(),
+        },
+    );
+
+    let mut file_contents = HashMap::new();
+    file_contents.insert("a.txt".to_string(), a_content.to_string());
+    file_contents.insert("b.txt".to_string(), b_content.to_string());
+
+    let mut sessions = BTreeMap::new();
+    sessions.insert(
+        "s_b".to_string(),
+        SessionRecord {
+            agent_id: test_agent("session-b"),
+            human_author: None,
+            custom_attributes: None,
+        },
+    );
+
+    repo.current_working_logs()
+        .write_initial_attributions_with_contents(files, prompts, humans, file_contents, sessions)
+        .unwrap();
+
+    repo.git(&["stash", "push", "--", "a.txt"]).unwrap();
+    repo.sync_daemon_force();
+
+    let stash_initial = single_stash_v2_initial(&repo);
+    assert_eq!(
+        stash_initial.files.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from(["a.txt".to_string()])
+    );
+    assert!(
+        stash_initial.prompts.contains_key("prompt_a"),
+        "stashed file prompt metadata should be retained"
+    );
+    assert!(
+        !stash_initial.prompts.contains_key("prompt_b"),
+        "unstashed file prompt metadata should be dropped"
+    );
+    assert!(
+        stash_initial.humans.is_empty(),
+        "unstashed known-human metadata should be dropped"
+    );
+    assert!(
+        stash_initial.sessions.is_empty(),
+        "unstashed session metadata should be dropped"
+    );
+
+    let live_initial = repo.current_working_logs().read_initial_attributions();
+    assert!(
+        !live_initial.prompts.contains_key("prompt_a"),
+        "live INITIAL should not retain metadata for the stashed file"
+    );
+    assert!(
+        live_initial.prompts.contains_key("prompt_b"),
+        "live INITIAL should retain metadata for the unstashed file"
+    );
+    assert!(
+        live_initial.humans.contains_key("h_b"),
+        "live INITIAL should retain unstashed known-human metadata"
+    );
+    assert!(
+        live_initial.sessions.contains_key("s_b"),
+        "live INITIAL should retain unstashed session metadata"
+    );
+}
+
 /// Regression (#5): `git stash push -- <pathspec>` must only save attribution
-/// for the stashed paths. save_stash_attributions used to copy the entire
-/// working log into the stash, so the stash carried checkpoints for files that
-/// were never stashed (here b.txt). On a later cross-branch/shifted pop this
-/// resurrects attribution for an unstashed file.
+/// for the stashed paths and leave unstashed attribution live.
 #[test]
 fn test_stash_push_pathspec_excludes_unstashed_file_from_stash_log() {
     let repo = TestRepo::new();
@@ -1240,33 +1574,8 @@ fn test_stash_push_pathspec_excludes_unstashed_file_from_stash_log() {
     repo.git(&["stash", "push", "--", "a.txt"]).unwrap();
     repo.sync_daemon_force();
 
-    // Collect every file referenced by the stash worklog's checkpoints.jsonl.
-    let stashes = repo.path().join(".git").join("ai").join("stashes");
-    let mut stashed_files = std::collections::BTreeSet::new();
-    let worklog_dir = std::fs::read_dir(&stashes)
-        .expect("stashes dir exists")
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.ends_with("_worklog"))
-        })
-        .expect("a *_worklog dir should exist after stash");
-    let checkpoints = worklog_dir.join("checkpoints.jsonl");
-    if let Ok(content) = std::fs::read_to_string(&checkpoints) {
-        for line in content.lines().filter(|l| !l.trim().is_empty()) {
-            let v: serde_json::Value = serde_json::from_str(line).expect("valid checkpoint json");
-            if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
-                for entry in entries {
-                    if let Some(f) = entry.get("file").and_then(|f| f.as_str()) {
-                        stashed_files.insert(f.to_string());
-                    }
-                }
-            }
-        }
-    }
+    let stashed_files: BTreeSet<_> = single_stash_v2_initial(&repo).files.into_keys().collect();
+    let live_checkpoint_files = current_checkpoint_files(&repo);
 
     assert!(
         stashed_files.contains("a.txt"),
@@ -1278,6 +1587,21 @@ fn test_stash_push_pathspec_excludes_unstashed_file_from_stash_log() {
         "stash must NOT carry the unstashed file b.txt, got {:?}",
         stashed_files
     );
+    assert!(
+        !live_checkpoint_files.contains("a.txt"),
+        "live checkpoints must not retain stashed file a.txt, got {:?}",
+        live_checkpoint_files
+    );
+    assert!(
+        live_checkpoint_files.contains("b.txt"),
+        "live checkpoints must retain unstashed file b.txt, got {:?}",
+        live_checkpoint_files
+    );
+
+    repo.git(&["stash", "pop"]).unwrap();
+    repo.stage_all_and_commit("apply partial stash").unwrap();
+    a.assert_committed_lines(vec!["a line 1".ai(), "a line 2".ai()]);
+    b.assert_committed_lines(vec!["b line 1".ai(), "b line 2".ai()]);
 }
 
 crate::reuse_tests_in_worktree!(

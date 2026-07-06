@@ -29,6 +29,9 @@ pub mod committed_pos {
     pub const COMMIT_BODY: usize = 12; // String (null if empty)
     pub const AUTHORSHIP_NOTE: usize = 13; // String (full serialized authorship note)
     pub const HUNKS: usize = 14; // String (JSON array of DiffJsonHunk)
+    pub const AUTHOR_TS: usize = 15; // u64 (git author timestamp, %at)
+    pub const COMMIT_TS: usize = 16; // u64 (git committer timestamp, %ct)
+    pub const PATCH_ID: usize = 17; // String (git patch-id --stable)
 }
 
 /// Values for Event ID 1: committed
@@ -57,6 +60,9 @@ pub mod committed_pos {
 /// | 12 | commit_body | String |
 /// | 13 | authorship_note | String |
 /// | 14 | hunks | String |
+/// | 15 | author_ts | u64 |
+/// | 16 | commit_ts | u64 |
+/// | 17 | patch_id | String |
 #[derive(Debug, Clone, Default)]
 pub struct CommittedValues {
     // Scalar fields
@@ -75,6 +81,9 @@ pub struct CommittedValues {
     pub commit_body: PosField<String>,
     pub authorship_note: PosField<String>,
     pub hunks: PosField<String>,
+    pub author_ts: PosField<u64>,
+    pub commit_ts: PosField<u64>,
+    pub patch_id: PosField<String>,
 }
 
 impl CommittedValues {
@@ -203,6 +212,36 @@ impl CommittedValues {
         self.hunks = Some(None);
         self
     }
+
+    pub fn author_ts(mut self, value: u64) -> Self {
+        self.author_ts = Some(Some(value));
+        self
+    }
+
+    pub fn author_ts_null(mut self) -> Self {
+        self.author_ts = Some(None);
+        self
+    }
+
+    pub fn commit_ts(mut self, value: u64) -> Self {
+        self.commit_ts = Some(Some(value));
+        self
+    }
+
+    pub fn commit_ts_null(mut self) -> Self {
+        self.commit_ts = Some(None);
+        self
+    }
+
+    pub fn patch_id(mut self, value: impl Into<String>) -> Self {
+        self.patch_id = Some(Some(value.into()));
+        self
+    }
+
+    pub fn patch_id_null(mut self) -> Self {
+        self.patch_id = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CommittedValues {
@@ -265,6 +304,21 @@ impl PosEncoded for CommittedValues {
             string_to_json(&self.authorship_note),
         );
         sparse_set(&mut map, committed_pos::HUNKS, string_to_json(&self.hunks));
+        sparse_set(
+            &mut map,
+            committed_pos::AUTHOR_TS,
+            u64_to_json(&self.author_ts),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::COMMIT_TS,
+            u64_to_json(&self.commit_ts),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::PATCH_ID,
+            string_to_json(&self.patch_id),
+        );
 
         map
     }
@@ -287,6 +341,9 @@ impl PosEncoded for CommittedValues {
             commit_body: sparse_get_string(arr, committed_pos::COMMIT_BODY),
             authorship_note: sparse_get_string(arr, committed_pos::AUTHORSHIP_NOTE),
             hunks: sparse_get_string(arr, committed_pos::HUNKS),
+            author_ts: sparse_get_u64(arr, committed_pos::AUTHOR_TS),
+            commit_ts: sparse_get_u64(arr, committed_pos::COMMIT_TS),
+            patch_id: sparse_get_string(arr, committed_pos::PATCH_ID),
         }
     }
 }
@@ -1049,6 +1106,28 @@ mod tests {
     }
 
     #[test]
+    fn test_committed_values_with_commit_timestamps_and_patch_id() {
+        use super::PosEncoded;
+
+        let values = CommittedValues::new()
+            .author_ts(1_704_067_200)
+            .commit_ts(1_704_067_260)
+            .patch_id("abc123");
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(
+            sparse.get("15"),
+            Some(&Value::Number(1_704_067_200u64.into()))
+        );
+        assert_eq!(
+            sparse.get("16"),
+            Some(&Value::Number(1_704_067_260u64.into()))
+        );
+        assert_eq!(sparse.get("17"), Some(&Value::String("abc123".to_string())));
+    }
+
+    #[test]
     fn test_committed_values_from_sparse() {
         use super::PosEncoded;
 
@@ -1171,7 +1250,10 @@ mod tests {
             .human_additions(25)
             .first_checkpoint_ts(1700000000)
             .commit_subject("Test commit")
-            .commit_body_null();
+            .commit_body_null()
+            .author_ts(1700000100)
+            .commit_ts(1700000200)
+            .patch_id("stable-patch-id");
 
         let sparse = PosEncoded::to_sparse(&original);
         let restored = <CommittedValues as PosEncoded>::from_sparse(&sparse);
@@ -1183,6 +1265,9 @@ mod tests {
             Some(Some("Test commit".to_string()))
         );
         assert_eq!(restored.commit_body, Some(None));
+        assert_eq!(restored.author_ts, Some(Some(1700000100)));
+        assert_eq!(restored.commit_ts, Some(Some(1700000200)));
+        assert_eq!(restored.patch_id, Some(Some("stable-patch-id".to_string())));
     }
 
     #[test]

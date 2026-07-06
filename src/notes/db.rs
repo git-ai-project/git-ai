@@ -70,7 +70,8 @@ impl NotesDatabase {
                 eprintln!("[Error] Failed to initialize notes database: {}", e);
                 // Fall back to a temp file so the process can continue running.
                 let temp_path = std::env::temp_dir().join("git-ai-notes-db-failed");
-                let conn = Connection::open(&temp_path).expect("Failed to create temp DB");
+                let conn = crate::sqlite::open_with_memory_limits(&temp_path)
+                    .expect("Failed to create temp DB");
                 Mutex::new(NotesDatabase { conn })
             }
         });
@@ -83,12 +84,11 @@ impl NotesDatabase {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let conn = crate::sqlite::open_with_memory_limits(path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -105,12 +105,11 @@ impl NotesDatabase {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(&db_path)?;
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -581,7 +580,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test-notes.db");
 
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
