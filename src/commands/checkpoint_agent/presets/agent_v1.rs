@@ -167,9 +167,10 @@ impl AgentPreset for AgentV1Preset {
                     model,
                     conversation_id,
                     trace_id,
-                    command,
+                    command.clone(),
                 ),
                 tool_use_id: tool_use_id.unwrap_or_else(|| "shell".to_string()),
+                command,
             }),
             AgentV1Payload::PostShellCommand {
                 repo_working_dir,
@@ -185,9 +186,10 @@ impl AgentPreset for AgentV1Preset {
                     model,
                     conversation_id,
                     trace_id,
-                    command,
+                    command.clone(),
                 ),
                 tool_use_id: tool_use_id.unwrap_or_else(|| "shell".to_string()),
+                command,
                 stream_source: None,
             }),
         };
@@ -308,6 +310,10 @@ mod tests {
                     e.context.metadata.get("command").map(String::as_str),
                     Some("printf 'generated\\n' > output.txt")
                 );
+                assert_eq!(
+                    e.command.as_deref(),
+                    Some("printf 'generated\\n' > output.txt")
+                );
             }
             _ => panic!("Expected PreBashCall"),
         }
@@ -339,6 +345,10 @@ mod tests {
                     e.context.metadata.get("command").map(String::as_str),
                     Some("printf 'generated\\n' > output.txt")
                 );
+                assert_eq!(
+                    e.command.as_deref(),
+                    Some("printf 'generated\\n' > output.txt")
+                );
                 assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostBashCall"),
@@ -360,6 +370,7 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.tool_use_id, "shell");
                 assert!(e.context.metadata.is_empty());
+                assert!(e.command.is_none());
             }
             _ => panic!("Expected PreBashCall"),
         }

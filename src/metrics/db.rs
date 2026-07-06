@@ -151,17 +151,13 @@ impl MetricsDatabase {
 
     /// Get or initialize the global database
     pub fn global() -> Result<&'static Mutex<MetricsDatabase>, GitAiError> {
-        let db_mutex = METRICS_DB.get_or_init(|| {
-            match Self::new() {
-                Ok(db) => Mutex::new(db),
-                Err(e) => {
-                    eprintln!("[Error] Failed to initialize metrics database: {}", e);
-                    // Create a dummy connection that will fail on any operation
-                    let temp_path = std::env::temp_dir().join("git-ai-metrics-db-failed");
-                    let conn = crate::sqlite::open_with_memory_limits(&temp_path)
-                        .expect("Failed to create temp DB");
-                    Mutex::new(MetricsDatabase { conn })
-                }
+        let db_mutex = METRICS_DB.get_or_init(|| match Self::new() {
+            Ok(db) => Mutex::new(db),
+            Err(e) => {
+                eprintln!("[Error] Failed to initialize metrics database: {}", e);
+                Mutex::new(
+                    Self::new_fallback().expect("Failed to create fallback metrics database"),
+                )
             }
         });
 
@@ -190,6 +186,26 @@ impl MetricsDatabase {
         let mut db = Self { conn };
         db.initialize_schema()?;
 
+        Ok(db)
+    }
+
+    fn new_fallback() -> Result<Self, GitAiError> {
+        let temp_path = std::env::temp_dir().join("git-ai-metrics-db-failed");
+        Self::new_fallback_at_path(&temp_path)
+    }
+
+    fn new_fallback_at_path(path: &std::path::Path) -> Result<Self, GitAiError> {
+        let conn = crate::sqlite::open_with_memory_limits(path)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA temp_store=MEMORY;
+            "#,
+        )?;
+
+        let mut db = Self { conn };
+        db.initialize_schema()?;
         Ok(db)
     }
 
@@ -1668,6 +1684,21 @@ mod tests {
         ] {
             assert_metric_index_exists(&db, index);
         }
+    }
+
+    #[test]
+    fn test_fallback_database_initializes_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("fallback-metrics.db");
+        let mut db = MetricsDatabase::new_fallback_at_path(&db_path).unwrap();
+
+        db.insert_events(&[event_json(days_ago(1))]).unwrap();
+
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

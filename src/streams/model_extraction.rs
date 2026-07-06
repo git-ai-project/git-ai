@@ -378,7 +378,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let conn = rusqlite::Connection::open(path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(path).unwrap();
         conn.execute_batch(
             "CREATE TABLE spans (
                 span_id TEXT PRIMARY KEY,

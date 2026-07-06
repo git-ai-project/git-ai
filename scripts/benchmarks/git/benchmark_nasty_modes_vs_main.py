@@ -592,7 +592,14 @@ def main() -> int:
             prepare_main_worktree(repo_root, args.main_ref, main_worktree)
             created_main_worktree = True
             print("Building main branch binary...")
-            main_bin = build_release_binary(main_worktree, targets_dir / "main")
+            try:
+                main_bin = build_release_binary(main_worktree, targets_dir / "main")
+            except BenchmarkError as err:
+                print(
+                    "::warning::Skipping nasty benchmark because the main baseline failed to build."
+                )
+                print(f"Baseline build error: {err}")
+                return 0
             main_sha = git_output(main_worktree, ["rev-parse", "HEAD"])
 
         print("Cloning seed repo snapshot...")
