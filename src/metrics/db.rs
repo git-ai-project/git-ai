@@ -151,16 +151,13 @@ impl MetricsDatabase {
 
     /// Get or initialize the global database
     pub fn global() -> Result<&'static Mutex<MetricsDatabase>, GitAiError> {
-        let db_mutex = METRICS_DB.get_or_init(|| {
-            match Self::new() {
-                Ok(db) => Mutex::new(db),
-                Err(e) => {
-                    eprintln!("[Error] Failed to initialize metrics database: {}", e);
-                    // Create a dummy connection that will fail on any operation
-                    let temp_path = std::env::temp_dir().join("git-ai-metrics-db-failed");
-                    let conn = Connection::open(&temp_path).expect("Failed to create temp DB");
-                    Mutex::new(MetricsDatabase { conn })
-                }
+        let db_mutex = METRICS_DB.get_or_init(|| match Self::new() {
+            Ok(db) => Mutex::new(db),
+            Err(e) => {
+                eprintln!("[Error] Failed to initialize metrics database: {}", e);
+                Mutex::new(
+                    Self::new_fallback().expect("Failed to create fallback metrics database"),
+                )
             }
         });
 
@@ -177,12 +174,11 @@ impl MetricsDatabase {
         }
 
         // Open with WAL mode and performance optimizations
-        let conn = Connection::open(&db_path)?;
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -193,9 +189,31 @@ impl MetricsDatabase {
         Ok(db)
     }
 
+    fn new_fallback() -> Result<Self, GitAiError> {
+        let temp_path = std::env::temp_dir().join("git-ai-metrics-db-failed");
+        Self::new_fallback_at_path(&temp_path)
+    }
+
+    fn new_fallback_at_path(path: &std::path::Path) -> Result<Self, GitAiError> {
+        let conn = crate::sqlite::open_with_memory_limits(path)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA temp_store=MEMORY;
+            "#,
+        )?;
+
+        let mut db = Self { conn };
+        db.initialize_schema()?;
+        Ok(db)
+    }
+
     #[cfg(test)]
-    pub(crate) fn new_in_memory_for_tests() -> Result<Self, GitAiError> {
-        let conn = Connection::open_in_memory()?;
+    pub(crate) fn new_temp_for_tests() -> Result<(Self, tempfile::TempDir), GitAiError> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let db_path = temp_dir.path().join("metrics.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
@@ -206,7 +224,7 @@ impl MetricsDatabase {
         let mut db = Self { conn };
         db.initialize_schema()?;
 
-        Ok(db)
+        Ok((db, temp_dir))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -214,12 +232,11 @@ impl MetricsDatabase {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let conn = crate::sqlite::open_with_memory_limits(path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -1481,7 +1498,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test-metrics.db");
 
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
 
         let mut db = MetricsDatabase { conn };
@@ -1670,10 +1687,25 @@ mod tests {
     }
 
     #[test]
+    fn test_fallback_database_initializes_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("fallback-metrics.db");
+        let mut db = MetricsDatabase::new_fallback_at_path(&db_path).unwrap();
+
+        db.insert_events(&[event_json(days_ago(1))]).unwrap();
+
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn test_initialize_schema_handles_preexisting_agent_usage_table() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("concurrent-init.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         // Simulate a partial migration state from a concurrent process:
         // schema version indicates agent_usage_throttle is missing, but it already exists.
@@ -1715,7 +1747,7 @@ mod tests {
     fn test_migrates_version_2_to_row_level_retry_schema() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v2.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
@@ -1756,7 +1788,7 @@ mod tests {
     fn test_migrates_version_2_with_preexisting_retry_columns() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v2-partial-retry.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
@@ -1820,7 +1852,7 @@ mod tests {
     fn test_migrates_version_3_to_event_metadata_schema_without_sync_backfill() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("v3.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (

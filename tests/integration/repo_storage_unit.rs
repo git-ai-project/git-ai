@@ -209,6 +209,35 @@ fn test_read_all_checkpoints_filters_incompatible_versions() {
     assert_eq!(checkpoints[0].api_version, CHECKPOINT_API_VERSION);
 }
 
+#[test]
+fn test_oversized_checkpoints_file_is_truncated_before_read() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
+
+    fs::write(&checkpoints_file, "this is intentionally not valid json\n")
+        .expect("write oversized checkpoints fixture");
+
+    let checkpoints = working_log
+        .read_all_checkpoints_with_size_limit_for_test(8)
+        .expect("oversized checkpoint file should be reset before parsing");
+
+    assert!(
+        checkpoints.is_empty(),
+        "oversized checkpoints file should read back as empty"
+    );
+    assert_eq!(
+        fs::metadata(&checkpoints_file)
+            .expect("empty checkpoints file should remain")
+            .len(),
+        0,
+        "oversized checkpoints file should be truncated to an empty file"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6. test_persisted_working_log_reset
 // ---------------------------------------------------------------------------

@@ -1518,9 +1518,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_uploads_from_db_and_marks_delivered() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         let ts1 = now_ts().saturating_sub(2);
         let ts2 = now_ts().saturating_sub(1);
         db.borrow_mut()
@@ -1584,9 +1583,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_marks_invalid_rows_delivered() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         let ts = now_ts();
         db.borrow_mut()
             .insert_events(&["not-json".to_string(), event_json(ts)])
@@ -1649,9 +1647,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_marks_partial_server_errors_undeliverable() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         let ts1 = now_ts().saturating_sub(3);
         let ts2 = now_ts().saturating_sub(2);
         let ts3 = now_ts().saturating_sub(1);
@@ -1728,9 +1725,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_marks_all_server_errors_undeliverable() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         let ts1 = now_ts().saturating_sub(2);
         let ts2 = now_ts().saturating_sub(1);
         db.borrow_mut()
@@ -1804,9 +1800,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_retries_batch_for_invalid_server_error_index() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         db.borrow_mut()
             .insert_events(&[event_json(now_ts().saturating_sub(1))])
             .unwrap();
@@ -1858,9 +1853,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_keeps_rows_pending_after_upload_failure() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         let ts = now_ts();
         db.borrow_mut().insert_events(&[event_json(ts)]).unwrap();
 
@@ -1900,9 +1894,8 @@ mod tests {
 
     #[test]
     fn flush_pending_metric_records_uploads_new_rows_after_old_failure() {
-        let db = Rc::new(RefCell::new(
-            MetricsDatabase::new_in_memory_for_tests().unwrap(),
-        ));
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
         let old_ts = now_ts().saturating_sub(10);
         db.borrow_mut()
             .insert_events(&[event_json(old_ts)])

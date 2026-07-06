@@ -738,7 +738,7 @@ fn merge_filters(mut convenience: Vec<Value>, raw: Option<&str>) -> Result<Optio
 // ---------------------------------------------------------------------------
 
 fn open_db(path: &Path) -> Result<Connection, rusqlite::Error> {
-    let conn = Connection::open(path)?;
+    let conn = crate::sqlite::open_with_memory_limits(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch(SCHEMA)?;
     ensure_derived_columns(&conn)?;
@@ -1530,12 +1530,14 @@ Grading workflow:
 mod tests {
     use super::*;
 
-    fn mem_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
+    fn temp_db() -> (Connection, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("analyze-sessions.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         // Mirror open_db so the derived funnel-gap columns are present in tests.
         ensure_derived_columns(&conn).unwrap();
-        conn
+        (conn, dir)
     }
 
     fn session_row(id: &str) -> Value {
@@ -1553,7 +1555,7 @@ mod tests {
 
     #[test]
     fn insert_sessions_dedupes_by_session_id() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         let rows = vec![session_row("s1"), session_row("s2")];
         assert_eq!(insert_sessions(&conn, &rows).unwrap(), 2);
         // Re-inserting the same ids adds nothing.
@@ -1567,7 +1569,7 @@ mod tests {
 
     #[test]
     fn derived_funnel_gaps_compute_from_stage_columns() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         insert_sessions(&conn, &[session_row("s1")]).unwrap();
         // Set a full funnel: 100 committed → 70 pr_opened → 40 merged → 30 prod.
         conn.execute(
@@ -1609,7 +1611,7 @@ mod tests {
 
     #[test]
     fn recompute_models_denormalizes_distinct_models() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         insert_sessions(&conn, &[session_row("s1"), session_row("s2")]).unwrap();
         // Two models for s1 (out of order), one for s2.
         conn.execute(
@@ -1640,7 +1642,7 @@ mod tests {
 
     #[test]
     fn recompute_pr_counts_counts_distinct_prs() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         insert_sessions(&conn, &[session_row("s1"), session_row("s2")]).unwrap();
         conn.execute(
             "INSERT INTO session_prs (session_id, repo_url, pr_number, ai_lines) VALUES \
@@ -1670,7 +1672,7 @@ mod tests {
 
     #[test]
     fn session_numbers_and_time_parse() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         insert_sessions(&conn, &[session_row("s1")]).unwrap();
         let (g, prod, net, start): (i64, i64, i64, i64) = conn
             .query_row(
@@ -1723,7 +1725,7 @@ mod tests {
 
     #[test]
     fn cursor_serves_each_row_exactly_once() {
-        let mut conn = mem_db();
+        let (mut conn, _db_dir) = temp_db();
         init_cursor(&conn, 100).unwrap();
         insert_sessions(&conn, &[session_row("s1"), session_row("s2")]).unwrap();
 
@@ -1736,7 +1738,7 @@ mod tests {
 
     #[test]
     fn reset_rewinds_cursor_to_reserve_from_start() {
-        let mut conn = mem_db();
+        let (mut conn, _db_dir) = temp_db();
         init_cursor(&conn, 100).unwrap();
         insert_sessions(&conn, &[session_row("s1"), session_row("s2")]).unwrap();
         assert_eq!(claim_next(&mut conn), Some("s1".to_string()));
@@ -1752,7 +1754,7 @@ mod tests {
     #[test]
     fn pull_does_not_rewind_analysis_cursor() {
         // Re-running pull (init_cursor) must not reset analysis progress.
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         init_cursor(&conn, 100).unwrap();
         conn.execute("UPDATE cursor SET analyzed_seq=5 WHERE name='default'", [])
             .unwrap();
@@ -1769,7 +1771,7 @@ mod tests {
 
     #[test]
     fn events_persist_idempotently_and_round_trip() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         insert_sessions(&conn, &[session_row("s1")]).unwrap();
         let events = vec![
             json!({
@@ -1799,7 +1801,7 @@ mod tests {
 
     #[test]
     fn cursor_tracks_fetch_progress() {
-        let conn = mem_db();
+        let (conn, _db_dir) = temp_db();
         init_cursor(&conn, 100).unwrap();
         assert_eq!(get_fetched(&conn).unwrap(), 0);
         set_fetched(&conn, 50).unwrap();

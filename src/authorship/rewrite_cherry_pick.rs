@@ -96,6 +96,24 @@ fn compute_patch_ids(
         return Ok(HashMap::new());
     }
 
+    stable_patch_ids_for_commits(repo, &commits)
+}
+
+pub(crate) fn stable_patch_ids_for_commits(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, crate::error::GitAiError> {
+    let mut commits = Vec::new();
+    let mut seen = HashSet::new();
+    for sha in commit_shas {
+        if seen.insert(sha.clone()) {
+            commits.push(sha.clone());
+        }
+    }
+    if commits.is_empty() {
+        return Ok(HashMap::new());
+    }
+
     let mut log_args = repo.global_args_for_exec();
     log_args.extend([
         "log".to_string(),
@@ -103,6 +121,7 @@ fn compute_patch_ids(
         "--no-walk".to_string(),
         "--reverse".to_string(),
         "--no-ext-diff".to_string(),
+        "--no-textconv".to_string(),
         "--no-color".to_string(),
         "--format=medium".to_string(),
         "-p".to_string(),
@@ -135,6 +154,12 @@ fn compute_patch_ids(
 
 #[cfg(test)]
 mod tests {
+    use super::stable_patch_ids_for_commits;
+
+    fn looks_like_hex_id(value: &str) -> bool {
+        matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
     #[test]
     fn match_cherry_pick_pairs_empty_sources() {
         // Cannot call with a real repo in unit tests, but we can verify the early return
@@ -190,6 +215,27 @@ mod tests {
         let pairs = positional_pair(&sources, &new_commits);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("a".repeat(40), "d".repeat(40)));
+    }
+
+    #[test]
+    fn stable_patch_ids_for_commits_batches_multiple_commits() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        tmp.write_file("one.txt", "one\n", false)
+            .expect("write first");
+        let first = tmp.commit_all("first").expect("first commit");
+        tmp.write_file("two.txt", "two\n", false)
+            .expect("write second");
+        let second = tmp.commit_all("second").expect("second commit");
+
+        let patch_ids =
+            stable_patch_ids_for_commits(tmp.gitai_repo(), &[first.clone(), second.clone()])
+                .expect("patch ids");
+
+        let first_patch_id = patch_ids.get(&first).expect("first patch id");
+        let second_patch_id = patch_ids.get(&second).expect("second patch id");
+        assert!(looks_like_hex_id(first_patch_id));
+        assert!(looks_like_hex_id(second_patch_id));
+        assert_ne!(first_patch_id, second_patch_id);
     }
 
     /// Helper that simulates pass-2 positional pairing without patch-id (for unit testing).

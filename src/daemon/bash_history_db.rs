@@ -89,7 +89,7 @@ const MIGRATIONS: &[&str] = &[
 "#,
 ];
 
-static BASH_HISTORY_DB: OnceLock<Mutex<BashHistoryDatabase>> = OnceLock::new();
+static BASH_HISTORY_DB: OnceLock<Result<Mutex<BashHistoryDatabase>, String>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct BashCallStart {
@@ -146,14 +146,27 @@ pub struct BashHistoryDatabase {
 
 impl BashHistoryDatabase {
     pub fn global() -> Result<&'static Mutex<BashHistoryDatabase>, GitAiError> {
-        let db_mutex = BASH_HISTORY_DB.get_or_init(|| match Self::new() {
-            Ok(db) => Mutex::new(db),
+        let db_result = BASH_HISTORY_DB.get_or_init(|| match Self::new() {
+            Ok(db) => Ok(Mutex::new(db)),
             Err(e) => {
                 eprintln!("[Error] Failed to initialize bash history database: {}", e);
-                Mutex::new(Self::fallback_database())
+                match Self::fallback_database() {
+                    Ok(db) => Ok(Mutex::new(db)),
+                    Err(fallback_error) => {
+                        let error_msg = format!(
+                            "Failed to initialize bash history database; primary error: {}; fallback error: {}",
+                            e, fallback_error
+                        );
+                        eprintln!("[Error] {}", error_msg);
+                        Err(error_msg)
+                    }
+                }
             }
         });
-        Ok(db_mutex)
+        match db_result {
+            Ok(db_mutex) => Ok(db_mutex),
+            Err(error_msg) => Err(GitAiError::Generic(error_msg.clone())),
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -165,49 +178,46 @@ impl BashHistoryDatabase {
 
     #[cfg(any(test, feature = "test-support"))]
     fn disabled_database() -> Self {
-        let conn = Connection::open_in_memory().expect("Failed to create disabled bash DB");
+        let temp_path = std::env::var_os("GIT_AI_TEST_DB_PATH")
+            .or_else(|| std::env::var_os("GITAI_TEST_DB_PATH"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("git-ai-bash-history-disabled.db"));
+        let db_path = temp_path.with_extension("bash-disabled.db");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("Failed to create disabled bash DB directory");
+        }
+        let conn = crate::sqlite::open_with_memory_limits(&db_path)
+            .expect("Failed to create disabled bash DB");
         BashHistoryDatabase {
             conn,
             enabled: false,
         }
     }
 
-    fn fallback_database() -> Self {
+    fn fallback_database() -> Result<Self, GitAiError> {
         let temp_path = std::env::temp_dir().join("git-ai-bash-history-db-failed");
         Self::fallback_database_at(&temp_path)
     }
 
-    fn fallback_database_at(path: &Path) -> Self {
-        match Self::open_at_path(path) {
-            Ok(db) => db,
-            Err(e) => {
-                eprintln!(
-                    "[Error] Failed to initialize fallback bash history database: {}",
-                    e
-                );
-                let conn =
-                    Connection::open_in_memory().expect("Failed to create in-memory bash DB");
-                let mut db = BashHistoryDatabase {
-                    conn,
-                    enabled: true,
-                };
-                db.initialize_schema()
-                    .expect("Failed to initialize in-memory bash DB schema");
-                db
-            }
-        }
+    fn fallback_database_at(path: &Path) -> Result<Self, GitAiError> {
+        Self::open_at_path(path).map_err(|e| {
+            GitAiError::Generic(format!(
+                "Failed to initialize fallback bash history database at {}: {}",
+                path.display(),
+                e
+            ))
+        })
     }
 
     pub fn open_at_path(path: &Path) -> Result<Self, GitAiError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let conn = crate::sqlite::open_with_memory_limits(path)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
-            PRAGMA cache_size=-2000;
             PRAGMA temp_store=MEMORY;
             "#,
         )?;
@@ -881,12 +891,25 @@ mod tests {
     }
 
     #[test]
-    fn fallback_database_has_schema() {
+    fn fallback_database_at_file_has_schema() {
         let dir = tempfile::tempdir().unwrap();
-        let db = BashHistoryDatabase::fallback_database_at(dir.path());
+        let db =
+            BashHistoryDatabase::fallback_database_at(&dir.path().join("fallback.db")).unwrap();
 
         let calls = db.all_calls_for_test().unwrap();
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn fallback_database_returns_error_when_file_path_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        match BashHistoryDatabase::fallback_database_at(dir.path()) {
+            Ok(_) => panic!("fallback database unexpectedly opened a directory path"),
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("Failed to initialize fallback bash history database")
+            ),
+        }
     }
 
     #[test]

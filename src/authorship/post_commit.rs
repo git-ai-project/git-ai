@@ -13,7 +13,7 @@ use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::notes_api::write_note as notes_add;
-use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
+use crate::git::repository::{Repository, batch_read_paths_at_treeishes, exec_git};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
@@ -1020,17 +1020,65 @@ pub(crate) fn metric_tool_model_breakdown(
     })
 }
 
-pub(crate) fn commit_subject_and_body(
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CommitMetricMetadata {
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub author_ts: Option<u64>,
+    pub commit_ts: Option<u64>,
+}
+
+pub(crate) fn commit_metric_metadata(
     repo: &Repository,
     commit_sha: &str,
-) -> (Option<String>, Option<String>) {
-    let Ok(commit) = repo.find_commit(commit_sha.to_string()) else {
-        return (None, None);
+) -> Result<CommitMetricMetadata, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "show".to_string(),
+        "-s".to_string(),
+        "--no-notes".to_string(),
+        "--encoding=UTF-8".to_string(),
+        "--format=%s%x00%b%x00%at%x00%ct".to_string(),
+        commit_sha.to_string(),
+    ]);
+    let output = exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(parse_commit_metric_metadata_output(&stdout))
+}
+
+fn parse_commit_metric_metadata_output(output: &str) -> CommitMetricMetadata {
+    let mut parts = output.splitn(4, '\0');
+    let Some(subject) = parts.next() else {
+        return CommitMetricMetadata::default();
     };
-    let subject = Some(commit.summary().unwrap_or_default());
-    let body = commit.body().unwrap_or_default();
-    let body = if body.is_empty() { None } else { Some(body) };
-    (subject, body)
+    let Some(body) = parts.next() else {
+        return CommitMetricMetadata::default();
+    };
+    let Some(author_ts) = parts.next() else {
+        return CommitMetricMetadata::default();
+    };
+    let Some(commit_ts) = parts.next() else {
+        return CommitMetricMetadata::default();
+    };
+
+    let subject = subject.trim().to_string();
+    let body = body.trim().to_string();
+
+    CommitMetricMetadata {
+        subject: Some(subject),
+        body: (!body.is_empty()).then_some(body),
+        author_ts: author_ts.trim().parse::<u64>().ok(),
+        commit_ts: commit_ts.trim().parse::<u64>().ok(),
+    }
+}
+
+pub(crate) fn stable_patch_id_for_commit(repo: &Repository, commit_sha: &str) -> Option<String> {
+    crate::authorship::rewrite_cherry_pick::stable_patch_ids_for_commits(
+        repo,
+        &[commit_sha.to_string()],
+    )
+    .ok()
+    .and_then(|patch_ids| patch_ids.get(commit_sha).cloned())
 }
 
 pub(crate) fn commit_metric_attrs(
@@ -1096,14 +1144,26 @@ fn record_commit_metrics(
         values.first_checkpoint_ts_null()
     };
 
-    let (subject, body) = commit_subject_and_body(repo, commit_sha);
-    let values = match subject {
+    let metadata = commit_metric_metadata(repo, commit_sha).unwrap_or_default();
+    let values = match metadata.subject {
         Some(subject) => values.commit_subject(subject),
         None => values.commit_subject_null(),
     };
-    let values = match body {
+    let values = match metadata.body {
         Some(body) => values.commit_body(body),
         None => values.commit_body_null(),
+    };
+    let values = match metadata.author_ts {
+        Some(author_ts) => values.author_ts(author_ts),
+        None => values.author_ts_null(),
+    };
+    let values = match metadata.commit_ts {
+        Some(commit_ts) => values.commit_ts(commit_ts),
+        None => values.commit_ts_null(),
+    };
+    let values = match stable_patch_id_for_commit(repo, commit_sha) {
+        Some(patch_id) => values.patch_id(patch_id),
+        None => values.patch_id_null(),
     }
     .authorship_note(authorship_note);
 
@@ -1122,6 +1182,45 @@ fn record_commit_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_commit_metric_metadata_output_reads_subject_body_and_timestamps() {
+        let metadata = parse_commit_metric_metadata_output(concat!(
+            "Subject line",
+            "\0",
+            "Body line one\n\nBody line two",
+            "\0",
+            "1704067200",
+            "\0",
+            "1704067260\n"
+        ));
+
+        assert_eq!(metadata.subject, Some("Subject line".to_string()));
+        assert_eq!(
+            metadata.body,
+            Some("Body line one\n\nBody line two".to_string())
+        );
+        assert_eq!(metadata.author_ts, Some(1_704_067_200));
+        assert_eq!(metadata.commit_ts, Some(1_704_067_260));
+    }
+
+    #[test]
+    fn parse_commit_metric_metadata_output_uses_null_body_for_empty_body() {
+        let metadata = parse_commit_metric_metadata_output(concat!(
+            "Subject line",
+            "\0",
+            "",
+            "\0",
+            "1704067200",
+            "\0",
+            "1704067260\n"
+        ));
+
+        assert_eq!(metadata.subject, Some("Subject line".to_string()));
+        assert_eq!(metadata.body, None);
+        assert_eq!(metadata.author_ts, Some(1_704_067_200));
+        assert_eq!(metadata.commit_ts, Some(1_704_067_260));
+    }
 
     #[test]
     fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {
