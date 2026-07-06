@@ -98,10 +98,17 @@ struct ReflogAnchor {
     end_offset: u64,
 }
 
+const CHERRY_PICK_REFLOG_PREFIXES: &[&str] = &["cherry-pick:", "commit (cherry-pick):"];
+
 enum ColdSeedMatchSpec {
     SingleEntry {
         expected: ExpectedTransition,
         prefixes: Vec<String>,
+    },
+    HeadSpan {
+        expected: ExpectedTransition,
+        prefixes: Vec<String>,
+        limit: usize,
     },
     PullSpan {
         action: String,
@@ -246,6 +253,12 @@ impl RefCursor {
                     self.command_start_hints.insert(key.clone(), offset);
                 }
                 self.initialize_reflog_cursor(&key, seed)?;
+            } else if command_can_clamp_non_authoritative_cold_seed(cmd) {
+                let seed = self.clamp_seed_to_own_entry(&key, offset, cmd)?;
+                if seed != offset {
+                    self.command_start_hints.insert(key.clone(), offset);
+                    self.initialize_reflog_cursor(&key, seed)?;
+                }
             }
         }
 
@@ -295,6 +308,26 @@ impl RefCursor {
                     .map(|entry| entry.start_offset)
                     .min();
                 Ok(earliest_own.unwrap_or(offset))
+            }
+            ColdSeedMatchSpec::HeadSpan {
+                expected,
+                prefixes,
+                limit,
+            } => {
+                if limit == 0 {
+                    return Ok(offset);
+                }
+                let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
+                let reference = if let Some(reference) = key.strip_prefix("common:") {
+                    reference.to_string()
+                } else {
+                    "HEAD".to_string()
+                };
+                let entries = read_reflog_entries(key.to_string(), &path, &reference, None)?;
+                Ok(
+                    head_span_start_near_offset(&entries, offset, &prefix_refs, expected, limit)
+                        .unwrap_or(offset),
+                )
             }
             ColdSeedMatchSpec::PullSpan { action, expected } => {
                 self.clamp_seed_to_pull_span_entry(key, &path, offset, &action, expected)
@@ -384,6 +417,34 @@ impl RefCursor {
             "rebase" => Some(ColdSeedMatchSpec::RebaseSpan {
                 expected: ExpectedTransition::default(),
             }),
+            "cherry-pick" => {
+                if args
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "--abort" | "--quit"))
+                    || args.iter().any(|arg| arg == "--no-commit" || arg == "-n")
+                {
+                    return None;
+                }
+                let source_args = cherry_pick_source_args(&args);
+                let limit = if source_args
+                    .iter()
+                    .any(|source| cherry_pick_source_is_range(source))
+                {
+                    usize::MAX
+                } else if source_args.is_empty() {
+                    self.pending_cherry_pick_source_oids.len().max(1)
+                } else {
+                    source_args.len().max(1)
+                };
+                Some(ColdSeedMatchSpec::HeadSpan {
+                    expected: ExpectedTransition::default(),
+                    prefixes: CHERRY_PICK_REFLOG_PREFIXES
+                        .iter()
+                        .map(|prefix| (*prefix).to_string())
+                        .collect(),
+                    limit,
+                })
+            }
             _ => None,
         }
     }
@@ -464,7 +525,7 @@ impl RefCursor {
         self.consume_head_span_for_command_limited(
             cmd,
             state,
-            &["cherry-pick:", "commit:", "commit (cherry-pick):"],
+            CHERRY_PICK_REFLOG_PREFIXES,
             self.head_expected_transition(cmd, state),
             source_limit,
         )?;
@@ -1236,13 +1297,10 @@ impl RefCursor {
         }))
     }
 
-    // DEFERRED (code-review #14): like find_rebase_start_entry, this scans the
-    // reflog from reflog_start_offset for a contiguous span matching the
-    // message prefixes and returns the first that satisfies `expected`; it does
-    // not bound the search by the command's ingress hint. With repeated
-    // identical spans this could pick an earlier same-shaped span than the one
-    // this command produced. Threading the per-command ingress offset would
-    // make it exact.
+    // Span commands can append several contiguous HEAD rows. If command ingress
+    // captured a late reflog offset, prefer the first matching span at/after that
+    // hint, then fall back to the latest matching span before the hint when the
+    // hint landed after the command's own rows.
     fn find_head_span_start_entry(
         &mut self,
         worktree: Option<&Path>,
@@ -1261,6 +1319,8 @@ impl RefCursor {
         let start = self.reflog_start_offset(&key, &path)?;
         let entries = read_reflog_entries(key, &path, "HEAD", start)?;
         let mut contiguous = VecDeque::<CursorEntry>::new();
+        let hint = self.command_start_hints.get(&head_key(&git_dir)).copied();
+        let mut latest_before_hint: Option<CursorEntry> = None;
 
         for entry in entries {
             if self.entry_consumed(&entry) || !message_matches(&entry.message, message_prefixes) {
@@ -1279,11 +1339,20 @@ impl RefCursor {
                 contiguous.pop_front();
             }
             if matches {
-                return Ok(contiguous.front().cloned());
+                let Some(candidate) = contiguous.front().cloned() else {
+                    continue;
+                };
+                let Some(hint) = hint else {
+                    return Ok(Some(candidate));
+                };
+                if candidate.start_offset >= hint {
+                    return Ok(Some(candidate));
+                }
+                latest_before_hint = Some(candidate);
             }
         }
 
-        Ok(None)
+        Ok(latest_before_hint)
     }
 
     fn find_head_entry(
@@ -2596,6 +2665,46 @@ fn clamp_seed_to_entry_containing_offset(
         .map(|entry| entry.start_offset)
 }
 
+fn head_span_start_near_offset(
+    entries: &[CursorEntry],
+    offset: u64,
+    message_prefixes: &[&str],
+    expected: ExpectedTransition,
+    limit: usize,
+) -> Option<u64> {
+    let mut contiguous = VecDeque::<&CursorEntry>::new();
+    let mut latest_before_offset: Option<u64> = None;
+
+    for entry in entries {
+        if !message_matches(&entry.message, message_prefixes) {
+            contiguous.clear();
+            continue;
+        }
+        if contiguous
+            .back()
+            .is_some_and(|previous| previous.new != entry.old)
+        {
+            contiguous.clear();
+        }
+        contiguous.push_back(entry);
+        while contiguous.len() > limit {
+            contiguous.pop_front();
+        }
+        if !expected.matches(entry) {
+            continue;
+        }
+        let Some(candidate) = contiguous.front() else {
+            continue;
+        };
+        if candidate.start_offset >= offset {
+            return None;
+        }
+        latest_before_offset = Some(candidate.start_offset);
+    }
+
+    latest_before_offset
+}
+
 fn pull_span_start_containing_offset(
     entries: &[CursorEntry],
     offset: u64,
@@ -3414,6 +3523,10 @@ fn command_can_move_refs_on_nonzero(primary: Option<&str>) -> bool {
         primary,
         Some("checkout" | "switch" | "stash" | "rebase" | "pull" | "branch" | "cherry-pick")
     )
+}
+
+fn command_can_clamp_non_authoritative_cold_seed(cmd: &NormalizedCommand) -> bool {
+    matches!(cmd.primary_command.as_deref(), Some("cherry-pick"))
 }
 
 fn message_matches(message: &str, prefixes: &[&str]) -> bool {
