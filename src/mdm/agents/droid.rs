@@ -1,6 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use crate::mdm::utils::{
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+};
 use jsonc_parser::ParseOptions;
 use serde_json::{Value, json};
 use std::fs;
@@ -350,9 +352,10 @@ impl HookInstaller for DroidInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+        let has_binary = binary_exists("droid");
         let has_dotfiles = home_dir().join(".factory").exists();
 
-        if !has_dotfiles {
+        if !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
@@ -400,6 +403,7 @@ impl HookInstaller for DroidInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -408,6 +412,72 @@ mod tests {
         let settings_path = temp_dir.path().join(".factory").join("settings.json");
         fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         (temp_dir, settings_path)
+    }
+
+    fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().to_path_buf();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+        }
+
+        f(&home);
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    fn with_fake_binary_on_path<F: FnOnce(&Path)>(binary_name: &str, f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let bin_dir = temp_dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_bin = bin_dir.join(binary_name);
+        fs::write(&fake_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var_os("PATH");
+        let new_path = match &prev_path {
+            Some(p) => {
+                let mut paths = vec![bin_dir.clone()];
+                paths.extend(std::env::split_paths(p));
+                std::env::join_paths(paths).unwrap()
+            }
+            None => bin_dir.clone().into(),
+        };
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        f(temp_dir.path());
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
     }
 
     fn binary_path() -> PathBuf {
@@ -1097,5 +1167,75 @@ mod tests {
     fn jsonc_parse_empty_returns_empty_object() {
         let val = parse_jsonc_settings("").unwrap();
         assert_eq!(val, json!({}));
+    }
+
+    // ---- Detection / check_hooks ----
+
+    #[test]
+    #[serial]
+    fn c4_binary_on_path_without_dotfiles_detects_tool() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("droid", |_| {
+                let installer = DroidInstaller;
+                let result = installer.check_hooks(&params()).unwrap();
+                assert!(
+                    result.tool_installed,
+                    "droid binary on PATH should be detected even without ~/.factory"
+                );
+                assert!(!result.hooks_installed);
+                assert!(!result.hooks_up_to_date);
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn c5_no_binary_no_dotfiles_not_detected() {
+        with_temp_home(|_home| {
+            let installer = DroidInstaller;
+            let result = installer.check_hooks(&params()).unwrap();
+            assert!(
+                !result.tool_installed,
+                "no binary and no ~/.factory should mean tool_installed=false"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn c6_dotfiles_without_binary_detects_tool() {
+        with_temp_home(|home| {
+            fs::create_dir_all(home.join(".factory")).unwrap();
+            let installer = DroidInstaller;
+            let result = installer.check_hooks(&params()).unwrap();
+            assert!(
+                result.tool_installed,
+                "~/.factory dir should be enough to detect tool even without binary"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn c7_binary_on_path_install_creates_settings() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("droid", |_| {
+                let installer = DroidInstaller;
+                let result = installer.install_hooks(&params(), false).unwrap();
+                assert!(result.is_some(), "install_hooks should produce a diff");
+
+                let settings_path = DroidInstaller::settings_path();
+                assert!(
+                    settings_path.exists(),
+                    "install_hooks should create ~/.factory/settings.json"
+                );
+
+                let content = fs::read_to_string(&settings_path).unwrap();
+                assert!(
+                    content.contains("checkpoint droid"),
+                    "settings.json should contain the checkpoint hook command"
+                );
+            });
+        });
     }
 }

@@ -209,6 +209,7 @@ fn save_stash_attributions(
     }
 
     let source_log = repo.storage.working_log_for_base_commit(head_sha)?;
+    source_log.ensure_checkpoints_file_size_limit()?;
     if pathspecs.is_empty() && !has_duplicate_checkpoint_records(&source_log)? {
         return compact_stash_attributions_from_working_log(repo, stash_sha, head_sha, head_sha);
     }
@@ -323,6 +324,7 @@ fn write_compaction_checkpoints(
 ) -> Result<(), GitAiError> {
     let source_checkpoints = source_log.dir.join("checkpoints.jsonl");
     let compact_checkpoints = compact_log.dir.join("checkpoints.jsonl");
+    source_log.ensure_checkpoints_file_size_limit()?;
     if !source_checkpoints.exists() {
         return compact_log.write_all_checkpoints(&[]);
     }
