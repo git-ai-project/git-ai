@@ -253,7 +253,7 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
     let nesting = read_global_git_config(&repo, "trace2.eventNesting");
 
     assert_eq!(target.as_deref(), Some(expected_target.as_str()));
-    assert_eq!(nesting.as_deref(), Some("10"));
+    assert_eq!(nesting.as_deref(), Some("0"));
 }
 
 #[test]
@@ -373,7 +373,7 @@ fn daemon_status_does_not_self_emit_trace2_events() {
     );
 
     let mut set_nesting_command = Command::new(real_git_executable());
-    set_nesting_command.args(["config", "--global", "trace2.eventNesting", "10"]);
+    set_nesting_command.args(["config", "--global", "trace2.eventNesting", "0"]);
     set_nesting_command.current_dir(repo.path());
     configure_test_home_env(&mut set_nesting_command, &repo);
     let set_nesting = set_nesting_command
