@@ -315,7 +315,25 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/nightly/start-async-daemon.sh" \
             "$GITHUB_WORKSPACE/target/release/git-ai"
 
+      # A live agent CLI needs a real API key to do anything. When the matching
+      # secret is not configured (e.g. on forks, or when a key was rotated out),
+      # the agent makes no changes and the live test fails — a false positive
+      # that has nothing to do with git-ai. Detect that case and skip the live
+      # steps instead of failing the whole nightly and opening a triage issue.
+      - name: Check API key availability
+        id: api_key
+        env:
+          AGENT_API_KEY: ${{ secrets[matrix.api_key_var] }}
+        run: |
+          if [ -z "$AGENT_API_KEY" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Live test skipped::Secret ${{ matrix.api_key_var }} is not configured; skipping live ${{ matrix.agent }} (${{ matrix.channel }}) test."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run live agent test (with retry)
+        if: steps.api_key.outputs.available == 'true'
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 20
@@ -332,6 +350,7 @@ jobs:
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
 
       - name: Verify attribution pipeline
+        if: steps.api_key.outputs.available == 'true'
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
           bash "$GITHUB_WORKSPACE/scripts/nightly/verify-attribution.sh" "${{ matrix.agent }}"
