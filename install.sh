@@ -358,7 +358,7 @@ while IFS='|' read -r shell_name config_file; do
     # Append if not already present
     if ! grep -qsF "$INSTALL_DIR" "$config_file"; then
         echo "" >> "$config_file"
-        echo "# Added by git-ai installer on $(date)" >> "$config_file"
+        echo "# Added by git-ai installer on $(date '+%a %b %-e %H:%M:%S %Z %Y')" >> "$config_file"
         echo "$path_cmd" >> "$config_file"
         SHELLS_CONFIGURED="${SHELLS_CONFIGURED}${shell_name}|${config_file}\n"
     else
