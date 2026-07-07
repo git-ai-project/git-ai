@@ -2371,12 +2371,20 @@ impl VirtualAttributions {
                         // Only pure insertions shift coordinates; replacements do not.
                         // A replaced carryover line W has committed coordinate W - (# pure
                         // insertions before W).
-                        let pure_inserts_before = pure_insertion_lines
-                            .iter()
-                            .filter(|&&l| l < workdir_line_num)
-                            .count() as u32;
-                        explicitly_resolved_commit_lines
-                            .insert(workdir_line_num - pure_inserts_before, ());
+                        // Pure insertions have no committed counterpart, so skip them: their
+                        // fabricated coordinate would alias an unrelated committed line.
+                        if pure_insertion_lines
+                            .binary_search(&workdir_line_num)
+                            .is_err()
+                        {
+                            let pure_inserts_before = pure_insertion_lines
+                                .iter()
+                                .filter(|&&l| l < workdir_line_num)
+                                .count()
+                                as u32;
+                            explicitly_resolved_commit_lines
+                                .insert(workdir_line_num - pure_inserts_before, ());
+                        }
                     } else {
                         // Convert working directory line number to commit line number
                         // by subtracting the count of pure-insertion unstaged lines before this line.

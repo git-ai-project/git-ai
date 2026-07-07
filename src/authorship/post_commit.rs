@@ -397,6 +397,15 @@ where
         // content after the last checkpoint).  These are lines present in both the INITIAL
         // attributions (carrying their carryover line numbers) and in recovery_hunks.  Edge
         // recovery must not re-claim these lines.
+        //
+        // Coordinate invariant: initial_attributions line numbers are in carryover/workdir
+        // coordinates, while recovery_hunks line numbers are in committed coordinates.  These
+        // match here because stale-detection in build_carryover_snapshot replaces the carryover
+        // with committed content whenever pure insertions are present (the only case that would
+        // shift coordinates), which empties initial_attributions for those files.  The only
+        // scenario that populates initial_attributions is in-place replacement (no coordinate
+        // shift), so the direct intersection is safe.  If stale-detection logic changes, a
+        // coordinate-aware conversion using pure_insertion_hunks would be needed here.
         let displaced_to_initial_lines: HashMap<String, HashSet<u32>> = initial_attributions
             .files
             .iter()
@@ -798,6 +807,7 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
     }
 
     let recovery_hunks = recovery_committed_hunks(repo, &parent_sha, amended_commit, None)?;
+    // See coordinate invariant comment on the equivalent computation in post_commit_detailed.
     let displaced_to_initial_lines_amend: HashMap<String, HashSet<u32>> = initial_attributions
         .files
         .iter()
