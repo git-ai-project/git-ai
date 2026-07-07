@@ -271,7 +271,7 @@ class VariantRunner:
             )
             self.base_env["GIT_TRACE2_EVENT_NESTING"] = os.environ.get(
                 "GIT_AI_TEST_TRACE2_NESTING",
-                "10",
+                "0",
             )
             self.base_env["GIT_AI_DAEMON_CHECKPOINT_DELEGATE"] = "true"
             self.base_env["GIT_AI_DAEMON_CONTROL_SOCKET"] = str(

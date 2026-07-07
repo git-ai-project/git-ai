@@ -543,7 +543,7 @@ fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
             "GIT_TRACE2_EVENT",
             DaemonConfig::trace2_event_target_for_path(trace_socket_path),
         ),
-        ("GIT_TRACE2_EVENT_NESTING", "10".to_string()),
+        ("GIT_TRACE2_EVENT_NESTING", "0".to_string()),
     ]
 }
 
@@ -609,7 +609,7 @@ impl WorkdirRaceHarness {
                 "GIT_TRACE2_EVENT",
                 DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
             )
-            .env("GIT_TRACE2_EVENT_NESTING", "10")
+            .env("GIT_TRACE2_EVENT_NESTING", "0")
             .output()
             .expect("failed to execute traced git command");
         assert!(

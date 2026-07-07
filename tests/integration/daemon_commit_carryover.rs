@@ -27,7 +27,7 @@ fn test_daemon_commit_uses_immutable_commit_content_not_next_worktree_edit() {
         &["commit", "-m", "add ai line"],
         &[
             ("GIT_TRACE2_EVENT", trace_target.as_str()),
-            ("GIT_TRACE2_EVENT_NESTING", "10"),
+            ("GIT_TRACE2_EVENT_NESTING", "0"),
         ],
     )
     .unwrap();
