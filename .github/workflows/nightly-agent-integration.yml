@@ -323,16 +323,24 @@ jobs:
       - name: Check API key availability
         id: api_key
         env:
-          AGENT_API_KEY: ${{ secrets[matrix.api_key_var] }}
+          # Map each secret explicitly (no dynamic secrets[...] indexing, which
+          # CodeQL flags as excessive secret exposure), then pick the agent's
+          # key by name via bash indirect expansion.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          API_KEY_VAR: ${{ matrix.api_key_var }}
         run: |
-          if [ -z "$AGENT_API_KEY" ]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=Live test skipped::Secret ${{ matrix.api_key_var }} is not configured; skipping live ${{ matrix.agent }} (${{ matrix.channel }}) test."
-          else
+          if [ -n "${!API_KEY_VAR:-}" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Live test skipped::Secret ${API_KEY_VAR} is not configured; skipping live ${{ matrix.agent }} (${{ matrix.channel }}) test."
           fi
 
       - name: Run live agent test (with retry)
+        id: live_test
         if: steps.api_key.outputs.available == 'true'
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
@@ -340,7 +348,6 @@ jobs:
           max_attempts: 2
           command: |
             export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
-            export ${{ matrix.api_key_var }}="${{ secrets[matrix.api_key_var] }}"
             bash "$GITHUB_WORKSPACE/scripts/nightly/test-live-agent.sh" "${{ matrix.agent }}" "${{ matrix.binary_name }}"
         continue-on-error: ${{ matrix.channel == 'latest' }}
         env:
@@ -350,7 +357,7 @@ jobs:
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
 
       - name: Verify attribution pipeline
-        if: steps.api_key.outputs.available == 'true'
+        if: steps.api_key.outputs.available == 'true' && steps.live_test.outcome == 'success'
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
           bash "$GITHUB_WORKSPACE/scripts/nightly/verify-attribution.sh" "${{ matrix.agent }}"
