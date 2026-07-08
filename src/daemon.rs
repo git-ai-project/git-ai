@@ -37,9 +37,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-#[cfg(windows)]
 use std::io;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(not(windows))]
+use std::os::fd::{AsFd, AsRawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
@@ -88,6 +89,15 @@ const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+// Trace2 frames are written synchronously by Git to the daemon's Unix socket.
+// With small kernel socket buffers (macOS defaults to ~8 KiB), a bursty trace2
+// stream can fill the buffer and block the raw `git` process in `write()` until
+// the daemon drains it. A larger receive buffer absorbs those bursts. Starts at
+// a conservative 512 KiB and can be raised toward 1 MiB via the env override
+// without a code change. This is a mitigation, not a guarantee: any finite
+// buffer can still fill if the daemon genuinely stops draining.
+#[cfg(not(windows))]
+const TRACE_SOCKET_RECV_BUFFER_BYTES: usize = 512 * 1024;
 const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
@@ -6521,6 +6531,11 @@ fn trace_listener_loop_actor(
             .name(local_socket_name(&trace_socket_path)?)
             .create_sync()
             .map_err(|e| GitAiError::Generic(format!("failed binding trace socket: {}", e)))?;
+        // Raise the receive buffer on the listener so accepted connections
+        // inherit the larger buffer as early as possible.
+        if let Err(error) = set_trace_listener_recv_buffer(&listener) {
+            tracing::debug!(%error, "trace listener recv buffer setup failed");
+        }
         set_socket_owner_only(&trace_socket_path)?;
         for stream in listener.incoming() {
             if coordinator.is_shutting_down() {
@@ -6529,6 +6544,11 @@ fn trace_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
+            // Re-apply on each accepted connection as a backstop in case the
+            // listener-inherited value was not honored on this platform.
+            if let Err(error) = set_trace_socket_recv_buffer(&stream) {
+                tracing::debug!(%error, "trace connection recv buffer setup failed");
+            }
             if let Err(error) = coordinator.trace_unidentified_connection_opened() {
                 tracing::debug!(%error, "trace connection open bookkeeping error");
                 continue;
@@ -7393,6 +7413,84 @@ fn local_socket_name<'a>(socket_path: &'a Path) -> Result<Name<'a>, GitAiError> 
     socket_path
         .to_fs_name::<GenericFilePath>()
         .map_err(|e| GitAiError::Generic(format!("invalid daemon socket path: {}", e)))
+}
+
+/// Target trace socket receive buffer size in bytes.
+///
+/// Defaults to `TRACE_SOCKET_RECV_BUFFER_BYTES` and can be overridden via
+/// `GIT_AI_TRACE_SOCKET_RECV_BUFFER_BYTES` to ramp toward 1 MiB (or larger)
+/// without a code change. A value of `0` disables the buffer bump entirely.
+#[cfg(not(windows))]
+fn trace_socket_recv_buffer_bytes() -> usize {
+    std::env::var("GIT_AI_TRACE_SOCKET_RECV_BUFFER_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(TRACE_SOCKET_RECV_BUFFER_BYTES)
+}
+
+#[cfg(not(windows))]
+fn set_trace_socket_recv_buffer(stream: &LocalSocketStream) -> io::Result<()> {
+    match stream {
+        LocalSocketStream::UdSocket(stream) => {
+            set_socket_recv_buffer(stream, trace_socket_recv_buffer_bytes())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_trace_listener_recv_buffer(listener: &LocalSocketListener) -> io::Result<()> {
+    match listener {
+        LocalSocketListener::UdSocket(listener) => {
+            set_socket_recv_buffer(listener, trace_socket_recv_buffer_bytes())
+        }
+    }
+}
+
+/// Raise a socket's kernel receive buffer to `bytes` via `SO_RCVBUF`.
+///
+/// A `bytes` of `0` is a no-op (buffer bump disabled). The kernel may clamp the
+/// request to `net.core.rmem_max` on Linux, so the effective value can be lower
+/// than requested; that is fine -- this only ever raises capacity.
+#[cfg(not(windows))]
+fn set_socket_recv_buffer<S: AsFd>(socket: &S, bytes: usize) -> io::Result<()> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let value = bytes.min(libc::c_int::MAX as usize) as libc::c_int;
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_fd().as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &value as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+fn socket_recv_buffer<S: AsFd>(socket: &S) -> io::Result<usize> {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of_val(&value) as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            socket.as_fd().as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &mut value as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(value.max(0) as usize)
+    }
 }
 
 pub fn open_local_socket_stream_with_timeout(
@@ -8883,6 +8981,47 @@ mod tests {
         )
         .await
         .expect("checkpoint trace ingest drain must return when daemon shutdown is requested");
+    }
+
+    /// The trace socket receive-buffer helper must raise a socket's `SO_RCVBUF`
+    /// capacity toward the configured target.
+    #[test]
+    #[cfg(not(windows))]
+    fn trace_socket_recv_buffer_helper_raises_socket_capacity() {
+        let (server, _client) =
+            std::os::unix::net::UnixStream::pair().expect("create connected unix socket pair");
+        let before = socket_recv_buffer(&server).expect("read baseline receive buffer");
+        set_socket_recv_buffer(&server, TRACE_SOCKET_RECV_BUFFER_BYTES)
+            .expect("set trace socket receive buffer");
+        let after = socket_recv_buffer(&server).expect("read trace socket receive buffer");
+        // Linux clamps SO_RCVBUF to net.core.rmem_max, so `after` can land below
+        // the target on hosts with a small rmem_max (e.g. CI's ~208 KiB
+        // default). The helper is still correct as long as it raised capacity
+        // toward the target: it either reached the target or grew past the
+        // default buffer.
+        assert!(
+            after >= TRACE_SOCKET_RECV_BUFFER_BYTES || after > before,
+            "trace socket receive buffer should reach {} bytes or exceed the {}-byte baseline, got {}",
+            TRACE_SOCKET_RECV_BUFFER_BYTES,
+            before,
+            after
+        );
+    }
+
+    /// A zero target is a no-op: the helper must not error and must not shrink
+    /// the socket's existing receive buffer.
+    #[test]
+    #[cfg(not(windows))]
+    fn trace_socket_recv_buffer_helper_zero_is_noop() {
+        let (server, _client) =
+            std::os::unix::net::UnixStream::pair().expect("create connected unix socket pair");
+        let before = socket_recv_buffer(&server).expect("read baseline receive buffer");
+        set_socket_recv_buffer(&server, 0).expect("zero target must be a no-op");
+        let after = socket_recv_buffer(&server).expect("read receive buffer after no-op");
+        assert_eq!(
+            before, after,
+            "a zero target must not change the socket receive buffer"
+        );
     }
 
     /// Concurrent enqueues from multiple threads must never deadlock or
