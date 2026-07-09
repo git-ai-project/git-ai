@@ -1651,7 +1651,9 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
             // Resolve pending region: if both sides inserted differing content,
             // favor observed; else take whichever inserted.
             if !c_pending.is_empty() && !o_pending.is_empty() {
-                if c_pending == o_pending {
+                if committed_cmp_lines[committed_i..c_anchor]
+                    == observed_cmp_lines[observed_i..o_anchor]
+                {
                     result.extend(c_pending);
                 } else {
                     result.extend(o_pending);
@@ -1696,8 +1698,11 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect();
-            let committed_changed = committed_chunk != base_chunk;
-            let observed_changed = observed_chunk != base_chunk;
+            let base_cmp_chunk = &base_cmp_lines[chunk_base_start..base_i];
+            let committed_cmp_chunk = &committed_cmp_lines[committed_i..c_anchor];
+            let observed_cmp_chunk = &observed_cmp_lines[observed_i..o_anchor];
+            let committed_changed = committed_cmp_chunk != base_cmp_chunk;
+            let observed_changed = observed_cmp_chunk != base_cmp_chunk;
 
             match (committed_changed, observed_changed) {
                 (true, false) => result.extend(committed_chunk),
@@ -1705,7 +1710,7 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
                 (true, true) => {
                     // Two-sided change → favor observed (matches --theirs),
                     // unless both produced identical content.
-                    if committed_chunk == observed_chunk {
+                    if committed_cmp_chunk == observed_cmp_chunk {
                         result.extend(committed_chunk);
                     } else {
                         result.extend(observed_chunk);
@@ -1729,7 +1734,7 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
         .map(|s| (*s).to_string())
         .collect();
     if !c_tail.is_empty() && !o_tail.is_empty() {
-        if c_tail == o_tail {
+        if committed_cmp_lines[committed_i..] == observed_cmp_lines[observed_i..] {
             result.extend(c_tail);
         } else {
             result.extend(o_tail);
@@ -3681,6 +3686,18 @@ mod tests {
             committed
         );
         assert!(diff_hunks_between_contents(observed, committed).is_empty());
+    }
+
+    #[test]
+    fn carryover_merge_does_not_treat_crlf_only_observed_chunk_as_change() {
+        let parent = "a\nb\nc\n";
+        let committed = "A\nb\nC\n";
+        let observed = "a\r\nb\r\nD\r\n";
+
+        assert_eq!(
+            carryover_merge_content(parent, committed, observed),
+            "A\nb\nD\r\n"
+        );
     }
 
     /// Differential test: the in-memory carryover merge must agree with real
