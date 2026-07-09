@@ -260,6 +260,7 @@ fn fully_populated_file_config() -> FileConfig {
         codex_hooks_format: Some("config_toml".to_string()),
         notes_backend: Some(NotesBackendConfig::default()),
         transcript_streaming_lookback_days: Some(7),
+        max_checkpoint_file_size_bytes: Some(3 * 1024 * 1024),
     }
 }
 
