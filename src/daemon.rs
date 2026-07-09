@@ -61,6 +61,7 @@ pub mod domain;
 pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
+pub mod otel_exporter;
 pub mod reducer;
 pub mod ref_cursor;
 pub mod rewrite_metrics;
