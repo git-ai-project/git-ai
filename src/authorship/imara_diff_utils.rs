@@ -264,6 +264,19 @@ pub(crate) fn normalize_line_endings(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(s.replace("\r\n", "\n"))
 }
 
+/// Compare two strings while treating CRLF and LF line endings as equivalent.
+pub(crate) fn content_eq_ignoring_line_endings(a: &str, b: &str) -> bool {
+    a == b || normalize_line_endings(a) == normalize_line_endings(b)
+}
+
+/// Split content into terminator-preserving lines normalized for CRLF/LF comparisons.
+pub(crate) fn split_lines_normalized_terminators(s: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    split_lines_with_terminators(s)
+        .into_iter()
+        .map(normalize_line_endings)
+        .collect()
+}
+
 /// Splits a string into lines, preserving line terminators.
 fn split_lines_with_terminators(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
