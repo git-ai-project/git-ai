@@ -310,6 +310,92 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_namespaced_tools_are_classified() {
+        for tool_name in &[
+            "functions.apply_patch",
+            "functions.exec_command",
+            "functions.Bash",
+            "multi_tool_use.parallel",
+        ] {
+            let input = json!({
+                "cwd": "/home/user/project",
+                "hook_event_name": "PostToolUse",
+                "tool_name": tool_name,
+                "session_id": "codex-sess-1",
+                "tool_use_id": "tu-1"
+            })
+            .to_string();
+            let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+            assert_eq!(events.len(), 1, "{} should parse to one event", tool_name);
+            match &events[0] {
+                ParsedHookEvent::PostBashCall(_) => {
+                    assert!(
+                        tool_name.ends_with("exec_command")
+                            || tool_name.ends_with("Bash")
+                            || *tool_name == "multi_tool_use.parallel",
+                        "{} should be bash",
+                        tool_name
+                    );
+                }
+                ParsedHookEvent::PostFileEdit(_) => {
+                    assert_eq!(
+                        *tool_name, "functions.apply_patch",
+                        "only apply_patch is a file edit"
+                    );
+                }
+                _ => panic!("Expected PostBashCall or PostFileEdit for {}", tool_name),
+            }
+        }
+    }
+
+    #[test]
+    fn test_codex_extracts_patch_file_paths_from_patch_and_command_keys() {
+        let input = json!({
+            "cwd": "/home/user/project",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "apply_patch",
+            "session_id": "codex-sess-1",
+            "tool_use_id": "patch-1",
+            "tool_input": {
+                "patch": "*** Update File: /home/user/project/src/main.rs\n@@ old\n+new\n"
+            }
+        })
+        .to_string();
+        let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+
+        let input = json!({
+            "cwd": "/home/user/project",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "functions.apply_patch",
+            "session_id": "codex-sess-1",
+            "tool_use_id": "patch-2",
+            "tool_input": {
+                "command": "*** Update File: /home/user/project/src/main.rs\n@@ old\n+new\n"
+            }
+        })
+        .to_string();
+        let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
     fn test_codex_rejects_non_bash_tool() {
         let input = json!({
             "cwd": "/home/user/project",

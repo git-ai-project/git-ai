@@ -304,6 +304,12 @@ pub enum ToolClass {
 // Tool classification per agent (Section 8.2 of PRD)
 // ---------------------------------------------------------------------------
 
+/// Strip the `functions.` namespace prefix that Codex/OpenAI function-call
+/// tools add to hook tool names (e.g. `functions.apply_patch` -> `apply_patch`).
+fn normalize_tool_name(tool_name: &str) -> &str {
+    tool_name.strip_prefix("functions.").unwrap_or(tool_name)
+}
+
 /// Classify a tool name for a given agent.
 pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
     match agent {
@@ -342,11 +348,17 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
-        Agent::Codex => match tool_name {
-            "apply_patch" => ToolClass::FileEdit,
-            "Bash" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
-            _ => ToolClass::Skip,
-        },
+        Agent::Codex => {
+            // Codex Desktop (OpenAI function-calling) prefixes tool names with
+            // "functions."; strip it before matching the bare tool name.
+            let tool_name = normalize_tool_name(tool_name);
+            match tool_name {
+                "apply_patch" => ToolClass::FileEdit,
+                "Bash" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
+                "multi_tool_use.parallel" => ToolClass::Bash,
+                _ => ToolClass::Skip,
+            }
+        }
         Agent::Pi => match tool_name {
             "edit" | "write" | "replace" | "rename" => ToolClass::FileEdit,
             "bash" => ToolClass::Bash,
@@ -1507,6 +1519,49 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+    }
+
+    #[test]
+    fn test_tool_classification_codex_namespaced() {
+        // Codex Desktop/OpenAI function calls namespace tools with "functions." prefix.
+        assert_eq!(
+            classify_tool(Agent::Codex, "functions.apply_patch"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Codex, "functions.Bash"),
+            ToolClass::Bash
+        );
+        assert_eq!(
+            classify_tool(Agent::Codex, "functions.exec_command"),
+            ToolClass::Bash
+        );
+        assert_eq!(
+            classify_tool(Agent::Codex, "functions.shell"),
+            ToolClass::Bash
+        );
+        assert_eq!(
+            classify_tool(Agent::Codex, "functions.shell_command"),
+            ToolClass::Bash
+        );
+        // Unqualified names still work as before.
+        assert_eq!(
+            classify_tool(Agent::Codex, "apply_patch"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Codex, "exec_command"), ToolClass::Bash);
+        // The parallel tool wrapper must be routed through the bash/stat-diff path.
+        assert_eq!(
+            classify_tool(Agent::Codex, "multi_tool_use.parallel"),
+            ToolClass::Bash
+        );
+        // Unknown names are still skipped.
+        assert_eq!(
+            classify_tool(Agent::Codex, "functions.Read"),
+            ToolClass::Skip
+        );
+        assert_eq!(classify_tool(Agent::Codex, "Read"), ToolClass::Skip);
     }
 
     #[test]
