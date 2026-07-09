@@ -241,7 +241,7 @@ def setup_variant_runtime(
         env["GIT_TRACE2_EVENT"] = f"af_unix:stream:{trace_socket}"
         env["GIT_TRACE2_EVENT_NESTING"] = os.environ.get(
             "GIT_AI_TEST_TRACE2_NESTING",
-            "10",
+            "0",
         )
         env["GIT_AI_DAEMON_CHECKPOINT_DELEGATE"] = "true"
         env["GIT_AI_DAEMON_CONTROL_SOCKET"] = str(control_socket)

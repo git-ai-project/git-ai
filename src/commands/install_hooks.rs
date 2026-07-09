@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
 const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
-const TRACE2_EVENT_NESTING_VALUE: &str = "10";
+const TRACE2_EVENT_NESTING_VALUE: &str = "0";
 const VISUAL_STUDIO_INSTALLER_ID: &str = "visual-studio";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

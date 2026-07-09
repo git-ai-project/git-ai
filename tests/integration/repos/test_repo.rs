@@ -391,7 +391,7 @@ impl DaemonProcess {
                 "GIT_TRACE2_EVENT",
                 DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
             )
-            .env("GIT_TRACE2_EVENT_NESTING", "10");
+            .env("GIT_TRACE2_EVENT_NESTING", "0");
         configure_test_home_env(&mut command, &self.daemon_home);
 
         let output = run_command_output(&mut command, "daemon readiness probe git config")
@@ -1759,7 +1759,7 @@ impl TestRepo {
     }
 
     fn trace2_nesting_value() -> String {
-        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string())
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "0".to_string())
     }
 
     fn setup_daemon_mode(&mut self) {
