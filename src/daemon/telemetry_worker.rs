@@ -34,6 +34,19 @@ static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
 static DAEMON_LOG_UPLOAD_IN_FLIGHT: std::sync::OnceLock<Arc<AtomicBool>> =
     std::sync::OnceLock::new();
 
+/// Result of a telemetry flush cycle.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FlushStatus {
+    /// Approximate buffered + pending metrics still awaiting upload.
+    pub metrics_remaining: usize,
+    /// Approximate number of notes still eligible for upload.
+    pub notes_remaining: usize,
+}
+
+struct FlushRequest {
+    completion: tokio::sync::oneshot::Sender<FlushStatus>,
+}
+
 /// Accumulated telemetry events waiting to be flushed.
 struct TelemetryBuffer {
     errors: Vec<ErrorEvent>,
@@ -75,15 +88,6 @@ impl TelemetryBuffer {
             cas_records: Vec::new(),
             daemon_logs: Vec::new(),
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.errors.is_empty()
-            && self.performances.is_empty()
-            && self.messages.is_empty()
-            && self.metrics.is_empty()
-            && self.cas_records.is_empty()
-            && self.daemon_logs.is_empty()
     }
 
     fn ingest_envelopes(&mut self, envelopes: Vec<TelemetryEnvelope>) {
@@ -176,13 +180,16 @@ impl TelemetryBuffer {
 #[derive(Clone)]
 pub struct DaemonTelemetryWorkerHandle {
     buffer: Arc<Mutex<TelemetryBuffer>>,
+    flush_tx: tokio::sync::mpsc::UnboundedSender<FlushRequest>,
 }
 
 impl DaemonTelemetryWorkerHandle {
     #[cfg(test)]
     pub fn new_noop() -> Self {
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             buffer: Arc::new(Mutex::new(TelemetryBuffer::new())),
+            flush_tx,
         }
     }
 
@@ -216,6 +223,19 @@ impl DaemonTelemetryWorkerHandle {
             return;
         }
         self.buffer.lock().await.ingest_daemon_logs(events);
+    }
+
+    /// Request an immediate telemetry flush and wait for the worker to complete.
+    pub async fn flush_and_wait(&self) -> Result<FlushStatus, GitAiError> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.flush_tx
+            .send(FlushRequest {
+                completion: completion_tx,
+            })
+            .map_err(|_| GitAiError::Generic("telemetry worker has stopped".to_string()))?;
+        completion_rx
+            .await
+            .map_err(|_| GitAiError::Generic("telemetry flush was cancelled".to_string()))
     }
 
     /// Returns the current number of metrics waiting for upload.
@@ -396,15 +416,17 @@ pub fn submit_daemon_internal_daemon_logs(events: Vec<DaemonLogEvent>) -> bool {
 /// to their respective destinations (Sentry, PostHog, metrics API, CAS API).
 pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
     let buffer = Arc::new(Mutex::new(TelemetryBuffer::new()));
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
+        flush_tx,
     };
     let daemon_id = crate::uuid::generate_v4();
 
     spawn_metrics_metadata_backfill();
 
     tokio::spawn(async move {
-        telemetry_flush_loop(buffer, daemon_id).await;
+        telemetry_flush_loop(buffer, daemon_id, flush_rx).await;
     });
 
     handle
@@ -447,15 +469,27 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
     Ok(())
 }
 
-async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: String) {
+async fn telemetry_flush_loop(
+    buffer: Arc<Mutex<TelemetryBuffer>>,
+    daemon_id: String,
+    mut flush_rx: tokio::sync::mpsc::UnboundedReceiver<FlushRequest>,
+) {
     let mut ticker = interval(FLUSH_INTERVAL);
     let started_at = std::time::Instant::now();
     let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
+    let mut flush_requests: Vec<FlushRequest> = Vec::new();
+
     // The first tick completes immediately; skip it.
     ticker.tick().await;
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            Some(request) = flush_rx.recv() => {
+                flush_requests.push(request);
+                ticker.reset_immediately();
+            }
+        }
 
         let now = std::time::Instant::now();
         let heartbeat = if now >= next_heartbeat_at && daemon_log_upload_enabled() {
@@ -472,28 +506,26 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
             if let Some(event) = heartbeat {
                 buf.ingest_daemon_logs(vec![event]);
             }
-            if buf.is_empty() {
-                None
-            } else {
-                Some(buf.take())
-            }
+            buf.take()
         };
 
+        let flush_all = !flush_requests.is_empty();
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
         let daemon_id_for_flush = daemon_id.clone();
-        let requeue_daemon_logs = tokio::task::spawn_blocking(move || {
-            if let Some(snapshot) = snapshot {
-                flush_telemetry_batch(snapshot, &daemon_id_for_flush)
-            } else {
-                flush_pending_metrics();
-                Vec::new()
-            }
+        let flush_result = tokio::task::spawn_blocking(move || {
+            flush_telemetry_batch(snapshot, &daemon_id_for_flush, flush_all)
         })
         .await
         .unwrap_or_else(|e| {
             tracing::error!(%e, "telemetry flush task panicked");
-            Vec::new()
+            (Vec::new(), FlushStatus::default())
         });
+
+        let (requeue_daemon_logs, flush_status) = flush_result;
+
+        for request in flush_requests.drain(..) {
+            let _ = request.completion.send(flush_status);
+        }
 
         if !requeue_daemon_logs.is_empty() {
             buffer
@@ -504,7 +536,11 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
     }
 }
 
-fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
+fn flush_telemetry_batch(
+    batch: TelemetryBuffer,
+    daemon_id: &str,
+    flush_all: bool,
+) -> (Vec<DaemonLogEvent>, FlushStatus) {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
 
@@ -533,15 +569,47 @@ fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonL
     }
 
     // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
-    flush_notes();
+    let notes_done = flush_notes(flush_all);
 
     flush_pending_metrics();
 
-    if batch.daemon_logs.is_empty() {
+    let requeue_daemon_logs = if batch.daemon_logs.is_empty() {
         Vec::new()
     } else {
         dispatch_daemon_log_upload(batch.daemon_logs, daemon_id, &distinct_id)
-    }
+    };
+
+    let metrics_remaining = if METRICS_UPLOAD_AVAILABLE.load(Ordering::Relaxed) {
+        MetricsDatabase::global()
+            .and_then(|db| {
+                db.lock()
+                    .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))
+            })
+            .and_then(|db| db.count_retryable())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let notes_remaining = if notes_done {
+        0
+    } else {
+        crate::notes::db::NotesDatabase::global()
+            .and_then(|db| {
+                db.lock()
+                    .map_err(|_| GitAiError::Generic("notes DB lock poisoned".to_string()))
+            })
+            .and_then(|db| db.count_pending_syncable())
+            .unwrap_or(0)
+    };
+
+    (
+        requeue_daemon_logs,
+        FlushStatus {
+            metrics_remaining,
+            notes_remaining,
+        },
+    )
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
@@ -1142,22 +1210,27 @@ fn flush_sentry_and_posthog(
 ///
 /// Skips silently when:
 /// - `notes_backend.kind != Http`
+/// - `notes_backend.backend_url` is not configured
 /// - Not authenticated (no API key and not logged in)
-pub fn flush_notes() {
+///
+/// If `flush_all` is true, the function repeatedly dequeues and uploads until no
+/// pending notes remain. Returns `true` if no pending notes are left after the
+/// flush, `false` otherwise (e.g. upload failures that left retryable rows).
+pub fn flush_notes(flush_all: bool) -> bool {
     use crate::api::types::{NoteEntry, NotesUploadRequest};
     use crate::config::NotesBackendKind;
 
     let cfg = Config::fresh();
     if cfg.notes_backend_kind() != NotesBackendKind::Http {
         tracing::debug!("notes: skipping flush, backend is not Http");
-        return;
+        return true;
     }
 
     let backend_url = match cfg.notes_backend_url() {
         Some(url) => url.to_string(),
         None => {
             tracing::debug!("notes: skipping flush, notes_backend.backend_url is not configured");
-            return;
+            return true;
         }
     };
     let context = ApiContext::new(Some(backend_url));
@@ -1165,79 +1238,90 @@ pub fn flush_notes() {
 
     if !client.is_logged_in() && !client.has_api_key() {
         tracing::debug!("notes: skipping flush, not authenticated");
-        return;
+        return true;
     }
 
-    // Dequeue up to 50 pending notes.
-    let pending = match crate::notes::db::NotesDatabase::global() {
-        Ok(db) => match db.lock() {
-            Ok(mut lock) => match lock.dequeue_pending(50) {
-                Ok(rows) => rows,
+    let mut loop_count = 0;
+    let max_loops = if flush_all { 1_000 } else { 1 };
+
+    loop {
+        if loop_count >= max_loops {
+            break;
+        }
+        loop_count += 1;
+
+        // Dequeue up to 50 pending notes.
+        let pending = match crate::notes::db::NotesDatabase::global() {
+            Ok(db) => match db.lock() {
+                Ok(mut lock) => match lock.dequeue_pending(50) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::warn!(%e, "notes: failed to dequeue pending rows");
+                        break;
+                    }
+                },
                 Err(e) => {
-                    tracing::warn!(%e, "notes: failed to dequeue pending rows");
-                    return;
+                    tracing::warn!("notes: DB lock poisoned: {}", e);
+                    break;
                 }
             },
             Err(e) => {
-                tracing::warn!("notes: DB lock poisoned: {}", e);
-                return;
+                tracing::warn!(%e, "notes: failed to get notes DB");
+                break;
             }
-        },
-        Err(e) => {
-            tracing::warn!(%e, "notes: failed to get notes DB");
-            return;
+        };
+
+        if pending.is_empty() {
+            break;
         }
-    };
 
-    if pending.is_empty() {
-        return;
-    }
+        let commit_shas: Vec<String> = pending.iter().map(|p| p.commit_sha.clone()).collect();
 
-    let commit_shas: Vec<String> = pending.iter().map(|p| p.commit_sha.clone()).collect();
+        let entries: Vec<NoteEntry> = pending
+            .iter()
+            .map(|p| NoteEntry {
+                commit_sha: p.commit_sha.clone(),
+                content: p.content.clone(),
+            })
+            .collect();
 
-    let entries: Vec<NoteEntry> = pending
-        .iter()
-        .map(|p| NoteEntry {
-            commit_sha: p.commit_sha.clone(),
-            content: p.content.clone(),
-        })
-        .collect();
+        let request = NotesUploadRequest { entries };
 
-    let request = NotesUploadRequest { entries };
-
-    match client.upload_notes(request) {
-        Ok(resp) => {
-            tracing::debug!(
-                success = resp.success_count,
-                failure = resp.failure_count,
-                "notes: uploaded batch"
-            );
-            if let Ok(db) = crate::notes::db::NotesDatabase::global()
-                && let Ok(mut lock) = db.lock()
-            {
-                if resp.failure_count == 0 {
-                    let _ = lock.mark_synced(&commit_shas);
-                } else {
-                    // Server reported partial failures but doesn't identify which
-                    // entries failed. Mark the entire batch as failed so all entries
-                    // are retried on the next flush cycle.
-                    let _ = lock.mark_failed(
-                        &commit_shas,
-                        &format!(
-                            "partial failure: {}/{} entries failed",
-                            resp.failure_count,
-                            commit_shas.len()
-                        ),
-                    );
+        match client.upload_notes(request) {
+            Ok(resp) => {
+                tracing::debug!(
+                    success = resp.success_count,
+                    failure = resp.failure_count,
+                    "notes: uploaded batch"
+                );
+                if let Ok(db) = crate::notes::db::NotesDatabase::global()
+                    && let Ok(mut lock) = db.lock()
+                {
+                    if resp.failure_count == 0 {
+                        let _ = lock.mark_synced(&commit_shas);
+                    } else {
+                        // Server reported partial failures but doesn't identify which
+                        // entries failed. Mark the entire batch as failed so all entries
+                        // are retried on the next flush cycle.
+                        let _ = lock.mark_failed(
+                            &commit_shas,
+                            &format!(
+                                "partial failure: {}/{} entries failed",
+                                resp.failure_count,
+                                commit_shas.len()
+                            ),
+                        );
+                    }
                 }
             }
-        }
-        Err(e) => {
-            tracing::warn!(%e, "notes: upload error");
-            if let Ok(db) = crate::notes::db::NotesDatabase::global()
-                && let Ok(mut lock) = db.lock()
-            {
-                let _ = lock.mark_failed(&commit_shas, &e.to_string());
+            Err(e) => {
+                tracing::warn!(%e, "notes: upload error");
+                if let Ok(db) = crate::notes::db::NotesDatabase::global()
+                    && let Ok(mut lock) = db.lock()
+                {
+                    let _ = lock.mark_failed(&commit_shas, &e.to_string());
+                }
+                break;
             }
         }
     }
@@ -1252,6 +1336,14 @@ pub fn flush_notes() {
         && let Ok(mut lock) = db.lock()
     {
         let _ = lock.evict_stale_cache(10_000, 90 * 24 * 3600);
+    }
+
+    match crate::notes::db::NotesDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(lock) => lock.count_pending_syncable().unwrap_or(0) == 0,
+            Err(_) => false,
+        },
+        Err(_) => false,
     }
 }
 

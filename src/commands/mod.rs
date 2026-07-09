@@ -18,6 +18,7 @@ pub mod login;
 pub mod logout;
 pub mod notes_migrate;
 pub mod personal_dashboard;
+pub mod pre_exit;
 pub mod show;
 pub mod show_prompt;
 pub mod status;

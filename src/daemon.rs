@@ -152,6 +152,15 @@ pub fn daemon_process_active() -> bool {
     DAEMON_PROCESS_ACTIVE.load(Ordering::SeqCst)
 }
 
+/// Result returned by the `pre-exit` control request.
+#[derive(Debug, Serialize, Deserialize)]
+struct PreExitResult {
+    done: bool,
+    timed_out: bool,
+    metrics_remaining: usize,
+    notes_remaining: usize,
+}
+
 struct DaemonProcessActiveGuard;
 
 impl DaemonProcessActiveGuard {
@@ -5624,32 +5633,34 @@ impl ActorDaemonCoordinator {
                         old_head,
                         new_head,
                     } => {
-                        if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                            let repo = find_repository_in_path(&worktree)?;
-                            match kind {
-                                crate::daemon::domain::ResetKind::Hard => {
-                                    repo.storage.delete_working_log_for_base_commit(old_head)?;
-                                }
-                                _ => {
-                                    if is_ancestor_commit(&repo, new_head, old_head) {
-                                        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
-                                            &repo, old_head, new_head,
-                                        )?;
-                                    } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                        let outcome =
-                                            crate::authorship::rewrite::handle_rewrite_event_with_metrics(
-                                            &repo,
-                                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                                old_tip: old_head.to_string(),
-                                                new_tip: new_head.to_string(),
-                                                onto: None,
-                                            },
-                                        )?;
-                                        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
-                                            &repo,
-                                            outcome.metric_commits,
-                                        );
-                                    }
+                        let should_handle =
+                            !old_head.is_empty() && !new_head.is_empty() && old_head != new_head;
+                        match kind {
+                            _ if !should_handle => {}
+                            crate::daemon::domain::ResetKind::Hard => {
+                                let repo = find_repository_in_path(&worktree)?;
+                                repo.storage.delete_working_log_for_base_commit(old_head)?;
+                            }
+                            _ => {
+                                let repo = find_repository_in_path(&worktree)?;
+                                if is_ancestor_commit(&repo, new_head, old_head) {
+                                    crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+                                        &repo, old_head, new_head,
+                                    )?;
+                                } else if !is_ancestor_commit(&repo, old_head, new_head) {
+                                    let outcome =
+                                        crate::authorship::rewrite::handle_rewrite_event_with_metrics(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                            old_tip: old_head.to_string(),
+                                            new_tip: new_head.to_string(),
+                                            onto: None,
+                                        },
+                                    )?;
+                                    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                        &repo,
+                                        outcome.metric_commits,
+                                    );
                                 }
                             }
                         }
@@ -5962,6 +5973,164 @@ impl ActorDaemonCoordinator {
         self.status_for_family(repo_working_dir).await
     }
 
+    /// Wait for the daemon to finish all in-flight work and telemetry flushing.
+    ///
+    /// Progress is logged every few seconds. Returns a `PreExitResult` describing
+    /// whether the daemon was idle before the timeout and how much telemetry
+    /// (if any) is still pending.
+    async fn pre_exit(&self, timeout_secs: u64) -> PreExitResult {
+        use tokio::time::{Duration, Instant, timeout};
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(timeout_secs);
+        let log_interval = Duration::from_secs(3);
+        let mut last_log = start;
+
+        let mut result = PreExitResult {
+            done: false,
+            timed_out: false,
+            metrics_remaining: 0,
+            notes_remaining: 0,
+        };
+
+        let mut maybe_log = |phase: &str| {
+            let now = Instant::now();
+            if now - last_log >= log_interval {
+                tracing::info!(phase, "pre-exit: still waiting");
+                eprintln!("pre-exit: still waiting for {}...", phase);
+                last_log = now;
+            }
+        };
+
+        // Phase 1: wait for the trace-ingest and family-sequencer work side.
+        while !self.is_shutting_down() {
+            let now = Instant::now();
+            if now >= deadline {
+                result.timed_out = true;
+                break;
+            }
+            let remaining = deadline - now;
+
+            maybe_log("daemon work");
+            if timeout(remaining, self.wait_for_trace_ingest_processed_through())
+                .await
+                .is_err()
+            {
+                result.timed_out = true;
+                break;
+            }
+
+            if self.is_shutting_down() {
+                break;
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                result.timed_out = true;
+                break;
+            }
+            let remaining = deadline - now;
+
+            if timeout(remaining, self.drain_all_ready_family_sequencers())
+                .await
+                .is_err()
+            {
+                result.timed_out = true;
+                break;
+            }
+
+            if !self.has_pending_daemon_work() {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        if self.is_shutting_down() {
+            result.timed_out = true;
+        }
+
+        // Phase 2: drain the transcript/stream worker.
+        if !result.timed_out
+            && let Some(worker) = &self.stream_worker
+        {
+            let now = Instant::now();
+            if now < deadline {
+                let remaining = deadline - now;
+                maybe_log("transcript processing");
+                match timeout(remaining, worker.drain()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "pre-exit: transcript drain failed");
+                    }
+                    Err(_) => {
+                        result.timed_out = true;
+                    }
+                }
+            } else {
+                result.timed_out = true;
+            }
+        }
+
+        // Phase 3: flush telemetry and wait for the worker to finish.
+        if !result.timed_out
+            && let Some(worker) = &self.telemetry_worker
+        {
+            let now = Instant::now();
+            if now < deadline {
+                let remaining = deadline - now;
+                maybe_log("telemetry flush");
+                match timeout(remaining, worker.flush_and_wait()).await {
+                    Ok(Ok(status)) => {
+                        result.metrics_remaining = status.metrics_remaining;
+                        result.notes_remaining = status.notes_remaining;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "pre-exit: telemetry flush failed");
+                    }
+                    Err(_) => {
+                        result.timed_out = true;
+                    }
+                }
+            } else {
+                result.timed_out = true;
+            }
+        }
+
+        result.done = !result.timed_out
+            && result.metrics_remaining == 0
+            && result.notes_remaining == 0
+            && !self.has_pending_daemon_work();
+        result
+    }
+
+    fn has_pending_daemon_work(&self) -> bool {
+        if self.queued_trace_payloads.load(Ordering::Acquire) > 0 {
+            return true;
+        }
+        if self.next_trace_ingest_seq.load(Ordering::Acquire)
+            > self.processed_trace_ingest_seq.load(Ordering::Acquire)
+        {
+            return true;
+        }
+        if self.has_open_trace_roots_that_may_mutate_refs() {
+            return true;
+        }
+        if let Ok(map) = self.inflight_effects_by_family.lock()
+            && !map.is_empty()
+        {
+            return true;
+        }
+        if let Ok(map) = self.family_sequencers_by_family.lock() {
+            for state in map.values() {
+                if !state.entries.is_empty() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::Ping => Ok(ControlResponse::ok(None, None)),
@@ -6038,9 +6207,15 @@ impl ActorDaemonCoordinator {
                 // Trigger an immediate notes flush in a blocking task.
                 // Fire-and-forget: the periodic flush loop is the safety net.
                 tokio::task::spawn_blocking(|| {
-                    crate::daemon::telemetry_worker::flush_notes();
+                    crate::daemon::telemetry_worker::flush_notes(false);
                 });
                 Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::PreExit { timeout_secs } => {
+                let result = self.pre_exit(timeout_secs).await;
+                serde_json::to_value(result)
+                    .map(|v| ControlResponse::ok(None, Some(v)))
+                    .map_err(GitAiError::from)
             }
             ControlRequest::BashSessionStart {
                 repo_work_dir,
@@ -7393,6 +7568,12 @@ fn checkpoint_control_response_timeout(
         }
         ControlRequest::SyncFamily { .. } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
         ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
+        // Pre-exit blocks until the requested timeout is reached; give the daemon
+        // a small grace period over the requested limit so the caller sees a
+        // response rather than a client-side socket timeout.
+        ControlRequest::PreExit { timeout_secs } => {
+            Duration::from_secs(timeout_secs.saturating_add(5))
+        }
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }

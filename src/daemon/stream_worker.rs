@@ -105,6 +105,10 @@ struct SweepRequest {
     completion: Option<std::sync::mpsc::Sender<Result<(), String>>>,
 }
 
+struct DrainRequest {
+    completion: tokio::sync::oneshot::Sender<()>,
+}
+
 impl SweepRequest {
     fn normal(trigger: SweepTrigger) -> Self {
         Self {
@@ -182,6 +186,7 @@ impl SweepTriggerGate {
 pub struct StreamWorkerHandle {
     checkpoint_tx: tokio::sync::mpsc::UnboundedSender<CheckpointNotification>,
     sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepRequest>,
+    drain_tx: tokio::sync::mpsc::UnboundedSender<DrainRequest>,
     sweep_trigger_gate: SweepTriggerGate,
 }
 
@@ -252,12 +257,30 @@ impl StreamWorkerHandle {
         })
     }
 
+    /// Request that the worker drain all immediate processing tasks.
+    ///
+    /// Returns after the worker has finished processing all currently-enqueued
+    /// immediate-priority tasks and any that are already in flight.
+    pub async fn drain(&self) -> Result<(), String> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.drain_tx
+            .send(DrainRequest {
+                completion: completion_tx,
+            })
+            .map_err(|_| "stream worker has stopped".to_string())?;
+        completion_rx
+            .await
+            .map_err(|_| "stream worker drain was cancelled".to_string())
+    }
+
     #[cfg(test)]
     fn for_test_sweep_triggers(sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepRequest>) -> Self {
         let (checkpoint_tx, _checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (drain_tx, _drain_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             checkpoint_tx,
             sweep_tx,
+            drain_tx,
             sweep_trigger_gate: SweepTriggerGate::new(),
         }
     }
@@ -287,11 +310,13 @@ struct StreamWorker {
     shutdown_flag: Arc<AtomicBool>,
     checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
     sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
+    drain_rx: tokio::sync::mpsc::UnboundedReceiver<DrainRequest>,
     sweep_trigger_gate: SweepTriggerGate,
 }
 
 impl StreamWorker {
     /// Create a new transcript worker.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         streams_db: Arc<StreamsDatabase>,
         telemetry_handle: DaemonTelemetryWorkerHandle,
@@ -299,6 +324,7 @@ impl StreamWorker {
         shutdown_flag: Arc<AtomicBool>,
         checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
         sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
+        drain_rx: tokio::sync::mpsc::UnboundedReceiver<DrainRequest>,
         sweep_trigger_gate: SweepTriggerGate,
     ) -> Self {
         let sweep_coordinator =
@@ -315,6 +341,7 @@ impl StreamWorker {
             shutdown_flag,
             checkpoint_rx,
             sweep_rx,
+            drain_rx,
             sweep_trigger_gate,
         }
     }
@@ -402,6 +429,9 @@ impl StreamWorker {
                         }
                     }
                 }
+                Some(request) = self.drain_rx.recv() => {
+                    self.handle_drain_request(request).await;
+                }
             }
         }
 
@@ -418,6 +448,19 @@ impl StreamWorker {
                 i += 1;
             }
         }
+    }
+
+    async fn handle_drain_request(&mut self, request: DrainRequest) {
+        // Process immediate priority tasks that are already queued.
+        self.drain_immediate_tasks().await;
+
+        // Continue processing newly promoted tasks until there is no ready
+        // work and no in-flight processing.
+        while !self.priority_queue.is_empty() || !self.in_flight.is_empty() {
+            self.process_next_task().await;
+        }
+
+        let _ = request.completion.send(());
     }
 
     fn next_delayed_task_at(&self) -> Option<std::time::Instant> {
@@ -1311,6 +1354,7 @@ pub fn spawn_stream_worker(
 ) -> StreamWorkerHandle {
     let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
     let (sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let sweep_trigger_gate = SweepTriggerGate::new();
 
@@ -1321,6 +1365,7 @@ pub fn spawn_stream_worker(
         shutdown_flag,
         checkpoint_rx,
         sweep_rx,
+        drain_rx,
         sweep_trigger_gate.clone(),
     );
 
@@ -1331,6 +1376,7 @@ pub fn spawn_stream_worker(
     StreamWorkerHandle {
         checkpoint_tx,
         sweep_tx,
+        drain_tx,
         sweep_trigger_gate,
     }
 }
@@ -1398,6 +1444,7 @@ mod scheduling_tests {
         let db = Arc::new(StreamsDatabase::open(temp.path().join("streams.db")).unwrap());
         let (_checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdown = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let telemetry = DaemonTelemetryWorkerHandle::new_noop();
@@ -1410,6 +1457,7 @@ mod scheduling_tests {
             shutdown_flag,
             checkpoint_rx,
             sweep_rx,
+            drain_rx,
             sweep_trigger_gate,
         );
         (temp, worker, shutdown)
@@ -1524,6 +1572,7 @@ mod subagent_sweep_tests {
     fn make_worker(db: Arc<StreamsDatabase>) -> StreamWorker {
         let (_checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdown = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let telemetry = DaemonTelemetryWorkerHandle::new_noop();
@@ -1534,6 +1583,7 @@ mod subagent_sweep_tests {
             shutdown_flag,
             checkpoint_rx,
             sweep_rx,
+            drain_rx,
             SweepTriggerGate::new(),
         )
     }

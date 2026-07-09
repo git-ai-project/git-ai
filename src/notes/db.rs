@@ -462,6 +462,16 @@ impl NotesDatabase {
 
     // ----- Read operations -----
 
+    /// Count notes that have not been synced to the remote backend.
+    pub fn count_pending_syncable(&self) -> Result<usize, GitAiError> {
+        let count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM notes WHERE synced = 0", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(count as usize)
+    }
+
     /// Retrieve the note content for a single commit SHA.
     pub fn get_note(&self, commit_sha: &str) -> Result<Option<String>, GitAiError> {
         match self.conn.query_row(
