@@ -181,6 +181,7 @@ pub struct Config {
     codex_hooks_format: CodexHooksFormat,
     notes_backend: NotesBackendConfig,
     transcript_streaming_lookback_days: Option<u32>,
+    max_checkpoint_file_size_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -262,6 +263,8 @@ pub struct FileConfig {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_file_size_bytes: Option<usize>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -321,6 +324,8 @@ pub struct ConfigPatch {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_file_size_bytes: Option<usize>,
 }
 
 impl Config {
@@ -625,6 +630,11 @@ impl Config {
 
     pub fn transcript_streaming_lookback_days(&self) -> Option<u32> {
         self.transcript_streaming_lookback_days
+    }
+
+    /// Returns the per-file size limit for checkpoint content reads.
+    pub fn max_checkpoint_file_size_bytes(&self) -> usize {
+        self.max_checkpoint_file_size_bytes
     }
 
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
@@ -1151,6 +1161,17 @@ fn build_config() -> Config {
         .or(Some(7))
         .and_then(|v| if v == 0 { None } else { Some(v) });
 
+    // Per-file checkpoint content limit: env > file > default (3 MiB).
+    let max_checkpoint_file_size_bytes = env::var("GIT_AI_MAX_CHECKPOINT_FILE_SIZE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.max_checkpoint_file_size_bytes)
+        })
+        .unwrap_or(3 * 1024 * 1024);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -1177,6 +1198,7 @@ fn build_config() -> Config {
             codex_hooks_format,
             notes_backend,
             transcript_streaming_lookback_days,
+            max_checkpoint_file_size_bytes,
         };
         apply_test_config_patch(&mut config);
         config
@@ -1207,6 +1229,7 @@ fn build_config() -> Config {
         codex_hooks_format,
         notes_backend,
         transcript_streaming_lookback_days,
+        max_checkpoint_file_size_bytes,
     }
 }
 
@@ -1653,6 +1676,9 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(days) = patch.transcript_streaming_lookback_days {
             config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };
         }
+        if let Some(max_bytes) = patch.max_checkpoint_file_size_bytes {
+            config.max_checkpoint_file_size_bytes = max_bytes;
+        }
     }
 }
 
@@ -1694,6 +1720,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            max_checkpoint_file_size_bytes: 3 * 1024 * 1024,
         }
     }
 
@@ -1936,6 +1963,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            max_checkpoint_file_size_bytes: 3 * 1024 * 1024,
         }
     }
 
@@ -2081,6 +2109,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            max_checkpoint_file_size_bytes: 3 * 1024 * 1024,
         }
     }
 

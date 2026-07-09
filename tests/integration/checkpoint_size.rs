@@ -1,4 +1,5 @@
 use crate::repos::test_repo::TestRepo;
+use git_ai::git::repository::find_repository_in_path;
 use rand::{RngExt, distr::Alphanumeric};
 use std::{fs, time::Instant};
 
@@ -84,6 +85,63 @@ fn test_checkpoint_size_logging_large_ai_rewrites() {
             checkpoints_file, size
         );
     }
+}
+
+#[test]
+fn test_checkpoint_skips_oversized_files() {
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|p| p.max_checkpoint_file_size_bytes = Some(64));
+
+    let small_path = repo.path().join("small.txt");
+    let big_path = repo.path().join("big.txt");
+    fs::write(&small_path, "small content\n").expect("write small file");
+    fs::write(&big_path, "x".repeat(256)).expect("write big file");
+
+    repo.git_ai(&["checkpoint", "mock_ai", "small.txt", "big.txt"])
+        .expect("git-ai checkpoint should succeed");
+
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit("initial")
+        .unwrap();
+    let checkpoints = working_log.read_all_checkpoints().unwrap();
+    assert_eq!(checkpoints.len(), 1, "expected exactly one checkpoint");
+    let latest = checkpoints.last().unwrap();
+    assert_eq!(
+        latest.entries.len(),
+        1,
+        "expected one entry: oversized file should be skipped"
+    );
+    assert_eq!(latest.entries[0].file, "small.txt");
+}
+
+#[test]
+fn test_checkpoint_saves_normal_files_under_limit() {
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|p| p.max_checkpoint_file_size_bytes = Some(1024));
+
+    let file_path = repo.path().join("normal.txt");
+    let content = "this is a normal file\nwith a few lines\n";
+    fs::write(&file_path, content).expect("write normal file");
+
+    repo.git_ai(&["checkpoint", "mock_ai", "normal.txt"])
+        .expect("git-ai checkpoint should succeed");
+
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit("initial")
+        .unwrap();
+    let checkpoints = working_log.read_all_checkpoints().unwrap();
+    assert_eq!(checkpoints.len(), 1, "expected exactly one checkpoint");
+    let latest = checkpoints.last().unwrap();
+    assert_eq!(
+        latest.entries.len(),
+        1,
+        "expected one entry for normal file"
+    );
+    assert_eq!(latest.entries[0].file, "normal.txt");
 }
 
 crate::reuse_tests_in_worktree!(test_checkpoint_size_logging_large_ai_rewrites,);

@@ -1344,8 +1344,8 @@ impl Repository {
     /// This starts from Git's effective committer identity, then overlays any
     /// configured `author.name` and/or `author.email` from git-ai config.
     pub fn effective_author_identity(&self) -> GitAuthorIdentity {
-        self.git_author_identity()
-            .with_author_config(&config::Config::fresh_author_cached())
+        let git_id = self.git_author_identity();
+        git_id.with_author_config(&config::Config::fresh_author_cached())
     }
 
     /// Get the effective git commit author identity for this repository.

@@ -503,6 +503,9 @@ fn get_config_value(key: &str) -> Result<(), String> {
                     .unwrap_or(0)
                     .into(),
             ),
+            "max_checkpoint_file_size_bytes" => {
+                Value::Number(runtime_config.max_checkpoint_file_size_bytes().into())
+            }
             "custom_attributes" => serde_json::to_value(runtime_config.custom_attributes())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "notes_backend" => {
@@ -806,6 +809,17 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.transcript_streaming_lookback_days = Some(days);
                 crate::config::save_file_config(&file_config)?;
                 println!("[transcript_streaming_lookback_days]: {}", days);
+            }
+            "max_checkpoint_file_size_bytes" => {
+                let bytes = value.trim().parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid max_checkpoint_file_size_bytes value '{}'. Expected a non-negative integer in bytes",
+                        value
+                    )
+                })?;
+                file_config.max_checkpoint_file_size_bytes = Some(bytes);
+                crate::config::save_file_config(&file_config)?;
+                println!("[max_checkpoint_file_size_bytes]: {}", bytes);
             }
             "custom_attributes" => {
                 if add_mode {
@@ -1144,6 +1158,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [transcript_streaming_lookback_days]: {}", v);
+                }
+            }
+            "max_checkpoint_file_size_bytes" => {
+                let old_value = file_config.max_checkpoint_file_size_bytes.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [max_checkpoint_file_size_bytes]: {}", v);
                 }
             }
             "custom_attributes" => {

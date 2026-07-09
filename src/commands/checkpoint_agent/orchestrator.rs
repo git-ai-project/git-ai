@@ -71,6 +71,7 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
 
     let mut repo_cache: HashMap<PathBuf, RepoContext> = HashMap::new();
     let mut files = Vec::new();
+    let max_size = config::Config::get().max_checkpoint_file_size_bytes();
 
     for path in capped_paths {
         if !path.is_absolute() {
@@ -121,7 +122,15 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
         };
 
         let t_read = std::time::Instant::now();
-        let content = if path.exists() {
+        let content = if let Ok(meta) = fs::metadata(path) {
+            if meta.len() as usize > max_size {
+                tracing::warn!(
+                    "skipping file larger than max_checkpoint_file_size_bytes: {} ({} bytes)",
+                    path.display(),
+                    meta.len(),
+                );
+                continue;
+            }
             fs::read_to_string(path).ok()
         } else {
             Some(String::new())
@@ -284,6 +293,10 @@ fn split_files_into_requests(
     stream_source: Option<StreamSource>,
     metadata: HashMap<String, String>,
 ) -> Vec<CheckpointRequest> {
+    let all_files: Vec<CheckpointFile> = all_files
+        .into_iter()
+        .filter(|f| f.content.is_some())
+        .collect();
     let mut by_repo: HashMap<PathBuf, Vec<CheckpointFile>> = HashMap::new();
     for f in all_files {
         by_repo.entry(f.repo_work_dir.clone()).or_default().push(f);
@@ -304,11 +317,21 @@ fn split_files_into_requests(
 }
 
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
+    let max_size = config::Config::get().max_checkpoint_file_size_bytes();
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
         for f in &mut files {
             if let Some(override_content) = dirty.get(&f.path) {
-                f.content = Some(override_content.clone());
+                if override_content.len() > max_size {
+                    tracing::warn!(
+                        "skipping dirty file override larger than max_checkpoint_file_size_bytes: {} ({} bytes)",
+                        f.path.display(),
+                        override_content.len(),
+                    );
+                    f.content = None;
+                } else {
+                    f.content = Some(override_content.clone());
+                }
             }
         }
     }
@@ -331,11 +354,21 @@ fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
 ) -> Result<Vec<CheckpointRequest>, GitAiError> {
+    let max_size = config::Config::get().max_checkpoint_file_size_bytes();
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
         for f in &mut files {
             if let Some(override_content) = dirty.get(&f.path) {
-                f.content = Some(override_content.clone());
+                if override_content.len() > max_size {
+                    tracing::warn!(
+                        "skipping dirty file override larger than max_checkpoint_file_size_bytes: {} ({} bytes)",
+                        f.path.display(),
+                        override_content.len(),
+                    );
+                    f.content = None;
+                } else {
+                    f.content = Some(override_content.clone());
+                }
             }
         }
     }
@@ -362,11 +395,21 @@ fn execute_post_file_edit(
 }
 
 fn execute_known_human_edit(e: KnownHumanEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
+    let max_size = config::Config::get().max_checkpoint_file_size_bytes();
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
         for f in &mut files {
             if let Some(override_content) = dirty.get(&f.path) {
-                f.content = Some(override_content.clone());
+                if override_content.len() > max_size {
+                    tracing::warn!(
+                        "skipping dirty file override larger than max_checkpoint_file_size_bytes: {} ({} bytes)",
+                        f.path.display(),
+                        override_content.len(),
+                    );
+                    f.content = None;
+                } else {
+                    f.content = Some(override_content.clone());
+                }
             }
         }
     }
