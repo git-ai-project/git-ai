@@ -81,11 +81,11 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "25.x",
+    "@types/node": "26.x",
     "@types/vscode": "1.99.0",
-    "@typescript-eslint/eslint-plugin": "^8.61.1",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.59.4",
-    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "3.9.2",
     "eslint": "^10.5.0",
@@ -98,6 +98,6 @@
     "test-exclude": ">=7.0.0"
   },
   "dependencies": {
-    "posthog-node": "^5.35.14"
+    "posthog-node": "^5.39.4"
   }
 }
