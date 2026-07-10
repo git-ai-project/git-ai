@@ -12,6 +12,11 @@ pub fn match_cherry_pick_pairs(
     sources: &[String],
     new_commits: &[String],
 ) -> Result<Vec<(String, String)>, crate::error::GitAiError> {
+    crate::authorship::rewrite::ensure_rewrite_work_limit("source commits", sources.len())?;
+    crate::authorship::rewrite::ensure_rewrite_work_limit(
+        "destination commits",
+        new_commits.len(),
+    )?;
     if sources.is_empty() || new_commits.is_empty() {
         return Ok(Vec::new());
     }
@@ -103,6 +108,7 @@ pub(crate) fn stable_patch_ids_for_commits(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashMap<String, String>, crate::error::GitAiError> {
+    crate::authorship::rewrite::ensure_rewrite_work_limit("patch-id commits", commit_shas.len())?;
     let mut commits = Vec::new();
     let mut seen = HashSet::new();
     for sha in commit_shas {
@@ -236,6 +242,19 @@ mod tests {
         assert!(looks_like_hex_id(first_patch_id));
         assert!(looks_like_hex_id(second_patch_id));
         assert_ne!(first_patch_id, second_patch_id);
+    }
+
+    #[test]
+    fn stable_patch_ids_reject_oversized_commit_set_before_git() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let commits = (0..=crate::authorship::rewrite::MAX_REWRITE_COMMITS)
+            .map(|index| format!("{index:040x}"))
+            .collect::<Vec<_>>();
+
+        let error = stable_patch_ids_for_commits(tmp.gitai_repo(), &commits)
+            .expect_err("oversized patch-id batch must fail closed");
+
+        assert!(error.to_string().contains("rewrite work exceeded"));
     }
 
     /// Helper that simulates pass-2 positional pairing without patch-id (for unit testing).

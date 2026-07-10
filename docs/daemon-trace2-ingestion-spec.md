@@ -70,6 +70,14 @@ of stdin, retains at most 32 MiB of stdout and 1 MiB of stderr, and uses bounded
 reader-thread stacks. Overflow is drained, reported as an error, and fails the
 affected attribution side effect closed without retaining the excess output.
 
+Rewrite side effects additionally cap parsed work at 4,096 commits, mappings,
+or diff pairs. Revision walks request at most one extra record so overflow is
+detected before note maps and diff structures are built. Ordinary
+cherry-pick/revert source expressions share one `cat-file` batch; at most one
+range walk is allowed alongside that batch because combining independent
+ranges changes Git's exclusion semantics. Multiple range arguments fail the
+attribution side effect closed instead of spawning Git once per range.
+
 Separation of concerns:
 
 - The **normalizer** parses trace2/argv facts only. It never reads mutable
