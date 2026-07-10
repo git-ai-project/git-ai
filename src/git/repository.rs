@@ -15,9 +15,11 @@ use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
@@ -30,6 +32,87 @@ thread_local! {
     static INTERNAL_GIT_HOOKS_DISABLED_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 static INTERNAL_GIT_HOOKS_DISABLED_DEPTH_GLOBAL: AtomicUsize = AtomicUsize::new(0);
+
+const MAX_INTERNAL_GIT_COMMANDS: usize = 8;
+const MAX_INTERNAL_GIT_ARGS: usize = 16_384;
+const MAX_INTERNAL_GIT_ARG_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_INTERNAL_GIT_STDIN_BYTES: usize = 32 * 1_024 * 1_024;
+const MAX_INTERNAL_GIT_STDOUT_BYTES: usize = 32 * 1_024 * 1_024;
+const MAX_INTERNAL_GIT_STDERR_BYTES: usize = 1_024 * 1_024;
+const INTERNAL_GIT_READER_STACK_BYTES: usize = 512 * 1_024;
+
+struct InternalGitLimiter {
+    active: Mutex<usize>,
+    available: Condvar,
+}
+
+impl InternalGitLimiter {
+    fn acquire(&self) -> InternalGitPermit<'_> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *active >= MAX_INTERNAL_GIT_COMMANDS {
+            active = self
+                .available
+                .wait(active)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *active += 1;
+        InternalGitPermit { limiter: self }
+    }
+}
+
+struct InternalGitPermit<'a> {
+    limiter: &'a InternalGitLimiter,
+}
+
+impl Drop for InternalGitPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .limiter
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active = active.saturating_sub(1);
+        self.limiter.available.notify_one();
+    }
+}
+
+fn internal_git_limiter() -> &'static InternalGitLimiter {
+    static LIMITER: OnceLock<InternalGitLimiter> = OnceLock::new();
+    LIMITER.get_or_init(|| InternalGitLimiter {
+        active: Mutex::new(0),
+        available: Condvar::new(),
+    })
+}
+
+struct BoundedCommandOutput {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+fn read_bounded_command_output(
+    mut reader: impl Read,
+    max_bytes: usize,
+) -> std::io::Result<BoundedCommandOutput> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024));
+    let mut exceeded = false;
+    let mut chunk = [0u8; 16 * 1_024];
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let retained = remaining.min(read);
+        bytes.extend_from_slice(&chunk[..retained]);
+        exceeded |= retained < read;
+    }
+    Ok(BoundedCommandOutput { bytes, exceeded })
+}
 
 pub struct InternalGitHooksGuard;
 
@@ -2693,7 +2776,6 @@ fn spawn_probe_log(effective_args: &[String]) {
         .append(true)
         .open(&path)
     {
-        use std::io::Write;
         let _ = writeln!(f, "{}", sub);
     }
 }
@@ -2702,16 +2784,50 @@ fn spawn_probe_log(effective_args: &[String]) {
 #[inline]
 fn spawn_probe_log(_effective_args: &[String]) {}
 
-fn exec_git_allow_nonzero_with_profile_and_env(
+fn validate_internal_git_command(
     args: &[String],
-    profile: InternalGitProfile,
+    stdin_data: Option<&[u8]>,
+) -> Result<(), GitAiError> {
+    if args.len() > MAX_INTERNAL_GIT_ARGS
+        || args
+            .iter()
+            .try_fold(0usize, |total, arg| total.checked_add(arg.len() + 1))
+            .is_none_or(|total| total > MAX_INTERNAL_GIT_ARG_BYTES)
+    {
+        return Err(GitAiError::Generic(
+            "internal Git command arguments exceeded the 4 MiB limit".to_string(),
+        ));
+    }
+    if stdin_data.is_some_and(|data| data.len() > MAX_INTERNAL_GIT_STDIN_BYTES) {
+        return Err(GitAiError::Generic(
+            "internal Git command stdin exceeded the 32 MiB limit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn kill_and_wait(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_internal_git_command(
+    effective_args: &[String],
     envs: &[(&str, &OsStr)],
+    stdin_data: Option<&[u8]>,
 ) -> Result<Output, GitAiError> {
-    let effective_args =
-        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
-    spawn_probe_log(&effective_args);
+    validate_internal_git_command(effective_args, stdin_data)?;
+    let _permit = internal_git_limiter().acquire();
+
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(&effective_args);
+    cmd.args(effective_args)
+        .stdin(if stdin_data.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     apply_internal_git_env(&mut cmd);
     for (key, value) in envs {
         cmd.env(key, value);
@@ -2724,7 +2840,125 @@ fn exec_git_allow_nonzero_with_profile_and_env(
         }
     }
 
-    cmd.output().map_err(GitAiError::IoError)
+    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            kill_and_wait(&mut child);
+            return Err(GitAiError::IoError(std::io::Error::other(
+                "internal Git command stdout was not piped",
+            )));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            kill_and_wait(&mut child);
+            return Err(GitAiError::IoError(std::io::Error::other(
+                "internal Git command stderr was not piped",
+            )));
+        }
+    };
+    let stdin = child.stdin.take();
+
+    let (status, stdout, stderr) = std::thread::scope(|scope| {
+        let stdout_handle = match std::thread::Builder::new()
+            .name("git-ai-git-stdout".to_string())
+            .stack_size(INTERNAL_GIT_READER_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                read_bounded_command_output(stdout, MAX_INTERNAL_GIT_STDOUT_BYTES)
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                kill_and_wait(&mut child);
+                return Err(GitAiError::IoError(error));
+            }
+        };
+        let stderr_handle = match std::thread::Builder::new()
+            .name("git-ai-git-stderr".to_string())
+            .stack_size(INTERNAL_GIT_READER_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                read_bounded_command_output(stderr, MAX_INTERNAL_GIT_STDERR_BYTES)
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                kill_and_wait(&mut child);
+                return Err(GitAiError::IoError(error));
+            }
+        };
+        let stdin_handle = if let (Some(mut stdin), Some(data)) = (stdin, stdin_data) {
+            match std::thread::Builder::new()
+                .name("git-ai-git-stdin".to_string())
+                .stack_size(INTERNAL_GIT_READER_STACK_BYTES)
+                .spawn_scoped(scope, move || stdin.write_all(data))
+            {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    kill_and_wait(&mut child);
+                    return Err(GitAiError::IoError(error));
+                }
+            }
+        } else {
+            None
+        };
+
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(error) => {
+                kill_and_wait(&mut child);
+                return Err(GitAiError::IoError(error));
+            }
+        };
+        let stdout = stdout_handle
+            .join()
+            .map_err(|_| std::io::Error::other("internal Git stdout reader panicked"))??;
+        let stderr = stderr_handle
+            .join()
+            .map_err(|_| std::io::Error::other("internal Git stderr reader panicked"))??;
+        if let Some(handle) = stdin_handle {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Ok(Err(error)) => return Err(GitAiError::IoError(error)),
+                Err(_) => {
+                    return Err(GitAiError::IoError(std::io::Error::other(
+                        "internal Git stdin writer panicked",
+                    )));
+                }
+            }
+        }
+        Ok((status, stdout, stderr))
+    })?;
+
+    if stdout.exceeded || stderr.exceeded {
+        let stream = if stdout.exceeded && stderr.exceeded {
+            "stdout and stderr"
+        } else if stdout.exceeded {
+            "stdout"
+        } else {
+            "stderr"
+        };
+        return Err(GitAiError::Generic(format!(
+            "internal Git command {stream} exceeded its memory limit"
+        )));
+    }
+
+    Ok(Output {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
+}
+
+fn exec_git_allow_nonzero_with_profile_and_env(
+    args: &[String],
+    profile: InternalGitProfile,
+    envs: &[(&str, &OsStr)],
+) -> Result<Output, GitAiError> {
+    let effective_args =
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    spawn_probe_log(&effective_args);
+    run_internal_git_command(&effective_args, envs, None)
 }
 
 /// Spawn a git command with stdout piped and stderr inherited.
@@ -2843,42 +3077,7 @@ pub fn exec_git_stdin_with_profile(
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     spawn_probe_log(&effective_args);
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(&effective_args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    apply_internal_git_env(&mut cmd);
-
-    #[cfg(windows)]
-    {
-        if !is_interactive_terminal() {
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-    }
-
-    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
-
-    // Write stdin in a separate thread to avoid deadlock: if we write all stdin
-    // before reading stdout, the child's stdout pipe buffer can fill up, causing
-    // the child to block on write, which prevents it from consuming more stdin,
-    // which blocks our write_all. Writing concurrently avoids this.
-    let stdin_handle = child.stdin.take().map(|mut stdin| {
-        let data = stdin_data.to_vec();
-        std::thread::spawn(move || {
-            use std::io::Write;
-            stdin.write_all(&data)
-        })
-    });
-
-    let output = child.wait_with_output().map_err(GitAiError::IoError)?;
-
-    if let Some(handle) = stdin_handle
-        && let Err(e) = handle.join().expect("stdin writer thread panicked")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(GitAiError::IoError(e));
-    }
+    let output = run_internal_git_command(&effective_args, &[], Some(stdin_data))?;
 
     if !output.status.success() {
         let code = output.status.code();
@@ -3191,6 +3390,56 @@ mod tests {
                 Some(Some((*value).to_string()))
             );
         }
+    }
+
+    #[test]
+    fn bounded_command_output_retains_prefix_and_reports_overflow() {
+        let output = read_bounded_command_output(std::io::Cursor::new(b"abcdef"), 3).unwrap();
+
+        assert_eq!(output.bytes, b"abc");
+        assert!(output.exceeded);
+
+        let exact = read_bounded_command_output(std::io::Cursor::new(b"abc"), 3).unwrap();
+        assert_eq!(exact.bytes, b"abc");
+        assert!(!exact.exceeded);
+    }
+
+    #[test]
+    fn internal_git_command_rejects_unbounded_argument_count() {
+        let args = vec![String::new(); MAX_INTERNAL_GIT_ARGS + 1];
+
+        let error = validate_internal_git_command(&args, None).unwrap_err();
+
+        assert!(error.to_string().contains("arguments exceeded"));
+    }
+
+    #[test]
+    fn internal_git_limiter_blocks_past_capacity_and_reuses_permits() {
+        let limiter = std::sync::Arc::new(InternalGitLimiter {
+            active: Mutex::new(0),
+            available: Condvar::new(),
+        });
+        let mut held = (0..MAX_INTERNAL_GIT_COMMANDS)
+            .map(|_| limiter.acquire())
+            .collect::<Vec<_>>();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiting_limiter = limiter.clone();
+        let waiter = std::thread::spawn(move || {
+            let _permit = waiting_limiter.acquire();
+            tx.send(()).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "a ninth internal Git command must wait for capacity"
+        );
+        held.pop();
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("released capacity should wake a waiting command");
+
+        drop(held);
+        waiter.join().unwrap();
     }
 
     #[test]

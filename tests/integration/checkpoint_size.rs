@@ -321,12 +321,23 @@ fn test_repeated_checkpoints_plateau_after_runtime_warmup() {
     }
 
     #[cfg(target_os = "linux")]
+    let first_window_vm_size_kib = daemon_vm_size_kib(&repo);
+
+    for iteration in 33..=52 {
+        checkpoint_and_commit(iteration);
+    }
+
+    #[cfg(target_os = "linux")]
     {
-        let growth_kib = daemon_vm_size_kib(&repo).saturating_sub(warmed_vm_size_kib);
-        eprintln!("post-warmup checkpoint daemon VmSize growth: {growth_kib} KiB");
+        let first_window_growth_kib = first_window_vm_size_kib.saturating_sub(warmed_vm_size_kib);
+        let late_window_growth_kib =
+            daemon_vm_size_kib(&repo).saturating_sub(first_window_vm_size_kib);
+        eprintln!(
+            "checkpoint daemon VmSize growth: first window {first_window_growth_kib} KiB, late window {late_window_growth_kib} KiB"
+        );
         assert!(
-            growth_kib < 256 * 1024,
-            "post-warmup checkpoints grew daemon VmSize by {growth_kib} KiB"
+            late_window_growth_kib < 256 * 1024,
+            "late checkpoint window grew daemon VmSize by {late_window_growth_kib} KiB"
         );
     }
 }

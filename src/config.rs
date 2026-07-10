@@ -1041,6 +1041,8 @@ fn build_config() -> Config {
         .unwrap_or_default();
 
     let git_path = resolve_git_path(&file_cfg);
+    #[cfg(any(test, feature = "test-support"))]
+    let git_path = env::var("GIT_AI_TEST_GIT_PATH").unwrap_or(git_path);
 
     // Build feature flags from file config
     let feature_flags = build_feature_flags(&file_cfg);
