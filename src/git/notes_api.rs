@@ -10,7 +10,7 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::config::{Config, NotesBackendKind};
 use crate::error::GitAiError;
-use crate::git::repository::Repository;
+use crate::git::repository::{BatchMaterializationBudget, Repository, ensure_batch_git_item_limit};
 use std::collections::{HashMap, HashSet};
 
 // Re-export CommitAuthorship so callers don't need to import from refs directly.
@@ -32,6 +32,7 @@ pub fn write_notes_batch(
     if entries.is_empty() {
         return Ok(());
     }
+    ensure_batch_git_item_limit("note write", entries.len())?;
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => http_write_batch(entries),
         NotesBackendKind::GitNotes => crate::git::refs::notes_add_batch(repo, entries),
@@ -61,10 +62,13 @@ pub fn read_notes_batch(
     if commit_shas.is_empty() {
         return Ok(HashMap::new());
     }
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
 
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
             let mut notes = http_read_notes(commit_shas);
+            let mut materialization_budget = BatchMaterializationBudget::new();
+            reserve_note_map(&mut materialization_budget, "note content", &notes)?;
 
             let missing_after_cache: Vec<String> = commit_shas
                 .iter()
@@ -72,7 +76,10 @@ pub fn read_notes_batch(
                 .cloned()
                 .collect();
             if !missing_after_cache.is_empty() {
-                notes.extend(http_fetch_and_cache_notes(&missing_after_cache));
+                notes.extend(http_fetch_and_cache_notes(
+                    &missing_after_cache,
+                    &mut materialization_budget,
+                )?);
             }
 
             let missing_after_http: Vec<String> = commit_shas
@@ -84,6 +91,7 @@ pub fn read_notes_batch(
                 && let Ok(git_notes) =
                     crate::git::refs::notes_for_commits(repo, &missing_after_http)
             {
+                reserve_note_map(&mut materialization_budget, "note content", &git_notes)?;
                 notes.extend(git_notes);
             }
 
@@ -152,6 +160,7 @@ pub fn read_note_blob_oids(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashMap<String, String>, GitAiError> {
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
     match Config::get().notes_backend_kind() {
         // For Http, notes are in notes-db not in git — no blob OIDs exist.
         // Return an empty map; callers handle this as "no notes in git".
@@ -166,6 +175,7 @@ pub fn commits_with_notes(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashSet<String>, GitAiError> {
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
             // Check the cache first; fall through to git notes for misses.
@@ -192,6 +202,7 @@ pub fn filter_commits_with_notes(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<Vec<CommitAuthorship>, GitAiError> {
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
             // `CommitAuthorship` requires a git_author that is only available from
@@ -265,6 +276,8 @@ pub fn materialize_notes_for_display(repo: &Repository, limit: usize) -> Result<
     use crate::git::repository::exec_git;
     use crate::git::repository::exec_git_stdin;
 
+    ensure_batch_git_item_limit("display note commit", limit)?;
+
     // 1. Get recent commits via rev-list.
     let rev_list_args: Vec<String> = repo
         .global_args_for_exec()
@@ -283,6 +296,7 @@ pub fn materialize_notes_for_display(repo: &Repository, limit: usize) -> Result<
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
+    ensure_batch_git_item_limit("display note commit", commit_shas.len())?;
 
     if commit_shas.is_empty() {
         return Ok(0);
@@ -552,20 +566,23 @@ fn http_read_notes(commit_shas: &[String]) -> HashMap<String, String> {
     db_lock.get_notes(&refs).unwrap_or_default()
 }
 
-fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String> {
+fn http_fetch_and_cache_notes(
+    commit_shas: &[String],
+    materialization_budget: &mut BatchMaterializationBudget,
+) -> Result<HashMap<String, String>, GitAiError> {
     if commit_shas.is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
 
     let cfg = Config::fresh();
     let Some(backend_url) = cfg.notes_backend_url().map(str::to_string) else {
-        return HashMap::new();
+        return Ok(HashMap::new());
     };
 
     let ctx = crate::api::client::ApiContext::new(Some(backend_url));
     let client = crate::api::client::ApiClient::new(ctx);
     if !client.is_logged_in() && !client.has_api_key() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
 
     let mut fetched = HashMap::new();
@@ -576,6 +593,7 @@ fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String>
                 if response.notes.is_empty() {
                     continue;
                 }
+                reserve_note_map(materialization_budget, "note content", &response.notes)?;
                 let entries: Vec<(String, String)> = response.notes.into_iter().collect();
                 if let Ok(db) = crate::notes::db::NotesDatabase::global()
                     && let Ok(mut lock) = db.lock()
@@ -590,11 +608,23 @@ fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String>
         }
     }
 
-    fetched
+    Ok(fetched)
 }
 
 fn http_check_exists(commit_shas: &[String]) -> HashSet<String> {
     http_read_notes(commit_shas).into_keys().collect()
+}
+
+fn reserve_note_map(
+    budget: &mut BatchMaterializationBudget,
+    kind: &str,
+    notes: &HashMap<String, String>,
+) -> Result<(), GitAiError> {
+    ensure_batch_git_item_limit("materialized note", notes.len())?;
+    for content in notes.values() {
+        budget.reserve(kind, content.len())?;
+    }
+    Ok(())
 }
 
 // --- Tests ---
@@ -602,6 +632,37 @@ fn http_check_exists(commit_shas: &[String]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_map_budget_is_shared_across_sources() {
+        let content = "x".repeat(1_024 * 1_024);
+        let cached = (0..8)
+            .map(|index| (format!("{index:040x}"), content.clone()))
+            .collect::<HashMap<_, _>>();
+        let fetched = (8..17)
+            .map(|index| (format!("{index:040x}"), content.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut budget = crate::git::repository::BatchMaterializationBudget::new();
+
+        reserve_note_map(&mut budget, "note content", &cached).unwrap();
+        let error = reserve_note_map(&mut budget, "note content", &fetched)
+            .expect_err("all note sources must share one materialization budget");
+
+        assert!(error.to_string().contains("materialized note content"));
+    }
+
+    #[test]
+    fn materialize_notes_for_display_rejects_oversized_limit_before_git() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+
+        let error = materialize_notes_for_display(
+            tmp.gitai_repo(),
+            crate::git::repository::MAX_BATCH_GIT_ITEMS + 1,
+        )
+        .expect_err("display materialization must bound the requested history walk");
+
+        assert!(error.to_string().contains("display note commit count"));
+    }
 
     /// With kind=Http, the http helpers upsert into notes-db (synced=0) and the
     /// read helper returns the cached value. This tests the private http_* helpers

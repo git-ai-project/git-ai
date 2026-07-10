@@ -41,7 +41,7 @@ const MAX_INTERNAL_GIT_STDOUT_BYTES: usize = 32 * 1_024 * 1_024;
 const MAX_INTERNAL_GIT_STDERR_BYTES: usize = 1_024 * 1_024;
 const INTERNAL_GIT_READER_STACK_BYTES: usize = 512 * 1_024;
 pub(crate) const MAX_BATCH_GIT_ITEMS: usize = 4_096;
-const MAX_BATCH_MATERIALIZED_CONTENT_BYTES: usize = 16 * 1_024 * 1_024;
+pub(crate) const MAX_BATCH_MATERIALIZED_CONTENT_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_GIT_INDEX_BYTES: u64 = 32 * 1_024 * 1_024;
 
 pub(crate) fn ensure_batch_git_item_limit(kind: &str, count: usize) -> Result<(), GitAiError> {
@@ -51,6 +51,27 @@ pub(crate) fn ensure_batch_git_item_limit(kind: &str, count: usize) -> Result<()
         )));
     }
     Ok(())
+}
+
+pub(crate) struct BatchMaterializationBudget {
+    used_bytes: usize,
+}
+
+impl BatchMaterializationBudget {
+    pub(crate) fn new() -> Self {
+        Self { used_bytes: 0 }
+    }
+
+    pub(crate) fn reserve(&mut self, kind: &str, bytes: usize) -> Result<(), GitAiError> {
+        self.used_bytes = self.used_bytes.saturating_add(bytes);
+        if self.used_bytes > MAX_BATCH_MATERIALIZED_CONTENT_BYTES {
+            return Err(GitAiError::Generic(format!(
+                "batched materialized {kind} exceeded the {MAX_BATCH_MATERIALIZED_CONTENT_BYTES} byte limit ({})",
+                self.used_bytes
+            )));
+        }
+        Ok(())
+    }
 }
 
 struct InternalGitLimiter {
@@ -2749,6 +2770,15 @@ fn spawn_probe_log(effective_args: &[String]) {
     let Ok(path) = std::env::var("GIT_AI_SPAWN_LOG") else {
         return;
     };
+    if let Some(filter) = std::env::var_os("GIT_AI_SPAWN_LOG_MATCH") {
+        let filter = filter.to_string_lossy();
+        if !effective_args
+            .iter()
+            .any(|arg| arg.contains(filter.as_ref()))
+        {
+            return;
+        }
+    }
     let sub = effective_args
         .iter()
         .find(|a| !a.starts_with('-') && !a.contains('=') && !a.contains('/') && !a.contains('\\'))
@@ -3098,18 +3128,13 @@ fn materialize_path_contents(
     blob_contents: &HashMap<String, String>,
 ) -> Result<HashMap<(String, String), String>, GitAiError> {
     ensure_batch_git_item_limit("materialized path", request_blob_oids.len())?;
-    let mut materialized_bytes = 0usize;
+    let mut budget = BatchMaterializationBudget::new();
     let mut contents = HashMap::with_capacity(request_blob_oids.len());
     for (request, blob_oid) in request_blob_oids {
         let Some(content) = blob_contents.get(&blob_oid) else {
             continue;
         };
-        materialized_bytes = materialized_bytes.saturating_add(content.len());
-        if materialized_bytes > MAX_BATCH_MATERIALIZED_CONTENT_BYTES {
-            return Err(GitAiError::Generic(format!(
-                "batched Git materialized content exceeded the {MAX_BATCH_MATERIALIZED_CONTENT_BYTES} byte limit ({materialized_bytes})"
-            )));
-        }
+        budget.reserve("content", content.len())?;
         contents.insert(request, content.clone());
     }
     Ok(contents)
@@ -3463,6 +3488,7 @@ mod tests {
         let log_dir = tempfile::tempdir().unwrap();
         let log_path = log_dir.path().join("spawns.log");
         let _spawn_log = TestEnvGuard::set("GIT_AI_SPAWN_LOG", log_path.as_os_str());
+        let _spawn_filter = TestEnvGuard::set("GIT_AI_SPAWN_LOG_MATCH", tmp.path().as_os_str());
 
         let contents = tmp
             .gitai_repo()

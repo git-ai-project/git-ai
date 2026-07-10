@@ -55,6 +55,7 @@ mod daemon_commit_carryover;
 mod daemon_git_output_memory;
 mod daemon_ipc_memory;
 mod daemon_log_memory;
+mod daemon_note_materialization_memory;
 mod daemon_reflog_memory;
 mod daemon_repository_reader_memory;
 mod daemon_retained_state_memory;
