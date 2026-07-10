@@ -1,7 +1,7 @@
 src/daemon.rs
   dacf127c97d5a34b 68,7369-7370
 src/daemon/bash_sessions.rs
-  dacf127c97d5a34b 1-45,47-60
+  dacf127c97d5a34b 1-45,1-60,47-60
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -15,7 +15,6 @@ src/daemon/bash_sessions.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 61,
       "total_deletions": 0,
       "accepted_lines": 60,
