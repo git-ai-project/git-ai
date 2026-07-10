@@ -4300,6 +4300,93 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
 
 #[test]
 #[serial]
+#[cfg(not(windows))]
+fn daemon_times_out_bash_checkpoint_processing_without_affecting_other_checkpoints() {
+    use git_ai::commands::checkpoint_agent::orchestrator::{
+        BaseCommit, CheckpointFile, CheckpointRequest,
+    };
+    use git_ai::daemon::checkpoint::PreparedPathRole;
+
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_TEST_BASH_CHECKPOINT_PROCESSING_TIMEOUT_MS", "50"),
+            ("GIT_AI_TEST_CHECKPOINT_PROCESSING_DELAY_MS", "100"),
+        ],
+    );
+    let file_path = repo.path().join("timeout.txt");
+    fs::write(&file_path, "checkpoint content\n").expect("failed to write checkpoint file");
+
+    let request = |trace_id: &str, metadata: std::collections::HashMap<String, String>| {
+        ControlRequest::CheckpointRun {
+            request: Box::new(CheckpointRequest {
+                trace_id: trace_id.to_string(),
+                checkpoint_kind: CheckpointKind::Human,
+                agent_id: None,
+                files: vec![CheckpointFile {
+                    path: file_path.clone(),
+                    content: Some("checkpoint content\n".to_string()),
+                    repo_work_dir: repo.path().to_path_buf(),
+                    base_commit: BaseCommit::Initial,
+                }],
+                path_role: PreparedPathRole::WillEdit,
+                stream_source: None,
+                metadata,
+            }),
+        }
+    };
+
+    let bash_response = send_control_request_with_timeout(
+        &daemon.control_socket_path,
+        &request(
+            "bash-timeout",
+            std::collections::HashMap::from([(
+                "checkpoint_origin".to_string(),
+                "bash".to_string(),
+            )]),
+        ),
+        Duration::from_secs(2),
+    )
+    .expect("daemon should return a structured Bash checkpoint timeout response");
+    assert!(!bash_response.ok, "delayed Bash checkpoint should time out");
+    assert!(
+        bash_response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Bash checkpoint processing timed out")),
+        "unexpected timeout response: {bash_response:?}"
+    );
+    assert!(
+        repo.current_working_logs()
+            .read_all_checkpoints()
+            .expect("failed to read checkpoints after timeout")
+            .is_empty(),
+        "timed-out Bash checkpoint must not be appended"
+    );
+
+    let non_bash_response = send_control_request_with_timeout(
+        &daemon.control_socket_path,
+        &request("non-bash", std::collections::HashMap::new()),
+        Duration::from_secs(2),
+    )
+    .expect("non-Bash checkpoint request should receive a response");
+    assert!(
+        non_bash_response.ok,
+        "non-Bash checkpoint should not use the Bash deadline: {non_bash_response:?}"
+    );
+    assert_eq!(
+        repo.current_working_logs()
+            .read_all_checkpoints()
+            .expect("failed to read checkpoints after non-Bash request")
+            .len(),
+        1,
+        "non-Bash checkpoint should still be appended"
+    );
+}
+
+#[test]
+#[serial]
 fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attribution() {
     let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
