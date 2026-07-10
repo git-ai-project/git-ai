@@ -9,6 +9,22 @@ use crate::git::repo_state::is_valid_git_oid;
 use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
 
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub(crate) const MAX_REWRITE_COMMITS: usize = 4_096;
+
+pub(crate) fn ensure_rewrite_work_limit(kind: &str, count: usize) -> Result<(), GitAiError> {
+    if count > MAX_REWRITE_COMMITS {
+        return Err(GitAiError::Generic(format!(
+            "rewrite work exceeded the {MAX_REWRITE_COMMITS} {kind} limit ({count})"
+        )));
+    }
+    Ok(())
+}
+
+fn push_bounded_rewrite_item<T>(items: &mut Vec<T>, item: T, kind: &str) -> Result<(), GitAiError> {
+    ensure_rewrite_work_limit(kind, items.len().saturating_add(1))?;
+    items.push(item);
+    Ok(())
+}
 
 #[derive(Debug)]
 pub enum RewriteEvent {
@@ -413,6 +429,8 @@ pub(crate) fn handle_rewrite_event_with_metrics(
             sources,
             new_commits,
         } => {
+            ensure_rewrite_work_limit("source commits", sources.len())?;
+            ensure_rewrite_work_limit("destination commits", new_commits.len())?;
             let mappings: Vec<(String, String)> = sources.into_iter().zip(new_commits).collect();
             if mappings.is_empty() {
                 return Ok(RewriteOutcome::empty());
@@ -487,7 +505,7 @@ fn handle_squash_merge(
         .filter(|log| !log.attestations.is_empty());
 
     let base = find_merge_base(repo, source_head, onto).unwrap_or_else(|| onto.to_string());
-    let source_commits = list_commits_in_range(repo, &base, source_head);
+    let source_commits = list_commits_in_range(repo, &base, source_head)?;
     let sources = if source_commits.is_empty() {
         vec![source_head.to_string()]
     } else {
@@ -736,6 +754,7 @@ fn shift_authorship_notes_with_existing_mode(
     if mappings.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_rewrite_work_limit("note mappings", mappings.len())?;
 
     // Batch-read all notes for source and target commits in O(1) git calls
     let all_shas: Vec<String> = mappings
@@ -938,9 +957,13 @@ fn derive_mappings_from_range_diff(
         _ => &base,
     };
     let range_diff_output = run_range_diff(repo, &base, old_tip, onto, new_tip)?;
-    let mut mappings = parse_range_diff_output(&range_diff_output);
+    let mut mappings = parse_range_diff_output(&range_diff_output)?;
 
     let merge_mappings = derive_merge_commit_mappings(repo, &base, old_tip, new_tip, &mappings)?;
+    ensure_rewrite_work_limit(
+        "combined range-diff mappings",
+        mappings.len().saturating_add(merge_mappings.len()),
+    )?;
     mappings.extend(merge_mappings);
 
     Ok(mappings)
@@ -971,24 +994,25 @@ fn find_merge_base(repo: &Repository, a: &str, b: &str) -> Option<String> {
     if base.is_empty() { None } else { Some(base) }
 }
 
-pub(crate) fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) -> Vec<String> {
+pub(crate) fn list_commits_in_range(
+    repo: &Repository,
+    base: &str,
+    tip: &str,
+) -> Result<Vec<String>, GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.extend([
         "rev-list".to_string(),
         "--reverse".to_string(),
+        format!("--max-count={}", MAX_REWRITE_COMMITS + 1),
         format!("{}..{}", base, tip),
     ]);
-    exec_git_allow_nonzero(&args)
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return Ok(Vec::new());
+    };
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    parse_bounded_rewrite_oids(&output.stdout, "commits")
 }
 
 fn run_range_diff(
@@ -1009,10 +1033,10 @@ fn run_range_diff(
         format!("{}..{}", new_base, new_tip),
     ]);
     let output = exec_git(&args)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
+fn parse_range_diff_output(output: &str) -> Result<Vec<(String, String)>, GitAiError> {
     let mut mappings = Vec::new();
     let mut pending_dropped: Vec<String> = Vec::new();
     let mut previous_new_sha: Option<String> = None;
@@ -1039,9 +1063,17 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
                 // Dropped commit (squashed into a later commit)
                 if !old_sha.chars().all(|c| c == '0') {
                     if let Some(new_sha) = previous_new_sha.as_ref() {
-                        mappings.push((old_sha, new_sha.clone()));
+                        push_bounded_rewrite_item(
+                            &mut mappings,
+                            (old_sha, new_sha.clone()),
+                            "range-diff mappings",
+                        )?;
                     } else {
-                        pending_dropped.push(old_sha);
+                        push_bounded_rewrite_item(
+                            &mut pending_dropped,
+                            old_sha,
+                            "pending range-diff commits",
+                        )?;
                     }
                 }
             }
@@ -1056,10 +1088,18 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
                 }
                 // Map any preceding dropped commits to this new commit (squash)
                 for dropped in pending_dropped.drain(..) {
-                    mappings.push((dropped, new_sha.clone()));
+                    push_bounded_rewrite_item(
+                        &mut mappings,
+                        (dropped, new_sha.clone()),
+                        "range-diff mappings",
+                    )?;
                 }
                 previous_new_sha = Some(new_sha.clone());
-                mappings.push((old_sha, new_sha));
+                push_bounded_rewrite_item(
+                    &mut mappings,
+                    (old_sha, new_sha),
+                    "range-diff mappings",
+                )?;
             }
             _ => {
                 // '>' (new commit) or other — skip
@@ -1068,7 +1108,19 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
         }
     }
 
-    mappings
+    Ok(mappings)
+}
+
+fn parse_bounded_rewrite_oids(data: &[u8], kind: &str) -> Result<Vec<String>, GitAiError> {
+    let mut oids = Vec::new();
+    for line in String::from_utf8_lossy(data).lines() {
+        let oid = line.trim();
+        if oid.is_empty() {
+            continue;
+        }
+        push_bounded_rewrite_item(&mut oids, oid.to_string(), kind)?;
+    }
+    Ok(oids)
 }
 
 /// Find the first maximal ASCII-hex run in `s` whose length is a valid git OID
@@ -1185,6 +1237,7 @@ fn list_merge_commits(repo: &Repository, base: &str, tip: &str) -> Result<Vec<St
         "--merges".to_string(),
         "--topo-order".to_string(),
         "--reverse".to_string(),
+        format!("--max-count={}", MAX_REWRITE_COMMITS + 1),
         format!("{}..{}", base, tip),
     ]);
 
@@ -1193,12 +1246,7 @@ fn list_merge_commits(repo: &Repository, base: &str, tip: &str) -> Result<Vec<St
         return Ok(Vec::new());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect())
+    parse_bounded_rewrite_oids(&output.stdout, "merge commits")
 }
 
 fn get_commit_parents_batch(repo: &Repository, shas: &[String]) -> HashMap<String, Vec<String>> {
@@ -1242,6 +1290,7 @@ pub(crate) fn compute_diff_trees_batch(
     if pairs.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_rewrite_work_limit("diff pairs", pairs.len())?;
 
     let unique_shas = unique_pair_shas(pairs);
     let sha_to_tree = resolve_tree_shas(repo, &unique_shas)?;
@@ -1556,7 +1605,7 @@ Binary files a/image.png and b/image.png differ
     #[test]
     fn test_parse_range_diff_output_matched_equal() {
         let output = " 1:  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1:  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Some commit subject\n";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(mappings[0].1, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -1565,7 +1614,7 @@ Binary files a/image.png and b/image.png differ
     #[test]
     fn test_parse_range_diff_output_matched_bang() {
         let output = " 2:  1111111111111111111111111111111111111111 ! 3:  2222222222222222222222222222222222222222 Modified commit\n";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].0, "1111111111111111111111111111111111111111");
         assert_eq!(mappings[0].1, "2222222222222222222222222222222222222222");
@@ -1577,7 +1626,7 @@ Binary files a/image.png and b/image.png differ
  1:  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa < -:  0000000000000000000000000000000000000000 Dropped commit
  -:  0000000000000000000000000000000000000000 > 1:  cccccccccccccccccccccccccccccccccccccccc New commit
 ";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert!(mappings.is_empty());
     }
 
@@ -1587,7 +1636,7 @@ Binary files a/image.png and b/image.png differ
 1:  1111111111111111111111111111111111111111 < -:  ---------------------------------------- Add Python joke
 2:  2222222222222222222222222222222222222222 ! 1:  3333333333333333333333333333333333333333 Add Rust joke
 ";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert_eq!(
             mappings,
             vec![
@@ -1610,7 +1659,7 @@ Binary files a/image.png and b/image.png differ
 2:  2222222222222222222222222222222222222222 < -:  ---------------------------------------- AI commit 2
 3:  3333333333333333333333333333333333333333 < -:  ---------------------------------------- AI commit 3
 ";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert_eq!(
             mappings,
             vec![
@@ -1633,7 +1682,7 @@ Binary files a/image.png and b/image.png differ
     #[test]
     fn test_parse_range_diff_output_null_shas_skipped() {
         let output = " 1:  0000000000000000000000000000000000000000 = 1:  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Subject\n";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert!(mappings.is_empty());
     }
 
@@ -1644,7 +1693,7 @@ Binary files a/image.png and b/image.png differ
  2:  cccccccccccccccccccccccccccccccccccccccc ! 2:  dddddddddddddddddddddddddddddddddddddddd Second commit
  3:  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee = 3:  ffffffffffffffffffffffffffffffffffffffff Third commit
 ";
-        let mappings = parse_range_diff_output(output);
+        let mappings = parse_range_diff_output(output).unwrap();
         assert_eq!(mappings.len(), 3);
         assert_eq!(
             mappings[0],
@@ -1671,8 +1720,35 @@ Binary files a/image.png and b/image.png differ
 
     #[test]
     fn test_parse_range_diff_output_empty() {
-        let mappings = parse_range_diff_output("");
+        let mappings = parse_range_diff_output("").unwrap();
         assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn parse_range_diff_output_rejects_oversized_mapping_set() {
+        let output = (1..=MAX_REWRITE_COMMITS + 1)
+            .map(|index| {
+                let old = format!("{index:040x}");
+                let new = format!("{:040x}", index + MAX_REWRITE_COMMITS + 1);
+                format!(" {index}:  {old} = {index}:  {new} subject\n")
+            })
+            .collect::<String>();
+
+        let error = parse_range_diff_output(&output)
+            .expect_err("oversized range-diff mappings must fail closed");
+
+        assert!(error.to_string().contains("rewrite work exceeded"));
+    }
+
+    #[test]
+    fn compute_diff_trees_batch_rejects_oversized_pair_set_before_git() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let pairs = vec![("a".repeat(40), "b".repeat(40)); MAX_REWRITE_COMMITS + 1];
+
+        let error = compute_diff_trees_batch(tmp.gitai_repo(), &pairs)
+            .expect_err("oversized diff batch must fail closed");
+
+        assert!(error.to_string().contains("rewrite work exceeded"));
     }
 
     #[test]
@@ -1738,7 +1814,7 @@ Binary files a/image.png and b/image.png differ
         let old = "1111111111111111111111111111111111111111111111111111111111111111";
         let new = "2222222222222222222222222222222222222222222222222222222222222222";
         let output = format!(" 1:  {} = 1:  {} Some subject\n", old, new);
-        let mappings = parse_range_diff_output(&output);
+        let mappings = parse_range_diff_output(&output).unwrap();
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].0, old);
         assert_eq!(mappings[0].1, new);

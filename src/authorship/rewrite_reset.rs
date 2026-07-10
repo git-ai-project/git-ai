@@ -19,7 +19,7 @@ pub fn reconstruct_working_log_after_backward_reset(
     new_tip: &str,
 ) -> Result<(), GitAiError> {
     // List all commits being "un-done" (between new_tip exclusive and old_tip inclusive)
-    let commits = list_commits_in_range(repo, new_tip, old_tip);
+    let commits = list_commits_in_range(repo, new_tip, old_tip)?;
     if commits.is_empty() {
         return Ok(());
     }
@@ -241,7 +241,11 @@ fn extract_attributions_from_log_shifted(
     }
 }
 
-fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) -> Vec<String> {
+fn list_commits_in_range(
+    repo: &Repository,
+    base: &str,
+    tip: &str,
+) -> Result<Vec<String>, GitAiError> {
     crate::authorship::rewrite::list_commits_in_range(repo, base, tip)
 }
 

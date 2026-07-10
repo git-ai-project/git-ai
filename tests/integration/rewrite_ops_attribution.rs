@@ -2318,6 +2318,123 @@ fn test_rebase_conflict_theirs_preserves_attribution() {
     ]);
 }
 
+#[test]
+fn rebase_with_non_utf8_subject_preserves_attribution() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "i18n.commitEncoding", "ISO-8859-1"])
+        .unwrap();
+    repo.git(&["config", "i18n.logOutputEncoding", "ISO-8859-1"])
+        .unwrap();
+
+    let base_path = repo.path().join("base.txt");
+    fs::write(&base_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "base.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let mut base_file = repo.filename("base.txt");
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_path = repo.path().join("feature.txt");
+    fs::write(&feature_path, "feature ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "feature.txt"]).unwrap();
+    let message_dir = tempfile::tempdir().unwrap();
+    let message_path = message_dir.path().join("message.txt");
+    fs::write(&message_path, b"feature caf\xe9 subject\n").unwrap();
+    repo.git(&["commit", "-F", message_path.to_str().unwrap()])
+        .unwrap();
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.assert_committed_lines(crate::lines!["feature ai".ai()]);
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    let main_path = repo.path().join("main.txt");
+    fs::write(&main_path, "main human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("main advance").unwrap();
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    let mut main_file = repo.filename("main.txt");
+    main_file.assert_committed_lines(crate::lines!["main human".human()]);
+
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &main_branch]).unwrap();
+
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    feature_file.assert_committed_lines(crate::lines!["feature ai".ai()]);
+    main_file.assert_committed_lines(crate::lines!["main human".human()]);
+}
+
+#[test]
+fn cherry_pick_named_sources_batches_resolution_and_preserves_attribution() {
+    const SOURCE_COUNT: usize = 6;
+
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("spawns.log");
+    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_SPAWN_LOG", log_path.to_str().unwrap())]);
+    let base_path = repo.path().join("base.txt");
+    fs::write(&base_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "base.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let mut base_file = repo.filename("base.txt");
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "named-sources"]).unwrap();
+    let mut source_names = Vec::new();
+    for index in 0..SOURCE_COUNT {
+        let name = format!("source-{index}.txt");
+        fs::write(repo.path().join(&name), format!("AI source {index}\n")).unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", &name]).unwrap();
+        repo.stage_all_and_commit(&format!("source {index}"))
+            .unwrap();
+        let tag = format!("pick-source-{index}");
+        repo.git(&["tag", &tag]).unwrap();
+        source_names.push(tag);
+
+        base_file.assert_committed_lines(crate::lines!["base".human()]);
+        for committed_index in 0..=index {
+            let mut source_file = repo.filename(&format!("source-{committed_index}.txt"));
+            source_file
+                .assert_committed_lines(crate::lines![format!("AI source {committed_index}").ai()]);
+        }
+    }
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    repo.sync_daemon();
+    let before = fs::read_to_string(&log_path)
+        .map(|contents| contents.lines().count())
+        .unwrap_or_default();
+
+    let mut args = vec!["cherry-pick".to_string()];
+    args.extend(source_names);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    repo.git(&arg_refs).unwrap();
+    repo.sync_daemon();
+
+    base_file.assert_committed_lines(crate::lines!["base".human()]);
+    for index in 0..SOURCE_COUNT {
+        let mut source_file = repo.filename(&format!("source-{index}.txt"));
+        source_file.assert_committed_lines(crate::lines![format!("AI source {index}").ai()]);
+    }
+
+    let after_log = fs::read_to_string(&log_path).unwrap_or_default();
+    let side_effect_spawns = after_log.lines().skip(before).collect::<Vec<_>>();
+    let cat_file_spawns = side_effect_spawns
+        .iter()
+        .filter(|command| **command == "cat-file")
+        .count();
+    assert!(
+        cat_file_spawns <= 4,
+        "named-source resolution must stay batched; saw {cat_file_spawns} cat-file spawns: {side_effect_spawns:?}"
+    );
+}
+
 /// Spawn-scaling guard: a multi-commit `git revert` must trigger a CONSTANT
 /// number of daemon git spawns regardless of how many commits are reverted.
 /// Reverting N commits in one command and 3*N commits in another must produce

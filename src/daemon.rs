@@ -713,6 +713,22 @@ struct RewriteMetricContext {
     parent_diff_by_commit: HashMap<String, crate::authorship::rewrite::DiffTreeResult>,
 }
 
+fn parse_rewrite_commit_parent_pairs(data: &[u8]) -> Result<Vec<(String, String)>, GitAiError> {
+    let mut pairs = Vec::new();
+    for line in String::from_utf8_lossy(data).lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(commit_sha), Some(parent_sha)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        crate::authorship::rewrite::ensure_rewrite_work_limit(
+            "conflict-resolution commits",
+            pairs.len().saturating_add(1),
+        )?;
+        pairs.push((commit_sha.to_string(), parent_sha.to_string()));
+    }
+    Ok(pairs)
+}
+
 fn process_conflict_resolution_working_logs(
     repo: &Repository,
     new_tip: &str,
@@ -728,18 +744,14 @@ fn process_conflict_resolution_working_logs(
     args.extend([
         "log".to_string(),
         "--format=%H %P".to_string(),
+        format!(
+            "--max-count={}",
+            crate::authorship::rewrite::MAX_REWRITE_COMMITS + 1
+        ),
         format!("{}..{}", onto_sha, new_tip),
     ]);
     let output = crate::git::repository::exec_git(&args)?;
-    let log_output = String::from_utf8_lossy(&output.stdout);
-
-    let commit_parent_pairs = log_output
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            (parts.len() >= 2).then(|| (parts[0].to_string(), parts[1].to_string()))
-        })
-        .collect::<Vec<_>>();
+    let commit_parent_pairs = parse_rewrite_commit_parent_pairs(&output.stdout)?;
     let commit_shas = commit_parent_pairs
         .iter()
         .map(|(commit_sha, _)| commit_sha.clone())
@@ -1624,30 +1636,83 @@ fn resolve_cherry_pick_source_args_with_git_in_head_context(
     source_args: &[String],
     head_context: Option<&str>,
 ) -> Result<Vec<String>, GitAiError> {
-    let mut resolved = Vec::new();
-    let mut seen = HashSet::new();
-
-    for source in source_args {
-        let source = head_context
-            .map(|head| rewrite_head_source_arg_for_side_effect(source, head))
-            .unwrap_or_else(|| source.clone());
-        let oids = if cherry_pick_source_is_range(&source) {
-            if cherry_pick_range_has_omitted_side(&source) {
-                Vec::new()
-            } else {
-                resolve_cherry_pick_range_source_with_git(repo, &source)?
-            }
-        } else {
-            resolve_cherry_pick_single_source_with_git(repo, &source)?
-        };
-
-        for oid in oids {
-            if seen.insert(oid.clone()) {
-                resolved.push(oid);
-            }
-        }
+    crate::authorship::rewrite::ensure_rewrite_work_limit("source arguments", source_args.len())?;
+    let sources = source_args
+        .iter()
+        .map(|source| {
+            head_context
+                .map(|head| rewrite_head_source_arg_for_side_effect(source, head))
+                .unwrap_or_else(|| source.clone())
+        })
+        .filter(|source| {
+            !cherry_pick_source_is_range(source) || !cherry_pick_range_has_omitted_side(source)
+        })
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Ok(Vec::new());
     }
 
+    let range_count = sources
+        .iter()
+        .filter(|source| cherry_pick_source_is_range(source))
+        .count();
+    if range_count > 1 {
+        return Err(GitAiError::Generic(
+            "rewrite source resolution does not support multiple range arguments".to_string(),
+        ));
+    }
+
+    let single_sources = sources
+        .iter()
+        .filter(|source| !cherry_pick_source_is_range(source))
+        .cloned()
+        .collect::<Vec<_>>();
+    let single_oids = resolve_cherry_pick_single_sources_with_git(repo, &single_sources)?;
+    let range_oids = match sources
+        .iter()
+        .find(|source| cherry_pick_source_is_range(source))
+    {
+        Some(source) => resolve_cherry_pick_range_source_with_git(repo, source)?,
+        None => Vec::new(),
+    };
+
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    for source in &sources {
+        if cherry_pick_source_is_range(source) {
+            for oid in &range_oids {
+                push_resolved_cherry_pick_oid(&mut resolved, &mut seen, oid)?;
+            }
+        } else if let Some(oid) = single_oids.get(source) {
+            push_resolved_cherry_pick_oid(&mut resolved, &mut seen, oid)?;
+        }
+    }
+    Ok(resolved)
+}
+
+fn push_resolved_cherry_pick_oid(
+    resolved: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    oid: &str,
+) -> Result<(), GitAiError> {
+    if seen.insert(oid.to_string()) {
+        crate::authorship::rewrite::ensure_rewrite_work_limit(
+            "resolved commits",
+            resolved.len().saturating_add(1),
+        )?;
+        resolved.push(oid.to_string());
+    }
+    Ok(())
+}
+
+fn collect_resolved_cherry_pick_oids<'a>(
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<Vec<String>, GitAiError> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    for oid in lines.map(str::trim).filter(|oid| is_valid_oid(oid)) {
+        push_resolved_cherry_pick_oid(&mut resolved, &mut seen, oid)?;
+    }
     Ok(resolved)
 }
 
@@ -1689,25 +1754,49 @@ fn rewrite_head_source_term_for_side_effect(term: &str, head_context: &str) -> S
     term.to_string()
 }
 
-fn resolve_cherry_pick_single_source_with_git(
+fn resolve_cherry_pick_single_sources_with_git(
     repo: &Repository,
-    source: &str,
-) -> Result<Vec<String>, GitAiError> {
+    sources: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if sources.is_empty() {
+        return Ok(HashMap::new());
+    }
     let mut args = repo.global_args_for_exec();
     args.extend([
         "cat-file".to_string(),
         "--batch-check=%(objectname) %(objecttype)".to_string(),
     ]);
-    let stdin_data = format!("{source}^{{commit}}\n");
+    let mut stdin_data = String::new();
+    for source in sources {
+        stdin_data.push_str(source);
+        stdin_data.push_str("^{commit}\n");
+    }
     let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let oid = parts.next()?;
-            (parts.next() == Some("commit") && is_valid_oid(oid)).then(|| oid.to_string())
-        })
-        .collect())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let mut resolved = HashMap::new();
+    for source in sources {
+        let Some(line) = lines.next() else {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file returned fewer records than the {} source requests",
+                sources.len()
+            )));
+        };
+        let mut parts = line.split_whitespace();
+        if let Some(oid) = parts.next()
+            && parts.next() == Some("commit")
+            && is_valid_oid(oid)
+        {
+            resolved.insert(source.clone(), oid.to_string());
+        }
+    }
+    if lines.next().is_some() {
+        return Err(GitAiError::Generic(format!(
+            "git cat-file returned more records than the {} source requests",
+            sources.len()
+        )));
+    }
+    Ok(resolved)
 }
 
 fn resolve_cherry_pick_range_source_with_git(
@@ -1718,15 +1807,14 @@ fn resolve_cherry_pick_range_source_with_git(
     args.extend([
         "rev-list".to_string(),
         "--reverse".to_string(),
+        format!(
+            "--max-count={}",
+            crate::authorship::rewrite::MAX_REWRITE_COMMITS + 1
+        ),
         source.to_string(),
     ]);
     let output = exec_git(&args)?;
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| is_valid_oid(line))
-        .map(ToOwned::to_owned)
-        .collect())
+    collect_resolved_cherry_pick_oids(String::from_utf8_lossy(&output.stdout).lines())
 }
 
 fn resolve_explicit_cherry_pick_sources_for_side_effect(
@@ -1872,6 +1960,11 @@ fn apply_cherry_pick_complete_rewrite(
     sources: &[String],
     new_commits: &[String],
 ) -> Result<(), GitAiError> {
+    crate::authorship::rewrite::ensure_rewrite_work_limit("source commits", sources.len())?;
+    crate::authorship::rewrite::ensure_rewrite_work_limit(
+        "destination commits",
+        new_commits.len(),
+    )?;
     let pairs = crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(
         repo,
         sources,
@@ -1971,6 +2064,7 @@ fn apply_cherry_pick_no_commit_rewrite(
     if sources.is_empty() || new_head.is_empty() {
         return Ok(());
     }
+    crate::authorship::rewrite::ensure_rewrite_work_limit("source commits", sources.len())?;
     let mappings = sources
         .iter()
         .map(|source| (source.clone(), new_head.to_string()))
@@ -8243,6 +8337,23 @@ mod tests {
     }
 
     #[test]
+    fn conflict_resolution_commit_parser_rejects_oversized_history() {
+        let log = (1..=crate::authorship::rewrite::MAX_REWRITE_COMMITS + 1)
+            .map(|index| {
+                format!(
+                    "{index:040x} {:040x}\n",
+                    index + crate::authorship::rewrite::MAX_REWRITE_COMMITS + 1
+                )
+            })
+            .collect::<String>();
+
+        let error = parse_rewrite_commit_parent_pairs(log.as_bytes())
+            .expect_err("oversized rewrite history must fail closed");
+
+        assert!(error.to_string().contains("rewrite work exceeded"));
+    }
+
+    #[test]
     fn revert_source_args_do_not_treat_bare_gpg_sign_as_value_option() {
         assert_eq!(
             revert_source_args_from_command_args(&["--gpg-sign".to_string(), "HEAD~1".to_string()]),
@@ -8278,6 +8389,114 @@ mod tests {
             ]),
             vec!["HEAD~1"]
         );
+    }
+
+    #[test]
+    #[serial]
+    fn cherry_pick_single_source_resolution_uses_one_git_spawn() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        tmp.write_file("one.txt", "one\n", false)
+            .expect("write source file");
+        let commit = tmp.commit_all("source").expect("source commit");
+        let log_dir = tempfile::tempdir().expect("spawn log directory");
+        let log_path = log_dir.path().join("spawns.log");
+        let _spawn_log = EnvVarGuard::set("GIT_AI_SPAWN_LOG", &log_path.to_string_lossy());
+        let _spawn_filter = EnvVarGuard::set(
+            "GIT_AI_SPAWN_LOG_MATCH",
+            tmp.path().to_str().expect("temporary repo path is UTF-8"),
+        );
+        let sources = vec![commit.clone(); 128];
+
+        let resolved = resolve_cherry_pick_source_args_with_git_in_head_context(
+            tmp.gitai_repo(),
+            &sources,
+            None,
+        )
+        .expect("resolve sources");
+
+        assert_eq!(resolved, vec![commit]);
+        let spawns = std::fs::read_to_string(log_path).expect("read spawn log");
+        assert_eq!(
+            spawns.lines().filter(|line| *line == "cat-file").count(),
+            1,
+            "ordinary cherry-pick sources must share one cat-file batch"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cherry_pick_mixed_source_resolution_uses_constant_git_spawns() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        tmp.write_file("history.txt", "one\n", false)
+            .expect("write first source");
+        let first = tmp.commit_all("first").expect("first commit");
+        tmp.write_file("history.txt", "one\ntwo\n", false)
+            .expect("write second source");
+        let second = tmp.commit_all("second").expect("second commit");
+        tmp.write_file("history.txt", "one\ntwo\nthree\n", false)
+            .expect("write third source");
+        let third = tmp.commit_all("third").expect("third commit");
+        tmp.write_file("history.txt", "one\ntwo\nthree\nfour\n", false)
+            .expect("write fourth source");
+        let fourth = tmp.commit_all("fourth").expect("fourth commit");
+        let log_dir = tempfile::tempdir().expect("spawn log directory");
+        let log_path = log_dir.path().join("spawns.log");
+        let _spawn_log = EnvVarGuard::set("GIT_AI_SPAWN_LOG", &log_path.to_string_lossy());
+        let _spawn_filter = EnvVarGuard::set(
+            "GIT_AI_SPAWN_LOG_MATCH",
+            tmp.path().to_str().expect("temporary repo path is UTF-8"),
+        );
+        let sources = vec![format!("{first}..{third}"), fourth.clone()];
+
+        let resolved = resolve_cherry_pick_source_args_with_git_in_head_context(
+            tmp.gitai_repo(),
+            &sources,
+            None,
+        )
+        .expect("resolve ranges");
+
+        assert_eq!(resolved, vec![second, third, fourth]);
+        let spawns = std::fs::read_to_string(log_path).expect("read spawn log");
+        assert_eq!(
+            spawns.lines().filter(|line| *line == "rev-list").count(),
+            1,
+            "the one supported cherry-pick range must use one revision walk"
+        );
+        assert_eq!(
+            spawns.lines().filter(|line| *line == "cat-file").count(),
+            1,
+            "all ordinary sources beside a range must share one cat-file batch"
+        );
+    }
+
+    #[test]
+    fn cherry_pick_multiple_ranges_fail_closed_instead_of_spawning_per_range() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let sources = vec!["HEAD~3..HEAD~2".to_string(), "HEAD~1..HEAD".to_string()];
+
+        let error = resolve_cherry_pick_source_args_with_git_in_head_context(
+            tmp.gitai_repo(),
+            &sources,
+            None,
+        )
+        .expect_err("multiple independent ranges must fail closed");
+
+        assert!(error.to_string().contains("multiple range arguments"));
+    }
+
+    #[test]
+    fn cherry_pick_source_resolution_rejects_oversized_work_before_git() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let sources = vec!["HEAD".to_string(); MAX_RETAINED_PENDING_OIDS + 1];
+
+        let error = resolve_cherry_pick_source_args_with_git_in_head_context(
+            tmp.gitai_repo(),
+            &sources,
+            None,
+        )
+        .expect_err("oversized source list must fail closed");
+
+        assert!(error.to_string().contains("rewrite work exceeded"));
     }
 
     #[test]

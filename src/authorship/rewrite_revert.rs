@@ -35,6 +35,10 @@ pub(crate) fn handle_revert_commits_with_metrics(
     if specs.is_empty() {
         return Ok(Vec::new());
     }
+    crate::authorship::rewrite::ensure_rewrite_work_limit(
+        "revert diff pairs",
+        specs.len().saturating_mul(2),
+    )?;
     let collect_metrics = crate::authorship::rewrite::rewrite_metrics_enabled();
 
     // Resolve every spec's parent_sha (only those missing need a lookup) and the
@@ -353,6 +357,23 @@ fn clip_file_attestation_to_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revert_batch_rejects_oversized_spec_set_before_git() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let specs = (0..crate::authorship::rewrite::MAX_REWRITE_COMMITS)
+            .map(|index| RevertSpec {
+                revert_commit: format!("{index:040x}"),
+                parent: Some("a".repeat(40)),
+                reverted_commit: Some("b".repeat(40)),
+            })
+            .collect::<Vec<_>>();
+
+        let error = handle_revert_commits_with_metrics(tmp.gitai_repo(), &specs)
+            .expect_err("two diff pairs per revert must fit the rewrite work limit");
+
+        assert!(error.to_string().contains("rewrite work exceeded"));
+    }
 
     #[test]
     fn legacy_revert_metric_original_sha_uses_reverted_commit() {
