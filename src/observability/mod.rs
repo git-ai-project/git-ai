@@ -74,11 +74,17 @@ pub fn log_metrics(events: Vec<MetricEvent>) {
         return;
     }
 
-    // Split into chunks of MAX_METRICS_PER_ENVELOPE
-    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-        let envelope = crate::daemon::TelemetryEnvelope::Metrics {
-            events: chunk.to_vec(),
-        };
+    // Consume owned chunks so large metric payloads are not cloned before submission.
+    let mut events = events.into_iter();
+    loop {
+        let chunk = events
+            .by_ref()
+            .take(MAX_METRICS_PER_ENVELOPE)
+            .collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break;
+        }
+        let envelope = crate::daemon::TelemetryEnvelope::Metrics { events: chunk };
         submit_telemetry_envelope(vec![envelope]);
     }
 }

@@ -18,8 +18,58 @@ pub type PosField<T> = Option<Option<T>>;
 /// Trait for types that can be position-encoded.
 pub trait PosEncoded: Sized + Default {
     fn to_sparse(&self) -> SparseArray;
+    fn into_sparse(self) -> SparseArray {
+        self.to_sparse()
+    }
     #[allow(dead_code)]
     fn from_sparse(arr: &SparseArray) -> Self;
+}
+
+pub fn string_into_json(field: PosField<String>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(value)) => Some(Value::String(value)),
+    }
+}
+
+pub fn u32_into_json(field: PosField<u32>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(value)) => Some(Value::Number(value.into())),
+    }
+}
+
+pub fn u64_into_json(field: PosField<u64>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(value)) => Some(Value::Number(value.into())),
+    }
+}
+
+pub fn vec_string_into_json(field: PosField<Vec<String>>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(values)) => Some(Value::Array(
+            values.into_iter().map(Value::String).collect(),
+        )),
+    }
+}
+
+pub fn vec_u32_into_json(field: PosField<Vec<u32>>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(values)) => Some(Value::Array(
+            values
+                .into_iter()
+                .map(|value| Value::Number(value.into()))
+                .collect(),
+        )),
+    }
 }
 
 /// Convert a `PosField<String>` to JSON Value for sparse array.

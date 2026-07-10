@@ -20,6 +20,8 @@ const SCHEMA_VERSION: usize = 4;
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
+pub(crate) const MAX_METRIC_EVENT_JSON_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_METRIC_UPLOAD_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
 /// Database migrations - each migration upgrades the schema by one version
@@ -563,9 +565,9 @@ impl MetricsDatabase {
         self.release_stale_processing_locks(now)?;
 
         let tx = self.conn.transaction()?;
-        let ids = {
+        let (ids, oversized_ids) = {
             let mut stmt = tx.prepare(
-                "SELECT id FROM metrics \
+                "SELECT id, length(CAST(event_json AS BLOB)) FROM metrics \
                  WHERE delivered_ts IS NULL \
                    AND processing_started_at IS NULL \
                    AND next_retry_at <= ?1 \
@@ -575,14 +577,50 @@ impl MetricsDatabase {
             )?;
             let rows = stmt.query_map(
                 params![now as i64, MAX_METRIC_UPLOAD_ATTEMPTS as i64, limit as i64],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )?;
             let mut ids = Vec::new();
+            let mut oversized_ids = Vec::new();
+            let mut selected_bytes = 0usize;
             for row in rows {
-                ids.push(row?);
+                let (id, event_bytes) = row?;
+                let event_bytes = event_bytes.max(0) as usize;
+                if event_bytes > MAX_METRIC_EVENT_JSON_BYTES {
+                    oversized_ids.push(id);
+                    continue;
+                }
+                if selected_bytes.saturating_add(event_bytes) > MAX_METRIC_UPLOAD_BATCH_BYTES {
+                    break;
+                }
+                selected_bytes = selected_bytes.saturating_add(event_bytes);
+                ids.push(id);
             }
-            ids
+            (ids, oversized_ids)
         };
+
+        if !oversized_ids.is_empty() {
+            let error = format!(
+                "metric event exceeds {}-byte upload limit",
+                MAX_METRIC_EVENT_JSON_BYTES
+            );
+            let mut stmt = tx.prepare_cached(
+                "UPDATE metrics \
+                 SET processing_started_at = NULL, \
+                     attempts = ?1, \
+                     last_sync_error = ?2, \
+                     last_sync_at = ?3, \
+                     next_retry_at = ?3 \
+                 WHERE id = ?4 AND delivered_ts IS NULL",
+            )?;
+            for id in oversized_ids {
+                stmt.execute(params![
+                    MAX_METRIC_UPLOAD_ATTEMPTS as i64,
+                    error,
+                    now as i64,
+                    id,
+                ])?;
+            }
+        }
 
         if ids.is_empty() {
             tx.commit()?;
@@ -1526,6 +1564,13 @@ mod tests {
         format!(r#"{{"t":{ts},"e":1,"v":{{}},"a":{{}}}}"#)
     }
 
+    fn event_json_with_payload(ts: u32, payload_bytes: usize) -> String {
+        format!(
+            r#"{{"t":{ts},"e":1,"v":{{"0":"{}"}},"a":{{}}}}"#,
+            "x".repeat(payload_bytes)
+        )
+    }
+
     fn event_json_with_repo(ts: u32, event_id: u16, repo: &str) -> String {
         format!(r#"{{"t":{ts},"e":{event_id},"v":{{}},"a":{{"1":"{repo}"}}}}"#)
     }
@@ -2436,6 +2481,63 @@ mod tests {
         assert!(batch[0].id > batch[1].id);
         assert!(batch[0].event_json.contains(&format!("\"t\":{newest_ts}")));
         assert!(batch[1].event_json.contains(&format!("\"t\":{middle_ts}")));
+    }
+
+    #[test]
+    fn test_dequeue_pending_batch_is_bounded_by_serialized_bytes() {
+        let (mut db, _temp_dir) = create_test_db();
+        let events = (0..10)
+            .map(|index| event_json_with_payload(days_ago(index + 1), 1024 * 1024))
+            .collect::<Vec<_>>();
+        db.insert_events(&events).unwrap();
+
+        let first_batch = db.dequeue_pending_batch(1000).unwrap();
+        let first_batch_bytes = first_batch
+            .iter()
+            .map(|record| record.event_json.len())
+            .sum::<usize>();
+
+        assert!(!first_batch.is_empty());
+        assert!(first_batch.len() < events.len());
+        assert!(first_batch_bytes <= MAX_METRIC_UPLOAD_BATCH_BYTES);
+
+        let second_batch = db.dequeue_pending_batch(1000).unwrap();
+        let second_batch_bytes = second_batch
+            .iter()
+            .map(|record| record.event_json.len())
+            .sum::<usize>();
+        assert_eq!(first_batch.len() + second_batch.len(), events.len());
+        assert!(second_batch_bytes <= MAX_METRIC_UPLOAD_BATCH_BYTES);
+    }
+
+    #[test]
+    fn test_dequeue_pending_batch_rejects_oversized_legacy_row_without_loading_it() {
+        let (mut db, _temp_dir) = create_test_db();
+        db.insert_events(&[event_json_with_payload(
+            days_ago(1),
+            MAX_METRIC_EVENT_JSON_BYTES + 1,
+        )])
+        .unwrap();
+
+        assert!(db.dequeue_pending_batch(1000).unwrap().is_empty());
+        assert_eq!(db.count_retryable().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_oversized_legacy_row_does_not_block_valid_pending_row() {
+        let (mut db, _temp_dir) = create_test_db();
+        let valid_event = event_json(days_ago(2));
+        db.insert_events(&[
+            valid_event.clone(),
+            event_json_with_payload(days_ago(1), MAX_METRIC_EVENT_JSON_BYTES + 1),
+        ])
+        .unwrap();
+
+        let batch = db.dequeue_pending_batch(1000).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].event_json, valid_event);
+        assert_eq!(db.count_retryable().unwrap(), 0);
     }
 
     #[test]
