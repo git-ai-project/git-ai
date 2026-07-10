@@ -63,6 +63,13 @@ affected connection and fails closed for attribution; it never delays or wraps
 the Git command. Control connections are independently capped at 16, with a
 36 MiB request limit that accommodates the default 32 MiB checkpoint budget.
 
+Git subprocesses used later by asynchronous side effects are also bounded and
+never run on trace ingress. At most eight buffered internal Git commands run at
+once. Each accepts at most 16,384 arguments / 4 MiB of argument data and 32 MiB
+of stdin, retains at most 32 MiB of stdout and 1 MiB of stderr, and uses bounded
+reader-thread stacks. Overflow is drained, reported as an error, and fails the
+affected attribution side effect closed without retaining the excess output.
+
 Separation of concerns:
 
 - The **normalizer** parses trace2/argv facts only. It never reads mutable
