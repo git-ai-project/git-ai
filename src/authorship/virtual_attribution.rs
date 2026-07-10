@@ -1355,6 +1355,7 @@ fn collect_unstaged_hunks(
     if let Some(paths) = pathspecs
         && let Ok(workdir) = repo.workdir()
     {
+        let mut untracked_content_budget = BatchMaterializationBudget::new();
         for pathspec in paths {
             // Skip if we already found this file in git diff
             if unstaged_hunks.contains_key(pathspec) {
@@ -1371,7 +1372,13 @@ fn collect_unstaged_hunks(
             let file_path = workdir.join(pathspec);
             if file_path.exists() && file_path.is_file() {
                 // Try to read the file
-                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                if let Ok(content) = read_bounded_working_log_file(&file_path) {
+                    if untracked_content_budget
+                        .reserve("untracked worktree content", content.len())
+                        .is_err()
+                    {
+                        break;
+                    }
                     // Count the lines - all lines are "unstaged" since the file is untracked
                     let line_count = content.lines().count() as u32;
                     if line_count > 0 {

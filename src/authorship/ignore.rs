@@ -2,7 +2,12 @@ use crate::git::repository::Repository;
 use glob::Pattern;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+
+const MAX_IGNORE_FILE_BYTES: u64 = 256 * 1024;
+const MAX_IGNORE_PATTERNS: usize = 4_096;
+const MAX_IGNORE_PATTERN_BYTES: usize = 4 * 1024;
 
 const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     "*.lock",
@@ -53,6 +58,8 @@ impl IgnoreMatcher {
     pub fn new(patterns: &[String]) -> Self {
         let patterns = patterns
             .iter()
+            .filter(|pattern| pattern.len() <= MAX_IGNORE_PATTERN_BYTES)
+            .take(MAX_IGNORE_PATTERNS)
             .map(|pattern| match Pattern::new(pattern) {
                 Ok(glob) => CompiledPattern::Glob(glob),
                 Err(_) => CompiledPattern::Exact(pattern.clone()),
@@ -144,8 +151,11 @@ fn parse_linguist_generated_patterns(contents: &str) -> Vec<String> {
             }
         }
 
-        if state == Some(true) {
+        if state == Some(true) && path_pattern.len() <= MAX_IGNORE_PATTERN_BYTES {
             patterns.push(path_pattern.to_string());
+            if patterns.len() >= MAX_IGNORE_PATTERNS {
+                break;
+            }
         }
     }
 
@@ -157,12 +167,12 @@ fn load_root_gitattributes_contents(repo: &Repository) -> Option<String> {
         return repo
             .get_file_content(".gitattributes", "HEAD")
             .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok());
+            .and_then(|bytes| bounded_ignore_contents(bytes, ".gitattributes", None));
     }
 
     let workdir = repo.workdir().ok()?;
     let gitattributes_path = workdir.join(".gitattributes");
-    fs::read_to_string(gitattributes_path).ok()
+    read_optional_ignore_file(&gitattributes_path, ".gitattributes")
 }
 
 /// Load ignore patterns from a `.git-ai-ignore` file at the repository root.
@@ -180,7 +190,13 @@ pub fn load_git_ai_ignore_patterns(repo: &Repository) -> Vec<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.len() > MAX_IGNORE_PATTERN_BYTES {
+            continue;
+        }
         patterns.push(line.to_string());
+        if patterns.len() >= MAX_IGNORE_PATTERNS {
+            break;
+        }
     }
 
     dedupe_patterns(patterns)
@@ -191,20 +207,21 @@ fn load_root_git_ai_ignore_contents(repo: &Repository) -> Option<String> {
         return repo
             .get_file_content(".git-ai-ignore", "HEAD")
             .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok());
+            .and_then(|bytes| bounded_ignore_contents(bytes, ".git-ai-ignore", None));
     }
 
     let workdir = repo.workdir().ok()?;
     let ignore_path = workdir.join(".git-ai-ignore");
-    fs::read_to_string(ignore_path).ok()
+    read_optional_ignore_file(&ignore_path, ".git-ai-ignore")
 }
 
 /// Load `.git-ai-ignore` patterns from a repo root path directly (no Repository object needed).
 /// Use this when you have a `&Path` but not a `Repository` (e.g. in snapshot capture code).
 pub fn load_git_ai_ignore_patterns_from_path(repo_root: &Path) -> Vec<String> {
-    let contents = match fs::read_to_string(repo_root.join(".git-ai-ignore")) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    let path = repo_root.join(".git-ai-ignore");
+    let contents = match read_optional_ignore_file(&path, ".git-ai-ignore") {
+        Some(contents) => contents,
+        None => return Vec::new(),
     };
     let mut patterns = Vec::new();
     for raw_line in contents.lines() {
@@ -212,7 +229,13 @@ pub fn load_git_ai_ignore_patterns_from_path(repo_root: &Path) -> Vec<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.len() > MAX_IGNORE_PATTERN_BYTES {
+            continue;
+        }
         patterns.push(line.to_string());
+        if patterns.len() >= MAX_IGNORE_PATTERNS {
+            break;
+        }
     }
     dedupe_patterns(patterns)
 }
@@ -221,9 +244,10 @@ pub fn load_git_ai_ignore_patterns_from_path(repo_root: &Path) -> Vec<String> {
 /// Use this when you have a `&Path` but not a `Repository` (e.g. in snapshot capture code).
 /// Uses the same parser as `load_linguist_generated_patterns_from_root_gitattributes`.
 pub fn load_linguist_generated_patterns_from_path(repo_root: &Path) -> Vec<String> {
-    match fs::read_to_string(repo_root.join(".gitattributes")) {
-        Ok(contents) => parse_linguist_generated_patterns(&contents),
-        Err(_) => Vec::new(),
+    let path = repo_root.join(".gitattributes");
+    match read_optional_ignore_file(&path, ".gitattributes") {
+        Some(contents) => parse_linguist_generated_patterns(&contents),
+        None => Vec::new(),
     }
 }
 
@@ -237,8 +261,8 @@ pub fn effective_ignore_patterns(
         repo,
     ));
     patterns.extend(load_git_ai_ignore_patterns(repo));
-    patterns.extend(extra_patterns.iter().cloned());
-    patterns.extend(user_patterns.iter().cloned());
+    patterns.extend(extra_patterns.iter().take(MAX_IGNORE_PATTERNS).cloned());
+    patterns.extend(user_patterns.iter().take(MAX_IGNORE_PATTERNS).cloned());
     dedupe_patterns(patterns)
 }
 
@@ -247,12 +271,39 @@ fn dedupe_patterns(patterns: Vec<String>) -> Vec<String> {
     let mut deduped = Vec::new();
 
     for pattern in patterns {
+        if pattern.len() > MAX_IGNORE_PATTERN_BYTES {
+            continue;
+        }
         if seen.insert(pattern.clone()) {
             deduped.push(pattern);
+            if deduped.len() >= MAX_IGNORE_PATTERNS {
+                break;
+            }
         }
     }
 
     deduped
+}
+
+fn read_optional_ignore_file(path: &Path, kind: &str) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IGNORE_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    bounded_ignore_contents(bytes, kind, Some(path))
+}
+
+fn bounded_ignore_contents(bytes: Vec<u8>, kind: &str, path: Option<&Path>) -> Option<String> {
+    if bytes.len() as u64 > MAX_IGNORE_FILE_BYTES {
+        tracing::warn!(
+            path = %path.map_or_else(|| "<git object>".to_string(), |path| path.display().to_string()),
+            max_bytes = MAX_IGNORE_FILE_BYTES,
+            "ignoring oversized {kind} file"
+        );
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn split_gitattributes_tokens(line: &str) -> Vec<String> {
@@ -292,6 +343,23 @@ fn split_gitattributes_tokens(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignore_pattern_count_is_bounded() {
+        let contents = (0..5_000)
+            .map(|index| format!("generated-{index}.txt"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let patterns = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+        let deduped = dedupe_patterns(patterns);
+
+        assert_eq!(deduped.len(), 4_096);
+        assert_eq!(
+            deduped.last().map(String::as_str),
+            Some("generated-4095.txt")
+        );
+    }
 
     #[test]
     fn defaults_include_snapshot_and_lock_patterns() {
