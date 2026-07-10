@@ -140,6 +140,7 @@ mod sweep_e2e;
 mod telemetry_memory;
 mod test_utils_unit;
 mod tls_native_certs;
+mod transcript_discovery_memory;
 mod transcript_memory;
 mod transcript_queue_memory;
 mod utf8_filenames;

@@ -40,7 +40,7 @@ impl Agent for WindsurfAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
+    fn discover_sessions(&self, _limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
         // Sweep not fully implemented for Windsurf yet — discovery comes from presets
         Ok(Vec::new())
     }

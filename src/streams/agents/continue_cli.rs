@@ -2,7 +2,9 @@
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{
+    DiscoveredSession, StreamFormat, SweepStrategy, discover_recent_files,
+};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{RecordIndexWatermark, WatermarkStrategy};
 use std::path::{Path, PathBuf};
@@ -28,25 +30,12 @@ impl ContinueAgent {
     }
 
     /// Scan for Continue session files in `~/.continue/sessions/**/*.json`.
-    fn scan_session_files() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
-        if let Some(home) = dirs::home_dir() {
-            let pattern = home
-                .join(".continue/sessions/**/*.json")
-                .to_string_lossy()
-                .to_string();
-
-            if let Ok(entries) = glob::glob(&pattern) {
-                for entry in entries.flatten() {
-                    if entry.is_file() {
-                        paths.push(entry);
-                    }
-                }
-            }
-        }
-
-        paths
+    fn scan_session_files(limit: usize) -> Vec<PathBuf> {
+        discover_recent_files(
+            dirs::home_dir().map(|path| path.join(".continue/sessions")),
+            limit,
+            |path| path.extension().and_then(|ext| ext.to_str()) == Some("json"),
+        )
     }
 }
 
@@ -65,8 +54,8 @@ impl Agent for ContinueAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
-        let paths = Self::scan_session_files();
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+        let paths = Self::scan_session_files(limit);
         let mut sessions = Vec::new();
 
         for path in paths {

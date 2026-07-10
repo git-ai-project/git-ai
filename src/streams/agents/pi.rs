@@ -40,7 +40,7 @@ impl Agent for PiAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
+    fn discover_sessions(&self, _limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
         // Discovery happens via presets, not filesystem scanning
         Ok(Vec::new())
     }

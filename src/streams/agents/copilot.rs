@@ -2,7 +2,7 @@
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{BoundedPathCollector, DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{
     ByteOffsetWatermark, RecordIndexWatermark, WatermarkStrategy, WatermarkType,
@@ -30,8 +30,8 @@ impl CopilotAgent {
     /// Scan for Copilot transcript files in standard locations.
     ///
     /// Discovers BOTH session.json files and .jsonl event streams.
-    fn scan_transcript_files() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
+    fn scan_transcript_files(limit: usize) -> Vec<PathBuf> {
+        let mut paths = BoundedPathCollector::new(limit);
 
         // Standard locations for Copilot transcripts (legacy)
         let search_dirs = vec![
@@ -81,7 +81,7 @@ impl CopilotAgent {
             }
         }
 
-        paths
+        paths.into_paths_newest_first()
     }
 
     /// Returns the VS Code workspace storage root directories to scan.
@@ -225,8 +225,8 @@ impl Agent for CopilotAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
-        let paths = Self::scan_transcript_files();
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+        let paths = Self::scan_transcript_files(limit);
         let mut sessions = Vec::new();
 
         for path in paths {

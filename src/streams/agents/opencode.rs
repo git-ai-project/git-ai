@@ -204,7 +204,7 @@ impl Agent for OpenCodeAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
+    fn discover_sessions(&self, _limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
         // Discovery comes from presets, not sweep.
         Ok(Vec::new())
     }

@@ -3,7 +3,7 @@
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::mdm::utils::gemini_config_dir;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{BoundedPathCollector, DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 use std::fs;
@@ -31,13 +31,13 @@ impl GeminiAgent {
     /// Scan for Gemini session files in standard locations.
     ///
     /// Searches `.gemini/tmp/*/chats/session-*.jsonl` under the configured Gemini CLI home.
-    fn scan_session_files() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
+    fn scan_session_files(limit: usize) -> Vec<PathBuf> {
+        let mut paths = BoundedPathCollector::new(limit);
 
         let gemini_tmp = gemini_config_dir().join("tmp");
         if gemini_tmp.exists() {
             let Ok(project_dirs) = fs::read_dir(&gemini_tmp) else {
-                return paths;
+                return Vec::new();
             };
             for project_entry in project_dirs.flatten() {
                 let chats_dir = project_entry.path().join("chats");
@@ -63,7 +63,7 @@ impl GeminiAgent {
             }
         }
 
-        paths
+        paths.into_paths_newest_first()
     }
 }
 
@@ -82,8 +82,8 @@ impl Agent for GeminiAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
-        let paths = Self::scan_session_files();
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+        let paths = Self::scan_session_files(limit);
         let mut sessions = Vec::new();
 
         for path in paths {
@@ -285,7 +285,9 @@ mod tests {
         unsafe {
             std::env::set_var("GEMINI_CLI_HOME", &gemini_home);
         }
-        let paths = GeminiAgent::scan_session_files();
+        let paths = GeminiAgent::scan_session_files(
+            crate::streams::sweep::MAX_DISCOVERED_SESSIONS_PER_AGENT,
+        );
         // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
         unsafe {
             match prev {
