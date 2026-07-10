@@ -5,7 +5,7 @@ use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::streams::sweep::{
     DiscoveredSession, StreamFormat, SweepStrategy, discover_recent_files,
 };
-use crate::streams::types::{StreamBatch, StreamError};
+use crate::streams::types::{StreamBatch, StreamError, read_monolithic_transcript_json};
 use crate::streams::watermark::{RecordIndexWatermark, WatermarkStrategy};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -102,29 +102,7 @@ impl Agent for ContinueAgent {
 
         let already_processed = record_watermark.0;
 
-        let file = std::fs::File::open(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                StreamError::Fatal {
-                    message: format!("Transcript file not found: {}", path.display()),
-                }
-            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                StreamError::Fatal {
-                    message: format!("Permission denied reading transcript: {}", path.display()),
-                }
-            } else {
-                StreamError::Transient {
-                    message: format!("Failed to read transcript file: {}", e),
-                    retry_after: Duration::from_secs(5),
-                }
-            }
-        })?;
-
-        let reader = std::io::BufReader::new(file);
-        let mut parsed: serde_json::Value =
-            serde_json::from_reader(reader).map_err(|e| StreamError::Parse {
-                line: 0,
-                message: format!("Invalid JSON in {}: {}", path.display(), e),
-            })?;
+        let mut parsed = read_monolithic_transcript_json(path)?;
 
         let history = match parsed.as_object_mut().and_then(|obj| obj.remove("history")) {
             Some(serde_json::Value::Array(arr)) => arr,
@@ -372,5 +350,25 @@ mod tests {
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0]["message"]["content"], "Let me check");
         assert!(result.events[0]["contextItems"].is_array());
+    }
+
+    #[test]
+    fn test_oversized_monolithic_transcript_is_rejected_before_parse() {
+        use tempfile::NamedTempFile;
+
+        let file = NamedTempFile::new().unwrap();
+        file.as_file().set_len(32 * 1_024 * 1_024 + 1).unwrap();
+        let agent = ContinueAgent::new();
+        let error = match agent.read_incremental(
+            file.path(),
+            Box::new(RecordIndexWatermark::new(0)),
+            "oversized",
+        ) {
+            Ok(_) => panic!("oversized monolithic transcripts must fail before parsing"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("monolithic transcript"));
+        assert!(error.to_string().contains("33554432 byte limit"));
     }
 }

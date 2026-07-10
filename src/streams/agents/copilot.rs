@@ -127,8 +127,12 @@ impl CopilotAgent {
         // workspace.json: .../workspaceStorage/{hash}/workspace.json
         let workspace_hash_dir = stream_path.parent()?.parent()?.parent()?;
         let workspace_json = workspace_hash_dir.join("workspace.json");
-        let content = fs::read_to_string(&workspace_json).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let json = crate::streams::types::read_bounded_json_file(
+            &workspace_json,
+            "Copilot workspace metadata",
+            crate::streams::types::MAX_JSON_METADATA_BYTES,
+        )
+        .ok()?;
         let folder_uri = json.get("folder")?.as_str()?;
         let path_str = folder_uri.strip_prefix("file://")?;
         let decoded = percent_decode_path(path_str);
@@ -420,29 +424,7 @@ fn read_session_json(
         });
     }
 
-    let file = std::fs::File::open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            StreamError::Fatal {
-                message: format!("Transcript file not found: {}", path.display()),
-            }
-        } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-            StreamError::Fatal {
-                message: format!("Permission denied reading transcript: {}", path.display()),
-            }
-        } else {
-            StreamError::Transient {
-                message: format!("Failed to read transcript file: {}", e),
-                retry_after: std::time::Duration::from_secs(5),
-            }
-        }
-    })?;
-
-    let reader = std::io::BufReader::new(file);
-    let mut session_json: serde_json::Value =
-        serde_json::from_reader(reader).map_err(|e| StreamError::Parse {
-            line: 0,
-            message: format!("Invalid JSON in {}: {}", path.display(), e),
-        })?;
+    let mut session_json = crate::streams::types::read_monolithic_transcript_json(path)?;
 
     let requests = match session_json
         .as_object_mut()
