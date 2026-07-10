@@ -16,7 +16,7 @@ use crate::streams::db::{StreamRecord, StreamsDatabase};
 use crate::streams::types::StreamError;
 use crate::streams::watermark::{WatermarkStrategy, WatermarkType};
 use chrono::{TimeZone, Utc};
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,87 @@ use tokio::sync::Notify;
 use tokio::time::{Duration, interval};
 
 const TRIGGERED_SWEEP_COOLDOWN: Duration = Duration::from_secs(30);
+const CHECKPOINT_NOTIFICATION_QUEUE_CAPACITY: usize = 1_024;
+const SWEEP_REQUEST_QUEUE_CAPACITY: usize = 32;
+
+type StreamTaskKey = (String, PathBuf, String);
+type CheckpointNotificationKey = (PathBuf, String, String);
+
+#[derive(Clone)]
+struct CheckpointQueueSender {
+    tx: tokio::sync::mpsc::Sender<CheckpointNotification>,
+    pending: Arc<Mutex<HashSet<CheckpointNotificationKey>>>,
+    saturated: Arc<AtomicBool>,
+}
+
+struct CheckpointQueueReceiver {
+    rx: tokio::sync::mpsc::Receiver<CheckpointNotification>,
+    pending: Arc<Mutex<HashSet<CheckpointNotificationKey>>>,
+    saturated: Arc<AtomicBool>,
+}
+
+fn checkpoint_queue() -> (CheckpointQueueSender, CheckpointQueueReceiver) {
+    let (tx, rx) = tokio::sync::mpsc::channel(CHECKPOINT_NOTIFICATION_QUEUE_CAPACITY);
+    let pending = Arc::new(Mutex::new(HashSet::new()));
+    let saturated = Arc::new(AtomicBool::new(false));
+    (
+        CheckpointQueueSender {
+            tx,
+            pending: pending.clone(),
+            saturated: saturated.clone(),
+        },
+        CheckpointQueueReceiver {
+            rx,
+            pending,
+            saturated,
+        },
+    )
+}
+
+impl CheckpointQueueSender {
+    fn try_send(&self, notification: CheckpointNotification) {
+        let key = notification.key();
+        let inserted = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone());
+        if !inserted {
+            return;
+        }
+
+        if let Err(error) = self.tx.try_send(notification) {
+            let queue_full = matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_));
+            self.pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&key);
+            if queue_full && !self.saturated.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    capacity = CHECKPOINT_NOTIFICATION_QUEUE_CAPACITY,
+                    "transcript checkpoint queue is full; a later checkpoint or sweep will recover dropped work"
+                );
+            }
+        }
+    }
+}
+
+impl CheckpointQueueReceiver {
+    async fn recv(&mut self) -> Option<CheckpointNotification> {
+        let notification = self.rx.recv().await?;
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&notification.key());
+        self.saturated.store(false, Ordering::Relaxed);
+        Some(notification)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.rx.len()
+    }
+}
 
 /// Extract a Unix-epoch u32 timestamp from a raw JSON event's "timestamp" field.
 /// Handles both ISO 8601 strings (e.g. "2026-05-11T23:13:12.819Z") and numeric
@@ -180,8 +261,8 @@ impl SweepTriggerGate {
 /// Handle for sending checkpoint notifications and sweep requests to the worker.
 #[derive(Clone)]
 pub struct StreamWorkerHandle {
-    checkpoint_tx: tokio::sync::mpsc::UnboundedSender<CheckpointNotification>,
-    sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepRequest>,
+    checkpoint_queue: CheckpointQueueSender,
+    sweep_tx: tokio::sync::mpsc::Sender<SweepRequest>,
     sweep_trigger_gate: SweepTriggerGate,
 }
 
@@ -209,7 +290,7 @@ impl StreamWorkerHandle {
             external_session_id,
             external_parent_session_id,
         };
-        let _ = self.checkpoint_tx.send(notification);
+        self.checkpoint_queue.try_send(notification);
     }
 
     /// Request a full sweep unless another sweep was triggered recently.
@@ -235,7 +316,7 @@ impl StreamWorkerHandle {
             .sweep_trigger_gate
             .force_trigger_at(Instant::now(), || {
                 self.sweep_tx
-                    .send(SweepRequest {
+                    .try_send(SweepRequest {
                         trigger,
                         priority: Priority::Immediate,
                         completion: completion_tx.take(),
@@ -248,15 +329,17 @@ impl StreamWorkerHandle {
     fn trigger_sweep_at(&self, trigger: SweepTrigger, now: Instant) -> bool {
         let source = trigger.to_string();
         self.sweep_trigger_gate.try_trigger_at(now, &source, || {
-            self.sweep_tx.send(SweepRequest::normal(trigger)).is_ok()
+            self.sweep_tx
+                .try_send(SweepRequest::normal(trigger))
+                .is_ok()
         })
     }
 
     #[cfg(test)]
-    fn for_test_sweep_triggers(sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepRequest>) -> Self {
-        let (checkpoint_tx, _checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+    fn for_test_sweep_triggers(sweep_tx: tokio::sync::mpsc::Sender<SweepRequest>) -> Self {
+        let (checkpoint_queue, _checkpoint_rx) = checkpoint_queue();
         Self {
-            checkpoint_tx,
+            checkpoint_queue,
             sweep_tx,
             sweep_trigger_gate: SweepTriggerGate::new(),
         }
@@ -275,18 +358,29 @@ struct CheckpointNotification {
     external_parent_session_id: Option<String>,
 }
 
+impl CheckpointNotification {
+    fn key(&self) -> CheckpointNotificationKey {
+        (
+            self.stream_path.clone(),
+            self.tool.clone(),
+            self.session_id.clone(),
+        )
+    }
+}
+
 /// Worker that processes transcript changes.
 struct StreamWorker {
     streams_db: Arc<StreamsDatabase>,
     sweep_coordinator: crate::daemon::sweep_coordinator::SweepCoordinator, // NEW
     priority_queue: BinaryHeap<ProcessingTask>,
     delayed_tasks: Vec<ProcessingTask>,
+    scheduled: HashMap<StreamTaskKey, Priority>,
     in_flight: HashSet<(PathBuf, String)>,
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_notify: Arc<Notify>,
     shutdown_flag: Arc<AtomicBool>,
-    checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
-    sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
+    checkpoint_queue: CheckpointQueueReceiver,
+    sweep_rx: tokio::sync::mpsc::Receiver<SweepRequest>,
     sweep_trigger_gate: SweepTriggerGate,
 }
 
@@ -297,8 +391,8 @@ impl StreamWorker {
         telemetry_handle: DaemonTelemetryWorkerHandle,
         shutdown_notify: Arc<Notify>,
         shutdown_flag: Arc<AtomicBool>,
-        checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
-        sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
+        checkpoint_queue: CheckpointQueueReceiver,
+        sweep_rx: tokio::sync::mpsc::Receiver<SweepRequest>,
         sweep_trigger_gate: SweepTriggerGate,
     ) -> Self {
         let sweep_coordinator =
@@ -309,11 +403,12 @@ impl StreamWorker {
             sweep_coordinator, // NEW
             priority_queue: BinaryHeap::new(),
             delayed_tasks: Vec::new(),
+            scheduled: HashMap::new(),
             in_flight: HashSet::new(),
             telemetry_handle,
             shutdown_notify,
             shutdown_flag,
-            checkpoint_rx,
+            checkpoint_queue,
             sweep_rx,
             sweep_trigger_gate,
         }
@@ -377,7 +472,7 @@ impl StreamWorker {
                         tracing::error!(error = %e, "sweep failed");
                     }
                 }
-                Some(notification) = self.checkpoint_rx.recv() => {
+                Some(notification) = self.checkpoint_queue.recv() => {
                     self.handle_checkpoint_notification(notification).await;
                 }
                 Some(request) = self.sweep_rx.recv() => {
@@ -425,6 +520,46 @@ impl StreamWorker {
             .iter()
             .filter_map(|task| task.next_retry_at)
             .min()
+    }
+
+    fn enqueue_task(&mut self, task: ProcessingTask) -> bool {
+        let key = (
+            task.session_id.clone(),
+            task.canonical_path.clone(),
+            task.stream_kind.clone(),
+        );
+        match self.scheduled.get_mut(&key) {
+            Some(priority) if task.priority < *priority => {
+                *priority = task.priority;
+                self.priority_queue.push(task);
+                true
+            }
+            Some(_) => false,
+            None => {
+                self.scheduled.insert(key, task.priority);
+                self.priority_queue.push(task);
+                true
+            }
+        }
+    }
+
+    fn task_is_current(&self, task: &ProcessingTask) -> bool {
+        self.scheduled.get(&(
+            task.session_id.clone(),
+            task.canonical_path.clone(),
+            task.stream_kind.clone(),
+        )) == Some(&task.priority)
+    }
+
+    fn finish_task(&mut self, task: &ProcessingTask) {
+        let key = (
+            task.session_id.clone(),
+            task.canonical_path.clone(),
+            task.stream_kind.clone(),
+        );
+        if self.scheduled.get(&key) == Some(&task.priority) {
+            self.scheduled.remove(&key);
+        }
     }
 
     /// Run a sweep across all agents to discover new/behind sessions.
@@ -502,7 +637,7 @@ impl StreamWorker {
                     );
 
                     for task in tasks {
-                        self.priority_queue.push(task);
+                        self.enqueue_task(task);
                     }
                 }
                 SweepItem::SharedStream {
@@ -547,7 +682,7 @@ impl StreamWorker {
                     }
 
                     enqueued_this_sweep.insert(dedup_key);
-                    self.priority_queue.push(ProcessingTask {
+                    self.enqueue_task(ProcessingTask {
                         priority,
                         session_id: SHARED_STREAM_SESSION_ID.to_string(),
                         stream_kind,
@@ -586,7 +721,7 @@ impl StreamWorker {
         );
 
         for task in tasks {
-            self.priority_queue.push(task);
+            self.enqueue_task(task);
         }
 
         // Sweep subagent transcripts for this main session (Claude only for now)
@@ -686,7 +821,7 @@ impl StreamWorker {
                 continue;
             }
 
-            self.priority_queue.push(ProcessingTask {
+            self.enqueue_task(ProcessingTask {
                 priority: Priority::Low,
                 session_id,
                 stream_kind: "transcript".to_string(),
@@ -899,6 +1034,10 @@ impl StreamWorker {
             return;
         };
 
+        if !self.task_is_current(&task) {
+            return;
+        }
+
         // Check if task is ready to be processed (retry delay)
         if let Some(next_retry_at) = task.next_retry_at
             && now < next_retry_at
@@ -929,7 +1068,7 @@ impl StreamWorker {
         // Handle result
         match result {
             Ok(Ok(())) => {
-                // Success - task is done
+                self.finish_task(&task);
             }
             Ok(Err(e)) => {
                 // Error - handle retry logic
@@ -1192,6 +1331,7 @@ impl StreamWorker {
                     ) {
                         tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
                     }
+                    self.finish_task(&task);
                     return;
                 }
 
@@ -1232,6 +1372,7 @@ impl StreamWorker {
                 ) {
                     tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
                 }
+                self.finish_task(&task);
             }
             StreamError::Fatal { message } => {
                 // Fatal errors are not retried
@@ -1248,6 +1389,7 @@ impl StreamWorker {
                 ) {
                     tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
                 }
+                self.finish_task(&task);
             }
         }
     }
@@ -1275,6 +1417,9 @@ impl StreamWorker {
 
         // Process immediate tasks
         for task in immediate_tasks {
+            if !self.task_is_current(&task) {
+                continue;
+            }
             self.in_flight
                 .insert((task.canonical_path.clone(), task.stream_kind.clone()));
             let db = self.streams_db.clone();
@@ -1289,6 +1434,7 @@ impl StreamWorker {
 
             self.in_flight
                 .remove(&(task.canonical_path.clone(), task.stream_kind.clone()));
+            self.finish_task(&task);
 
             match result {
                 Err(e) => {
@@ -1309,8 +1455,8 @@ pub fn spawn_stream_worker(
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_notify: Arc<Notify>,
 ) -> StreamWorkerHandle {
-    let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (checkpoint_queue_tx, checkpoint_queue_rx) = checkpoint_queue();
+    let (sweep_tx, sweep_rx) = tokio::sync::mpsc::channel(SWEEP_REQUEST_QUEUE_CAPACITY);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let sweep_trigger_gate = SweepTriggerGate::new();
 
@@ -1319,7 +1465,7 @@ pub fn spawn_stream_worker(
         telemetry_handle,
         shutdown_notify,
         shutdown_flag,
-        checkpoint_rx,
+        checkpoint_queue_rx,
         sweep_rx,
         sweep_trigger_gate.clone(),
     );
@@ -1329,7 +1475,7 @@ pub fn spawn_stream_worker(
     });
 
     StreamWorkerHandle {
-        checkpoint_tx,
+        checkpoint_queue: checkpoint_queue_tx,
         sweep_tx,
         sweep_trigger_gate,
     }
@@ -1393,11 +1539,42 @@ mod scheduling_tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn make_handle() -> (
+        StreamWorkerHandle,
+        CheckpointQueueReceiver,
+        tokio::sync::mpsc::Receiver<SweepRequest>,
+    ) {
+        let (checkpoint_queue_tx, checkpoint_queue_rx) = checkpoint_queue();
+        let (sweep_tx, sweep_rx) = tokio::sync::mpsc::channel(SWEEP_REQUEST_QUEUE_CAPACITY);
+        (
+            StreamWorkerHandle {
+                checkpoint_queue: checkpoint_queue_tx,
+                sweep_tx,
+                sweep_trigger_gate: SweepTriggerGate::new(),
+            },
+            checkpoint_queue_rx,
+            sweep_rx,
+        )
+    }
+
+    fn notify_test_checkpoint(handle: &StreamWorkerHandle, sequence: usize) {
+        handle.notify_checkpoint(
+            "session".to_string(),
+            "claude".to_string(),
+            format!("trace-{sequence}"),
+            Some(format!("tool-{sequence}")),
+            PathBuf::from("/test/session.jsonl"),
+            Some(PathBuf::from("/test/repo")),
+            "external-session".to_string(),
+            None,
+        );
+    }
+
     fn make_worker() -> (TempDir, StreamWorker, Arc<Notify>) {
         let temp = TempDir::new().unwrap();
         let db = Arc::new(StreamsDatabase::open(temp.path().join("streams.db")).unwrap());
-        let (_checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_checkpoint_tx, checkpoint_rx) = checkpoint_queue();
+        let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::channel(SWEEP_REQUEST_QUEUE_CAPACITY);
         let shutdown = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let telemetry = DaemonTelemetryWorkerHandle::new_noop();
@@ -1457,6 +1634,80 @@ mod scheduling_tests {
         worker.delayed_tasks.push(task("earlier", Some(earlier)));
 
         assert_eq!(worker.next_delayed_task_at(), Some(earlier));
+    }
+
+    #[test]
+    fn duplicate_checkpoint_notifications_are_coalesced_at_ingress() {
+        let (handle, checkpoint_rx, _sweep_rx) = make_handle();
+
+        for sequence in 0..10_000 {
+            notify_test_checkpoint(&handle, sequence);
+        }
+
+        assert_eq!(checkpoint_rx.len(), 1);
+    }
+
+    #[test]
+    fn unique_checkpoint_notification_queue_is_bounded() {
+        let (handle, checkpoint_rx, _sweep_rx) = make_handle();
+
+        for sequence in 0..2_000 {
+            handle.notify_checkpoint(
+                format!("session-{sequence}"),
+                "claude".to_string(),
+                format!("trace-{sequence}"),
+                None,
+                PathBuf::from(format!("/test/session-{sequence}.jsonl")),
+                None,
+                format!("external-{sequence}"),
+                None,
+            );
+        }
+
+        assert_eq!(checkpoint_rx.len(), CHECKPOINT_NOTIFICATION_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn recovery_sweep_queue_is_bounded() {
+        let (handle, _checkpoint_rx, sweep_rx) = make_handle();
+
+        for _ in 0..100 {
+            let _ = handle.trigger_sweep_for_recovery(SweepTrigger::PostCommit);
+        }
+
+        assert_eq!(sweep_rx.len(), SWEEP_REQUEST_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn immediate_task_supersedes_queued_low_priority_task() {
+        let (_temp, mut worker, _shutdown) = make_worker();
+        let mut low = task("session", None);
+        low.priority = Priority::Low;
+        let immediate = task("session", None);
+
+        assert!(worker.enqueue_task(low));
+        assert!(worker.enqueue_task(immediate));
+
+        let immediate = worker.priority_queue.pop().unwrap();
+        assert_eq!(immediate.priority, Priority::Immediate);
+        assert!(worker.task_is_current(&immediate));
+        worker.finish_task(&immediate);
+
+        let stale_low = worker.priority_queue.pop().unwrap();
+        assert_eq!(stale_low.priority, Priority::Low);
+        assert!(!worker.task_is_current(&stale_low));
+    }
+
+    #[test]
+    fn same_path_with_different_sessions_remains_distinct_work() {
+        let (_temp, mut worker, _shutdown) = make_worker();
+        let first = task("first-session", None);
+        let mut second = task("second-session", None);
+        second.canonical_path = first.canonical_path.clone();
+
+        assert!(worker.enqueue_task(first));
+        assert!(worker.enqueue_task(second));
+        assert_eq!(worker.priority_queue.len(), 2);
     }
 
     #[tokio::test]
@@ -1522,8 +1773,8 @@ mod subagent_sweep_tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     fn make_worker(db: Arc<StreamsDatabase>) -> StreamWorker {
-        let (_checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_checkpoint_tx, checkpoint_rx) = checkpoint_queue();
+        let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::channel(SWEEP_REQUEST_QUEUE_CAPACITY);
         let shutdown = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let telemetry = DaemonTelemetryWorkerHandle::new_noop();
@@ -1540,7 +1791,7 @@ mod subagent_sweep_tests {
 
     #[test]
     fn triggered_sweeps_share_thirty_second_cooldown() {
-        let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::channel(SWEEP_REQUEST_QUEUE_CAPACITY);
         let handle = StreamWorkerHandle::for_test_sweep_triggers(sweep_tx);
         let started_at = Instant::now();
 
@@ -1581,7 +1832,7 @@ mod subagent_sweep_tests {
 
     #[test]
     fn recovery_sweep_bypasses_cooldown_and_suppresses_followup_trigger() {
-        let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::channel(SWEEP_REQUEST_QUEUE_CAPACITY);
         let handle = StreamWorkerHandle::for_test_sweep_triggers(sweep_tx);
         let started_at = Instant::now();
 
@@ -1754,6 +2005,36 @@ mod subagent_sweep_tests {
         let task = worker.priority_queue.pop().unwrap();
         assert_eq!(task.session_id, "internal-sess-abc");
         assert_eq!(task.tool, "copilot");
+    }
+
+    #[tokio::test]
+    async fn duplicate_checkpoint_tasks_are_coalesced_while_queued() {
+        let tmp = TempDir::new().unwrap();
+        let transcript = tmp.path().join("session.jsonl");
+        writeln!(
+            std::fs::File::create(&transcript).unwrap(),
+            r#"{{"uuid":"event-1"}}"#
+        )
+        .unwrap();
+        let db = Arc::new(StreamsDatabase::open(tmp.path().join("streams.db")).unwrap());
+        let mut worker = make_worker(db);
+        let notification = CheckpointNotification {
+            session_id: "session".to_string(),
+            tool: "claude".to_string(),
+            trace_id: "trace".to_string(),
+            tool_use_id: None,
+            stream_path: transcript,
+            repo_work_dir: Some(tmp.path().to_path_buf()),
+            external_session_id: "external-session".to_string(),
+            external_parent_session_id: None,
+        };
+
+        worker
+            .handle_checkpoint_notification(notification.clone())
+            .await;
+        worker.handle_checkpoint_notification(notification).await;
+
+        assert_eq!(worker.priority_queue.len(), 1);
     }
 
     #[tokio::test]
