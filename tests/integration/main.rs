@@ -53,6 +53,7 @@ mod cursor;
 mod daemon_batch_materialization_memory;
 mod daemon_commit_carryover;
 mod daemon_git_output_memory;
+mod daemon_http_memory;
 mod daemon_ipc_memory;
 mod daemon_log_memory;
 mod daemon_note_materialization_memory;

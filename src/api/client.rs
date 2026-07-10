@@ -310,7 +310,7 @@ impl ApiContext {
         body: &T,
     ) -> Result<http::Response, GitAiError> {
         let url = self.build_url(endpoint)?;
-        let body_json = serde_json::to_string(body).map_err(GitAiError::JsonError)?;
+        let body_json = http::serialize_json_body(body).map_err(GitAiError::JsonError)?;
 
         let (_agent, mut request) = Self::http_post(&url, self.timeout_secs);
         request = request.set("Content-Type", "application/json");
