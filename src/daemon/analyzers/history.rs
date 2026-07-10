@@ -140,7 +140,7 @@ fn squash_source_head(
     resolve_revision_from_ref_state(source, refs)
 }
 
-fn merge_source_args(args: &[String]) -> Vec<&str> {
+pub(crate) fn merge_source_args(args: &[String]) -> Vec<&str> {
     let mut sources = Vec::new();
     let mut iter = args.iter().map(String::as_str).peekable();
     while let Some(arg) = iter.next() {

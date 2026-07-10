@@ -105,6 +105,11 @@ Robustness requirements (all implemented and tested):
 - offset beyond file length (pruned/truncated reflog) clears the cursor
 - branch delete/recreate clears the stale cursor
 - expiry/`reflog expire` invalidates via anchor mismatch
+- one cursor read covers at most 4 MiB and one reflog record at most 64 KiB;
+  exceeding either limit fails closed, seeds the cursor at the current EOF,
+  and lets the next command recover without rescanning oversized history
+- common-ref discovery is iterative and bounded to 8,192 filesystem entries,
+  4,096 reflogs, 4,096 pending directories, and 64 directory levels
 
 ### Consumption
 
@@ -128,7 +133,11 @@ Cursors come into existence at trusted observation points:
 
 1. **Trace ingress capture** (best-effort): when the daemon sees a *live*,
    non-terminal trace2 frame for a mutating command, it captures current
-   reflog ends and attaches them to the root as claimed start offsets. Because
+   reflog ends and attaches them to the root as claimed start offsets. This
+   latency-sensitive capture never inventories the ref tree: it performs
+   constant work for the worktree `HEAD`, its current symbolic ref, and one
+   auxiliary ref: `refs/stash` normally, or the explicit local source ref for
+   `merge --squash`. The symbolic `HEAD` read is capped at 4 KiB. Because
    delivery is asynchronous, these claims may already be post-append;
    `command_start_offset_is_authoritative` only accepts a claimed offset if
    records exist after it and it does not move an existing cursor backward.
@@ -227,6 +236,8 @@ Deterministic tests must cover, at minimum:
 10. no hidden sync before `show`/`blame`
 11. daemon survives partial trace roots, socket close ordering, child trace
     traffic, and never deadlocks checkpoints behind unidentified sockets
+12. oversized historical reflogs remain memory-bounded, fail closed for the
+    affected boundary, and preserve exact attribution for the next command
 
 Primary suites: `tests/daemon_mode.rs`, `tests/commit_tree_update_ref.rs`,
 `tests/integration/rewrite_ops_attribution.rs`, ref-cursor unit tests in
