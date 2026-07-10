@@ -16,6 +16,13 @@ const MAX_RETAINED_STASH_ENTRIES: usize = 4_096;
 const MAX_RETAINED_CHERRY_PICK_SOURCE_OIDS: usize = 4_096;
 const MAX_RETAINED_REF_CURSOR_KEYS: usize = 4_096;
 const MAX_RETAINED_SPARSE_REFLOG_ENTRIES: usize = 4_096;
+const MAX_REFLOG_READ_BYTES: u64 = 4 * 1_024 * 1_024;
+const MAX_REFLOG_RECORD_BYTES: usize = 64 * 1_024;
+const MAX_SYMBOLIC_HEAD_BYTES: u64 = 4 * 1_024;
+const MAX_DISCOVERED_REFLOGS: usize = 4_096;
+const MAX_REFLOG_DISCOVERY_ENTRIES: usize = 8_192;
+const MAX_REFLOG_DISCOVERY_DEPTH: usize = 64;
+const MAX_PENDING_REFLOG_DIRECTORIES: usize = 4_096;
 
 #[derive(Debug)]
 pub struct RefCursor {
@@ -1837,13 +1844,6 @@ impl RefCursor {
     }
 
     fn reflog_start_offset(&mut self, key: &str, path: &Path) -> Result<Option<u64>, GitAiError> {
-        let Some(offset) = self.offsets.get(key).copied() else {
-            return Ok(None);
-        };
-        if offset == 0 {
-            return Ok(Some(0));
-        }
-
         let len = match fs::metadata(path) {
             Ok(metadata) => metadata.len(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1852,9 +1852,23 @@ impl RefCursor {
             }
             Err(error) => return Err(GitAiError::IoError(error)),
         };
+        let Some(offset) = self.offsets.get(key).copied() else {
+            if len > MAX_REFLOG_READ_BYTES {
+                self.initialize_reflog_cursor(key, len)?;
+                return Ok(Some(len));
+            }
+            return Ok(None);
+        };
         if offset > len {
             self.clear_ref_cursor(key);
             return Ok(None);
+        }
+        if len.saturating_sub(offset) > MAX_REFLOG_READ_BYTES {
+            self.initialize_reflog_cursor(key, len)?;
+            return Ok(Some(len));
+        }
+        if offset == 0 {
+            return Ok(Some(0));
         }
 
         if let Some(anchor) = self.anchors.get(key) {
@@ -2183,30 +2197,60 @@ impl RefCursor {
 pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> HashMap<String, u64> {
     let mut offsets = HashMap::new();
 
-    if let Some(git_dir) = git_dir_for_worktree(worktree) {
-        let path = git_dir.join("logs").join("HEAD");
-        if let Ok(metadata) = fs::metadata(&path) {
-            offsets.insert(head_key(&git_dir), metadata.len());
-        }
+    let Some(git_dir) = git_dir_for_worktree(worktree) else {
+        return offsets;
+    };
+    let head_log = git_dir.join("logs").join("HEAD");
+    if let Ok(metadata) = fs::metadata(&head_log) {
+        offsets.insert(head_key(&git_dir), metadata.len());
     }
 
     let Some(common_dir) = common_dir_for_worktree(worktree) else {
         return offsets;
     };
-    let logs = common_dir.join("logs");
-    let mut refs = Vec::new();
-    if discover_reflog_refs(&logs, &logs, &mut refs).is_ok() {
-        for reference in refs {
-            if reference == "HEAD" {
-                continue;
-            }
-            let path = logs.join(&reference);
-            if let Ok(metadata) = fs::metadata(&path) {
-                offsets.insert(common_key(&reference), metadata.len());
-            }
+    let common_logs = common_dir.join("logs");
+    let stash_reference = "refs/stash";
+    let stash_log = common_logs.join(stash_reference);
+    if let Ok(metadata) = fs::metadata(&stash_log) {
+        offsets.insert(common_key(stash_reference), metadata.len());
+    }
+    if let Some(reference) = read_symbolic_head_reference(&git_dir) {
+        let branch_log = common_logs.join(&reference);
+        if let Ok(metadata) = fs::metadata(&branch_log) {
+            offsets.insert(common_key(&reference), metadata.len());
         }
     }
     offsets
+}
+
+fn read_symbolic_head_reference(git_dir: &Path) -> Option<String> {
+    let file = fs::File::open(git_dir.join("HEAD")).ok()?;
+    if file.metadata().ok()?.len() > MAX_SYMBOLIC_HEAD_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SYMBOLIC_HEAD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SYMBOLIC_HEAD_BYTES {
+        return None;
+    }
+    let contents = std::str::from_utf8(&bytes).ok()?;
+    let reference = contents.strip_prefix("ref:")?.trim();
+    if !safe_reflog_reference(reference) {
+        return None;
+    }
+    Some(reference.to_string())
+}
+
+fn safe_reflog_reference(reference: &str) -> bool {
+    reference.starts_with("refs/")
+        && reference.len() <= 1_024
+        && !reference.contains('\\')
+        && !reference.chars().any(char::is_control)
+        && reference
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 pub(crate) fn refs_at_reflog_start_offsets(
@@ -2986,14 +3030,26 @@ fn read_reflog_records(
         Some(offset) => offset,
         None => 0,
     };
+    let remaining = byte_len.saturating_sub(start);
+    if remaining > MAX_REFLOG_READ_BYTES {
+        return Ok(Vec::new());
+    }
     file.seek(SeekFrom::Start(start))
         .map_err(GitAiError::IoError)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(GitAiError::IoError)?;
+    let mut bytes = Vec::with_capacity(remaining as usize);
+    file.take(MAX_REFLOG_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(GitAiError::IoError)?;
+    if bytes.len() as u64 > MAX_REFLOG_READ_BYTES {
+        return Ok(Vec::new());
+    }
 
     let mut entries = Vec::new();
     let mut offset = start;
     for raw_line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if raw_line.len() > MAX_REFLOG_RECORD_BYTES {
+            return Ok(Vec::new());
+        }
         let line_start = offset;
         offset = offset.saturating_add(raw_line.len() as u64);
         if !raw_line.ends_with(b"\n") {
@@ -3054,6 +3110,9 @@ fn read_reflog_record_ending_at(
         };
         if let Some(index) = chunk[..search_end].iter().rposition(|byte| *byte == b'\n') {
             let line_start = chunk_start + index as u64 + 1;
+            if chunk.len() - index - 1 + suffix.len() > MAX_REFLOG_RECORD_BYTES {
+                return Ok(None);
+            }
             let mut line = chunk[index + 1..].to_vec();
             line.extend_from_slice(&suffix);
             let line = String::from_utf8_lossy(&line);
@@ -3062,6 +3121,9 @@ fn read_reflog_record_ending_at(
                 .filter(|record| record.end_offset > line_start));
         }
 
+        if chunk.len() + suffix.len() > MAX_REFLOG_RECORD_BYTES {
+            return Ok(None);
+        }
         let mut line = chunk;
         line.extend_from_slice(&suffix);
         suffix = line;
@@ -3105,26 +3167,45 @@ fn discover_reflog_refs(
     current: &Path,
     out: &mut Vec<String>,
 ) -> Result<(), GitAiError> {
-    if !current.exists() {
+    if out.len() >= MAX_DISCOVERED_REFLOGS {
         return Ok(());
     }
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            discover_reflog_refs(root, &path, out)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
+    let mut pending = VecDeque::from([(current.to_path_buf(), 0usize)]);
+    let mut visited_entries = 0usize;
+    while let Some((directory, depth)) = pending.pop_front() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(GitAiError::IoError(error)),
         };
-        let reference = relative.to_string_lossy().replace('\\', "/");
-        if reference == "ORIG_HEAD" || reference.starts_with("refs/") {
-            out.push(reference);
+        for entry in entries {
+            if visited_entries >= MAX_REFLOG_DISCOVERY_ENTRIES
+                || out.len() >= MAX_DISCOVERED_REFLOGS
+            {
+                return Ok(());
+            }
+            visited_entries += 1;
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                if depth < MAX_REFLOG_DISCOVERY_DEPTH
+                    && pending.len() < MAX_PENDING_REFLOG_DIRECTORIES
+                {
+                    pending.push_back((path, depth + 1));
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let reference = relative.to_string_lossy().replace('\\', "/");
+            if reference == "ORIG_HEAD" || reference.starts_with("refs/") {
+                out.push(reference);
+            }
         }
     }
     Ok(())
@@ -4711,6 +4792,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reflog_start_capture_reads_only_fixed_relevant_refs() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        append_reflog(&git_dir, "HEAD", &[(A, B, "commit: current")]);
+        append_reflog(&git_dir, "refs/heads/main", &[(A, B, "commit: current")]);
+        append_reflog(&git_dir, "refs/stash", &[(A, B, "stash: current")]);
+        for index in 0..128 {
+            append_reflog(
+                &git_dir,
+                &format!("refs/heads/unrelated-{index}"),
+                &[(A, B, "commit: unrelated")],
+            );
+        }
+
+        let offsets = capture_reflog_start_offsets_for_worktree(&worktree);
+
+        assert_eq!(offsets.len(), 3);
+        assert!(offsets.contains_key(&head_key(&git_dir)));
+        assert!(offsets.contains_key(&common_key("refs/heads/main")));
+        assert!(offsets.contains_key(&common_key("refs/stash")));
+    }
+
+    #[test]
+    fn reflog_discovery_has_bounded_entry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        for index in 0..4_100 {
+            append_reflog(
+                temp.path(),
+                &format!("refs/heads/branch-{index}"),
+                &[(A, B, "commit: test")],
+            );
+        }
+        let mut refs = Vec::new();
+
+        discover_reflog_refs(&logs, &logs, &mut refs).unwrap();
+
+        assert!(refs.len() <= 4_096, "discovered {} reflogs", refs.len());
+    }
+
     fn append_reflog(common_dir: &Path, reference: &str, entries: &[(&str, &str, &str)]) {
         let path = common_dir.join("logs").join(reference);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -4749,6 +4874,48 @@ mod tests {
     }
 
     #[test]
+    fn reflog_reader_rejects_oversized_delta() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("HEAD");
+        let line = format!("{}\n", reflog_line(A, B, "commit: historical"));
+        let count = (4 * 1_024 * 1_024 / line.len()) + 2;
+        fs::write(&path, line.repeat(count)).unwrap();
+
+        let records = read_reflog_records(&path, None).unwrap();
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn oversized_cold_reflog_seeds_cursor_at_eof_for_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let reference = "refs/heads/main";
+        let path = temp.path().join("logs").join(reference);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = format!("{}\n", reflog_line(A, B, "commit: historical"));
+        let count = (4 * 1_024 * 1_024 / line.len()) + 2;
+        fs::write(&path, line.repeat(count)).unwrap();
+        let historical_end = fs::metadata(&path).unwrap().len();
+        let key = common_key(reference);
+        let mut cursor = RefCursor::new(FamilyKey::new(temp.path().to_string_lossy()));
+
+        let first_start = cursor.reflog_start_offset(&key, &path).unwrap();
+
+        assert_eq!(first_start, Some(historical_end));
+        assert_eq!(cursor.offsets.get(&key), Some(&historical_end));
+
+        let next = format!("{}\n", reflog_line(B, C, "commit: next"));
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        file.write_all(next.as_bytes()).unwrap();
+
+        assert_eq!(
+            cursor.reflog_start_offset(&key, &path).unwrap(),
+            Some(historical_end)
+        );
+    }
+
+    #[test]
     fn reflog_anchor_rejects_non_newline_end_offset() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("HEAD");
@@ -4769,6 +4936,18 @@ mod tests {
                 .is_none(),
             "an offset inside an unterminated reflog record must not become an anchor"
         );
+    }
+
+    #[test]
+    fn reflog_anchor_rejects_oversized_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("HEAD");
+        let line = format!("{}\n", reflog_line(A, B, &"x".repeat(64 * 1_024)));
+        fs::write(&path, &line).unwrap();
+
+        let record = read_reflog_record_ending_at(&path, line.len() as u64).unwrap();
+
+        assert!(record.is_none());
     }
 
     #[test]
