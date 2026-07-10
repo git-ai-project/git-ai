@@ -3,6 +3,40 @@
 use std::io::BufRead;
 use std::time::Duration;
 
+/// Maximum retained size of one JSONL transcript record.
+pub const MAX_JSONL_EVENT_BYTES: usize = 1024 * 1024;
+
+/// Target maximum raw size of events retained in one transcript batch.
+///
+/// The record that crosses this threshold remains in the batch, so the hard
+/// upper bound is this value plus [`MAX_JSONL_EVENT_BYTES`].
+pub const MAX_JSONL_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+pub struct JsonlReadStats {
+    oversized_records: usize,
+    oversized_bytes: usize,
+}
+
+impl JsonlReadStats {
+    pub fn record_oversized(&mut self, bytes: usize) {
+        self.oversized_records = self.oversized_records.saturating_add(1);
+        self.oversized_bytes = self.oversized_bytes.saturating_add(bytes);
+    }
+
+    pub fn warn_if_oversized(&self, path: &std::path::Path) {
+        if self.oversized_records > 0 {
+            tracing::warn!(
+                path = %path.display(),
+                records = self.oversized_records,
+                bytes = self.oversized_bytes,
+                per_record_limit = MAX_JSONL_EVENT_BYTES,
+                "skipped oversized JSONL records"
+            );
+        }
+    }
+}
+
 /// Result of reading a single line from a JSONL reader.
 pub enum JsonlLineState {
     /// End of file reached.
@@ -11,25 +45,104 @@ pub enum JsonlLineState {
     Partial,
     /// Complete line ready for processing. Contains bytes read.
     Complete(usize),
+    /// Complete line that exceeded [`MAX_JSONL_EVENT_BYTES`] and was discarded.
+    Oversized(usize),
 }
 
 /// Read a line from a BufReader, detecting partial writes from concurrent writers.
 ///
 /// Returns `Eof` if no more data, `Partial` if the line lacks a trailing newline,
-/// or `Complete(bytes)` on success.
+/// `Complete(bytes)` on success, or `Oversized(bytes)` after consuming and
+/// discarding a complete record that exceeds [`MAX_JSONL_EVENT_BYTES`].
 pub fn read_jsonl_line(
     reader: &mut impl BufRead,
     line: &mut String,
 ) -> std::io::Result<JsonlLineState> {
-    line.clear();
-    let bytes_read = reader.read_line(line)?;
+    let mut bytes = std::mem::take(line).into_bytes();
+    bytes.clear();
+    let mut bytes_read = 0usize;
+    let mut complete = false;
+    let mut oversized = false;
+
+    loop {
+        let consumed = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+
+            let consumed = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            complete = available[consumed - 1] == b'\n';
+            bytes_read = bytes_read.saturating_add(consumed);
+
+            if !oversized && bytes_read <= MAX_JSONL_EVENT_BYTES {
+                bytes.extend_from_slice(&available[..consumed]);
+            } else {
+                oversized = true;
+            }
+            consumed
+        };
+        reader.consume(consumed);
+
+        if complete {
+            break;
+        }
+    }
+
     if bytes_read == 0 {
+        *line = String::from_utf8(bytes).expect("empty byte buffer is valid UTF-8");
         return Ok(JsonlLineState::Eof);
     }
-    if !line.ends_with('\n') {
+
+    if oversized {
+        *line = String::new();
+        return Ok(if complete {
+            JsonlLineState::Oversized(bytes_read)
+        } else {
+            JsonlLineState::Partial
+        });
+    }
+
+    *line = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if !complete {
         return Ok(JsonlLineState::Partial);
     }
     Ok(JsonlLineState::Complete(bytes_read))
+}
+
+/// Whether a JSONL reader should return its current batch.
+pub fn jsonl_batch_limit_reached(
+    event_count: usize,
+    event_limit: usize,
+    batch_bytes: usize,
+) -> bool {
+    event_count >= event_limit || batch_bytes >= MAX_JSONL_BATCH_BYTES
+}
+
+/// Search a bounded number of complete JSONL records without retaining an
+/// oversized record.
+pub fn find_in_jsonl_lines<T>(
+    reader: &mut impl BufRead,
+    max_lines: usize,
+    mut find: impl FnMut(&str) -> Option<T>,
+) -> Option<T> {
+    let mut line = String::new();
+    for _ in 0..max_lines {
+        match read_jsonl_line(reader, &mut line).ok()? {
+            JsonlLineState::Complete(_) => {
+                if let Some(value) = find(&line) {
+                    return Some(value);
+                }
+            }
+            JsonlLineState::Oversized(_) => continue,
+            JsonlLineState::Eof | JsonlLineState::Partial => break,
+        }
+    }
+    None
 }
 
 /// Errors that can occur during transcript processing.
@@ -194,5 +307,56 @@ mod tests {
 
         let r2 = read_jsonl_line(&mut reader, &mut line).unwrap();
         assert!(matches!(r2, JsonlLineState::Partial));
+    }
+
+    #[test]
+    fn test_read_jsonl_line_discards_oversized_record_and_reads_next_line() {
+        let oversized_bytes = MAX_JSONL_EVENT_BYTES + 1;
+        let mut data = vec![b'x'; oversized_bytes];
+        data.push(b'\n');
+        data.extend_from_slice(b"{\"kept\":true}\n");
+        let mut reader = std::io::BufReader::with_capacity(31, data.as_slice());
+        let mut line = String::new();
+
+        let first = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(
+            first,
+            JsonlLineState::Oversized(bytes) if bytes == oversized_bytes + 1
+        ));
+        assert!(line.is_empty());
+        assert!(line.capacity() <= MAX_JSONL_EVENT_BYTES);
+
+        let second = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(second, JsonlLineState::Complete(14)));
+        assert_eq!(line, "{\"kept\":true}\n");
+    }
+
+    #[test]
+    fn test_read_jsonl_line_does_not_advance_incomplete_oversized_record() {
+        let data = vec![b'x'; MAX_JSONL_EVENT_BYTES + 1];
+        let mut reader = std::io::BufReader::with_capacity(31, data.as_slice());
+        let mut line = String::new();
+
+        let result = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(result, JsonlLineState::Partial));
+        assert!(line.is_empty());
+        assert!(line.capacity() <= MAX_JSONL_EVENT_BYTES);
+    }
+
+    #[test]
+    fn test_find_in_jsonl_lines_skips_oversized_record() {
+        let mut data = vec![b'x'; MAX_JSONL_EVENT_BYTES + 1];
+        data.extend_from_slice(b"\n{\"cwd\":\"/repo\"}\n");
+        let mut reader = std::io::BufReader::with_capacity(31, data.as_slice());
+
+        let cwd = find_in_jsonl_lines(&mut reader, 2, |line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()?
+                .get("cwd")?
+                .as_str()
+                .map(str::to_owned)
+        });
+
+        assert_eq!(cwd.as_deref(), Some("/repo"));
     }
 }

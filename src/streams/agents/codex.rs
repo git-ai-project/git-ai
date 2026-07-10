@@ -7,7 +7,7 @@ use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -120,8 +120,10 @@ impl CodexAgent {
     /// the parent session UUID.
     pub fn detect_subagent_parent(path: &Path) -> Option<String> {
         let file = File::open(path).ok()?;
-        let reader = BufReader::new(file);
-        let first_line = reader.lines().next()?.ok()?;
+        let mut reader = BufReader::new(file);
+        let first_line = crate::streams::types::find_in_jsonl_lines(&mut reader, 1, |line| {
+            Some(line.to_string())
+        })?;
         if first_line.trim().is_empty() {
             return None;
         }
@@ -240,6 +242,8 @@ impl Agent for CodexAgent {
         let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
+        let mut batch_bytes = 0usize;
+        let mut read_stats = crate::streams::types::JsonlReadStats::default();
         let mut line = String::new();
 
         loop {
@@ -254,6 +258,12 @@ impl Agent for CodexAgent {
                 crate::streams::types::JsonlLineState::Complete(bytes_read) => {
                     line_number += 1;
                     current_offset += bytes_read as u64;
+                }
+                crate::streams::types::JsonlLineState::Oversized(bytes_read) => {
+                    line_number += 1;
+                    current_offset += bytes_read as u64;
+                    read_stats.record_oversized(bytes_read);
+                    continue;
                 }
             }
 
@@ -275,10 +285,16 @@ impl Agent for CodexAgent {
             };
 
             events.push(entry);
-            if events.len() >= batch_limit {
+            batch_bytes += line.len();
+            if crate::streams::types::jsonl_batch_limit_reached(
+                events.len(),
+                batch_limit,
+                batch_bytes,
+            ) {
                 break;
             }
         }
+        read_stats.warn_if_oversized(path);
 
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
 
@@ -300,18 +316,17 @@ impl Agent for CodexAgent {
 
     fn infer_cwd(&self, stream_path: &Path) -> Option<PathBuf> {
         use std::fs::File;
-        use std::io::{BufRead, BufReader};
+        use std::io::BufReader;
 
         let file = File::open(stream_path).ok()?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
 
         // Codex has cwd in session_meta or turn_context payload events
-        for line in reader.lines().take(20) {
-            let Ok(line) = line else { continue };
+        crate::streams::types::find_in_jsonl_lines(&mut reader, 20, |line| {
             if line.is_empty() {
-                continue;
+                return None;
             }
-            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
                 // Check payload.cwd (session_meta and turn_context)
                 if let Some(cwd) = obj
                     .get("payload")
@@ -322,8 +337,8 @@ impl Agent for CodexAgent {
                     return Some(PathBuf::from(cwd));
                 }
             }
-        }
-        None
+            None
+        })
     }
 
     fn streams(&self) -> Vec<StreamDescriptor> {
