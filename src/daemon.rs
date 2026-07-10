@@ -89,6 +89,7 @@ const TRACE_CONNECTION_CLOSED_EVENT: &str = "git_ai_connection_closed";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
+const BASH_CHECKPOINT_PROCESSING_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 // Trace2 frames are written synchronously by Git to the daemon's Unix socket.
 // With small kernel socket buffers (macOS defaults to ~8 KiB), a bursty trace2
@@ -848,9 +849,38 @@ fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
         .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
 }
 
-fn apply_checkpoint_side_effect(mut request: CheckpointRequest) -> Result<(), GitAiError> {
+fn bash_checkpoint_processing_timeout() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(timeout_ms) = std::env::var("GIT_AI_TEST_BASH_CHECKPOINT_PROCESSING_TIMEOUT_MS")
+        && let Ok(timeout_ms) = timeout_ms.parse::<u64>()
+    {
+        return Duration::from_millis(timeout_ms);
+    }
+
+    BASH_CHECKPOINT_PROCESSING_TIMEOUT
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn delay_checkpoint_processing_for_test() {
+    if let Ok(delay_ms) = std::env::var("GIT_AI_TEST_CHECKPOINT_PROCESSING_DELAY_MS")
+        && let Ok(delay_ms) = delay_ms.parse::<u64>()
+    {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+}
+
+fn apply_checkpoint_side_effect(
+    mut request: CheckpointRequest,
+    processing_deadline: Option<crate::daemon::checkpoint::CheckpointProcessingDeadline>,
+) -> Result<(), GitAiError> {
     if request.files.is_empty() {
         return Ok(());
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    delay_checkpoint_processing_for_test();
+    if let Some(deadline) = processing_deadline {
+        deadline.check("checkpoint side-effect setup")?;
     }
 
     let repo_work_dir = &request.files[0].repo_work_dir;
@@ -884,12 +914,13 @@ fn apply_checkpoint_side_effect(mut request: CheckpointRequest) -> Result<(), Gi
         return Ok(());
     };
 
-    crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
+    crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon_with_deadline(
         &repo,
         &author,
         request.checkpoint_kind,
         request,
         resolved,
+        processing_deadline,
     )
 }
 
@@ -4268,6 +4299,12 @@ impl ActorDaemonCoordinator {
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
+                    let processing_deadline = request.is_bash().then(|| {
+                        crate::daemon::checkpoint::CheckpointProcessingDeadline::new(
+                            checkpoint_start,
+                            bash_checkpoint_processing_timeout(),
+                        )
+                    });
                     let checkpoint_request = {
                         let future = async {
                             if !repo_wd.is_empty() {
@@ -4275,12 +4312,14 @@ impl ActorDaemonCoordinator {
                                     self.coordinator.apply_checkpoint(Path::new(&repo_wd)).await;
                                 match ack {
                                     Ok(ack) => {
-                                        apply_checkpoint_side_effect(*request).map(|_| ack.seq)
+                                        apply_checkpoint_side_effect(*request, processing_deadline)
+                                            .map(|_| ack.seq)
                                     }
                                     Err(error) => Err(error),
                                 }
                             } else {
-                                apply_checkpoint_side_effect(*request).map(|_| 0)
+                                apply_checkpoint_side_effect(*request, processing_deadline)
+                                    .map(|_| 0)
                             }
                         };
                         let caught = std::panic::AssertUnwindSafe(future);
@@ -7968,6 +8007,11 @@ mod tests {
             checkpoint_control_response_timeout(&sample_checkpoint_request(), false),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn bash_checkpoint_processing_budget_is_ten_seconds() {
+        assert_eq!(BASH_CHECKPOINT_PROCESSING_TIMEOUT, Duration::from_secs(10));
     }
 
     #[test]

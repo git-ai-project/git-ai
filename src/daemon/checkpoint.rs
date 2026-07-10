@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 #[cfg(not(any(test, feature = "test-support")))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -85,6 +85,46 @@ pub struct ResolvedCheckpointExecution {
     pub ts: u128,
     pub files: Vec<String>,
     pub dirty_files: HashMap<String, Arc<str>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointProcessingDeadline {
+    started_at: Instant,
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CheckpointExecutionContext {
+    started_at: Instant,
+    processing_deadline: Option<CheckpointProcessingDeadline>,
+}
+
+impl CheckpointProcessingDeadline {
+    pub fn new(started_at: Instant, timeout: Duration) -> Self {
+        Self {
+            started_at,
+            timeout,
+        }
+    }
+
+    pub(crate) fn check(self, phase: &str) -> Result<(), GitAiError> {
+        if self.started_at.elapsed() < self.timeout {
+            return Ok(());
+        }
+
+        Err(GitAiError::Generic(format!(
+            "Bash checkpoint processing timed out after {}ms during {}",
+            self.timeout.as_millis(),
+            phase,
+        )))
+    }
+}
+
+fn check_processing_deadline(
+    deadline: Option<CheckpointProcessingDeadline>,
+    phase: &str,
+) -> Result<(), GitAiError> {
+    deadline.map_or(Ok(()), |deadline| deadline.check(phase))
 }
 
 /// Build EventAttributes for AgentUsage events.
@@ -168,6 +208,24 @@ pub fn execute_resolved_checkpoint_from_daemon(
     checkpoint_request: CheckpointRequest,
     resolved: ResolvedCheckpointExecution,
 ) -> Result<(), GitAiError> {
+    execute_resolved_checkpoint_from_daemon_with_deadline(
+        repo,
+        author,
+        kind,
+        checkpoint_request,
+        resolved,
+        None,
+    )
+}
+
+pub fn execute_resolved_checkpoint_from_daemon_with_deadline(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    checkpoint_request: CheckpointRequest,
+    resolved: ResolvedCheckpointExecution,
+    processing_deadline: Option<CheckpointProcessingDeadline>,
+) -> Result<(), GitAiError> {
     let checkpoint_start = Instant::now();
     tracing::debug!("[BENCHMARK] Starting daemon replay checkpoint");
     execute_resolved_checkpoint(
@@ -177,7 +235,10 @@ pub fn execute_resolved_checkpoint_from_daemon(
         true,
         checkpoint_request,
         resolved,
-        checkpoint_start,
+        CheckpointExecutionContext {
+            started_at: checkpoint_start,
+            processing_deadline,
+        },
     )
     .map(|_| ())
 }
@@ -189,8 +250,13 @@ fn execute_resolved_checkpoint(
     quiet: bool,
     checkpoint_request: CheckpointRequest,
     mut resolved: ResolvedCheckpointExecution,
-    checkpoint_start: Instant,
+    context: CheckpointExecutionContext,
 ) -> Result<(usize, usize, usize), GitAiError> {
+    let CheckpointExecutionContext {
+        started_at: checkpoint_start,
+        processing_deadline,
+    } = context;
+    check_processing_deadline(processing_deadline, "checkpoint setup")?;
     if kind.is_ai() && checkpoint_request.agent_id.is_none() {
         return Err(GitAiError::Generic(
             "AI checkpoint is missing agent_id".to_string(),
@@ -207,6 +273,7 @@ fn execute_resolved_checkpoint(
 
     let read_checkpoints_start = Instant::now();
     let mut checkpoints = working_log.read_all_checkpoints()?;
+    check_processing_deadline(processing_deadline, "working log read")?;
     tracing::debug!(
         "[BENCHMARK] Reading {} checkpoints took {:?}",
         checkpoints.len(),
@@ -239,7 +306,8 @@ fn execute_resolved_checkpoint(
     }
 
     let save_states_start = Instant::now();
-    let file_content_hashes = save_current_file_states(&working_log, &resolved.files)?;
+    let file_content_hashes =
+        save_current_file_states(&working_log, &resolved.files, processing_deadline)?;
     tracing::debug!(
         "[BENCHMARK] save_current_file_states for {} files took {:?}",
         resolved.files.len(),
@@ -252,6 +320,7 @@ fn execute_resolved_checkpoint(
 
     let mut combined_hasher = Sha256::new();
     for (file_path, hash) in ordered_hashes {
+        check_processing_deadline(processing_deadline, "content hash aggregation")?;
         combined_hasher.update(file_path.as_bytes());
         combined_hasher.update(hash.as_bytes());
     }
@@ -276,7 +345,9 @@ fn execute_resolved_checkpoint(
         resolved.ts,
         Some(resolved.base_commit.as_str()),
         trace_id.clone(),
+        processing_deadline,
     ))?;
+    check_processing_deadline(processing_deadline, "checkpoint entry generation")?;
     tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
         entries.len(),
@@ -333,6 +404,7 @@ fn execute_resolved_checkpoint(
         );
 
         let append_start = Instant::now();
+        check_processing_deadline(processing_deadline, "checkpoint append")?;
         working_log.append_checkpoint(&checkpoint)?;
         tracing::debug!(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
@@ -434,6 +506,7 @@ fn execute_resolved_checkpoint(
 fn save_current_file_states(
     working_log: &PersistedWorkingLog,
     files: &[String],
+    processing_deadline: Option<CheckpointProcessingDeadline>,
 ) -> Result<HashMap<String, String>, GitAiError> {
     let _read_start = Instant::now();
 
@@ -457,6 +530,7 @@ fn save_current_file_states(
                     .acquire_owned()
                     .await
                     .expect("file state semaphore was closed");
+                check_processing_deadline(processing_deadline, "file state capture")?;
 
                 // Read file content - check dirty_files first, then filesystem
                 let content = if let Some(ref dirty_map) = *dirty_files {
@@ -471,7 +545,7 @@ fn save_current_file_states(
                     ))
                 })?;
 
-                crate::tokio_runtime::spawn_blocking_result(move || {
+                let result = crate::tokio_runtime::spawn_blocking_result(move || {
                     // Create SHA256 hash of the content
                     let mut hasher = Sha256::new();
                     hasher.update(content.as_bytes());
@@ -486,7 +560,9 @@ fn save_current_file_states(
 
                     Ok::<(String, String), GitAiError>((file_path, sha))
                 })
-                .await
+                .await;
+                check_processing_deadline(processing_deadline, "file state capture")?;
+                result
             });
         }
 
@@ -590,7 +666,9 @@ fn get_checkpoint_entry_for_file(
     initial_snapshot_contents: Arc<HashMap<String, Arc<str>>>,
     parent_note_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     ts: u128,
+    processing_deadline: Option<CheckpointProcessingDeadline>,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
+    check_processing_deadline(processing_deadline, "file attribution")?;
     let file_start = Instant::now();
     let initial_attrs_for_file = initial_attributions
         .get(&file_path)
@@ -627,6 +705,7 @@ fn get_checkpoint_entry_for_file(
 
         let stats = compute_file_line_stats(&previous_content, &current_content);
         let entry = WorkingLogEntry::new(file_path, file_content_hash, Vec::new(), Vec::new());
+        check_processing_deadline(processing_deadline, "file attribution")?;
         return Ok(Some((entry, stats)));
     }
 
@@ -771,6 +850,7 @@ fn get_checkpoint_entry_for_file(
             remapped_attributions,
             line_attributions,
         );
+        check_processing_deadline(processing_deadline, "file attribution")?;
         return Ok(Some((entry, FileLineStats::default())));
     }
 
@@ -784,6 +864,7 @@ fn get_checkpoint_entry_for_file(
         content: &current_content,
         ts,
     })?;
+    check_processing_deadline(processing_deadline, "file attribution")?;
 
     tracing::debug!(
         "[BENCHMARK] Processing file {} took {:?}",
@@ -806,7 +887,9 @@ async fn get_checkpoint_entries(
     ts: u128,
     head_commit_override: Option<&str>,
     trace_id: String,
+    processing_deadline: Option<CheckpointProcessingDeadline>,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
+    check_processing_deadline(processing_deadline, "checkpoint entry setup")?;
     let entries_fn_start = Instant::now();
 
     // Read INITIAL attributions from working log (empty if file doesn't exist)
@@ -930,6 +1013,7 @@ async fn get_checkpoint_entries(
                     initial_snapshot_contents.clone(),
                     parent_note_attributions.clone(),
                     ts,
+                    processing_deadline,
                 )
             })
             .await
@@ -946,6 +1030,7 @@ async fn get_checkpoint_entries(
     // Await all tasks concurrently
     let await_start = Instant::now();
     let results = futures::future::join_all(tasks).await;
+    check_processing_deadline(processing_deadline, "checkpoint entry generation")?;
     tracing::debug!(
         "[BENCHMARK] Awaiting {} tasks took {:?}",
         results.len(),
