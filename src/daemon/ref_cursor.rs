@@ -2324,7 +2324,10 @@ fn commit_subject(message: &str) -> Option<String> {
     message
         .lines()
         .find(|line| !line.trim().is_empty())
-        .map(|line| line.to_string())
+        .map(|line| {
+            line.trim_end_matches(|character: char| character.is_ascii_whitespace())
+                .to_string()
+        })
 }
 
 fn resolve_cherry_pick_source_oids_from_sources(
@@ -3526,6 +3529,27 @@ mod tests {
     const E: &str = "5555555555555555555555555555555555555555";
     const F: &str = "6666666666666666666666666666666666666666";
     const G: &str = "7777777777777777777777777777777777777777";
+
+    #[test]
+    fn commit_subject_matches_git_reflog_trailing_whitespace_cleanup() {
+        assert_eq!(commit_subject("subject \t"), Some("subject".to_string()));
+        assert_eq!(
+            commit_subject("\nsubject \t\nbody"),
+            Some("subject".to_string())
+        );
+        assert_eq!(
+            commit_subject("subject\u{00a0}"),
+            Some("subject\u{00a0}".to_string())
+        );
+
+        let args = vec![
+            "commit".to_string(),
+            "-m".to_string(),
+            "subject \t".to_string(),
+        ];
+        assert!(commit_reflog_messages(&args, false).contains("commit: subject"));
+        assert!(commit_reflog_messages(&args, true).contains("commit (amend): subject"));
+    }
 
     #[test]
     fn revert_source_args_do_not_treat_bare_gpg_sign_as_value_option() {
