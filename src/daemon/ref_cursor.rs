@@ -6,10 +6,16 @@ use crate::git::cli_parser::{
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
+const MAX_RETAINED_STASH_ENTRIES: usize = 4_096;
+const MAX_RETAINED_CHERRY_PICK_SOURCE_OIDS: usize = 4_096;
+const MAX_RETAINED_REF_CURSOR_KEYS: usize = 4_096;
+const MAX_RETAINED_SPARSE_REFLOG_ENTRIES: usize = 4_096;
 
 #[derive(Debug)]
 pub struct RefCursor {
@@ -18,6 +24,7 @@ pub struct RefCursor {
     anchors: HashMap<String, ReflogAnchor>,
     consumed_offsets: HashMap<String, HashSet<u64>>,
     consumed_anchors: HashMap<String, HashMap<u64, ReflogAnchor>>,
+    retained_sparse_entries: usize,
     /// Per-command soft hints from the daemon-ingress reflog offset capture.
     /// Populated at the start of each command's enrichment and cleared when the
     /// next command's enrichment begins. Unlike `offsets` (the authoritative
@@ -94,7 +101,7 @@ struct ReflogRecord {
 struct ReflogAnchor {
     old: String,
     new: String,
-    message: String,
+    message_hash: [u8; 32],
     end_offset: u64,
 }
 
@@ -127,6 +134,7 @@ impl RefCursor {
             anchors: HashMap::new(),
             consumed_offsets: HashMap::new(),
             consumed_anchors: HashMap::new(),
+            retained_sparse_entries: 0,
             command_start_hints: HashMap::new(),
             stash_stack: Vec::new(),
             pending_cherry_pick_source_oids: Vec::new(),
@@ -1805,6 +1813,7 @@ impl RefCursor {
             }
             _ => {}
         }
+        self.stash_stack.truncate(MAX_RETAINED_STASH_ENTRIES);
     }
 
     fn discover_common_refs(&self) -> Result<Vec<String>, GitAiError> {
@@ -1860,9 +1869,9 @@ impl RefCursor {
     }
 
     fn initialize_reflog_cursor(&mut self, key: &str, offset: u64) -> Result<(), GitAiError> {
+        self.ensure_ref_cursor_key(key);
         self.offsets.insert(key.to_string(), offset);
-        self.consumed_offsets.remove(key);
-        self.consumed_anchors.remove(key);
+        self.clear_sparse_entries_for_key(key);
         if offset == 0 {
             self.anchors.remove(key);
             return Ok(());
@@ -1930,6 +1939,15 @@ impl RefCursor {
     }
 
     fn consume_entry(&mut self, entry: &CursorEntry) -> Result<(), GitAiError> {
+        self.ensure_ref_cursor_key(&entry.key);
+        let already_retained = self
+            .consumed_offsets
+            .get(&entry.key)
+            .is_some_and(|offsets| offsets.contains(&entry.end_offset));
+        if !already_retained && self.retained_sparse_entries >= MAX_RETAINED_SPARSE_REFLOG_ENTRIES {
+            self.advance_cursor_to_entry(entry);
+            return Ok(());
+        }
         self.consumed_offsets
             .entry(entry.key.clone())
             .or_default()
@@ -1938,15 +1956,18 @@ impl RefCursor {
             .entry(entry.key.clone())
             .or_default()
             .insert(entry.end_offset, ReflogAnchor::from(entry));
+        if !already_retained {
+            self.retained_sparse_entries = self.retained_sparse_entries.saturating_add(1);
+        }
         self.compact_consumed_entries(&entry.key, &entry.path, &entry.reference)
     }
 
     fn advance_cursor_to_entry(&mut self, entry: &CursorEntry) {
+        self.ensure_ref_cursor_key(&entry.key);
         self.offsets.insert(entry.key.clone(), entry.end_offset);
         self.anchors
             .insert(entry.key.clone(), ReflogAnchor::from(entry));
-        self.consumed_offsets.remove(&entry.key);
-        self.consumed_anchors.remove(&entry.key);
+        self.clear_sparse_entries_for_key(&entry.key);
     }
 
     fn compact_consumed_entries(
@@ -1974,7 +1995,11 @@ impl RefCursor {
                 self.anchors.insert(key.to_string(), anchor);
             }
             if let Some(consumed) = self.consumed_offsets.get_mut(key) {
+                let before = consumed.len();
                 consumed.retain(|offset| *offset > advanced_to);
+                self.retained_sparse_entries = self
+                    .retained_sparse_entries
+                    .saturating_sub(before.saturating_sub(consumed.len()));
                 if consumed.is_empty() {
                     self.consumed_offsets.remove(key);
                 }
@@ -2025,9 +2050,9 @@ impl RefCursor {
         match fs::metadata(&path) {
             Ok(metadata) => {
                 let len = metadata.len();
+                self.ensure_ref_cursor_key(&key);
                 self.offsets.insert(key.clone(), len);
-                self.consumed_offsets.remove(&key);
-                self.consumed_anchors.remove(&key);
+                self.clear_sparse_entries_for_key(&key);
                 if let Some(record) = read_reflog_record_ending_at(&path, len)? {
                     self.anchors.insert(key, ReflogAnchor::from(&record));
                 } else {
@@ -2125,8 +2150,33 @@ impl RefCursor {
     fn clear_ref_cursor(&mut self, key: &str) {
         self.offsets.remove(key);
         self.anchors.remove(key);
-        self.consumed_offsets.remove(key);
+        self.clear_sparse_entries_for_key(key);
+    }
+
+    fn ensure_ref_cursor_key(&mut self, key: &str) {
+        if self.offsets.contains_key(key) {
+            return;
+        }
+        if self.offsets.len() >= MAX_RETAINED_REF_CURSOR_KEYS
+            && let Some(evicted) = self
+                .offsets
+                .keys()
+                .find(|candidate| candidate.starts_with("common:"))
+                .or_else(|| self.offsets.keys().next())
+                .cloned()
+        {
+            self.clear_ref_cursor(&evicted);
+        }
+        self.offsets.insert(key.to_string(), 0);
+    }
+
+    fn clear_sparse_entries_for_key(&mut self, key: &str) {
+        let removed = self
+            .consumed_offsets
+            .remove(key)
+            .map_or(0, |offsets| offsets.len());
         self.consumed_anchors.remove(key);
+        self.retained_sparse_entries = self.retained_sparse_entries.saturating_sub(removed);
     }
 }
 
@@ -2205,7 +2255,7 @@ impl From<&CursorEntry> for ReflogAnchor {
         Self {
             old: entry.old.clone(),
             new: entry.new.clone(),
-            message: entry.message.clone(),
+            message_hash: Sha256::digest(entry.message.as_bytes()).into(),
             end_offset: entry.end_offset,
         }
     }
@@ -2216,7 +2266,7 @@ impl From<&ReflogRecord> for ReflogAnchor {
         Self {
             old: record.old.clone(),
             new: record.new.clone(),
-            message: record.message.clone(),
+            message_hash: Sha256::digest(record.message.as_bytes()).into(),
             end_offset: record.end_offset,
         }
     }
@@ -2404,6 +2454,9 @@ fn resolve_cherry_pick_source_oids_from_sources(
     state: &FamilyState,
     sources: &[&str],
 ) -> Result<Option<Vec<String>>, GitAiError> {
+    if sources.len() > MAX_RETAINED_CHERRY_PICK_SOURCE_OIDS {
+        return Ok(None);
+    }
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -3678,6 +3731,79 @@ mod tests {
             revert_source_args(&["-Smy-key".to_string(), "HEAD~1".to_string()]),
             vec!["HEAD~1"]
         );
+    }
+
+    #[test]
+    fn oversized_cherry_pick_source_list_fails_closed() {
+        let family = FamilyKey::new("/tmp/git-ai-source-cap".to_string());
+        let state = family_state(&family);
+        let cmd = command(&family, &["cherry-pick"]);
+        let source_strings = (1..=4_097)
+            .map(|index| format!("{index:040x}"))
+            .collect::<Vec<_>>();
+        let sources = source_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        let resolved = resolve_cherry_pick_source_oids_from_sources(&cmd, &state, &sources)
+            .expect("resolve sources");
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn retained_ref_cursor_keys_are_bounded() {
+        let mut cursor = RefCursor::new(FamilyKey::new("/tmp/git-ai-ref-cursor-cap"));
+        for index in 0..=4_096 {
+            cursor
+                .initialize_reflog_cursor(&format!("common:refs/heads/branch-{index}"), 0)
+                .unwrap();
+        }
+
+        assert_eq!(cursor.offsets.len(), 4_096);
+        assert!(cursor.offsets.contains_key("common:refs/heads/branch-4096"));
+    }
+
+    #[test]
+    fn retained_sparse_reflog_entries_are_bounded() {
+        let mut cursor = RefCursor::new(FamilyKey::new("/tmp/git-ai-sparse-cursor-cap"));
+        let key = "common:refs/heads/main";
+        let missing_log = PathBuf::from("/definitely/missing/git-ai-reflog");
+        for index in 1..=4_097_u64 {
+            cursor
+                .consume_entry(&CursorEntry {
+                    key: key.to_string(),
+                    path: missing_log.clone(),
+                    reference: "refs/heads/main".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                    message: format!("commit: {index}"),
+                    timestamp_secs: Some(index as i64),
+                    start_offset: index - 1,
+                    end_offset: index,
+                })
+                .unwrap();
+        }
+
+        assert!(cursor.consumed_offsets.get(key).map_or(0, HashSet::len) <= 4_096);
+    }
+
+    #[test]
+    fn reflog_anchor_does_not_retain_the_full_message() {
+        let anchor = ReflogAnchor::from(&CursorEntry {
+            key: "common:refs/heads/main".to_string(),
+            path: PathBuf::from("/tmp/reflog"),
+            reference: "refs/heads/main".to_string(),
+            old: A.to_string(),
+            new: B.to_string(),
+            message: "x".repeat(16 * 1_024),
+            timestamp_secs: Some(1),
+            start_offset: 0,
+            end_offset: 1,
+        });
+
+        assert!(format!("{anchor:?}").len() < 512);
     }
 
     #[test]
@@ -5775,5 +5901,35 @@ mod tests {
             }]
         );
         assert_eq!(cursor.stash_stack, vec![C.to_string()]);
+    }
+
+    #[test]
+    fn stash_cursor_retains_only_a_bounded_newest_stack() {
+        const EXPECTED_LIMIT: usize = 4_096;
+
+        let mut cursor = RefCursor::new(FamilyKey::new("/tmp/family"));
+        for index in 1..=(EXPECTED_LIMIT + 1) {
+            cursor.apply_stash_ref_entry(
+                "push",
+                &CursorEntry {
+                    key: "common:refs/stash".to_string(),
+                    path: PathBuf::from("/tmp/stash-log"),
+                    reference: "refs/stash".to_string(),
+                    old: zero_oid(),
+                    new: format!("{index:040x}"),
+                    message: "stash push".to_string(),
+                    timestamp_secs: None,
+                    start_offset: index as u64,
+                    end_offset: index as u64 + 1,
+                },
+            );
+        }
+
+        assert_eq!(cursor.stash_stack.len(), EXPECTED_LIMIT);
+        assert_eq!(
+            cursor.stash_stack.first(),
+            Some(&format!("{:040x}", EXPECTED_LIMIT + 1))
+        );
+        assert!(!cursor.stash_stack.contains(&format!("{:040x}", 1)));
     }
 }

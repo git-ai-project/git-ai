@@ -9,6 +9,21 @@ use crate::error::GitAiError;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
+const MAX_PER_FILE_WATERMARKS: usize = 4_096;
+const MAX_PER_WORKTREE_WATERMARKS: usize = 256;
+
+fn retain_newest_watermarks(watermarks: &mut HashMap<String, u128>, limit: usize) {
+    if watermarks.len() <= limit {
+        return;
+    }
+    let mut entries = watermarks.drain().collect::<Vec<_>>();
+    entries.select_nth_unstable_by(limit, |left, right| {
+        right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+    });
+    entries.truncate(limit);
+    watermarks.extend(entries);
+}
+
 pub enum FamilyMsg {
     Apply(
         Box<NormalizedCommand>,
@@ -28,6 +43,14 @@ pub struct FamilyActorHandle {
 }
 
 impl FamilyActorHandle {
+    pub(crate) fn is_idle_for_eviction(&self) -> bool {
+        self.tx.strong_count() == 1
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     pub async fn apply(&self, cmd: NormalizedCommand) -> Result<AppliedCommand, GitAiError> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -158,6 +181,14 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                             state.watermarks.per_file.retain(|_, file_ts| *file_ts > ts);
                         }
                     }
+                    retain_newest_watermarks(
+                        &mut state.watermarks.per_file,
+                        MAX_PER_FILE_WATERMARKS,
+                    );
+                    retain_newest_watermarks(
+                        &mut state.watermarks.per_worktree,
+                        MAX_PER_WORKTREE_WATERMARKS,
+                    );
                 }
                 FamilyMsg::Shutdown => break,
             }
@@ -267,6 +298,54 @@ mod tests {
         assert_eq!(wm.per_file.get("src/main.rs"), Some(&3000));
         assert_eq!(wm.per_file.get("src/lib.rs"), Some(&2000));
 
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_file_watermarks_keep_only_the_newest_bounded_set() {
+        const EXPECTED_LIMIT: usize = 4_096;
+
+        let handle = spawn_family_actor(FamilyKey::new("bounded-watermarks"));
+        handle
+            .update_watermarks(WatermarkState {
+                per_file: (0..=EXPECTED_LIMIT)
+                    .map(|index| (format!("src/file-{index}.rs"), index as u128))
+                    .collect(),
+                per_worktree: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        let watermarks = handle.watermarks().await.unwrap();
+        assert_eq!(watermarks.per_file.len(), EXPECTED_LIMIT);
+        assert!(!watermarks.per_file.contains_key("src/file-0.rs"));
+        assert_eq!(
+            watermarks
+                .per_file
+                .get(&format!("src/file-{EXPECTED_LIMIT}.rs")),
+            Some(&(EXPECTED_LIMIT as u128))
+        );
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_worktree_watermarks_keep_only_the_newest_bounded_set() {
+        const EXPECTED_LIMIT: usize = 256;
+
+        let handle = spawn_family_actor(FamilyKey::new("bounded-worktrees"));
+        handle
+            .update_watermarks(WatermarkState {
+                per_file: HashMap::new(),
+                per_worktree: (0..=EXPECTED_LIMIT)
+                    .map(|index| (format!("/repo/worktree-{index}"), index as u128))
+                    .collect(),
+            })
+            .await
+            .unwrap();
+
+        let watermarks = handle.watermarks().await.unwrap();
+        assert_eq!(watermarks.per_worktree.len(), EXPECTED_LIMIT);
+        assert!(!watermarks.per_worktree.contains_key("/repo/worktree-0"));
         handle.shutdown().await.unwrap();
     }
 
