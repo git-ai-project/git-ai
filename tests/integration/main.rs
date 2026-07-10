@@ -86,6 +86,7 @@ mod jetbrains_download;
 mod jetbrains_ide_types;
 mod log;
 mod merge_rebase;
+mod metrics_memory;
 mod multi_repo_workspace;
 mod non_utf8_files;
 mod notes_merge_mixed_fanout;

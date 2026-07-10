@@ -14,11 +14,15 @@ use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::error::GitAiError;
-use crate::metrics::db::{METADATA_BACKFILL_BATCH_SIZE, MetricRecord, MetricsDatabase};
+use crate::metrics::db::{
+    MAX_METRIC_EVENT_JSON_BYTES, MAX_METRIC_UPLOAD_BATCH_BYTES, METADATA_BACKFILL_BATCH_SIZE,
+    MetricRecord, MetricsDatabase,
+};
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
@@ -642,24 +646,118 @@ fn flush_pending_metrics() {
 }
 
 fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
+    let db = MetricsDatabase::global()?;
+    store_metric_events_with(events, |event_jsons| {
+        let mut db_lock = db
+            .lock()
+            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+        db_lock.insert_events(event_jsons)
+    })
+}
+
+fn store_metric_events_with<Insert>(
+    events: &[MetricEvent],
+    mut insert_events: Insert,
+) -> Result<Vec<i64>, GitAiError>
+where
+    Insert: FnMut(&[String]) -> Result<Vec<i64>, GitAiError>,
+{
     if events.is_empty() {
         return Ok(Vec::new());
     }
 
-    let event_jsons: Vec<String> = events
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<_, _>>()?;
+    let mut inserted_ids = Vec::new();
+    let mut event_jsons = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut oversized_events = 0usize;
 
-    if event_jsons.is_empty() {
-        return Ok(Vec::new());
+    for event in events {
+        let Some(event_json) = serialize_metric_event_bounded(event)? else {
+            oversized_events = oversized_events.saturating_add(1);
+            continue;
+        };
+        let event_bytes = event_json.len();
+
+        if !event_jsons.is_empty()
+            && batch_bytes.saturating_add(event_bytes) > MAX_METRIC_UPLOAD_BATCH_BYTES
+        {
+            inserted_ids.extend(insert_events(&event_jsons)?);
+            event_jsons.clear();
+            batch_bytes = 0;
+        }
+
+        batch_bytes = batch_bytes.saturating_add(event_bytes);
+        event_jsons.push(event_json);
     }
 
-    let db = MetricsDatabase::global()?;
-    let mut db_lock = db
-        .lock()
-        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-    db_lock.insert_events(&event_jsons)
+    if !event_jsons.is_empty() {
+        inserted_ids.extend(insert_events(&event_jsons)?);
+    }
+
+    if oversized_events > 0 {
+        tracing::debug!(
+            oversized_events,
+            limit_bytes = MAX_METRIC_EVENT_JSON_BYTES,
+            "metrics: skipped oversized events"
+        );
+    }
+
+    Ok(inserted_ids)
+}
+
+struct BoundedMetricJsonWriter {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
+impl BoundedMetricJsonWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(8 * 1024),
+            exceeded_limit: false,
+        }
+    }
+}
+
+impl Write for BoundedMetricJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(new_len) = self.bytes.len().checked_add(bytes.len()) else {
+            self.exceeded_limit = true;
+            return Err(std::io::Error::other("metric JSON exceeds byte limit"));
+        };
+        if new_len > MAX_METRIC_EVENT_JSON_BYTES {
+            self.exceeded_limit = true;
+            return Err(std::io::Error::other("metric JSON exceeds byte limit"));
+        }
+
+        if new_len > self.bytes.capacity() {
+            let next_capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(new_len)
+                .min(MAX_METRIC_EVENT_JSON_BYTES);
+            self.bytes
+                .reserve_exact(next_capacity.saturating_sub(self.bytes.len()));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_metric_event_bounded(event: &MetricEvent) -> Result<Option<String>, GitAiError> {
+    let mut writer = BoundedMetricJsonWriter::new();
+    match serde_json::to_writer(&mut writer, event) {
+        Ok(()) => String::from_utf8(writer.bytes)
+            .map(Some)
+            .map_err(|e| GitAiError::Generic(format!("metric JSON was not UTF-8: {e}"))),
+        Err(_) if writer.exceeded_limit => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1423,6 +1521,18 @@ mod tests {
         format!(r#"{{"t":{ts},"e":1,"v":{{}},"a":{{}}}}"#)
     }
 
+    fn metric_event_with_payload(payload_bytes: usize) -> MetricEvent {
+        MetricEvent {
+            timestamp: now_ts(),
+            event_id: 1,
+            values: std::collections::HashMap::from([(
+                "0".to_string(),
+                serde_json::Value::String("x".repeat(payload_bytes)),
+            )]),
+            attrs: std::collections::HashMap::new(),
+        }
+    }
+
     fn unix_now() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1500,6 +1610,72 @@ mod tests {
         assert!(
             handle.buffer.lock().await.daemon_logs.is_empty(),
             "daemon log submission retained an event in a deferred task"
+        );
+    }
+
+    #[test]
+    fn metric_storage_drops_event_over_per_event_byte_limit() {
+        let events = vec![metric_event_with_payload(MAX_METRIC_EVENT_JSON_BYTES + 1)];
+        let mut inserted = 0usize;
+
+        store_metric_events_with(&events, |event_jsons| {
+            inserted += event_jsons.len();
+            Ok(Vec::new())
+        })
+        .unwrap();
+
+        assert_eq!(inserted, 0);
+    }
+
+    #[test]
+    fn metric_json_serialization_stops_at_per_event_byte_limit() {
+        let event = metric_event_with_payload(MAX_METRIC_EVENT_JSON_BYTES + 1);
+        let mut writer = BoundedMetricJsonWriter::new();
+
+        assert!(serde_json::to_writer(&mut writer, &event).is_err());
+        assert!(writer.exceeded_limit);
+        assert!(writer.bytes.len() <= MAX_METRIC_EVENT_JSON_BYTES);
+        assert!(writer.bytes.capacity() <= MAX_METRIC_EVENT_JSON_BYTES);
+    }
+
+    #[test]
+    fn metric_storage_keeps_event_below_per_event_byte_limit() {
+        let events = vec![metric_event_with_payload(1024 * 1024)];
+        let mut inserted = Vec::new();
+
+        store_metric_events_with(&events, |event_jsons| {
+            inserted.extend(event_jsons.iter().cloned());
+            Ok(Vec::new())
+        })
+        .unwrap();
+
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<MetricEvent>(&inserted[0])
+                .unwrap()
+                .values["0"],
+            events[0].values["0"]
+        );
+    }
+
+    #[test]
+    fn metric_storage_inserts_byte_bounded_chunks() {
+        let events = (0..10)
+            .map(|_| metric_event_with_payload(1024 * 1024))
+            .collect::<Vec<_>>();
+        let mut chunk_bytes = Vec::new();
+
+        store_metric_events_with(&events, |event_jsons| {
+            chunk_bytes.push(event_jsons.iter().map(String::len).sum::<usize>());
+            Ok(Vec::new())
+        })
+        .unwrap();
+
+        assert!(chunk_bytes.len() > 1);
+        assert!(
+            chunk_bytes
+                .iter()
+                .all(|bytes| *bytes <= MAX_METRIC_UPLOAD_BATCH_BYTES)
         );
     }
 

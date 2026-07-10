@@ -2,7 +2,8 @@
 
 use super::pos_encoded::{
     PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
+    sparse_get_vec_u32, sparse_set, string_into_json, string_to_json, u32_into_json, u32_to_json,
+    u64_into_json, u64_to_json, vec_string_into_json, vec_string_to_json, vec_u32_into_json,
     vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
@@ -323,6 +324,77 @@ impl PosEncoded for CommittedValues {
         map
     }
 
+    fn into_sparse(self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            committed_pos::HUMAN_ADDITIONS,
+            u32_into_json(self.human_additions),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::GIT_DIFF_DELETED_LINES,
+            u32_into_json(self.git_diff_deleted_lines),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::GIT_DIFF_ADDED_LINES,
+            u32_into_json(self.git_diff_added_lines),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::TOOL_MODEL_PAIRS,
+            vec_string_into_json(self.tool_model_pairs),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::AI_ADDITIONS,
+            vec_u32_into_json(self.ai_additions),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::AI_ACCEPTED,
+            vec_u32_into_json(self.ai_accepted),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::FIRST_CHECKPOINT_TS,
+            u64_into_json(self.first_checkpoint_ts),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::COMMIT_SUBJECT,
+            string_into_json(self.commit_subject),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::COMMIT_BODY,
+            string_into_json(self.commit_body),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::AUTHORSHIP_NOTE,
+            string_into_json(self.authorship_note),
+        );
+        sparse_set(&mut map, committed_pos::HUNKS, string_into_json(self.hunks));
+        sparse_set(
+            &mut map,
+            committed_pos::AUTHOR_TS,
+            u64_into_json(self.author_ts),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::COMMIT_TS,
+            u64_into_json(self.commit_ts),
+        );
+        sparse_set(
+            &mut map,
+            committed_pos::PATCH_ID,
+            string_into_json(self.patch_id),
+        );
+        map
+    }
+
     fn from_sparse(arr: &SparseArray) -> Self {
         Self {
             // Scalar fields
@@ -355,6 +427,10 @@ impl EventValues for CommittedValues {
 
     fn to_sparse(&self) -> SparseArray {
         PosEncoded::to_sparse(self)
+    }
+
+    fn into_sparse(self) -> SparseArray {
+        PosEncoded::into_sparse(self)
     }
 
     fn from_sparse(arr: &SparseArray) -> Self {
@@ -604,6 +680,71 @@ impl PosEncoded for RewriteCommittedValues {
         map
     }
 
+    fn into_sparse(self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::HUMAN_ADDITIONS,
+            u32_into_json(self.human_additions),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::GIT_DIFF_DELETED_LINES,
+            u32_into_json(self.git_diff_deleted_lines),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::GIT_DIFF_ADDED_LINES,
+            u32_into_json(self.git_diff_added_lines),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::TOOL_MODEL_PAIRS,
+            vec_string_into_json(self.tool_model_pairs),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::AI_ADDITIONS,
+            vec_u32_into_json(self.ai_additions),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::AI_ACCEPTED,
+            vec_u32_into_json(self.ai_accepted),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::COMMIT_SUBJECT,
+            string_into_json(self.commit_subject),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::COMMIT_BODY,
+            string_into_json(self.commit_body),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::AUTHORSHIP_NOTE,
+            string_into_json(self.authorship_note),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::HUNKS,
+            string_into_json(self.hunks),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::OPERATION_KIND,
+            string_into_json(self.operation_kind),
+        );
+        sparse_set(
+            &mut map,
+            rewrite_committed_pos::ORIGINAL_COMMIT_SHAS,
+            vec_string_into_json(self.original_commit_shas),
+        );
+        map
+    }
+
     fn from_sparse(arr: &SparseArray) -> Self {
         Self {
             human_additions: sparse_get_u32(arr, rewrite_committed_pos::HUMAN_ADDITIONS),
@@ -635,6 +776,10 @@ impl EventValues for RewriteCommittedValues {
 
     fn to_sparse(&self) -> SparseArray {
         PosEncoded::to_sparse(self)
+    }
+
+    fn into_sparse(self) -> SparseArray {
+        PosEncoded::into_sparse(self)
     }
 
     fn from_sparse(arr: &SparseArray) -> Self {
@@ -1106,6 +1251,28 @@ mod tests {
     }
 
     #[test]
+    fn committed_values_owned_encoding_matches_borrowed_encoding() {
+        let values = CommittedValues::new()
+            .human_additions(50)
+            .git_diff_deleted_lines(20)
+            .git_diff_added_lines(150)
+            .tool_model_pairs(vec!["all".to_string(), "codex:gpt-5".to_string()])
+            .ai_additions(vec![100, 70])
+            .ai_accepted(vec![80, 55])
+            .first_checkpoint_ts(1_704_067_200)
+            .commit_subject("subject")
+            .commit_body("body")
+            .authorship_note("note")
+            .hunks("[]")
+            .author_ts(1_704_067_210)
+            .commit_ts(1_704_067_220)
+            .patch_id("patch-id");
+        let borrowed = PosEncoded::to_sparse(&values);
+
+        assert_eq!(PosEncoded::into_sparse(values), borrowed);
+    }
+
+    #[test]
     fn test_committed_values_with_commit_timestamps_and_patch_id() {
         use super::PosEncoded;
 
@@ -1188,6 +1355,7 @@ mod tests {
             .original_commit_shas(vec!["old1".to_string()]);
 
         let sparse = PosEncoded::to_sparse(&original);
+        assert_eq!(PosEncoded::into_sparse(original.clone()), sparse);
 
         assert!(!sparse.contains_key("10"));
         assert_eq!(sparse.get("15"), Some(&Value::String("rebase".to_string())));

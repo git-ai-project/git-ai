@@ -53,7 +53,7 @@ pub fn record<V: EventValues>(values: V, attrs: EventAttributes) {
     if should_ignore_debug_self_check_event(&attrs) {
         return;
     }
-    let event = MetricEvent::new(&values, attrs.to_sparse());
+    let event = MetricEvent::from_values(values, attrs.to_sparse());
     // Write directly to observability log
     crate::observability::log_metrics(vec![event]);
 }
