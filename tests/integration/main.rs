@@ -51,6 +51,7 @@ mod continue_cli;
 mod cross_repo_cwd_attribution;
 mod cursor;
 mod daemon_commit_carryover;
+mod daemon_ipc_memory;
 mod daemon_log_memory;
 mod daemon_retained_state_memory;
 mod diff;

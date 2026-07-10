@@ -102,6 +102,13 @@ const TRACE_SOCKET_RECV_BUFFER_BYTES: usize = 512 * 1024;
 const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
 const MAX_RETAINED_AUXILIARY_STATE_KEYS: usize = 1_024;
 const MAX_RETAINED_PENDING_OIDS: usize = 4_096;
+const MAX_TRACE_JSON_LINE_BYTES: usize = 64 * 1024;
+const MAX_CONTROL_JSON_LINE_BYTES: usize = 36 * 1024 * 1024;
+const MAX_TRACE_CONNECTION_ROOTS: usize = 64;
+const MAX_TRACE_SID_BYTES: usize = 1_024;
+const MAX_TRACE_CONNECTIONS: usize = 128;
+const MAX_CONTROL_CONNECTIONS: usize = 16;
+const CONNECTION_HANDLER_STACK_BYTES: usize = 512 * 1024;
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
@@ -2364,13 +2371,65 @@ fn process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-fn read_json_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, GitAiError> {
-    let mut line = String::new();
-    let read = reader.read_line(&mut line)?;
-    if read == 0 {
-        return Ok(None);
+pub(crate) fn read_json_line_with_limit<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, GitAiError> {
+    let mut line = Vec::with_capacity(max_bytes.min(8 * 1024));
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if line.len().saturating_add(chunk_len) > max_bytes {
+            return Err(GitAiError::Generic(format!(
+                "daemon JSON line exceeds {max_bytes} bytes"
+            )));
+        }
+        line.extend_from_slice(&available[..chunk_len]);
+        reader.consume(chunk_len);
+        if line.last() == Some(&b'\n') {
+            break;
+        }
     }
-    Ok(Some(line))
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| GitAiError::IoError(io::Error::new(io::ErrorKind::InvalidData, error)))
+}
+
+fn try_acquire_connection_slot(counter: &AtomicUsize, limit: usize) -> bool {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < limit).then_some(active + 1)
+        })
+        .is_ok()
+}
+
+fn release_connection_slot(counter: &AtomicUsize) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        Some(active.saturating_sub(1))
+    });
+}
+
+fn configured_connection_limit(env_name: &str, default: usize) -> usize {
+    let is_test_daemon = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
+    if is_test_daemon
+        && let Some(limit) = std::env::var(env_name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|limit| *limit > 0)
+    {
+        return limit;
+    }
+    default
 }
 
 #[derive(Debug)]
@@ -2400,6 +2459,27 @@ struct FamilySequencerState {
 struct PendingRootSlot {
     family: String,
     order: FamilySequencerOrder,
+}
+
+#[derive(Clone, Copy)]
+enum DaemonConnectionKind {
+    Control,
+    Trace,
+}
+
+struct DaemonConnectionPermit {
+    coordinator: Arc<ActorDaemonCoordinator>,
+    kind: DaemonConnectionKind,
+}
+
+impl Drop for DaemonConnectionPermit {
+    fn drop(&mut self) {
+        let counter = match self.kind {
+            DaemonConnectionKind::Control => &self.coordinator.active_control_connections,
+            DaemonConnectionKind::Trace => &self.coordinator.active_trace_connections,
+        };
+        release_connection_slot(counter);
+    }
 }
 
 type CommitFileTimestampSnapshotHandle =
@@ -2490,6 +2570,10 @@ pub struct ActorDaemonCoordinator {
     processed_trace_ingest_seq: AtomicUsize,
     trace_ingest_progress_notify: Notify,
     trace_ingress_state: Mutex<TraceIngressState>,
+    active_control_connections: AtomicUsize,
+    active_trace_connections: AtomicUsize,
+    max_control_connections: usize,
+    max_trace_connections: usize,
     shutting_down: AtomicBool,
     shutdown_action: AtomicU8,
     shutdown_notify: Notify,
@@ -2580,6 +2664,16 @@ impl ActorDaemonCoordinator {
             processed_trace_ingest_seq: AtomicUsize::new(0),
             trace_ingest_progress_notify: Notify::new(),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
+            active_control_connections: AtomicUsize::new(0),
+            active_trace_connections: AtomicUsize::new(0),
+            max_control_connections: configured_connection_limit(
+                "GIT_AI_TEST_MAX_CONTROL_CONNECTIONS",
+                MAX_CONTROL_CONNECTIONS,
+            ),
+            max_trace_connections: configured_connection_limit(
+                "GIT_AI_TEST_MAX_TRACE_CONNECTIONS",
+                MAX_TRACE_CONNECTIONS,
+            ),
             shutting_down: AtomicBool::new(false),
             shutdown_action: AtomicU8::new(DaemonExitAction::Stop.as_u8()),
             shutdown_notify: Notify::new(),
@@ -2592,6 +2686,25 @@ impl ActorDaemonCoordinator {
         // Acquire pairs with the Release store in request_shutdown so all
         // writes made before shutdown is requested are visible to the caller.
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    fn try_acquire_connection(
+        self: &Arc<Self>,
+        kind: DaemonConnectionKind,
+    ) -> Option<DaemonConnectionPermit> {
+        let (counter, limit) = match kind {
+            DaemonConnectionKind::Control => (
+                &self.active_control_connections,
+                self.max_control_connections,
+            ),
+            DaemonConnectionKind::Trace => {
+                (&self.active_trace_connections, self.max_trace_connections)
+            }
+        };
+        try_acquire_connection_slot(counter, limit).then(|| DaemonConnectionPermit {
+            coordinator: self.clone(),
+            kind,
+        })
     }
 
     fn trigger_transcript_sweep(&self, trigger: crate::daemon::stream_worker::SweepTrigger) {
@@ -6260,10 +6373,21 @@ fn control_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
+            let Some(permit) = coordinator.try_acquire_connection(DaemonConnectionKind::Control)
+            else {
+                tracing::debug!(
+                    limit = coordinator.max_control_connections,
+                    "control connection limit reached"
+                );
+                continue;
+            };
             let coord = coordinator.clone();
             let handle = runtime_handle.clone();
             if std::thread::Builder::new()
+                .name("git-ai-control-connection".to_string())
+                .stack_size(CONNECTION_HANDLER_STACK_BYTES)
                 .spawn(move || {
+                    let _permit = permit;
                     if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
                         tracing::debug!(%e, "control connection error");
                     }
@@ -6405,8 +6529,19 @@ fn windows_control_pipe_worker_loop(
 
         let coord = coordinator.clone();
         let handle = runtime_handle.clone();
+        let Some(permit) = coord.try_acquire_connection(DaemonConnectionKind::Control) else {
+            tracing::debug!(
+                limit = coord.max_control_connections,
+                "control connection limit reached"
+            );
+            let _ = server.disconnect();
+            continue;
+        };
         std::thread::Builder::new()
+            .name("git-ai-control-connection".to_string())
+            .stack_size(CONNECTION_HANDLER_STACK_BYTES)
             .spawn(move || {
+                let _permit = permit;
                 handle_windows_control_pipe_connection(server, coord, handle);
             })
             .map_err(|e| {
@@ -6449,7 +6584,7 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
     coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
-    while let Some(line) = read_json_line(reader)? {
+    while let Some(line) = read_json_line_with_limit(reader, MAX_CONTROL_JSON_LINE_BYTES)? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -6491,6 +6626,14 @@ fn trace_listener_loop_actor(
                 break;
             }
             let Ok(stream) = stream else {
+                continue;
+            };
+            let Some(permit) = coordinator.try_acquire_connection(DaemonConnectionKind::Trace)
+            else {
+                tracing::debug!(
+                    limit = coordinator.max_trace_connections,
+                    "trace connection limit reached"
+                );
                 continue;
             };
             // Raise the receive buffer on each accepted connection. Unlike TCP,
@@ -6565,7 +6708,10 @@ fn trace_listener_loop_actor(
             let coord = coordinator.clone();
             let observed_roots_on_spawn_failure = observed_roots.clone();
             if std::thread::Builder::new()
+                .name("git-ai-trace-connection".to_string())
+                .stack_size(CONNECTION_HANDLER_STACK_BYTES)
                 .spawn(move || {
+                    let _permit = permit;
                     if let Err(e) =
                         handle_trace_connection_actor_reader(reader, coord, observed_roots)
                     {
@@ -6661,8 +6807,19 @@ fn windows_trace_pipe_worker_loop(
         connecting = windows_pipe_connecting_server(&trace_socket_path, false)?;
 
         let coord = coordinator.clone();
+        let Some(permit) = coord.try_acquire_connection(DaemonConnectionKind::Trace) else {
+            tracing::debug!(
+                limit = coord.max_trace_connections,
+                "trace connection limit reached"
+            );
+            let _ = server.disconnect();
+            continue;
+        };
         std::thread::Builder::new()
+            .name("git-ai-trace-connection".to_string())
+            .stack_size(CONNECTION_HANDLER_STACK_BYTES)
             .spawn(move || {
+                let _permit = permit;
                 handle_windows_trace_pipe_connection(server, coord);
             })
             .map_err(|e| {
@@ -6728,7 +6885,7 @@ fn bootstrap_trace_connection_actor_reader<R: Read>(
     observed_roots: &mut std::collections::BTreeSet<String>,
 ) -> Result<TraceConnectionBootstrap, GitAiError> {
     for _ in 0..TRACE_CONNECTION_BOOTSTRAP_MAX_LINES {
-        let line = match read_json_line(reader) {
+        let line = match read_json_line_with_limit(reader, MAX_TRACE_JSON_LINE_BYTES) {
             Ok(Some(line)) => line,
             Ok(None) => return Ok(TraceConnectionBootstrap::Eof),
             Err(error) if trace_bootstrap_read_timed_out(&error) => {
@@ -6768,7 +6925,7 @@ fn handle_trace_connection_actor_reader<R: Read>(
     coordinator: Arc<ActorDaemonCoordinator>,
     mut observed_roots: std::collections::BTreeSet<String>,
 ) -> Result<(), GitAiError> {
-    while let Some(line) = read_json_line(&mut reader)? {
+    while let Some(line) = read_json_line_with_limit(&mut reader, MAX_TRACE_JSON_LINE_BYTES)? {
         if process_trace_connection_line(&line, coordinator.clone(), &mut observed_roots)?
             .is_some_and(|outcome| !outcome.continue_reading)
         {
@@ -6801,8 +6958,23 @@ fn process_trace_connection_line(
     #[cfg(not(windows))]
     let mut bootstrap_complete = false;
     if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
+        if sid.len() > MAX_TRACE_SID_BYTES {
+            return Ok(Some(TraceLineOutcome {
+                continue_reading: false,
+                #[cfg(not(windows))]
+                bootstrap_complete: true,
+            }));
+        }
         let was_unidentified = observed_roots.is_empty();
         let root_sid = trace_root_sid(sid).to_string();
+        if !observed_roots.contains(&root_sid) && observed_roots.len() >= MAX_TRACE_CONNECTION_ROOTS
+        {
+            return Ok(Some(TraceLineOutcome {
+                continue_reading: false,
+                #[cfg(not(windows))]
+                bootstrap_complete: true,
+            }));
+        }
         // `start` carries argv but not the worktree. Keep bootstrapping on the
         // listener thread until the root `def_repo` event has been processed;
         // that is the first point where trace augmentation can capture reflog
@@ -7701,6 +7873,76 @@ mod tests {
     use serial_test::serial;
     use std::ffi::OsString;
     use std::io::Write;
+
+    #[test]
+    fn bounded_json_line_reader_rejects_oversized_frames() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"0123456789abcdefX\n"));
+
+        let error = read_json_line_with_limit(&mut reader, 16).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds 16 bytes"));
+    }
+
+    #[test]
+    fn bounded_json_line_reader_preserves_complete_lines() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"{\"one\":1}\n{\"two\":2}\n"));
+
+        assert_eq!(
+            read_json_line_with_limit(&mut reader, 64).unwrap(),
+            Some("{\"one\":1}\n".to_string())
+        );
+        assert_eq!(
+            read_json_line_with_limit(&mut reader, 64).unwrap(),
+            Some("{\"two\":2}\n".to_string())
+        );
+        assert_eq!(read_json_line_with_limit(&mut reader, 64).unwrap(), None);
+    }
+
+    #[test]
+    fn connection_slot_counter_is_bounded_and_reusable() {
+        let counter = AtomicUsize::new(0);
+
+        assert!(try_acquire_connection_slot(&counter, 2));
+        assert!(try_acquire_connection_slot(&counter, 2));
+        assert!(!try_acquire_connection_slot(&counter, 2));
+        release_connection_slot(&counter);
+        assert!(try_acquire_connection_slot(&counter, 2));
+        assert_eq!(counter.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn trace_connection_tracks_only_a_bounded_number_of_roots() {
+        let coordinator = Arc::new(ActorDaemonCoordinator::new());
+        let mut roots = std::collections::BTreeSet::new();
+        for index in 0..64 {
+            let line = serde_json::json!({
+                "event": "start",
+                "sid": format!("root-{index}"),
+                "argv": ["git", "status"],
+                "time_ns": index,
+            })
+            .to_string();
+            let outcome = process_trace_connection_line(&line, coordinator.clone(), &mut roots)
+                .unwrap()
+                .unwrap();
+            assert!(outcome.continue_reading);
+        }
+
+        let overflow = serde_json::json!({
+            "event": "start",
+            "sid": "root-overflow",
+            "argv": ["git", "status"],
+            "time_ns": 100,
+        })
+        .to_string();
+        let outcome = process_trace_connection_line(&overflow, coordinator.clone(), &mut roots)
+            .unwrap()
+            .unwrap();
+
+        assert!(!outcome.continue_reading);
+        assert_eq!(roots.len(), 64);
+        finalize_trace_connection_roots(coordinator, roots).unwrap();
+    }
 
     struct EnvVarGuard {
         key: &'static str,
