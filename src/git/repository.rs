@@ -63,13 +63,26 @@ impl BatchMaterializationBudget {
     }
 
     pub(crate) fn reserve(&mut self, kind: &str, bytes: usize) -> Result<(), GitAiError> {
-        self.used_bytes = self.used_bytes.saturating_add(bytes);
-        if self.used_bytes > MAX_BATCH_MATERIALIZED_CONTENT_BYTES {
+        self.replace_reservation(kind, 0, bytes)
+    }
+
+    pub(crate) fn replace_reservation(
+        &mut self,
+        kind: &str,
+        previous_bytes: usize,
+        replacement_bytes: usize,
+    ) -> Result<(), GitAiError> {
+        let next_used_bytes = self
+            .used_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(replacement_bytes);
+        if next_used_bytes > MAX_BATCH_MATERIALIZED_CONTENT_BYTES {
             return Err(GitAiError::Generic(format!(
                 "batched materialized {kind} exceeded the {MAX_BATCH_MATERIALIZED_CONTENT_BYTES} byte limit ({})",
-                self.used_bytes
+                next_used_bytes
             )));
         }
+        self.used_bytes = next_used_bytes;
         Ok(())
     }
 }

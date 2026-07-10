@@ -3,17 +3,20 @@ use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
+use crate::git::repository::{BatchMaterializationBudget, ensure_batch_git_item_limit};
 use crate::utils::normalize_to_posix;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-pub const MAX_CHECKPOINTS_JSONL_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_CHECKPOINTS_JSONL_BYTES: u64 = 32 * 1_024 * 1_024;
+const MAX_INITIAL_ATTRIBUTIONS_BYTES: u64 = 64 * 1_024 * 1_024;
+const MAX_WORKING_LOG_BLOB_BYTES: u64 = 16 * 1_024 * 1_024;
 
 #[cfg(feature = "test-support")]
 const TEST_CHECKPOINTS_JSONL_MAX_BYTES_ENV: &str = "GIT_AI_TEST_CHECKPOINTS_JSONL_MAX_BYTES";
@@ -171,12 +174,13 @@ impl RepoStorage {
             }
 
             let marker = dir_path.join(".archived_at");
-            let archived_at = match fs::read_to_string(&marker) {
-                Ok(contents) => contents.trim().parse::<u64>().unwrap_or(0),
-                // No marker means this was created before the retention feature;
-                // treat it as immediately expired so it gets cleaned up.
-                Err(_) => 0,
-            };
+            let archived_at =
+                match read_bounded_utf8_file(&marker, "working-log archive marker", 64) {
+                    Ok(contents) => contents.trim().parse::<u64>().unwrap_or(0),
+                    // No marker means this was created before the retention feature;
+                    // treat it as immediately expired so it gets cleaned up.
+                    Err(_) => 0,
+                };
 
             if now_secs.saturating_sub(archived_at) >= Self::OLD_WORKING_LOG_RETENTION_SECS {
                 tracing::debug!("Pruning expired old working log: {}", name_str);
@@ -355,11 +359,17 @@ impl PersistedWorkingLog {
     /* blob storage */
     pub fn get_file_version(&self, sha: &str) -> Result<String, GitAiError> {
         let blob_path = self.dir.join("blobs").join(sha);
-        Ok(fs::read_to_string(blob_path)?)
+        read_bounded_utf8_file(&blob_path, "working-log blob", MAX_WORKING_LOG_BLOB_BYTES)
     }
 
     #[allow(dead_code)]
     pub fn persist_file_version(&self, content: &str) -> Result<String, GitAiError> {
+        if content.len() as u64 > MAX_WORKING_LOG_BLOB_BYTES {
+            return Err(GitAiError::Generic(format!(
+                "working-log blob exceeded the {MAX_WORKING_LOG_BLOB_BYTES} byte limit ({})",
+                content.len()
+            )));
+        }
         // Create SHA256 hash of the content
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
@@ -523,6 +533,11 @@ impl PersistedWorkingLog {
                 continue;
             }
 
+            validate_checkpoint_collections(&checkpoint)?;
+            ensure_batch_git_item_limit(
+                "working-log checkpoint",
+                checkpoints.len().saturating_add(1),
+            )?;
             checkpoints.push(checkpoint);
         }
 
@@ -663,8 +678,16 @@ impl PersistedWorkingLog {
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
     pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
+        ensure_batch_git_item_limit("working-log checkpoint", checkpoints.len())?;
+        for checkpoint in checkpoints {
+            validate_checkpoint_collections(checkpoint)?;
+        }
         let checkpoints_file = self.checkpoints_file();
-        let mut output = BufWriter::new(fs::File::create(&checkpoints_file)?);
+        let mut output = BoundedWriter::new(
+            Vec::new(),
+            Self::checkpoints_file_size_limit_bytes(),
+            "checkpoints.jsonl",
+        );
 
         for checkpoint in checkpoints {
             serde_json::to_writer(&mut output, checkpoint)?;
@@ -672,6 +695,8 @@ impl PersistedWorkingLog {
         }
 
         output.flush()?;
+        let serialized = output.into_inner();
+        fs::write(&checkpoints_file, serialized)?;
         Ok(())
     }
 
@@ -698,25 +723,39 @@ impl PersistedWorkingLog {
 
     pub fn observed_file_snapshot(&self) -> Result<HashMap<String, String>, GitAiError> {
         let initial = self.read_initial_attributions();
-        let mut snapshot = HashMap::new();
+        let mut blob_by_path = HashMap::new();
 
         for file_path in initial.files.keys() {
-            let content = self
-                .stored_initial_file_content_from(&initial, file_path)
-                .ok_or_else(|| {
-                    GitAiError::Generic(format!(
-                        "INITIAL missing persisted file snapshot for {}",
-                        file_path
-                    ))
-                })?;
-            snapshot.insert(file_path.clone(), content);
+            let blob_sha = initial.file_blobs.get(file_path).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "INITIAL missing persisted file snapshot for {}",
+                    file_path
+                ))
+            })?;
+            ensure_new_working_log_snapshot_path(&blob_by_path, file_path)?;
+            blob_by_path.insert(file_path.clone(), blob_sha.clone());
         }
 
         for checkpoint in self.read_all_checkpoints()? {
             for entry in checkpoint.entries {
-                let content = self.get_file_version(&entry.blob_sha)?;
-                snapshot.insert(entry.file, content);
+                ensure_new_working_log_snapshot_path(&blob_by_path, &entry.file)?;
+                blob_by_path.insert(entry.file, entry.blob_sha);
             }
+        }
+
+        let mut blob_contents = HashMap::new();
+        let mut snapshot = HashMap::with_capacity(blob_by_path.len());
+        let mut budget = BatchMaterializationBudget::new();
+        for (file_path, blob_sha) in blob_by_path {
+            if !blob_contents.contains_key(&blob_sha) {
+                blob_contents.insert(
+                    blob_sha.clone(),
+                    self.get_file_version(&blob_sha).unwrap_or_default(),
+                );
+            }
+            let content = blob_contents.get(&blob_sha).expect("inserted above");
+            budget.reserve("working-log snapshot content", content.len())?;
+            snapshot.insert(file_path, content.clone());
         }
 
         Ok(snapshot)
@@ -753,10 +792,27 @@ impl PersistedWorkingLog {
         file_contents: HashMap<String, String>,
         sessions: std::collections::BTreeMap<String, SessionRecord>,
     ) -> Result<(), GitAiError> {
+        validate_initial_files(&attributions)?;
+        ensure_batch_git_item_limit("INITIAL prompt", prompts.len())?;
+        ensure_batch_git_item_limit("INITIAL human", humans.len())?;
+        ensure_batch_git_item_limit("INITIAL file content", file_contents.len())?;
+        ensure_batch_git_item_limit("INITIAL session", sessions.len())?;
         let filtered: HashMap<String, Vec<LineAttribution>> = attributions
             .into_iter()
             .filter(|(_, attrs)| !attrs.is_empty())
             .collect();
+
+        let mut content_budget = BatchMaterializationBudget::new();
+        for file_path in filtered.keys() {
+            let content = file_contents.get(file_path).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "INITIAL missing file content snapshot for {}",
+                    file_path
+                ))
+            })?;
+            content_budget.reserve("working-log INITIAL content", content.len())?;
+        }
+
         let mut file_blobs = HashMap::new();
         for file_path in filtered.keys() {
             let content = file_contents.get(file_path).ok_or_else(|| {
@@ -780,6 +836,7 @@ impl PersistedWorkingLog {
 
     /// Write a fully-formed INITIAL state, preserving any persisted blob references.
     pub fn write_initial(&self, initial: InitialAttributions) -> Result<(), GitAiError> {
+        validate_initial_attributions(&initial)?;
         let filtered_files: HashMap<String, Vec<LineAttribution>> = initial
             .files
             .into_iter()
@@ -804,8 +861,15 @@ impl PersistedWorkingLog {
             sessions: initial.sessions,
         };
 
-        let json = serde_json::to_string_pretty(&initial_data)?;
-        fs::write(&self.initial_file, json)?;
+        let mut output = BoundedWriter::new(
+            Vec::new(),
+            MAX_INITIAL_ATTRIBUTIONS_BYTES,
+            "working-log INITIAL",
+        );
+        serde_json::to_writer_pretty(&mut output, &initial_data)?;
+        output.flush()?;
+        let serialized = output.into_inner();
+        fs::write(&self.initial_file, serialized)?;
 
         Ok(())
     }
@@ -867,9 +931,19 @@ impl PersistedWorkingLog {
             return InitialAttributions::default();
         }
 
-        match fs::read_to_string(&self.initial_file) {
+        match read_bounded_utf8_file(
+            &self.initial_file,
+            "working-log INITIAL",
+            MAX_INITIAL_ATTRIBUTIONS_BYTES,
+        ) {
             Ok(content) => match serde_json::from_str(&content) {
-                Ok(initial_data) => initial_data,
+                Ok(initial_data) => match validate_initial_attributions(&initial_data) {
+                    Ok(()) => initial_data,
+                    Err(error) => {
+                        tracing::debug!("Invalid INITIAL file: {}. Returning empty.", error);
+                        InitialAttributions::default()
+                    }
+                },
                 Err(e) => {
                     tracing::debug!("Failed to parse INITIAL file: {}. Returning empty.", e);
                     InitialAttributions::default()
@@ -881,6 +955,118 @@ impl PersistedWorkingLog {
             }
         }
     }
+}
+
+fn validate_initial_attributions(initial: &InitialAttributions) -> Result<(), GitAiError> {
+    validate_initial_files(&initial.files)?;
+    ensure_batch_git_item_limit("INITIAL prompt", initial.prompts.len())?;
+    ensure_batch_git_item_limit("INITIAL blob", initial.file_blobs.len())?;
+    ensure_batch_git_item_limit("INITIAL human", initial.humans.len())?;
+    ensure_batch_git_item_limit("INITIAL session", initial.sessions.len())?;
+    Ok(())
+}
+
+fn validate_initial_files(files: &HashMap<String, Vec<LineAttribution>>) -> Result<(), GitAiError> {
+    ensure_batch_git_item_limit("INITIAL file", files.len())?;
+    for line_attributions in files.values() {
+        ensure_batch_git_item_limit("INITIAL line attribution", line_attributions.len())?;
+    }
+    Ok(())
+}
+
+fn ensure_new_working_log_snapshot_path(
+    paths: &HashMap<String, String>,
+    file_path: &str,
+) -> Result<(), GitAiError> {
+    if !paths.contains_key(file_path) {
+        ensure_batch_git_item_limit("working-log snapshot path", paths.len().saturating_add(1))?;
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_collections(checkpoint: &Checkpoint) -> Result<(), GitAiError> {
+    ensure_batch_git_item_limit("working-log entry", checkpoint.entries.len())?;
+    if let Some(metadata) = &checkpoint.agent_metadata {
+        ensure_batch_git_item_limit("working-log agent metadata", metadata.len())?;
+    }
+    for entry in &checkpoint.entries {
+        ensure_batch_git_item_limit("working-log attribution", entry.attributions.len())?;
+        ensure_batch_git_item_limit(
+            "working-log line attribution",
+            entry.line_attributions.len(),
+        )?;
+    }
+    Ok(())
+}
+
+struct BoundedWriter<W> {
+    inner: W,
+    written: u64,
+    max_bytes: u64,
+    kind: &'static str,
+}
+
+impl<W> BoundedWriter<W> {
+    fn new(inner: W, max_bytes: u64, kind: &'static str) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max_bytes,
+            kind,
+        }
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for BoundedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next_size = self.written.saturating_add(buffer.len() as u64);
+        if next_size > self.max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} exceeded the {} byte limit ({next_size})",
+                    self.kind, self.max_bytes
+                ),
+            ));
+        }
+
+        let written = self.inner.write(buffer)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn read_bounded_utf8_file(path: &Path, kind: &str, max_bytes: u64) -> Result<String, GitAiError> {
+    let file = fs::File::open(path)?;
+    let size_bytes = file.metadata()?.len();
+    if size_bytes > max_bytes {
+        return Err(GitAiError::Generic(format!(
+            "{kind} exceeded the {max_bytes} byte limit ({size_bytes})"
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(GitAiError::Generic(format!(
+            "{kind} exceeded the {max_bytes} byte limit ({})",
+            bytes.len()
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| GitAiError::Generic(format!("{kind} is not UTF-8: {error}")))
+}
+
+pub(crate) fn read_bounded_working_log_file(path: &Path) -> Result<String, GitAiError> {
+    read_bounded_utf8_file(path, "working-log file", MAX_WORKING_LOG_BLOB_BYTES)
 }
 
 #[cfg(test)]

@@ -7,7 +7,11 @@ use crate::authorship::hunk_shift::{DiffHunk, apply_hunk_shifts_to_line_attribut
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
+use crate::git::repo_storage::read_bounded_working_log_file;
+use crate::git::repository::{
+    BatchMaterializationBudget, Repository, batch_read_paths_at_treeishes,
+    ensure_batch_git_item_limit,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -394,6 +398,7 @@ impl VirtualAttributions {
         let mut prompts = BTreeMap::new();
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
+        let mut content_budget = BatchMaterializationBudget::new();
         // Prompt IDs that originate from INITIAL attributions (prior commits).
         // If a checkpoint later references the same prompt_id, it is removed from
         // this set because the prompt was actively used in this commit's session.
@@ -434,10 +439,16 @@ impl VirtualAttributions {
             if let Ok(workdir) = repo.workdir() {
                 let abs_path = workdir.join(file_path);
                 let file_content = if abs_path.exists() {
-                    std::fs::read_to_string(&abs_path).unwrap_or_default()
+                    read_bounded_working_log_file(&abs_path)?
                 } else {
                     String::new()
                 };
+                reserve_working_log_file_content(
+                    &mut content_budget,
+                    &file_contents,
+                    file_path,
+                    file_content.len(),
+                )?;
                 file_contents.insert(file_path.clone(), file_content.clone());
 
                 // Convert line attributions to character attributions
@@ -532,10 +543,16 @@ impl VirtualAttributions {
                 if let Ok(workdir) = repo.workdir() {
                     let abs_path = workdir.join(&entry.file);
                     let file_content = if abs_path.exists() {
-                        std::fs::read_to_string(&abs_path).unwrap_or_default()
+                        read_bounded_working_log_file(&abs_path)?
                     } else {
                         String::new()
                     };
+                    reserve_working_log_file_content(
+                        &mut content_budget,
+                        &file_contents,
+                        &entry.file,
+                        file_content.len(),
+                    )?;
                     file_contents.insert(entry.file.clone(), file_content);
                 }
 
@@ -604,6 +621,7 @@ impl VirtualAttributions {
         let mut prompts = BTreeMap::new();
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
+        let mut content_budget = BatchMaterializationBudget::new();
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
         let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
@@ -639,6 +657,12 @@ impl VirtualAttributions {
                 .stored_initial_file_content_from(&initial_attributions, file_path)
                 .or_else(|| final_state_snapshot.get(file_path).cloned())
                 .unwrap_or_default();
+            reserve_working_log_file_content(
+                &mut content_budget,
+                &file_contents,
+                file_path,
+                file_content.len(),
+            )?;
             file_contents.insert(file_path.clone(), file_content.clone());
 
             let char_attrs = line_attributions_to_attributions(line_attrs, &file_content, 0);
@@ -718,14 +742,18 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                let file_content = final_state_snapshot
-                    .get(&entry.file)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        working_log
-                            .get_file_version(&entry.blob_sha)
-                            .unwrap_or_default()
-                    });
+                let file_content = match final_state_snapshot.get(&entry.file) {
+                    Some(content) => content.clone(),
+                    None => working_log
+                        .get_file_version(&entry.blob_sha)
+                        .unwrap_or_default(),
+                };
+                reserve_working_log_file_content(
+                    &mut content_budget,
+                    &file_contents,
+                    &entry.file,
+                    file_content.len(),
+                )?;
                 file_contents.insert(entry.file.clone(), file_content.clone());
 
                 let line_attrs = if entry.line_attributions.is_empty() {
@@ -789,6 +817,7 @@ impl VirtualAttributions {
         let mut prompts = BTreeMap::new();
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
+        let mut content_budget = BatchMaterializationBudget::new();
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
         let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
@@ -826,6 +855,12 @@ impl VirtualAttributions {
                         file_path
                     ))
                 })?;
+            reserve_working_log_file_content(
+                &mut content_budget,
+                &file_contents,
+                file_path,
+                file_content.len(),
+            )?;
             file_contents.insert(file_path.clone(), file_content.clone());
             let char_attrs = line_attributions_to_attributions(line_attrs, &file_content, 0);
             attributions.insert(file_path.clone(), (char_attrs, line_attrs.clone()));
@@ -904,7 +939,15 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                let file_content = working_log.get_file_version(&entry.blob_sha)?;
+                let file_content = working_log
+                    .get_file_version(&entry.blob_sha)
+                    .unwrap_or_default();
+                reserve_working_log_file_content(
+                    &mut content_budget,
+                    &file_contents,
+                    &entry.file,
+                    file_content.len(),
+                )?;
                 file_contents.insert(entry.file.clone(), file_content.clone());
 
                 let line_attrs = if entry.line_attributions.is_empty() {
@@ -3564,9 +3607,78 @@ pub fn restore_virtual_attribution_carryover(
     Ok(())
 }
 
+fn reserve_working_log_file_content(
+    budget: &mut BatchMaterializationBudget,
+    file_contents: &HashMap<String, String>,
+    file_path: &str,
+    bytes: usize,
+) -> Result<(), GitAiError> {
+    let previous_bytes = if let Some(content) = file_contents.get(file_path) {
+        content.len()
+    } else {
+        ensure_batch_git_item_limit(
+            "working-log materialized file",
+            file_contents.len().saturating_add(1),
+        )?;
+        0
+    };
+    budget.replace_reservation("working-log file content", previous_bytes, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn working_log_content_budget_is_shared_across_files() {
+        let mut budget = crate::git::repository::BatchMaterializationBudget::new();
+        let mut file_contents = HashMap::new();
+        for index in 0..16 {
+            let path = format!("file-{index}.txt");
+            reserve_working_log_file_content(&mut budget, &file_contents, &path, 1_024 * 1_024)
+                .unwrap();
+            file_contents.insert(path, String::new());
+        }
+
+        let error = reserve_working_log_file_content(
+            &mut budget,
+            &file_contents,
+            "overflow.txt",
+            1_024 * 1_024,
+        )
+        .expect_err("working-log file contents must share one byte budget");
+
+        assert!(
+            error
+                .to_string()
+                .contains("materialized working-log file content")
+        );
+    }
+
+    #[test]
+    fn working_log_content_budget_tracks_replacement_bytes() {
+        let mut budget = crate::git::repository::BatchMaterializationBudget::new();
+        let mut file_contents = HashMap::new();
+        let path = "repeated.txt".to_string();
+        let content = "x".repeat(1_024 * 1_024);
+
+        reserve_working_log_file_content(&mut budget, &file_contents, &path, content.len())
+            .unwrap();
+        file_contents.insert(path.clone(), content);
+        for _ in 0..32 {
+            reserve_working_log_file_content(&mut budget, &file_contents, &path, 1_024 * 1_024)
+                .unwrap();
+        }
+
+        let error = reserve_working_log_file_content(
+            &mut budget,
+            &file_contents,
+            &path,
+            17 * 1_024 * 1_024,
+        )
+        .expect_err("a replacement must still fit the live content budget");
+        assert!(error.to_string().contains("working-log file content"));
+    }
 
     #[test]
     fn checkout_merge_rebased_content_preserves_clean_local_hunk_on_target_edit() {
