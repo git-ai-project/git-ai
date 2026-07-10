@@ -1,6 +1,6 @@
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{BoundedPathCollector, DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::WatermarkStrategy;
 use std::fs;
@@ -43,7 +43,7 @@ impl Agent for CopilotCliAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
         let Some(base_dir) = Self::session_state_base_dir() else {
             return Ok(Vec::new());
         };
@@ -57,7 +57,7 @@ impl Agent for CopilotCliAgent {
             retry_after: Duration::from_secs(60),
         })?;
 
-        let mut sessions = Vec::new();
+        let mut paths = BoundedPathCollector::new(limit);
 
         for entry in entries.flatten() {
             let dir_path = entry.path();
@@ -69,9 +69,14 @@ impl Agent for CopilotCliAgent {
             if !events_path.exists() {
                 continue;
             }
+            paths.push(events_path);
+        }
 
-            let Some(external_session_id) = dir_path
-                .file_name()
+        let mut sessions = Vec::new();
+        for events_path in paths.into_paths_newest_first() {
+            let Some(external_session_id) = events_path
+                .parent()
+                .and_then(|path| path.file_name())
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
             else {

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+pub(crate) const MAX_SWEEP_ITEMS: usize = 4_096;
+
 /// Work items discovered by the sweep.
 #[derive(Debug, Clone)]
 pub enum SweepItem {
@@ -65,7 +67,13 @@ impl SweepCoordinator {
                 continue;
             }
 
-            let discovered = match agent.discover_sessions() {
+            let remaining = MAX_SWEEP_ITEMS.saturating_sub(items.len());
+            if remaining == 0 {
+                break;
+            }
+            let discovery_limit =
+                remaining.min(crate::streams::sweep::MAX_DISCOVERED_SESSIONS_PER_AGENT);
+            let discovered = match agent.discover_sessions(discovery_limit) {
                 Ok(sessions) => sessions,
                 Err(e) => {
                     tracing::error!(
@@ -91,6 +99,9 @@ impl SweepCoordinator {
                         external_session_id: session.external_session_id.clone(),
                         external_parent_session_id: session.external_parent_session_id.clone(),
                     });
+                    if items.len() == MAX_SWEEP_ITEMS {
+                        break;
+                    }
                 }
             }
 
@@ -111,7 +122,7 @@ impl SweepCoordinator {
                     else {
                         continue;
                     };
-                    if seen_shared_paths.insert(p.clone()) {
+                    if items.len() < MAX_SWEEP_ITEMS && seen_shared_paths.insert(p.clone()) {
                         items.push(item);
                     }
                 }
@@ -216,5 +227,92 @@ impl SweepCoordinator {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::streams::agent::{PathResolverKind, StreamDescriptor};
+    use crate::streams::sweep::StreamFormat;
+    use crate::streams::types::StreamBatch;
+    use crate::streams::watermark::{WatermarkStrategy, WatermarkType};
+
+    struct ManySessionsAgent {
+        path: PathBuf,
+        count: usize,
+    }
+
+    impl Agent for ManySessionsAgent {
+        fn sweep_strategy(&self) -> SweepStrategy {
+            SweepStrategy::Periodic(std::time::Duration::from_secs(1))
+        }
+
+        fn discover_sessions(&self, _limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+            Ok((0..self.count)
+                .map(|index| DiscoveredSession {
+                    session_id: format!("session-{index}"),
+                    tool: "test".to_string(),
+                    stream_path: self.path.clone(),
+                    external_session_id: format!("external-{index}"),
+                    external_parent_session_id: None,
+                })
+                .collect())
+        }
+
+        fn read_incremental(
+            &self,
+            _path: &Path,
+            _watermark: Box<dyn WatermarkStrategy>,
+            _session_id: &str,
+        ) -> Result<StreamBatch, StreamError> {
+            unreachable!("coordinator discovery does not read transcript contents")
+        }
+
+        fn extract_event_timestamp(
+            &self,
+            _event: &serde_json::Value,
+            _file_meta: &std::fs::Metadata,
+            _is_first_event: bool,
+        ) -> u32 {
+            0
+        }
+
+        fn streams(&self) -> Vec<StreamDescriptor> {
+            vec![StreamDescriptor {
+                stream_kind: "transcript",
+                format: StreamFormat::ClaudeJsonl,
+                watermark_type: WatermarkType::ByteOffset,
+                path_resolver: PathResolverKind::Identity,
+                shared: false,
+                watermark_type_resolver: None,
+                format_resolver: None,
+            }]
+        }
+    }
+
+    #[test]
+    fn sweep_output_is_bounded_when_an_agent_discovers_many_stale_sessions() {
+        const EXPECTED_SWEEP_LIMIT: usize = 4_096;
+
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let db = Arc::new(StreamsDatabase::open(temp.path().join("streams.db")).unwrap());
+        let coordinator = SweepCoordinator {
+            streams_db: db,
+            agent_registry: vec![(
+                "test".to_string(),
+                Box::new(ManySessionsAgent {
+                    path: transcript,
+                    count: EXPECTED_SWEEP_LIMIT + 1,
+                }),
+            )],
+            lookback_days: None,
+        };
+
+        let items = coordinator.run_sweep().unwrap();
+
+        assert_eq!(items.len(), EXPECTED_SWEEP_LIMIT);
     }
 }

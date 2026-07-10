@@ -2,10 +2,11 @@
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{
+    DiscoveredSession, StreamFormat, SweepStrategy, discover_recent_files,
+};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{HybridWatermark, WatermarkStrategy};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,45 +26,19 @@ impl DroidAgent {
     }
 
     /// Scan for Droid conversation files in standard locations.
-    fn scan_conversation_files() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
+    fn scan_conversation_files(limit: usize) -> Vec<PathBuf> {
         // Droid transcripts are stored in ~/.factory/sessions/<project-dir>/<uuid>.jsonl
-        let search_dirs = vec![dirs::home_dir().map(|p| p.join(".factory/sessions"))];
-
-        for dir_opt in search_dirs {
-            if let Some(sessions_dir) = dir_opt
-                && sessions_dir.exists()
-            {
-                // Recursively scan all project directories under sessions/
-                Self::scan_jsonl_recursive(&sessions_dir, &mut paths);
-            }
-        }
-
-        paths
-    }
-
-    /// Recursively scan directory for *.jsonl files (excluding .settings.json).
-    fn scan_jsonl_recursive(dir: &Path, paths: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                Self::scan_jsonl_recursive(&path, paths);
-            } else if path.is_file()
-                && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
-                && !path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.contains(".settings."))
-                    .unwrap_or(false)
-            {
-                paths.push(path);
-            }
-        }
+        discover_recent_files(
+            dirs::home_dir().map(|path| path.join(".factory/sessions")),
+            limit,
+            |path| {
+                path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                    && !path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.contains(".settings."))
+            },
+        )
     }
 }
 
@@ -83,8 +58,8 @@ impl Agent for DroidAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
-        let paths = Self::scan_conversation_files();
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+        let paths = Self::scan_conversation_files(limit);
         let mut sessions = Vec::new();
 
         for path in paths {

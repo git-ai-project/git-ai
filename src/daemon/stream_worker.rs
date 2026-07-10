@@ -27,6 +27,10 @@ use tokio::time::{Duration, interval};
 const TRIGGERED_SWEEP_COOLDOWN: Duration = Duration::from_secs(30);
 const CHECKPOINT_NOTIFICATION_QUEUE_CAPACITY: usize = 1_024;
 const SWEEP_REQUEST_QUEUE_CAPACITY: usize = 32;
+const MAX_BACKGROUND_STREAM_TASKS: usize = 4_096;
+const MAX_SCHEDULED_STREAM_TASKS: usize =
+    MAX_BACKGROUND_STREAM_TASKS + CHECKPOINT_NOTIFICATION_QUEUE_CAPACITY;
+const MAX_RETAINED_TASK_OBJECTS: usize = MAX_SCHEDULED_STREAM_TASKS * 2;
 
 type StreamTaskKey = (String, PathBuf, String);
 type CheckpointNotificationKey = (PathBuf, String, String);
@@ -375,6 +379,8 @@ struct StreamWorker {
     priority_queue: BinaryHeap<ProcessingTask>,
     delayed_tasks: Vec<ProcessingTask>,
     scheduled: HashMap<StreamTaskKey, Priority>,
+    scheduled_background: usize,
+    scheduler_saturated: bool,
     in_flight: HashSet<(PathBuf, String)>,
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_notify: Arc<Notify>,
@@ -404,6 +410,8 @@ impl StreamWorker {
             priority_queue: BinaryHeap::new(),
             delayed_tasks: Vec::new(),
             scheduled: HashMap::new(),
+            scheduled_background: 0,
+            scheduler_saturated: false,
             in_flight: HashSet::new(),
             telemetry_handle,
             shutdown_notify,
@@ -530,17 +538,65 @@ impl StreamWorker {
         );
         match self.scheduled.get_mut(&key) {
             Some(priority) if task.priority < *priority => {
+                if *priority == Priority::Low {
+                    self.scheduled_background = self.scheduled_background.saturating_sub(1);
+                }
                 *priority = task.priority;
+                self.compact_task_objects_if_needed();
                 self.priority_queue.push(task);
                 true
             }
             Some(_) => false,
             None => {
+                if !self.has_capacity_for(task.priority) {
+                    if !self.scheduler_saturated {
+                        self.scheduler_saturated = true;
+                        tracing::warn!(
+                            priority = ?task.priority,
+                            scheduled = self.scheduled.len(),
+                            background = self.scheduled_background,
+                            "transcript scheduler is full; a later checkpoint or sweep will recover dropped work"
+                        );
+                    }
+                    return false;
+                }
+                if task.priority == Priority::Low {
+                    self.scheduled_background += 1;
+                }
                 self.scheduled.insert(key, task.priority);
+                self.compact_task_objects_if_needed();
                 self.priority_queue.push(task);
                 true
             }
         }
+    }
+
+    fn has_capacity_for(&self, priority: Priority) -> bool {
+        self.scheduled.len() < MAX_SCHEDULED_STREAM_TASKS
+            && (priority == Priority::Immediate
+                || self.scheduled_background < MAX_BACKGROUND_STREAM_TASKS)
+    }
+
+    fn compact_task_objects_if_needed(&mut self) {
+        if self.priority_queue.len() + self.delayed_tasks.len() < MAX_RETAINED_TASK_OBJECTS {
+            return;
+        }
+
+        let scheduled = &self.scheduled;
+        self.priority_queue.retain(|task| {
+            scheduled.get(&(
+                task.session_id.clone(),
+                task.canonical_path.clone(),
+                task.stream_kind.clone(),
+            )) == Some(&task.priority)
+        });
+        self.delayed_tasks.retain(|task| {
+            scheduled.get(&(
+                task.session_id.clone(),
+                task.canonical_path.clone(),
+                task.stream_kind.clone(),
+            )) == Some(&task.priority)
+        });
     }
 
     fn task_is_current(&self, task: &ProcessingTask) -> bool {
@@ -558,7 +614,10 @@ impl StreamWorker {
             task.stream_kind.clone(),
         );
         if self.scheduled.get(&key) == Some(&task.priority) {
-            self.scheduled.remove(&key);
+            if self.scheduled.remove(&key) == Some(Priority::Low) {
+                self.scheduled_background = self.scheduled_background.saturating_sub(1);
+            }
+            self.scheduler_saturated = false;
         }
     }
 
@@ -611,6 +670,9 @@ impl StreamWorker {
         let mut enqueued_this_sweep: HashSet<(PathBuf, String)> = HashSet::new();
 
         for item in items {
+            if priority == Priority::Low && !self.has_capacity_for(priority) {
+                break;
+            }
             match item {
                 SweepItem::Session {
                     session_id,
@@ -746,9 +808,14 @@ impl StreamWorker {
             return;
         }
 
-        let Ok(entries) = std::fs::read_dir(&subagents_dir) else {
+        let remaining = MAX_BACKGROUND_STREAM_TASKS.saturating_sub(self.scheduled_background);
+        if remaining == 0 {
             return;
-        };
+        }
+        let paths =
+            crate::streams::sweep::discover_recent_files([subagents_dir], remaining, |path| {
+                path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+            });
 
         let external_parent_session_id = stream_path
             .file_stem()
@@ -762,12 +829,7 @@ impl StreamWorker {
                     - std::time::Duration::from_secs(u64::from(days) * 24 * 60 * 60)
             });
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() || path.extension().map(|ext| ext == "jsonl") != Some(true) {
-                continue;
-            }
-
+        for path in paths {
             let Some(external_session_id) = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1708,6 +1770,55 @@ mod scheduling_tests {
         assert!(worker.enqueue_task(first));
         assert!(worker.enqueue_task(second));
         assert_eq!(worker.priority_queue.len(), 2);
+    }
+
+    #[test]
+    fn scheduled_work_is_bounded_with_capacity_reserved_for_checkpoints() {
+        const EXPECTED_BACKGROUND_LIMIT: usize = 4_096;
+        const EXPECTED_CHECKPOINT_RESERVE: usize = 1_024;
+
+        let (_temp, mut worker, _shutdown) = make_worker();
+        for sequence in 0..=EXPECTED_BACKGROUND_LIMIT {
+            let mut background = task(&format!("background-{sequence}"), None);
+            background.priority = Priority::Low;
+            let accepted = worker.enqueue_task(background);
+            assert_eq!(accepted, sequence < EXPECTED_BACKGROUND_LIMIT);
+        }
+        assert_eq!(worker.scheduled.len(), EXPECTED_BACKGROUND_LIMIT);
+
+        for sequence in 0..=EXPECTED_CHECKPOINT_RESERVE {
+            let checkpoint = task(&format!("checkpoint-{sequence}"), None);
+            let accepted = worker.enqueue_task(checkpoint);
+            assert_eq!(accepted, sequence < EXPECTED_CHECKPOINT_RESERVE);
+        }
+        assert_eq!(
+            worker.scheduled.len(),
+            EXPECTED_BACKGROUND_LIMIT + EXPECTED_CHECKPOINT_RESERVE
+        );
+    }
+
+    #[test]
+    fn stale_heap_and_retry_entries_are_compacted_under_key_churn() {
+        let (_temp, mut worker, _shutdown) = make_worker();
+
+        for sequence in 0..(MAX_RETAINED_TASK_OBJECTS * 3) {
+            let session_id = format!("session-{sequence}");
+            let mut background = task(&session_id, None);
+            background.priority = Priority::Low;
+            assert!(worker.enqueue_task(background.clone()));
+
+            let queued_background = worker.priority_queue.pop().unwrap();
+            worker.delayed_tasks.push(queued_background);
+
+            let immediate = task(&session_id, None);
+            assert!(worker.enqueue_task(immediate.clone()));
+            worker.finish_task(&immediate);
+        }
+
+        assert!(worker.scheduled.is_empty());
+        assert!(
+            worker.priority_queue.len() + worker.delayed_tasks.len() <= MAX_RETAINED_TASK_OBJECTS
+        );
     }
 
     #[tokio::test]

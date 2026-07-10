@@ -2,7 +2,7 @@
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{BoundedPathCollector, DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{RecordIndexWatermark, WatermarkStrategy};
 use std::fs;
@@ -84,7 +84,7 @@ impl Agent for AmpAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
         let threads_dir = match Self::amp_threads_path() {
             Ok(p) => p,
             Err(_) => return Ok(Vec::new()),
@@ -99,14 +99,18 @@ impl Agent for AmpAgent {
             retry_after: Duration::from_secs(30),
         })?;
 
-        let mut sessions = Vec::new();
+        let mut paths = BoundedPathCollector::new(limit);
 
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
+            paths.push(path);
+        }
 
+        let mut sessions = Vec::new();
+        for path in paths.into_paths_newest_first() {
             let Some(file_stem) = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -116,15 +120,13 @@ impl Agent for AmpAgent {
             };
 
             let session_id = generate_session_id(&file_stem, "amp");
-            let session = DiscoveredSession {
+            sessions.push(DiscoveredSession {
                 session_id,
                 tool: "amp".to_string(),
                 stream_path: path,
                 external_session_id: file_stem,
                 external_parent_session_id: None,
-            };
-
-            sessions.push(session);
+            });
         }
 
         Ok(sessions)

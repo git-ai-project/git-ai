@@ -3,10 +3,12 @@
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::mdm::utils::codex_home_dir;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{
+    DiscoveredSession, StreamFormat, SweepStrategy, discover_recent_files,
+};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{ByteOffsetWatermark, WatermarkStrategy};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,7 +37,7 @@ impl CodexAgent {
         session_id: &str,
         codex_home: &Path,
     ) -> Result<Option<PathBuf>, StreamError> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
+        let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
 
         for subdir in &["sessions", "archived_sessions"] {
             let search_dir = codex_home.join(subdir);
@@ -53,64 +55,41 @@ impl CodexAgent {
                 let path = entry.map_err(|e| StreamError::Fatal {
                     message: format!("Error reading glob entry: {}", e),
                 })?;
-                candidates.push(path);
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-
-        // Return the newest by modification time
-        let newest = candidates
-            .into_iter()
-            .filter_map(|p| {
-                p.metadata()
+                let Some(modified) = path
+                    .metadata()
                     .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| (p, t))
-            })
-            .max_by_key(|(_, t)| *t)
-            .map(|(p, _)| p);
+                    .and_then(|metadata| metadata.modified().ok())
+                else {
+                    continue;
+                };
+                if newest
+                    .as_ref()
+                    .is_none_or(|(_, current)| modified > *current)
+                {
+                    newest = Some((path, modified));
+                }
+            }
+        }
 
-        Ok(newest)
+        Ok(newest.map(|(path, _)| path))
     }
 
-    fn scan_session_files() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
+    fn scan_session_files(limit: usize) -> Vec<PathBuf> {
         let codex_home = codex_home_dir();
-
-        for subdir in &["sessions", "archived_sessions"] {
-            let search_dir = codex_home.join(subdir);
-            if search_dir.exists() {
-                Self::scan_rollout_recursive(&search_dir, &mut paths);
-            }
-        }
-
-        paths
-    }
-
-    fn scan_rollout_recursive(dir: &Path, paths: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                Self::scan_rollout_recursive(&path, paths);
-            } else if path.is_file()
-                && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("rollout-"))
-                    .unwrap_or(false)
-            {
-                paths.push(path);
-            }
-        }
+        discover_recent_files(
+            [
+                codex_home.join("sessions"),
+                codex_home.join("archived_sessions"),
+            ],
+            limit,
+            |path| {
+                path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("rollout-"))
+            },
+        )
     }
 
     /// Detect if a Codex JSONL file is a subagent transcript by reading its first line.
@@ -162,8 +141,8 @@ impl Agent for CodexAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
-        let paths = Self::scan_session_files();
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+        let paths = Self::scan_session_files(limit);
         let mut sessions = Vec::new();
 
         for path in paths {

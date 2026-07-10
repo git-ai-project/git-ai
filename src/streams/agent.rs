@@ -85,11 +85,11 @@ pub trait Agent: Send + Sync {
     /// Returns the sweep strategy for this agent.
     fn sweep_strategy(&self) -> SweepStrategy;
 
-    /// Discover all sessions in the agent's storage.
+    /// Discover the newest sessions in the agent's storage.
     ///
-    /// Returns ALL sessions found, regardless of whether they're in transcripts-db.
-    /// The coordinator will compare against the DB to decide what to process.
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError>;
+    /// Implementations must retain and return no more than `limit` sessions. The
+    /// coordinator compares them against transcripts-db to decide what to process.
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError>;
 
     /// Maximum number of events to return per `read_incremental` call.
     /// Bounds peak memory to batch_size × avg_event_size instead of file_size.

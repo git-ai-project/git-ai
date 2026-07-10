@@ -2,10 +2,11 @@
 
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
-use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
+use crate::streams::sweep::{
+    DiscoveredSession, StreamFormat, SweepStrategy, discover_recent_files,
+};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{ByteOffsetWatermark, WatermarkStrategy};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,9 +26,7 @@ impl ClaudeAgent {
     }
 
     /// Scan for Claude conversation files in standard locations.
-    fn scan_conversation_files() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-
+    fn scan_conversation_files(limit: usize) -> Vec<PathBuf> {
         // Check CLAUDE_CONFIG_DIR override first
         let base_dir = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
             Some(PathBuf::from(config_dir))
@@ -43,33 +42,9 @@ impl ClaudeAgent {
             dirs::config_dir().map(|p| p.join("claude/projects")),
         ];
 
-        for dir_opt in search_dirs {
-            if let Some(dir) = dir_opt
-                && dir.exists()
-            {
-                // Recursively scan for *.jsonl files
-                Self::scan_jsonl_recursive(&dir, &mut paths);
-            }
-        }
-
-        paths
-    }
-
-    /// Recursively scan directory for *.jsonl files.
-    fn scan_jsonl_recursive(dir: &Path, paths: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                Self::scan_jsonl_recursive(&path, paths);
-            } else if path.is_file() && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
-            {
-                paths.push(path);
-            }
-        }
+        discover_recent_files(search_dirs.into_iter().flatten(), limit, |path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        })
     }
 
     /// Extract session ID from a Claude conversation file path.
@@ -108,8 +83,8 @@ impl Agent for ClaudeAgent {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
 
-    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
-        let paths = Self::scan_conversation_files();
+    fn discover_sessions(&self, limit: usize) -> Result<Vec<DiscoveredSession>, StreamError> {
+        let paths = Self::scan_conversation_files(limit);
         let mut sessions = Vec::new();
 
         for path in paths {
@@ -396,7 +371,9 @@ mod tests {
 
     #[test]
     fn test_scan_discovers_real_claude_files() {
-        let paths = ClaudeAgent::scan_conversation_files();
+        let paths = ClaudeAgent::scan_conversation_files(
+            crate::streams::sweep::MAX_DISCOVERED_SESSIONS_PER_AGENT,
+        );
         // On this machine we have files in ~/.claude/projects/
         if dirs::home_dir()
             .map(|h| h.join(".claude/projects").exists())
