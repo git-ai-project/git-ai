@@ -89,7 +89,8 @@ impl CubeClient {
             .post(&self.url(path))
             .set("x-api-key", &self.api_key)
             .set("Content-Type", "application/json");
-        let body_str = serde_json::to_string(body).map_err(|e| CubeError::Json(e.to_string()))?;
+        let body_str =
+            http::serialize_json_body(body).map_err(|e| CubeError::Json(e.to_string()))?;
         let response = http::send_with_body(request, &body_str).map_err(CubeError::Transport)?;
         Self::parse(response)
     }

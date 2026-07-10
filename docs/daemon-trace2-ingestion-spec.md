@@ -92,6 +92,12 @@ blob cannot be cloned once per commit. The notes SQLite cache enforces the
 budget while rows are read and rolls back queue locks if a pending batch is too
 large. HTTP note requests are limited to 100 entries before JSON serialization.
 
+Shared HTTP transport rejects response bodies above 32 MiB, using both an
+early `Content-Length` check and a one-byte-over streaming read for chunked or
+misreported responses. Outbound JSON serialization writes through a 64 MiB
+bounded buffer shared by the API and Cube clients, so request construction
+cannot create an unbounded second copy of an in-memory payload.
+
 Separation of concerns:
 
 - The **normalizer** parses trace2/argv facts only. It never reads mutable
@@ -270,6 +276,8 @@ Deterministic tests must cover, at minimum:
 13. repeated large file blobs remain bounded during batched materialization
 14. repeated large note blobs remain bounded during rewrite-note migration,
     fail closed, and preserve attribution for the next command
+15. oversized HTTP responses remain bounded and preserve attribution for the
+    next command
 
 Primary suites: `tests/daemon_mode.rs`, `tests/commit_tree_update_ref.rs`,
 `tests/integration/rewrite_ops_attribution.rs`, ref-cursor unit tests in
