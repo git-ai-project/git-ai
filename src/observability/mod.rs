@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::daemon::daemon_log_layer::{
+    MAX_MESSAGE_LENGTH, bounded_copy, bounded_display_string, sanitize_log_string,
+};
 use crate::metrics::MetricEvent;
 
 pub mod performance_targets;
@@ -20,11 +23,21 @@ fn submit_telemetry_envelope(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
     }
 }
 
+fn telemetry_error_message(error: &dyn std::error::Error) -> String {
+    let bounded = bounded_display_string(error, MAX_MESSAGE_LENGTH);
+    sanitize_log_string(&bounded, MAX_MESSAGE_LENGTH)
+}
+
+fn telemetry_log_message(message: &str) -> String {
+    let bounded = bounded_copy(message, MAX_MESSAGE_LENGTH);
+    sanitize_log_string(&bounded, MAX_MESSAGE_LENGTH)
+}
+
 /// Log an error to Sentry (via daemon telemetry worker)
 pub fn log_error(error: &dyn std::error::Error, context: Option<serde_json::Value>) {
     let envelope = crate::daemon::TelemetryEnvelope::Error {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        message: error.to_string(),
+        message: telemetry_error_message(error),
         context,
     };
     submit_telemetry_envelope(vec![envelope]);
@@ -52,7 +65,7 @@ pub fn log_performance(
 pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value>) {
     let envelope = crate::daemon::TelemetryEnvelope::Message {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        message: message.to_string(),
+        message: telemetry_log_message(message),
         level: level.to_string(),
         context,
     };
@@ -93,7 +106,52 @@ pub fn log_metrics(events: Vec<MetricEvent>) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::fmt;
     use std::time::Duration;
+
+    struct SecretError(String);
+
+    impl fmt::Display for SecretError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(&self.0)
+        }
+    }
+
+    impl fmt::Debug for SecretError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.debug_tuple("SecretError").field(&self.0).finish()
+        }
+    }
+
+    impl std::error::Error for SecretError {}
+
+    #[test]
+    fn telemetry_error_message_is_redacted_and_hard_bounded() {
+        let secret = "sk_test_4eC39HqLyjWDarjtT1zdp7dc";
+        let error = SecretError(format!(
+            "{} token={secret} trailing data",
+            "x".repeat(MAX_MESSAGE_LENGTH)
+        ));
+
+        let message = telemetry_error_message(&error);
+
+        assert_eq!(message.chars().count(), MAX_MESSAGE_LENGTH);
+        assert!(!message.contains(secret));
+    }
+
+    #[test]
+    fn telemetry_log_message_is_redacted_and_hard_bounded() {
+        let secret = "sk_test_4eC39HqLyjWDarjtT1zdp7dc";
+        let raw = format!(
+            "{} token={secret} trailing data",
+            "x".repeat(MAX_MESSAGE_LENGTH)
+        );
+
+        let message = telemetry_log_message(&raw);
+
+        assert_eq!(message.chars().count(), MAX_MESSAGE_LENGTH);
+        assert!(!message.contains(secret));
+    }
 
     // Test error logging
     #[test]
