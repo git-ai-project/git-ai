@@ -50,6 +50,7 @@ mod config_pattern_detection;
 mod continue_cli;
 mod cross_repo_cwd_attribution;
 mod cursor;
+mod daemon_batch_materialization_memory;
 mod daemon_commit_carryover;
 mod daemon_git_output_memory;
 mod daemon_ipc_memory;

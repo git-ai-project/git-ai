@@ -40,6 +40,18 @@ const MAX_INTERNAL_GIT_STDIN_BYTES: usize = 32 * 1_024 * 1_024;
 const MAX_INTERNAL_GIT_STDOUT_BYTES: usize = 32 * 1_024 * 1_024;
 const MAX_INTERNAL_GIT_STDERR_BYTES: usize = 1_024 * 1_024;
 const INTERNAL_GIT_READER_STACK_BYTES: usize = 512 * 1_024;
+pub(crate) const MAX_BATCH_GIT_ITEMS: usize = 4_096;
+const MAX_BATCH_MATERIALIZED_CONTENT_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_GIT_INDEX_BYTES: u64 = 32 * 1_024 * 1_024;
+
+pub(crate) fn ensure_batch_git_item_limit(kind: &str, count: usize) -> Result<(), GitAiError> {
+    if count > MAX_BATCH_GIT_ITEMS {
+        return Err(GitAiError::Generic(format!(
+            "{kind} count exceeded the {MAX_BATCH_GIT_ITEMS} item limit ({count})"
+        )));
+    }
+    Ok(())
+}
 
 struct InternalGitLimiter {
     active: Mutex<usize>,
@@ -1717,50 +1729,16 @@ impl Repository {
         &self,
         file_paths: &[String],
     ) -> Result<HashMap<String, String>, GitAiError> {
-        use futures::future::join_all;
-        use std::sync::Arc;
-
-        const MAX_CONCURRENT: usize = 30;
-
-        let repo_global_args = self.global_args_for_exec();
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
-
-        let futures: Vec<_> = file_paths
+        ensure_batch_git_item_limit("staged file path", file_paths.len())?;
+        let requests = file_paths
             .iter()
-            .map(|file_path| {
-                let mut args = repo_global_args.clone();
-                args.push("show".to_string());
-                args.push(format!(":{}", file_path));
-                let file_path = file_path.clone();
-                let semaphore = semaphore.clone();
-
-                async move {
-                    let _permit = semaphore
-                        .acquire_owned()
-                        .await
-                        .expect("staged file semaphore was closed");
-                    let result = crate::tokio_runtime::spawn_blocking_result(move || {
-                        exec_git(&args).and_then(|output| {
-                            String::from_utf8(output.stdout)
-                                .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
-                        })
-                    })
-                    .await;
-                    (file_path, result)
-                }
-            })
-            .collect();
-
-        let results = crate::tokio_runtime::block_on(async { join_all(futures).await });
-
-        let mut staged_files = HashMap::new();
-        for (file_path, result) in results {
-            if let Ok(content) = result {
-                staged_files.insert(file_path, content);
-            }
-        }
-
-        Ok(staged_files)
+            .map(|path| (String::new(), path.clone()))
+            .collect::<Vec<_>>();
+        let contents = batch_read_paths_at_treeishes(self, &requests)?;
+        Ok(contents
+            .into_iter()
+            .map(|((_, path), content)| (path, content))
+            .collect())
     }
 
     /// Get blob OIDs for all stage-0 entries currently present in the index.
@@ -1768,6 +1746,12 @@ impl Repository {
         let mut staged_blobs = HashMap::new();
         let object_hash = repository_object_hash_kind_for_path_no_git_exec(self.path())?;
         let index_path = self.path().join("index");
+        let index_size = std::fs::metadata(&index_path)?.len();
+        if index_size > MAX_GIT_INDEX_BYTES {
+            return Err(GitAiError::Generic(format!(
+                "git index exceeded the {MAX_GIT_INDEX_BYTES} byte limit ({index_size})"
+            )));
+        }
         let index = gix_index::File::at(index_path, object_hash, true, Default::default())
             .map_err(|err| GitAiError::GixError(err.to_string()))?;
 
@@ -1777,6 +1761,10 @@ impl Repository {
             }
             let file_path = entry.path(&index).to_string();
             if !file_path.trim().is_empty() {
+                ensure_batch_git_item_limit(
+                    "staged index path",
+                    staged_blobs.len().saturating_add(1),
+                )?;
                 staged_blobs.insert(file_path, entry.id.to_string());
             }
         }
@@ -1832,12 +1820,7 @@ impl Repository {
         let output = exec_git(&args)?;
 
         // With -z, output is NUL-separated. The output may contain a trailing NUL.
-        let mut files: HashSet<String> = output
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|bytes| !bytes.is_empty())
-            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
-            .collect();
+        let mut files = parse_bounded_nul_paths(&output.stdout)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {
             files.retain(|path| paths.contains(path));
@@ -3092,6 +3075,46 @@ pub fn exec_git_stdin_with_profile(
     Ok(output)
 }
 
+fn parse_bounded_nul_paths(data: &[u8]) -> Result<HashSet<String>, GitAiError> {
+    let mut paths = HashSet::new();
+    for bytes in data
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+    {
+        let Ok(path) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        if paths.contains(path) {
+            continue;
+        }
+        ensure_batch_git_item_limit("commit path", paths.len().saturating_add(1))?;
+        paths.insert(path.to_string());
+    }
+    Ok(paths)
+}
+
+fn materialize_path_contents(
+    request_blob_oids: HashMap<(String, String), String>,
+    blob_contents: &HashMap<String, String>,
+) -> Result<HashMap<(String, String), String>, GitAiError> {
+    ensure_batch_git_item_limit("materialized path", request_blob_oids.len())?;
+    let mut materialized_bytes = 0usize;
+    let mut contents = HashMap::with_capacity(request_blob_oids.len());
+    for (request, blob_oid) in request_blob_oids {
+        let Some(content) = blob_contents.get(&blob_oid) else {
+            continue;
+        };
+        materialized_bytes = materialized_bytes.saturating_add(content.len());
+        if materialized_bytes > MAX_BATCH_MATERIALIZED_CONTENT_BYTES {
+            return Err(GitAiError::Generic(format!(
+                "batched Git materialized content exceeded the {MAX_BATCH_MATERIALIZED_CONTENT_BYTES} byte limit ({materialized_bytes})"
+            )));
+        }
+        contents.insert(request, content.clone());
+    }
+    Ok(contents)
+}
+
 pub(crate) fn batch_read_paths_at_treeishes(
     repo: &Repository,
     requests: &[(String, String)],
@@ -3099,6 +3122,7 @@ pub(crate) fn batch_read_paths_at_treeishes(
     if requests.is_empty() {
         return Ok(HashMap::new());
     }
+    ensure_batch_git_item_limit("tree path request", requests.len())?;
 
     let mut args = repo.global_args_for_exec();
     args.extend([
@@ -3114,20 +3138,19 @@ pub(crate) fn batch_read_paths_at_treeishes(
         + "\n";
     let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
     let stdout = String::from_utf8(output.stdout)?;
-    let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() != requests.len() {
-        return Err(GitAiError::Generic(format!(
-            "git cat-file returned {} records for {} path requests",
-            lines.len(),
-            requests.len()
-        )));
-    }
+    let mut lines = stdout.lines();
 
     let mut request_blob_oids: HashMap<(String, String), String> = HashMap::new();
     let mut unique_blob_oids = Vec::new();
     let mut seen_blob_oids = HashSet::new();
 
-    for (request, line) in requests.iter().zip(lines) {
+    for request in requests {
+        let Some(line) = lines.next() else {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file returned fewer records than the {} path requests",
+                requests.len()
+            )));
+        };
         let mut parts = line.split_whitespace();
         let Some(oid) = parts.next() else {
             continue;
@@ -3141,19 +3164,19 @@ pub(crate) fn batch_read_paths_at_treeishes(
             unique_blob_oids.push(oid);
         }
     }
+    if lines.next().is_some() {
+        return Err(GitAiError::Generic(format!(
+            "git cat-file returned more records than the {} path requests",
+            requests.len()
+        )));
+    }
 
     let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
         &repo.global_args_for_exec(),
         &unique_blob_oids,
     )?;
 
-    let mut contents = HashMap::new();
-    for (request, blob_oid) in request_blob_oids {
-        if let Some(content) = blob_contents.get(&blob_oid) {
-            contents.insert(request, content.clone());
-        }
-    }
-    Ok(contents)
+    materialize_path_contents(request_blob_oids, &blob_contents)
 }
 
 /// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.
@@ -3362,6 +3385,101 @@ fn parse_hunk_header_counts(line: &str) -> Option<(u32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestEnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: callers use #[serial_test::serial] to isolate this mutation.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: callers use #[serial_test::serial] to isolate this mutation.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn materialize_path_contents_rejects_shared_blob_amplification() {
+        let blob_oid = "a".repeat(40);
+        let content = "x".repeat(1_024 * 1_024);
+        let request_blob_oids = (0..=MAX_BATCH_MATERIALIZED_CONTENT_BYTES / content.len())
+            .map(|index| {
+                (
+                    ("HEAD".to_string(), format!("file-{index}.txt")),
+                    blob_oid.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let blob_contents = HashMap::from([(blob_oid, content)]);
+
+        let error = materialize_path_contents(request_blob_oids, &blob_contents)
+            .expect_err("shared blob clones must respect the materialization budget");
+
+        assert!(error.to_string().contains("materialized content"));
+    }
+
+    #[test]
+    fn commit_file_parser_rejects_oversized_path_set() {
+        let mut data = Vec::new();
+        for index in 0..=MAX_BATCH_GIT_ITEMS {
+            data.extend_from_slice(format!("file-{index}\0").as_bytes());
+        }
+
+        let error = parse_bounded_nul_paths(&data)
+            .expect_err("oversized commit path sets must fail closed");
+
+        assert!(error.to_string().contains("path count"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn staged_file_content_reads_use_constant_git_batches() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let paths = (0..64)
+            .map(|index| {
+                let path = format!("file-{index}.txt");
+                tmp.write_file(&path, &format!("content {index}\n"), false)
+                    .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        tmp.git_command(&["add", "-A"]).unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("spawns.log");
+        let _spawn_log = TestEnvGuard::set("GIT_AI_SPAWN_LOG", log_path.as_os_str());
+
+        let contents = tmp
+            .gitai_repo()
+            .get_all_staged_files_content(&paths)
+            .expect("read staged files");
+
+        assert_eq!(contents.len(), paths.len());
+        assert_eq!(
+            contents.get("file-63.txt").map(String::as_str),
+            Some("content 63\n")
+        );
+        let spawns = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            spawns.lines().count() <= 2,
+            "all staged paths must share a constant number of internal Git processes: {spawns:?}"
+        );
+    }
 
     fn explicit_command_env(cmd: &Command, key: &str) -> Option<Option<String>> {
         cmd.get_envs()

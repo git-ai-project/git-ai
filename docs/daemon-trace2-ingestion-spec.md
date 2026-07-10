@@ -78,6 +78,13 @@ range walk is allowed alongside that batch because combining independent
 ranges changes Git's exclusion semantics. Multiple range arguments fail the
 attribution side effect closed instead of spawning Git once per range.
 
+Batched repository reads accept at most 4,096 paths or objects. A batch may
+materialize at most 16 MiB of path-keyed content after Git object deduplication;
+this prevents one shared large blob from being cloned once per path into an
+otherwise unbounded map. Index parsing is rejected above 32 MiB, and staged
+content uses the same constant two-process batch path rather than spawning Git
+once per file.
+
 Separation of concerns:
 
 - The **normalizer** parses trace2/argv facts only. It never reads mutable
