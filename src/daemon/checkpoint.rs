@@ -84,7 +84,7 @@ pub struct ResolvedCheckpointExecution {
     pub base_commit: String,
     pub ts: u128,
     pub files: Vec<String>,
-    pub dirty_files: HashMap<String, String>,
+    pub dirty_files: HashMap<String, Arc<str>>,
 }
 
 /// Build EventAttributes for AgentUsage events.
@@ -188,7 +188,7 @@ fn execute_resolved_checkpoint(
     kind: CheckpointKind,
     quiet: bool,
     checkpoint_request: CheckpointRequest,
-    resolved: ResolvedCheckpointExecution,
+    mut resolved: ResolvedCheckpointExecution,
     checkpoint_start: Instant,
 ) -> Result<(usize, usize, usize), GitAiError> {
     if kind.is_ai() && checkpoint_request.agent_id.is_none() {
@@ -202,7 +202,7 @@ fn execute_resolved_checkpoint(
         .working_log_for_base_commit(&resolved.base_commit)?;
 
     if !resolved.dirty_files.is_empty() {
-        working_log.set_dirty_files(Some(resolved.dirty_files.clone()));
+        working_log.set_dirty_files(Some(std::mem::take(&mut resolved.dirty_files)));
     }
 
     let read_checkpoints_start = Instant::now();
@@ -482,7 +482,7 @@ fn save_current_file_states(
 
                     // Write content to blob file
                     let blob_path = blobs_dir.join(&sha);
-                    std::fs::write(blob_path, content)?;
+                    std::fs::write(blob_path, content.as_bytes())?;
 
                     Ok::<(String, String), GitAiError>((file_path, sha))
                 })
@@ -511,13 +511,16 @@ fn get_previous_content_from_head(
     repo: &Repository,
     file_path: &str,
     head_tree_id: &Option<String>,
-) -> String {
+) -> Arc<str> {
     let Some(tree_id) = head_tree_id.as_ref() else {
-        return String::new();
+        return Arc::from("");
     };
     match repo.read_file_blob_at_tree(tree_id, std::path::Path::new(file_path)) {
-        Ok(content) => String::from_utf8_lossy(&content).to_string(),
-        Err(_) => String::new(),
+        Ok(content) => {
+            let text = String::from_utf8_lossy(&content);
+            Arc::from(text.into_owned())
+        }
+        Err(_) => Arc::from(""),
     }
 }
 
@@ -584,7 +587,7 @@ fn get_checkpoint_entry_for_file(
     author_id: Arc<String>,
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
-    initial_snapshot_contents: Arc<HashMap<String, String>>,
+    initial_snapshot_contents: Arc<HashMap<String, Arc<str>>>,
     parent_note_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
@@ -600,7 +603,7 @@ fn get_checkpoint_entry_for_file(
 
     let current_content = working_log
         .read_current_file_content(&file_path)
-        .unwrap_or_default();
+        .unwrap_or_else(|_| Arc::<str>::from(""));
 
     // Non-pre-commit fast path:
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
@@ -609,9 +612,11 @@ fn get_checkpoint_entry_for_file(
     // that later AI checkpoints can use to identify human-written lines.
     if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         let previous_content = if let Some(state) = previous_state.as_ref() {
-            working_log
-                .get_file_version(&state.blob_sha)
-                .unwrap_or_default()
+            Arc::<str>::from(
+                working_log
+                    .get_file_version(&state.blob_sha)
+                    .unwrap_or_default(),
+            )
         } else {
             get_previous_content_from_head(&repo, &file_path, head_tree_id.as_ref())
         };
@@ -627,9 +632,11 @@ fn get_checkpoint_entry_for_file(
 
     let from_checkpoint = previous_state.as_ref().map(|state| {
         (
-            working_log
-                .get_file_version(&state.blob_sha)
-                .unwrap_or_default(),
+            Arc::<str>::from(
+                working_log
+                    .get_file_version(&state.blob_sha)
+                    .unwrap_or_default(),
+            ),
             state.attributions.clone(),
         )
     });
@@ -805,13 +812,13 @@ async fn get_checkpoint_entries(
     // Read INITIAL attributions from working log (empty if file doesn't exist)
     let initial_read_start = Instant::now();
     let initial_data = working_log.read_initial_attributions();
-    let initial_snapshot_contents: HashMap<String, String> = {
+    let initial_snapshot_contents: HashMap<String, Arc<str>> = {
         let mut map = HashMap::new();
         for file_path in initial_data.files.keys() {
             if let Some(content) =
                 working_log.initial_file_content_from(&initial_data, file_path)?
             {
-                map.insert(file_path.clone(), content);
+                map.insert(file_path.clone(), Arc::<str>::from(content));
             }
         }
         map

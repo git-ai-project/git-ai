@@ -1,5 +1,11 @@
+#[cfg(unix)]
+use crate::repos::test_file::ExpectedLineExt;
+#[cfg(unix)]
+use crate::repos::test_repo::{TestRepo, real_git_executable};
 use regex::Regex;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -88,6 +94,79 @@ fn internal_spawn_helper_calls_must_provide_guard_env() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn internal_git_spawns_disable_trace2_env() {
+    let repo = TestRepo::new();
+    fs::write(repo.path().join("plain.txt"), "plain log content\n").unwrap();
+    repo.stage_all_and_commit("feat: plain log").unwrap();
+    let mut file = repo.filename("plain.txt");
+    file.assert_committed_lines(lines!["plain log content".unattributed_human()]);
+
+    let wrapper_path = repo.test_home_path().join("recording-git");
+    let env_log_path = repo.test_home_path().join("internal-git-env.log");
+    fs::write(
+        &wrapper_path,
+        r#"#!/bin/sh
+{
+  printf 'argv=%s\n' "$*"
+  printf 'GIT_TRACE2=%s\n' "${GIT_TRACE2-<unset>}"
+  printf 'GIT_TRACE2_EVENT=%s\n' "${GIT_TRACE2_EVENT-<unset>}"
+  printf 'GIT_TRACE2_PERF=%s\n' "${GIT_TRACE2_PERF-<unset>}"
+} >> "$GIT_AI_INTERNAL_GIT_ENV_LOG"
+exec "$GIT_AI_REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&wrapper_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper_path, permissions).unwrap();
+
+    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
+    fs::write(
+        &config_path,
+        serde_json::json!({
+            "git_path": wrapper_path,
+            "prompt_storage": "notes",
+            "exclude_prompts_in_repositories": [],
+            "disable_version_checks": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let env_log = env_log_path.to_string_lossy().to_string();
+    let real_git = real_git_executable().to_string();
+    repo.git_ai_with_env(
+        &["log", "--no-pager", "--plain", "-n", "1"],
+        &[
+            ("GIT_AI_INTERNAL_GIT_ENV_LOG", env_log.as_str()),
+            ("GIT_AI_REAL_GIT", real_git.as_str()),
+            ("GIT_TRACE2", "1"),
+            ("GIT_TRACE2_EVENT", "1"),
+            ("GIT_TRACE2_PERF", "1"),
+        ],
+    )
+    .expect("git-ai log --plain should succeed through recording git");
+
+    let env_log = fs::read_to_string(&env_log_path).expect("recording git should write env log");
+    assert!(
+        env_log.contains("argv=") && env_log.contains(" log "),
+        "expected recording git to capture a git log invocation:\n{}",
+        env_log
+    );
+
+    for line in env_log.lines() {
+        if line.starts_with("GIT_TRACE2=") {
+            assert_eq!(line, "GIT_TRACE2=0", "env log:\n{}", env_log);
+        } else if line.starts_with("GIT_TRACE2_EVENT=") {
+            assert_eq!(line, "GIT_TRACE2_EVENT=0", "env log:\n{}", env_log);
+        } else if line.starts_with("GIT_TRACE2_PERF=") {
+            assert_eq!(line, "GIT_TRACE2_PERF=0", "env log:\n{}", env_log);
+        }
+    }
+}
+
 #[test]
 fn direct_git_command_spawns_are_centralized() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -95,7 +174,8 @@ fn direct_git_command_spawns_are_centralized() {
     collect_rs_files(&src_root, &mut files);
 
     let allowed_suffixes = ["src/git/repository.rs", "src/commands/git_handlers.rs"];
-    let pattern = Regex::new(r#"Command::new\(config::Config::get\(\)\.git_cmd\(\)\)"#).unwrap();
+    let pattern =
+        Regex::new(r#"Command::new\((?:crate::)?config::Config::get\(\)\.git_cmd\(\)\)"#).unwrap();
 
     for file in files {
         let file_str = file.to_string_lossy().replace('\\', "/");

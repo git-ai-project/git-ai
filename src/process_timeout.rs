@@ -65,6 +65,18 @@ pub(crate) fn run_command_with_timeout(
     poll_interval: Duration,
     env_remove: &[&str],
 ) -> Result<TimedCommandOutput, String> {
+    run_command_with_timeout_and_env(program, args, cwd, timeout, poll_interval, env_remove, &[])
+}
+
+pub(crate) fn run_command_with_timeout_and_env(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    poll_interval: Duration,
+    env_remove: &[&str],
+    env_set: &[(&str, &str)],
+) -> Result<TimedCommandOutput, String> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -72,6 +84,9 @@ pub(crate) fn run_command_with_timeout(
         .stderr(Stdio::piped());
     for key in env_remove {
         command.env_remove(key);
+    }
+    for (key, value) in env_set {
+        command.env(key, value);
     }
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

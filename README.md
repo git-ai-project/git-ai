@@ -210,7 +210,7 @@ Hundreds of engineering teams (including many in the Fortune 100) use Git AI to 
 The CLI accurately attributes AI code on every commit. The teams version adds a secure prompt store and joins in data from across the SDLC — tying token spend to individual Pull Requests, calculating % AI by PR, team, and repo, and connecting signals like amount of rework during code review, and even tying incidents back to the AI session that caused them. Self-host it or run it in our cloud: connect your SCM and get aggregate stats across thousands of repos plus full observability into everything your coding agents do.
 
 #### Who built this?
-[Aidan](https://github.com/git-ai-project/git-ai) and [Sasha](https://github.com/svarlamov) — say hi in [Discord](https://discord.gg/XJStYvkb5U) or set up a [Meet the maintainers call](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors).
+[Aidan](https://github.com/acunniffe) and [Sasha](https://github.com/svarlamov) — say hi in [Discord](https://discord.gg/XJStYvkb5U) or set up a [Meet the maintainers call](https://calendly.com/d/cxjh-z79-ktm/meeting-with-git-ai-authors).
 
 #### What are the capabilities and known limitations?
 Git AI provides line-level attribution for AI-generated code - whether it is written with an edit tool or a bash command. When a Git rewrite operation is run (`rebase`, `stash`, `squash --merge`, etc) Git AI will move and merge attributions so nothing is lost. 

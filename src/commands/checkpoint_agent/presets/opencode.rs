@@ -481,6 +481,27 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_extracts_file_paths_from_patch_key() {
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "sess-1",
+            "cwd": "/project",
+            "tool_name": "edit",
+            "tool_input": {
+                "patch": "*** Update File: /project/src/main.rs\n@@ old\n+new\n"
+            }
+        })
+        .to_string();
+        let events = OpenCodePreset.parse(&input, "t_test").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.file_paths, vec![PathBuf::from("/project/src/main.rs")]);
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
     fn test_opencode_default_tool_use_id() {
         let input = json!({
             "hook_event_name": "PreToolUse",
