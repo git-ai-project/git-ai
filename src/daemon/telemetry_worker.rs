@@ -28,6 +28,7 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 const DAEMON_LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MAX_DAEMON_LOG_EVENTS_PER_UPLOAD: usize = 1000;
 const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
+const MAX_DAEMON_LOG_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
@@ -42,6 +43,7 @@ struct TelemetryBuffer {
     metrics: Vec<MetricEvent>,
     cas_records: Vec<CasSyncPayload>,
     daemon_logs: Vec<DaemonLogEvent>,
+    daemon_log_bytes: usize,
 }
 
 struct ErrorEvent {
@@ -74,6 +76,7 @@ impl TelemetryBuffer {
             metrics: Vec::new(),
             cas_records: Vec::new(),
             daemon_logs: Vec::new(),
+            daemon_log_bytes: 0,
         }
     }
 
@@ -140,23 +143,41 @@ impl TelemetryBuffer {
     }
 
     fn ingest_daemon_logs(&mut self, events: Vec<DaemonLogEvent>) {
-        self.daemon_logs.extend(events);
+        for event in events {
+            self.daemon_log_bytes = self
+                .daemon_log_bytes
+                .saturating_add(daemon_log_event_approx_bytes(&event));
+            self.daemon_logs.push(event);
+        }
         self.cap_daemon_logs();
     }
 
     fn requeue_failed_daemon_logs(&mut self, mut failed_events: Vec<DaemonLogEvent>) {
         failed_events.append(&mut self.daemon_logs);
         self.daemon_logs = failed_events;
+        self.daemon_log_bytes = self
+            .daemon_logs
+            .iter()
+            .map(daemon_log_event_approx_bytes)
+            .fold(0usize, usize::saturating_add);
         self.cap_daemon_logs();
     }
 
     fn cap_daemon_logs(&mut self) {
-        let overflow = self
-            .daemon_logs
-            .len()
-            .saturating_sub(MAX_DAEMON_LOG_BUFFER_EVENTS);
-        if overflow > 0 {
-            self.daemon_logs.drain(0..overflow);
+        let mut drop_count = 0usize;
+        while self.daemon_logs.len().saturating_sub(drop_count) > MAX_DAEMON_LOG_BUFFER_EVENTS
+            || self.daemon_log_bytes > MAX_DAEMON_LOG_BUFFER_BYTES
+        {
+            let Some(event) = self.daemon_logs.get(drop_count) else {
+                break;
+            };
+            self.daemon_log_bytes = self
+                .daemon_log_bytes
+                .saturating_sub(daemon_log_event_approx_bytes(event));
+            drop_count += 1;
+        }
+        if drop_count > 0 {
+            self.daemon_logs.drain(0..drop_count);
         }
     }
 
@@ -168,7 +189,37 @@ impl TelemetryBuffer {
             metrics: std::mem::take(&mut self.metrics),
             cas_records: std::mem::take(&mut self.cas_records),
             daemon_logs: std::mem::take(&mut self.daemon_logs),
+            daemon_log_bytes: std::mem::take(&mut self.daemon_log_bytes),
         }
+    }
+}
+
+fn daemon_log_event_approx_bytes(event: &DaemonLogEvent) -> usize {
+    const FIXED_FIELDS_BYTES: usize = 128;
+
+    let string_bytes = event.id.as_ref().map_or(0, String::len)
+        + event.timestamp.len()
+        + event.target.as_ref().map_or(0, String::len)
+        + event.message.len()
+        + event.repo_url.as_ref().map_or(0, String::len)
+        + event.git_ai_version.as_ref().map_or(0, String::len);
+    let dynamic_field_bytes = event.fields.iter().fold(0usize, |total, (key, value)| {
+        total
+            .saturating_add(key.len())
+            .saturating_add(daemon_log_field_value_approx_bytes(value))
+    });
+
+    FIXED_FIELDS_BYTES
+        .saturating_add(string_bytes)
+        .saturating_add(dynamic_field_bytes)
+}
+
+fn daemon_log_field_value_approx_bytes(value: &DaemonLogFieldValue) -> usize {
+    match value {
+        DaemonLogFieldValue::String(value) => value.len(),
+        DaemonLogFieldValue::Number(value) => value.to_string().len(),
+        DaemonLogFieldValue::Bool(_) => 1,
+        DaemonLogFieldValue::Null => 0,
     }
 }
 
@@ -376,18 +427,18 @@ pub fn submit_daemon_internal_cas(records: Vec<CasSyncPayload>) -> bool {
 /// Returns true if the handle was available and events were submitted.
 pub fn submit_daemon_internal_daemon_logs(events: Vec<DaemonLogEvent>) -> bool {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let handle = handle.clone();
-            runtime.spawn(async move {
-                handle.submit_daemon_logs(events).await;
-            });
-        } else {
-            handle.submit_daemon_logs_sync(events);
-        }
+        submit_daemon_internal_daemon_logs_with_handle(handle, events);
         true
     } else {
         false
     }
+}
+
+fn submit_daemon_internal_daemon_logs_with_handle(
+    handle: &DaemonTelemetryWorkerHandle,
+    events: Vec<DaemonLogEvent>,
+) {
+    handle.submit_daemon_logs_sync(events);
 }
 
 /// Spawn the telemetry worker task. Returns a handle for submitting events.
@@ -1430,6 +1481,28 @@ mod tests {
         assert_eq!(guard.messages.len(), 1);
     }
 
+    #[tokio::test]
+    async fn daemon_log_submission_does_not_defer_when_buffer_is_busy() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+        let guard = handle.buffer.lock().await;
+
+        submit_daemon_internal_daemon_logs_with_handle(
+            &handle,
+            vec![sample_daemon_log_event("deferred")],
+        );
+
+        assert!(guard.daemon_logs.is_empty());
+        drop(guard);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            handle.buffer.lock().await.daemon_logs.is_empty(),
+            "daemon log submission retained an event in a deferred task"
+        );
+    }
+
     #[test]
     fn flush_pending_metric_records_uploads_from_db_and_marks_delivered() {
         let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
@@ -2001,11 +2074,28 @@ mod tests {
         buffer.ingest_daemon_logs(events);
 
         assert_eq!(buffer.daemon_logs.len(), MAX_DAEMON_LOG_BUFFER_EVENTS);
+        assert!(buffer.daemon_log_bytes <= MAX_DAEMON_LOG_BUFFER_BYTES);
         assert_eq!(buffer.daemon_logs.first().unwrap().message, "2");
         assert_eq!(
             buffer.daemon_logs.last().unwrap().message,
             (total - 1).to_string()
         );
+    }
+
+    #[test]
+    fn telemetry_buffer_caps_daemon_logs_by_retained_bytes() {
+        let mut buffer = TelemetryBuffer::new();
+        let large_message = "x".repeat(4 * 1024 * 1024);
+
+        buffer.ingest_daemon_logs(vec![
+            sample_daemon_log_event(format!("old-{large_message}")),
+            sample_daemon_log_event(format!("middle-{large_message}")),
+            sample_daemon_log_event(format!("new-{large_message}")),
+        ]);
+
+        assert_eq!(buffer.daemon_logs.len(), 1);
+        assert!(buffer.daemon_log_bytes <= MAX_DAEMON_LOG_BUFFER_BYTES);
+        assert!(buffer.daemon_logs[0].message.starts_with("new-"));
     }
 
     #[test]
@@ -2023,6 +2113,7 @@ mod tests {
         buffer.requeue_failed_daemon_logs(failed_events);
 
         assert_eq!(buffer.daemon_logs.len(), MAX_DAEMON_LOG_BUFFER_EVENTS);
+        assert!(buffer.daemon_log_bytes <= MAX_DAEMON_LOG_BUFFER_BYTES);
         assert_eq!(buffer.daemon_logs.first().unwrap().message, "old-2");
         assert_eq!(
             buffer.daemon_logs[MAX_DAEMON_LOG_BUFFER_EVENTS - 2].message,
