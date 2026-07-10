@@ -137,6 +137,7 @@ mod superuser_guard;
 mod sweep_e2e;
 mod test_utils_unit;
 mod tls_native_certs;
+mod transcript_memory;
 mod utf8_filenames;
 mod virtual_attribution_unit;
 mod windsurf;

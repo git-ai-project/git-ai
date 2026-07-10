@@ -8,7 +8,7 @@ use crate::streams::watermark::{
     ByteOffsetWatermark, RecordIndexWatermark, WatermarkStrategy, WatermarkType,
 };
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -366,11 +366,9 @@ impl Agent for CopilotAgent {
 
         // Fallback: scan first few lines for file paths in tool calls
         let file = fs::File::open(stream_path).ok()?;
-        let reader = BufReader::new(file);
-        for line in reader.lines().take(20).map_while(Result::ok) {
-            let Some(json) = serde_json::from_str::<serde_json::Value>(&line).ok() else {
-                continue;
-            };
+        let mut reader = BufReader::new(file);
+        crate::streams::types::find_in_jsonl_lines(&mut reader, 20, |line| {
+            let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
             if json.get("type").and_then(|v| v.as_str()) == Some("tool.execution_start")
                 && let Some(file_path) = json
                     .get("data")
@@ -387,8 +385,8 @@ impl Agent for CopilotAgent {
                     candidate = dir.parent();
                 }
             }
-        }
-        None
+            None
+        })
     }
 }
 
@@ -529,6 +527,8 @@ pub(super) fn read_event_stream(
     let mut events = Vec::with_capacity(batch_limit);
     let mut current_offset = start_offset;
     let mut line_number = 0;
+    let mut batch_bytes = 0usize;
+    let mut read_stats = crate::streams::types::JsonlReadStats::default();
 
     // Read lines from watermark position
     let mut line = String::new();
@@ -544,6 +544,12 @@ pub(super) fn read_event_stream(
             crate::streams::types::JsonlLineState::Complete(bytes_read) => {
                 line_number += 1;
                 current_offset += bytes_read as u64;
+            }
+            crate::streams::types::JsonlLineState::Oversized(bytes_read) => {
+                line_number += 1;
+                current_offset += bytes_read as u64;
+                read_stats.record_oversized(bytes_read);
+                continue;
             }
         }
 
@@ -565,10 +571,13 @@ pub(super) fn read_event_stream(
         };
 
         events.push(entry);
-        if events.len() >= batch_limit {
+        batch_bytes += line.len();
+        if crate::streams::types::jsonl_batch_limit_reached(events.len(), batch_limit, batch_bytes)
+        {
             break;
         }
     }
+    read_stats.warn_if_oversized(path);
 
     // Create new watermark with updated offset
     let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));

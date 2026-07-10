@@ -117,13 +117,8 @@ fn extract_model_from_jsonl_line(line: &str) -> Option<String> {
 
 fn extract_model_from_jsonl_head(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    for line in reader.lines().map_while(Result::ok).take(20) {
-        if let Some(model) = extract_model_from_jsonl_line(&line) {
-            return Some(model);
-        }
-    }
-    None
+    let mut reader = BufReader::new(file);
+    crate::streams::types::find_in_jsonl_lines(&mut reader, 20, extract_model_from_jsonl_line)
 }
 
 /// Extracts the model from VS Code Copilot's `models.json` debug log.

@@ -160,6 +160,8 @@ impl Agent for CursorAgent {
         let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
+        let mut batch_bytes = 0usize;
+        let mut read_stats = crate::streams::types::JsonlReadStats::default();
 
         let mut line = String::new();
         loop {
@@ -174,6 +176,12 @@ impl Agent for CursorAgent {
                 crate::streams::types::JsonlLineState::Complete(bytes_read) => {
                     line_number += 1;
                     current_offset += bytes_read as u64;
+                }
+                crate::streams::types::JsonlLineState::Oversized(bytes_read) => {
+                    line_number += 1;
+                    current_offset += bytes_read as u64;
+                    read_stats.record_oversized(bytes_read);
+                    continue;
                 }
             }
 
@@ -195,10 +203,16 @@ impl Agent for CursorAgent {
             };
 
             events.push(entry);
-            if events.len() >= batch_limit {
+            batch_bytes += line.len();
+            if crate::streams::types::jsonl_batch_limit_reached(
+                events.len(),
+                batch_limit,
+                batch_bytes,
+            ) {
                 break;
             }
         }
+        read_stats.warn_if_oversized(path);
 
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
 
