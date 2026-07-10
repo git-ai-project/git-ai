@@ -1,9 +1,9 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::working_log::{
-    AgentId, CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind,
+    AgentId, CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind, WorkingLogEntry,
 };
-use git_ai::git::repo_storage::{InitialAttributions, RepoStorage};
+use git_ai::git::repo_storage::{InitialAttributions, MAX_CHECKPOINTS_JSONL_BYTES, RepoStorage};
 use std::collections::HashMap;
 use std::fs;
 use std::time::SystemTime;
@@ -235,6 +235,188 @@ fn test_oversized_checkpoints_file_is_truncated_before_read() {
             .len(),
         0,
         "oversized checkpoints file should be truncated to an empty file"
+    );
+}
+
+#[test]
+fn test_default_checkpoints_file_limit_is_memory_bounded() {
+    let configured_limit = std::hint::black_box(MAX_CHECKPOINTS_JSONL_BYTES);
+    assert!(
+        configured_limit <= 32 * 1_024 * 1_024,
+        "checkpoint history must not be parsed up to {configured_limit} bytes"
+    );
+}
+
+#[test]
+fn test_oversized_checkpoint_write_preserves_existing_file() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let checkpoints_file = working_log.checkpoints_file();
+    fs::write(&checkpoints_file, "existing checkpoint data\n").unwrap();
+
+    let checkpoint = Checkpoint::new(
+        CheckpointKind::Human,
+        "x".repeat(MAX_CHECKPOINTS_JSONL_BYTES as usize),
+        "oversized".to_string(),
+        vec![],
+    );
+    let error = working_log
+        .write_all_checkpoints(&[checkpoint])
+        .expect_err("oversized checkpoint serialization must be rejected");
+
+    assert!(error.to_string().contains("checkpoints.jsonl"));
+    assert_eq!(
+        fs::read_to_string(checkpoints_file).unwrap(),
+        "existing checkpoint data\n",
+        "a rejected rewrite must leave the prior checkpoint history intact"
+    );
+}
+
+#[test]
+fn test_checkpoint_write_rejects_nested_collection_amplification() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let entries = (0..=4_096)
+        .map(|index| {
+            WorkingLogEntry::new(
+                format!("file-{index}.txt"),
+                "blob".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )
+        })
+        .collect();
+    let checkpoint = Checkpoint::new(
+        CheckpointKind::Human,
+        String::new(),
+        "nested-amplification".to_string(),
+        entries,
+    );
+
+    let error = working_log
+        .write_all_checkpoints(&[checkpoint])
+        .expect_err("nested checkpoint collections must be bounded");
+
+    assert!(error.to_string().contains("working-log entry count"));
+    assert!(!working_log.checkpoints_file().exists());
+}
+
+#[test]
+fn test_initial_write_rejects_nested_collection_amplification() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let mut initial = InitialAttributions::default();
+    initial.files.insert(
+        "file.txt".to_string(),
+        (0..=4_096)
+            .map(|index| LineAttribution::new(index + 1, index + 1, "ai".to_string(), None))
+            .collect(),
+    );
+    initial
+        .file_blobs
+        .insert("file.txt".to_string(), "blob".to_string());
+
+    let error = working_log
+        .write_initial(initial)
+        .expect_err("nested INITIAL collections must be bounded");
+
+    assert!(error.to_string().contains("INITIAL line attribution count"));
+    assert!(!working_log.initial_file.exists());
+}
+
+#[test]
+fn test_initial_content_snapshot_uses_shared_materialization_budget() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let mut files = HashMap::new();
+    let mut contents = HashMap::new();
+    for index in 0..17 {
+        let path = format!("file-{index}.txt");
+        files.insert(
+            path.clone(),
+            vec![LineAttribution::new(1, 1, "ai".to_string(), None)],
+        );
+        contents.insert(path, "x".repeat(1_024 * 1_024));
+    }
+
+    let error = working_log
+        .write_initial_attributions_with_contents(
+            files,
+            HashMap::new(),
+            Default::default(),
+            contents,
+            Default::default(),
+        )
+        .expect_err("INITIAL file contents must share one materialization budget");
+
+    assert!(
+        error
+            .to_string()
+            .contains("materialized working-log INITIAL content")
+    );
+    assert!(!working_log.initial_file.exists());
+}
+
+#[test]
+fn test_oversized_working_log_blob_is_rejected() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let blobs_dir = working_log.dir.join("blobs");
+    fs::create_dir_all(&blobs_dir).unwrap();
+    let blob_path = blobs_dir.join("oversized");
+    let blob = fs::File::create(&blob_path).unwrap();
+    blob.set_len(16 * 1_024 * 1_024 + 1).unwrap();
+
+    let error = working_log
+        .get_file_version("oversized")
+        .expect_err("oversized working-log blobs must fail before allocation");
+
+    assert!(error.to_string().contains("working-log blob"));
+}
+
+#[test]
+fn test_observed_snapshot_rejects_shared_blob_amplification() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+    let content = "x".repeat(1_024 * 1_024);
+    let blob_sha = working_log.persist_file_version(&content).unwrap();
+    let mut initial = InitialAttributions::default();
+    for index in 0..17 {
+        let path = format!("shared-{index}.txt");
+        initial.files.insert(
+            path.clone(),
+            vec![LineAttribution::new(1, 1, "ai".to_string(), None)],
+        );
+        initial.file_blobs.insert(path, blob_sha.clone());
+    }
+    working_log.write_initial(initial).unwrap();
+
+    let error = working_log
+        .observed_file_snapshot()
+        .expect_err("shared working-log blobs must respect an aggregate byte budget");
+
+    assert!(
+        error
+            .to_string()
+            .contains("materialized working-log snapshot content")
     );
 }
 
