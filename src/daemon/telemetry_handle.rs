@@ -38,11 +38,24 @@ impl DaemonTelemetryHandle {
     /// blocks indefinitely (which would hold the global mutex and stall the
     /// entire process).
     fn apply_socket_timeouts(stream: &mut DaemonClientStream, socket_path: &std::path::Path) {
-        let _ = crate::daemon::set_daemon_client_stream_timeouts(
-            stream,
-            socket_path,
-            DAEMON_SOCKET_IO_TIMEOUT,
-        );
+        Self::apply_socket_timeout(stream, socket_path, DAEMON_SOCKET_IO_TIMEOUT);
+    }
+
+    fn apply_socket_timeout(
+        stream: &mut DaemonClientStream,
+        socket_path: &std::path::Path,
+        timeout: Duration,
+    ) {
+        let _ = crate::daemon::set_daemon_client_stream_timeouts(stream, socket_path, timeout);
+    }
+
+    fn reconnect(&mut self) -> Result<(), String> {
+        let mut stream =
+            open_local_socket_stream_with_timeout(&self.socket_path, Duration::from_secs(1))
+                .map_err(|error| error.to_string())?;
+        Self::apply_socket_timeouts(&mut stream, &self.socket_path);
+        self.conn = BufReader::new(stream);
+        Ok(())
     }
 
     /// Send a control request over the persistent connection and read the response.
@@ -50,18 +63,23 @@ impl DaemonTelemetryHandle {
     fn send(&mut self, request: &ControlRequest) -> Result<ControlResponse, String> {
         match self.send_inner(request) {
             Ok(resp) => Ok(resp),
+            Err(error) if matches!(request, ControlRequest::CheckpointRun { .. }) => {
+                // The daemon may have accepted the checkpoint before the response
+                // failed, so never replay it. Heal the persistent socket for the
+                // next request without changing this request's error result.
+                match self.reconnect() {
+                    Ok(()) => Err(error),
+                    Err(reconnect_error) => Err(format!(
+                        "send failed ({error}), reconnect also failed ({reconnect_error})"
+                    )),
+                }
+            }
             Err(first_err) => {
                 // Connection may have been dropped by the daemon; try reconnecting once.
-                match open_local_socket_stream_with_timeout(
-                    &self.socket_path,
-                    Duration::from_secs(1),
-                ) {
-                    Ok(mut stream) => {
-                        Self::apply_socket_timeouts(&mut stream, &self.socket_path);
-                        self.conn = BufReader::new(stream);
-                        self.send_inner(request)
-                            .map_err(|e| format!("reconnect ok but send failed: {}", e))
-                    }
+                match self.reconnect() {
+                    Ok(()) => self
+                        .send_inner(request)
+                        .map_err(|e| format!("reconnect ok but send failed: {}", e)),
                     Err(reconnect_err) => Err(format!(
                         "send failed ({}), reconnect also failed ({})",
                         first_err, reconnect_err
@@ -72,6 +90,17 @@ impl DaemonTelemetryHandle {
     }
 
     fn send_inner(&mut self, request: &ControlRequest) -> Result<ControlResponse, String> {
+        Self::apply_socket_timeout(
+            self.conn.get_mut(),
+            &self.socket_path,
+            crate::daemon::control_request_response_timeout(request),
+        );
+        let result = self.exchange(request);
+        Self::apply_socket_timeouts(self.conn.get_mut(), &self.socket_path);
+        result
+    }
+
+    fn exchange(&mut self, request: &ControlRequest) -> Result<ControlResponse, String> {
         let mut body = serde_json::to_vec(request).map_err(|e| e.to_string())?;
         body.push(b'\n');
         self.conn
@@ -250,4 +279,134 @@ pub fn submit_cas(records: Vec<CasSyncPayload>) {
 pub fn submit_notes() {
     let request = ControlRequest::FlushNotes;
     let _ = send_via_daemon(&request);
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+    use crate::authorship::working_log::CheckpointKind;
+    use crate::commands::checkpoint_agent::orchestrator::{
+        BaseCommit, CheckpointFile, CheckpointRequest,
+    };
+    use crate::daemon::checkpoint::PreparedPathRole;
+    use interprocess::local_socket::{ListenerOptions, prelude::*};
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::PathBuf;
+    use std::thread;
+
+    fn checkpoint_request(trace_id: &str) -> ControlRequest {
+        ControlRequest::CheckpointRun {
+            request: Box::new(CheckpointRequest {
+                trace_id: trace_id.to_string(),
+                checkpoint_kind: CheckpointKind::Human,
+                agent_id: None,
+                files: vec![CheckpointFile {
+                    path: PathBuf::from("test.txt"),
+                    content: None,
+                    repo_work_dir: PathBuf::from("/tmp/repo"),
+                    base_commit: BaseCommit::Initial,
+                }],
+                path_role: PreparedPathRole::WillEdit,
+                stream_source: None,
+                metadata: Default::default(),
+            }),
+        }
+    }
+
+    fn bind_test_listener(socket_path: &std::path::Path) -> LocalSocketListener {
+        ListenerOptions::new()
+            .name(crate::daemon::local_socket_name(socket_path).unwrap())
+            .create_sync()
+            .unwrap()
+    }
+
+    fn connect_test_handle(socket_path: &std::path::Path) -> DaemonTelemetryHandle {
+        let mut stream =
+            open_local_socket_stream_with_timeout(socket_path, Duration::from_secs(1)).unwrap();
+        DaemonTelemetryHandle::apply_socket_timeouts(&mut stream, socket_path);
+        DaemonTelemetryHandle {
+            socket_path: socket_path.to_path_buf(),
+            conn: BufReader::new(stream),
+        }
+    }
+
+    fn read_request_and_respond(stream: LocalSocketStream, delay: Duration) -> ControlRequest {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let request = serde_json::from_str(line.trim()).unwrap();
+        thread::sleep(delay);
+        let response = serde_json::to_string(&ControlResponse::ok(None, None)).unwrap();
+        reader.get_mut().write_all(response.as_bytes()).unwrap();
+        reader.get_mut().write_all(b"\n").unwrap();
+        reader.get_mut().flush().unwrap();
+        request
+    }
+
+    #[test]
+    fn persistent_handle_honors_long_control_request_timeout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("control.sock");
+        let listener = bind_test_listener(&socket_path);
+        let server = thread::spawn(move || {
+            let stream = listener.incoming().next().unwrap().unwrap();
+            read_request_and_respond(stream, Duration::from_millis(2_100))
+        });
+        let mut handle = connect_test_handle(&socket_path);
+
+        let response = handle.send(&ControlRequest::SyncFamily {
+            repo_working_dir: "/tmp/repo".to_string(),
+        });
+
+        assert!(
+            response.is_ok(),
+            "long control request failed: {response:?}"
+        );
+        assert!(matches!(
+            server.join().unwrap(),
+            ControlRequest::SyncFamily { .. }
+        ));
+    }
+
+    #[test]
+    fn failed_checkpoint_heals_connection_without_replaying_request() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("control.sock");
+        let listener = bind_test_listener(&socket_path);
+        let server = thread::spawn(move || {
+            let first_stream = listener.incoming().next().unwrap().unwrap();
+            let mut first_reader = BufReader::new(first_stream);
+            let mut first_line = String::new();
+            first_reader.read_line(&mut first_line).unwrap();
+            drop(first_reader);
+
+            let second_stream = listener.incoming().next().unwrap().unwrap();
+            let second_request = read_request_and_respond(second_stream, Duration::from_millis(0));
+            (first_line, second_request)
+        });
+        let mut handle = connect_test_handle(&socket_path);
+
+        assert!(handle.send(&checkpoint_request("first")).is_err());
+        let second = handle.send(&checkpoint_request("second"));
+        if second.is_err() {
+            // Unblock the test server on the red path where the failed checkpoint
+            // did not establish a fresh connection.
+            let _ = open_local_socket_stream_with_timeout(&socket_path, Duration::from_secs(1));
+        }
+
+        assert!(
+            second.is_ok(),
+            "healed checkpoint connection failed: {second:?}"
+        );
+        let (first_line, second_request) = server.join().unwrap();
+        let first_request: ControlRequest = serde_json::from_str(first_line.trim()).unwrap();
+        assert!(matches!(
+            first_request,
+            ControlRequest::CheckpointRun { .. }
+        ));
+        let ControlRequest::CheckpointRun { request } = second_request else {
+            panic!("reconnected socket received a replay or non-checkpoint request");
+        };
+        assert_eq!(request.trace_id, "second");
+    }
 }

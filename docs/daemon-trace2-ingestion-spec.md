@@ -43,7 +43,7 @@ daemon-ingress "start" offsets captured after the fact.
 
 ```
 git (trace2 socket target)
-  → socket listener (src/daemon.rs)
+  → bounded socket listener (src/daemon.rs)
       prepare_trace_payload_for_ingest: filters definitely-read-only roots,
       enqueues mutating roots with sequence numbers
   → TraceNormalizer (src/daemon/trace_normalizer.rs)
@@ -55,6 +55,13 @@ git (trace2 socket target)
   → analyzers (src/daemon/analyzers/history.rs)
       classified semantic events → rewrite/post-commit side effects
 ```
+
+The listener rejects trace frames larger than 64 KiB, retains at most 64 root
+SIDs per connection, and admits at most 128 live trace connections. Unix and
+Windows connection handlers use bounded stacks. Exceeding any limit closes the
+affected connection and fails closed for attribution; it never delays or wraps
+the Git command. Control connections are independently capped at 16, with a
+36 MiB request limit that accommodates the default 32 MiB checkpoint budget.
 
 Separation of concerns:
 
@@ -81,8 +88,9 @@ Trust is decided at the cursor, not at ingress (see below).
 Per family, the cursor stores per-ref-key:
 
 - byte offset into the reflog file (always at a line boundary)
-- anchor: the full reflog record ending at that offset (old/new OIDs,
-  message) proving the offset still belongs to the same reflog generation
+- anchor: the old/new OIDs, end offset, and a SHA-256 message fingerprint for
+  the reflog record ending at that offset, proving the offset still belongs to
+  the same reflog generation without retaining an unbounded message
 - consumed offsets/anchors (entries already owned by earlier commands)
 - in-memory stash stack and pending cherry-pick source OIDs
 

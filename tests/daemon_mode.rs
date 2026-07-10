@@ -640,13 +640,16 @@ impl WorkdirRaceHarness {
             .env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")
             .output()
             .expect("failed to execute delegated checkpoint");
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.status.success(),
+            output.status.success()
+                && !stderr.contains("Background worker rejected checkpoint")
+                && !stderr.contains("Failed to send checkpoint to background worker"),
             "delegated checkpoint failed in {} for {} \nstdout:{}\nstderr:{}",
             workdir.display(),
             file_rel,
             String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         );
     }
 
@@ -4417,9 +4420,13 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
     fs::write(repo.path().join("init.txt"), "init\n").expect("write failed");
     repo.git(&["add", "init.txt"]).expect("add failed");
     repo.git(&["commit", "-m", "init"]).expect("commit failed");
+    repo.filename("init.txt")
+        .assert_committed_lines(crate::lines!["init".unattributed_human()]);
 
-    let mut guard = DaemonGuard::start(&repo);
-    let pid = guard.child.id();
+    let pid = repo
+        .daemon_pid()
+        .expect("dedicated daemon should be running");
+    let trace_socket_path = repo.daemon_trace_socket_path();
 
     // Let the daemon settle after startup.
     thread::sleep(Duration::from_millis(500));
@@ -4436,15 +4443,17 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
 
     // Send 2000 complete git trace lifecycle rounds (start + exit + atexit).
     // Each round simulates a complete `git status` invocation with a unique SID.
-    for batch in 0..20 {
+    // Keep each connection below the per-connection root SID limit while
+    // preserving the full 2,000-command load across sequential connections.
+    for batch in 0..40 {
         let mut frames = Vec::new();
-        for i in 0..100u64 {
+        for i in 0..50u64 {
             let sid = format!("stress-{}-{}", batch, i);
             frames.push(serde_json::json!({
                 "event": "start",
                 "sid": &sid,
                 "argv": ["git", "status"],
-                "time_ns": 1000000000u64 + (batch * 100) as u64 + i,
+                "time_ns": 1000000000u64 + (batch * 50) as u64 + i,
             }));
             frames.push(serde_json::json!({
                 "event": "def_repo",
@@ -4456,15 +4465,15 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
                 "event": "exit",
                 "sid": &sid,
                 "code": 0,
-                "time_ns": 1000000001u64 + (batch * 100) as u64 + i,
+                "time_ns": 1000000001u64 + (batch * 50) as u64 + i,
             }));
             frames.push(trace_atexit_frame(
                 &sid,
                 0,
-                1000000002u64 + (batch * 100) as u64 + i,
+                1000000002u64 + (batch * 50) as u64 + i,
             ));
         }
-        send_trace_frames(&guard.trace_socket_path, &frames);
+        send_trace_frames(&trace_socket_path, &frames);
         // Small delay to let the daemon process frames.
         thread::sleep(Duration::from_millis(50));
     }
@@ -4491,7 +4500,17 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
         eprintln!("RSS measurement unavailable, verifying daemon survived load");
     }
 
-    guard.shutdown();
+    let status = send_control_request(
+        &repo.daemon_control_socket_path(),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("dedicated daemon should survive trace load");
+    assert!(
+        status.ok,
+        "dedicated daemon rejected status after trace load"
+    );
 }
 
 fn bg_command(repo: &TestRepo, subcommand: &str, extra_args: &[&str]) -> Output {
