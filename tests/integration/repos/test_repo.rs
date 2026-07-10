@@ -1753,6 +1753,10 @@ impl TestRepo {
             .unwrap_or_else(|| self.test_home.clone())
     }
 
+    pub(crate) fn daemon_pid(&self) -> Option<u32> {
+        self.daemon_process.as_ref().map(|daemon| daemon.pid)
+    }
+
     pub(crate) fn daemon_trace_socket_path(&self) -> PathBuf {
         self.daemon_process
             .as_ref()

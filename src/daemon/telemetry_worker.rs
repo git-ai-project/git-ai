@@ -24,7 +24,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
@@ -33,6 +34,13 @@ const DAEMON_LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MAX_DAEMON_LOG_EVENTS_PER_UPLOAD: usize = 1000;
 const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
 const MAX_DAEMON_LOG_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TELEMETRY_BUFFER_EVENTS: usize = 5000;
+const MAX_TELEMETRY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TELEMETRY_EVENT_BYTES: usize = 256 * 1024;
+const MAX_CAS_BUFFER_RECORDS: usize = 1000;
+const MAX_CAS_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CAS_RECORD_BYTES: usize = 2 * 1024 * 1024;
+const METRIC_PERSISTENCE_QUEUE_CAPACITY: usize = 32;
 
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
@@ -44,8 +52,12 @@ struct TelemetryBuffer {
     errors: Vec<ErrorEvent>,
     performances: Vec<PerformanceEvent>,
     messages: Vec<MessageEvent>,
-    metrics: Vec<MetricEvent>,
+    telemetry_event_count: usize,
+    telemetry_bytes: usize,
+    dropped_telemetry_events: u64,
     cas_records: Vec<CasSyncPayload>,
+    cas_bytes: usize,
+    dropped_cas_records: u64,
     daemon_logs: Vec<DaemonLogEvent>,
     daemon_log_bytes: usize,
 }
@@ -77,8 +89,12 @@ impl TelemetryBuffer {
             errors: Vec::new(),
             performances: Vec::new(),
             messages: Vec::new(),
-            metrics: Vec::new(),
+            telemetry_event_count: 0,
+            telemetry_bytes: 0,
+            dropped_telemetry_events: 0,
             cas_records: Vec::new(),
+            cas_bytes: 0,
+            dropped_cas_records: 0,
             daemon_logs: Vec::new(),
             daemon_log_bytes: 0,
         }
@@ -88,13 +104,24 @@ impl TelemetryBuffer {
         self.errors.is_empty()
             && self.performances.is_empty()
             && self.messages.is_empty()
-            && self.metrics.is_empty()
             && self.cas_records.is_empty()
             && self.daemon_logs.is_empty()
+            && self.dropped_telemetry_events == 0
+            && self.dropped_cas_records == 0
     }
 
     fn ingest_envelopes(&mut self, envelopes: Vec<TelemetryEnvelope>) {
         for envelope in envelopes {
+            let event_bytes = telemetry_envelope_approx_bytes(&envelope);
+            if event_bytes > MAX_TELEMETRY_EVENT_BYTES
+                || self.telemetry_event_count >= MAX_TELEMETRY_BUFFER_EVENTS
+                || self.telemetry_bytes.saturating_add(event_bytes) > MAX_TELEMETRY_BUFFER_BYTES
+            {
+                self.dropped_telemetry_events = self.dropped_telemetry_events.saturating_add(1);
+                continue;
+            }
+
+            let mut accepted = true;
             match envelope {
                 TelemetryEnvelope::Error {
                     timestamp,
@@ -136,14 +163,30 @@ impl TelemetryBuffer {
                     });
                 }
                 TelemetryEnvelope::Metrics { events } => {
-                    self.metrics.extend(events);
+                    debug_assert!(events.is_empty(), "metric envelopes must be split first");
+                    accepted = false;
                 }
+            }
+            if accepted {
+                self.telemetry_event_count = self.telemetry_event_count.saturating_add(1);
+                self.telemetry_bytes = self.telemetry_bytes.saturating_add(event_bytes);
             }
         }
     }
 
     fn ingest_cas(&mut self, records: Vec<CasSyncPayload>) {
-        self.cas_records.extend(records);
+        for record in records {
+            let record_bytes = cas_payload_approx_bytes(&record);
+            if record_bytes > MAX_CAS_RECORD_BYTES
+                || self.cas_records.len() >= MAX_CAS_BUFFER_RECORDS
+                || self.cas_bytes.saturating_add(record_bytes) > MAX_CAS_BUFFER_BYTES
+            {
+                self.dropped_cas_records = self.dropped_cas_records.saturating_add(1);
+                continue;
+            }
+            self.cas_bytes = self.cas_bytes.saturating_add(record_bytes);
+            self.cas_records.push(record);
+        }
     }
 
     fn ingest_daemon_logs(&mut self, events: Vec<DaemonLogEvent>) {
@@ -190,12 +233,116 @@ impl TelemetryBuffer {
             errors: std::mem::take(&mut self.errors),
             performances: std::mem::take(&mut self.performances),
             messages: std::mem::take(&mut self.messages),
-            metrics: std::mem::take(&mut self.metrics),
+            telemetry_event_count: std::mem::take(&mut self.telemetry_event_count),
+            telemetry_bytes: std::mem::take(&mut self.telemetry_bytes),
+            dropped_telemetry_events: std::mem::take(&mut self.dropped_telemetry_events),
             cas_records: std::mem::take(&mut self.cas_records),
+            cas_bytes: std::mem::take(&mut self.cas_bytes),
+            dropped_cas_records: std::mem::take(&mut self.dropped_cas_records),
             daemon_logs: std::mem::take(&mut self.daemon_logs),
             daemon_log_bytes: std::mem::take(&mut self.daemon_log_bytes),
         }
     }
+}
+
+fn telemetry_envelope_approx_bytes(envelope: &TelemetryEnvelope) -> usize {
+    const FIXED_FIELDS_BYTES: usize = 128;
+
+    let bytes = match envelope {
+        TelemetryEnvelope::Error {
+            timestamp,
+            message,
+            context,
+        } => timestamp
+            .len()
+            .saturating_add(message.len())
+            .saturating_add(optional_json_approx_bytes(context)),
+        TelemetryEnvelope::Performance {
+            timestamp,
+            operation,
+            context,
+            tags,
+            ..
+        } => {
+            let mut bytes = timestamp
+                .len()
+                .saturating_add(operation.len())
+                .saturating_add(optional_json_approx_bytes(context));
+            if let Some(tags) = tags {
+                for (key, value) in tags {
+                    bytes = bytes
+                        .saturating_add(16)
+                        .saturating_add(key.len())
+                        .saturating_add(value.len());
+                    if bytes > MAX_TELEMETRY_EVENT_BYTES {
+                        break;
+                    }
+                }
+            }
+            bytes
+        }
+        TelemetryEnvelope::Message {
+            timestamp,
+            message,
+            level,
+            context,
+        } => timestamp
+            .len()
+            .saturating_add(message.len())
+            .saturating_add(level.len())
+            .saturating_add(optional_json_approx_bytes(context)),
+        TelemetryEnvelope::Metrics { .. } => MAX_TELEMETRY_EVENT_BYTES.saturating_add(1),
+    };
+
+    FIXED_FIELDS_BYTES.saturating_add(bytes)
+}
+
+fn optional_json_approx_bytes(value: &Option<Value>) -> usize {
+    value.as_ref().map_or(0, |value| {
+        json_value_approx_bytes(value, MAX_TELEMETRY_EVENT_BYTES)
+    })
+}
+
+fn json_value_approx_bytes(value: &Value, limit: usize) -> usize {
+    fn add_bounded(total: usize, bytes: usize, limit: usize) -> usize {
+        total.saturating_add(bytes).min(limit.saturating_add(1))
+    }
+
+    match value {
+        Value::Null | Value::Bool(_) => 8,
+        Value::Number(_) => 32,
+        Value::String(value) => value.len().saturating_add(16),
+        Value::Array(values) => {
+            let mut total = 16usize;
+            for value in values {
+                total = add_bounded(total, json_value_approx_bytes(value, limit), limit);
+                if total > limit {
+                    break;
+                }
+            }
+            total
+        }
+        Value::Object(values) => {
+            let mut total = 16usize;
+            for (key, value) in values {
+                total = add_bounded(total, key.len().saturating_add(16), limit);
+                total = add_bounded(total, json_value_approx_bytes(value, limit), limit);
+                if total > limit {
+                    break;
+                }
+            }
+            total
+        }
+    }
+}
+
+fn cas_payload_approx_bytes(record: &CasSyncPayload) -> usize {
+    const FIXED_FIELDS_BYTES: usize = 128;
+
+    FIXED_FIELDS_BYTES
+        .saturating_add(record.hash.len())
+        .saturating_add(record.data.len())
+        .saturating_add(record.metadata.as_ref().map_or(0, String::len))
 }
 
 fn daemon_log_event_approx_bytes(event: &DaemonLogEvent) -> usize {
@@ -231,38 +378,48 @@ fn daemon_log_field_value_approx_bytes(value: &DaemonLogFieldValue) -> usize {
 #[derive(Clone)]
 pub struct DaemonTelemetryWorkerHandle {
     buffer: Arc<Mutex<TelemetryBuffer>>,
+    metric_tx: SyncSender<Vec<MetricEvent>>,
+    pending_metric_events: Arc<AtomicUsize>,
+    dropped_metric_events: Arc<AtomicU64>,
 }
 
 impl DaemonTelemetryWorkerHandle {
     #[cfg(test)]
     pub fn new_noop() -> Self {
+        Self::new_with_metric_persister(|_| {})
+    }
+
+    #[cfg(test)]
+    fn new_with_metric_persister<Persist>(persist: Persist) -> Self
+    where
+        Persist: Fn(Vec<MetricEvent>) + Send + 'static,
+    {
+        let (metric_tx, pending_metric_events, dropped_metric_events) =
+            spawn_metric_persistence_worker(persist);
         Self {
             buffer: Arc::new(Mutex::new(TelemetryBuffer::new())),
+            metric_tx,
+            pending_metric_events,
+            dropped_metric_events,
         }
     }
 
     /// Submit telemetry envelopes for batched processing.
     pub async fn submit_telemetry(&self, envelopes: Vec<TelemetryEnvelope>) {
         let (buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
-        if !buffered_envelopes.is_empty() {
-            self.buffer
-                .lock()
-                .await
-                .ingest_envelopes(buffered_envelopes);
+        if !buffered_envelopes.is_empty()
+            && let Ok(mut buffer) = self.buffer.try_lock()
+        {
+            buffer.ingest_envelopes(buffered_envelopes);
         }
-
-        if !metric_events.is_empty() {
-            std::mem::drop(tokio::task::spawn_blocking(move || {
-                if let Err(e) = store_metrics_in_db(&metric_events) {
-                    tracing::warn!(%e, "telemetry: failed to persist metrics locally");
-                }
-            }));
-        }
+        self.enqueue_metrics(metric_events);
     }
 
     /// Submit CAS records for batched upload.
     pub async fn submit_cas(&self, records: Vec<CasSyncPayload>) {
-        self.buffer.lock().await.ingest_cas(records);
+        if let Ok(mut buffer) = self.buffer.try_lock() {
+            buffer.ingest_cas(records);
+        }
     }
 
     /// Submit daemon diagnostic events for batched upload.
@@ -270,24 +427,19 @@ impl DaemonTelemetryWorkerHandle {
         if events.is_empty() {
             return;
         }
-        self.buffer.lock().await.ingest_daemon_logs(events);
+        if let Ok(mut buffer) = self.buffer.try_lock() {
+            buffer.ingest_daemon_logs(events);
+        }
     }
 
     /// Returns the current number of metrics waiting for upload.
     ///
     /// Used by the transcript worker for backpressure: if SQLite pending rows
-    /// or the legacy in-memory buffer are above a threshold, the worker yields
-    /// to let the flush loop drain them. Returns `usize::MAX` when the buffer
-    /// lock is contended, so callers default to "wait" rather than "push more".
+    /// or the bounded persistence queue are above a threshold, the worker yields
+    /// to let the flush loop drain them. Returns `usize::MAX` when SQLite is
+    /// contended, so callers default to "wait" rather than "push more".
     pub fn metrics_buffer_len(&self) -> usize {
-        let buffered = self
-            .buffer
-            .try_lock()
-            .map(|buf| buf.metrics.len())
-            .unwrap_or(usize::MAX);
-        if buffered == usize::MAX {
-            return usize::MAX;
-        }
+        let buffered = self.pending_metric_events.load(Ordering::Relaxed);
 
         if !METRICS_UPLOAD_AVAILABLE.load(Ordering::Relaxed) {
             return buffered;
@@ -305,11 +457,9 @@ impl DaemonTelemetryWorkerHandle {
 
     /// Persist metrics directly from an existing blocking worker.
     ///
-    /// Transcript sweeps can emit many batches in a tight loop. Routing those
-    /// through the async telemetry entrypoint creates one fire-and-forget
-    /// `spawn_blocking` task per batch, so a fast producer can retain many raw
-    /// transcript events while SQLite writes catch up. This path keeps the
-    /// producer coupled to the metrics DB write and bounds peak memory.
+    /// Transcript sweeps can emit many batches in a tight loop. This path keeps
+    /// the producer coupled to the metrics DB write, so its watermark advances
+    /// only after persistence and it cannot overflow the best-effort queue.
     pub fn persist_metrics_blocking(&self, events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
         store_metrics_in_db(events)
     }
@@ -327,11 +477,7 @@ impl DaemonTelemetryWorkerHandle {
             buf.ingest_envelopes(buffered_envelopes);
         }
 
-        if !metric_events.is_empty()
-            && let Err(e) = store_metrics_in_db(&metric_events)
-        {
-            tracing::warn!(%e, "telemetry: failed to persist daemon metrics locally");
-        }
+        self.enqueue_metrics(metric_events);
     }
 
     /// Submit CAS records synchronously (best-effort, non-blocking).
@@ -353,6 +499,69 @@ impl DaemonTelemetryWorkerHandle {
             buf.ingest_daemon_logs(events);
         }
     }
+
+    fn enqueue_metrics(&self, events: Vec<MetricEvent>) {
+        if events.is_empty() {
+            return;
+        }
+
+        let event_count = events.len();
+        atomic_saturating_add(&self.pending_metric_events, event_count);
+        match self.metric_tx.try_send(events) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                atomic_saturating_sub(&self.pending_metric_events, event_count);
+                atomic_u64_saturating_add(&self.dropped_metric_events, event_count as u64);
+            }
+        }
+    }
+}
+
+fn spawn_metric_persistence_worker<Persist>(
+    persist: Persist,
+) -> (
+    SyncSender<Vec<MetricEvent>>,
+    Arc<AtomicUsize>,
+    Arc<AtomicU64>,
+)
+where
+    Persist: Fn(Vec<MetricEvent>) + Send + 'static,
+{
+    let (tx, rx) = sync_channel::<Vec<MetricEvent>>(METRIC_PERSISTENCE_QUEUE_CAPACITY);
+    let pending_events = Arc::new(AtomicUsize::new(0));
+    let dropped_events = Arc::new(AtomicU64::new(0));
+    let worker_pending_events = Arc::clone(&pending_events);
+
+    std::thread::Builder::new()
+        .name("git-ai-metrics-persistence".to_string())
+        .spawn(move || {
+            while let Ok(events) = rx.recv() {
+                let event_count = events.len();
+                persist(events);
+                atomic_saturating_sub(&worker_pending_events, event_count);
+            }
+        })
+        .expect("failed to spawn metrics persistence worker");
+
+    (tx, pending_events, dropped_events)
+}
+
+fn atomic_saturating_add(value: &AtomicUsize, amount: usize) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
+}
+
+fn atomic_saturating_sub(value: &AtomicUsize, amount: usize) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(amount))
+    });
+}
+
+fn atomic_u64_saturating_add(value: &AtomicU64, amount: u64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
 }
 
 /// Global handle for the daemon's in-process telemetry worker.
@@ -373,7 +582,7 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
 /// Returns true if the handle was available and envelopes were submitted.
 pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
-        submit_daemon_internal_telemetry_with_handle(handle.clone(), envelopes);
+        submit_daemon_internal_telemetry_with_handle(handle, envelopes);
         true
     } else {
         false
@@ -381,16 +590,10 @@ pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bo
 }
 
 fn submit_daemon_internal_telemetry_with_handle(
-    handle: DaemonTelemetryWorkerHandle,
+    handle: &DaemonTelemetryWorkerHandle,
     envelopes: Vec<TelemetryEnvelope>,
 ) {
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            handle.submit_telemetry(envelopes).await;
-        });
-    } else {
-        handle.submit_telemetry_sync(envelopes);
-    }
+    handle.submit_telemetry_sync(envelopes);
 }
 
 fn split_metric_envelopes(
@@ -413,18 +616,18 @@ fn split_metric_envelopes(
 /// Returns true if the handle was available and records were submitted.
 pub fn submit_daemon_internal_cas(records: Vec<CasSyncPayload>) -> bool {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let handle = handle.clone();
-            runtime.spawn(async move {
-                handle.submit_cas(records).await;
-            });
-        } else {
-            handle.submit_cas_sync(records);
-        }
-        true
+        submit_daemon_internal_cas_with_handle(handle, records)
     } else {
         false
     }
+}
+
+fn submit_daemon_internal_cas_with_handle(
+    handle: &DaemonTelemetryWorkerHandle,
+    records: Vec<CasSyncPayload>,
+) -> bool {
+    handle.submit_cas_sync(records);
+    true
 }
 
 /// Submit daemon diagnostic events from within the daemon process.
@@ -451,15 +654,25 @@ fn submit_daemon_internal_daemon_logs_with_handle(
 /// to their respective destinations (Sentry, PostHog, metrics API, CAS API).
 pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
     let buffer = Arc::new(Mutex::new(TelemetryBuffer::new()));
+    let (metric_tx, pending_metric_events, dropped_metric_events) =
+        spawn_metric_persistence_worker(|events| {
+            if let Err(e) = store_metrics_in_db(&events) {
+                tracing::warn!(%e, "telemetry: failed to persist metrics locally");
+            }
+        });
     let handle = DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
+        metric_tx,
+        pending_metric_events,
+        dropped_metric_events,
     };
     let daemon_id = crate::uuid::generate_v4();
+    let flush_dropped_metric_events = Arc::clone(&handle.dropped_metric_events);
 
     spawn_metrics_metadata_backfill();
 
     tokio::spawn(async move {
-        telemetry_flush_loop(buffer, daemon_id).await;
+        telemetry_flush_loop(buffer, daemon_id, flush_dropped_metric_events).await;
     });
 
     handle
@@ -502,7 +715,11 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
     Ok(())
 }
 
-async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: String) {
+async fn telemetry_flush_loop(
+    buffer: Arc<Mutex<TelemetryBuffer>>,
+    daemon_id: String,
+    dropped_metric_events: Arc<AtomicU64>,
+) {
     let mut ticker = interval(FLUSH_INTERVAL);
     let started_at = std::time::Instant::now();
     let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
@@ -511,6 +728,15 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
 
     loop {
         ticker.tick().await;
+
+        let dropped_metrics = dropped_metric_events.swap(0, Ordering::Relaxed);
+        if dropped_metrics > 0 {
+            tracing::warn!(
+                dropped_metrics,
+                queue_capacity = METRIC_PERSISTENCE_QUEUE_CAPACITY,
+                "telemetry: metric persistence queue was full"
+            );
+        }
 
         let now = std::time::Instant::now();
         let heartbeat = if now >= next_heartbeat_at && daemon_log_upload_enabled() {
@@ -560,13 +786,16 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
 }
 
 fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
+    if batch.dropped_telemetry_events > 0 || batch.dropped_cas_records > 0 {
+        tracing::warn!(
+            dropped_telemetry_events = batch.dropped_telemetry_events,
+            dropped_cas_records = batch.dropped_cas_records,
+            "telemetry: bounded buffer dropped oversized or excess events"
+        );
+    }
+
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
-
-    // Flush metrics (always processed — uploaded or stored in SQLite)
-    if !batch.metrics.is_empty() {
-        flush_metrics(&batch.metrics);
-    }
 
     // Flush Sentry events (errors, performance, messages)
     let has_sentry_or_posthog =
@@ -596,35 +825,6 @@ fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonL
         Vec::new()
     } else {
         dispatch_daemon_log_upload(batch.daemon_logs, daemon_id, &distinct_id)
-    }
-}
-
-fn flush_metrics(events: &[MetricEvent]) {
-    let context = ApiContext::new(None);
-    let api_base_url = context.base_url.clone();
-    let client = ApiClient::new(context);
-
-    let should_upload = metrics_upload_allowed(&api_base_url, &client);
-    METRICS_UPLOAD_AVAILABLE.store(should_upload, Ordering::Relaxed);
-
-    let mut upload_failed = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-
-    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-        if let Err(e) = store_metrics_in_db(chunk) {
-            tracing::warn!(%e, "telemetry: failed to persist metrics before upload");
-            continue;
-        }
-
-        if should_upload && !upload_failed && std::time::Instant::now() < deadline {
-            match flush_pending_metrics_from_db(&client, deadline) {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(%e, "telemetry: failed to upload pending metrics");
-                    upload_failed = true;
-                }
-            }
-        }
     }
 }
 
@@ -1554,41 +1754,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_daemon_internal_telemetry_spawns_when_runtime_exists() {
+    async fn daemon_internal_telemetry_does_not_defer_when_buffer_is_busy() {
         let handle = DaemonTelemetryWorkerHandle::new_noop();
         let guard = handle.buffer.lock().await;
 
         submit_daemon_internal_telemetry_with_handle(
-            handle.clone(),
+            &handle,
             vec![test_message_envelope("runtime")],
         );
 
         assert!(guard.messages.is_empty());
         drop(guard);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if handle.buffer.lock().await.messages.len() == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        assert!(
+            handle.buffer.lock().await.messages.is_empty(),
+            "contended telemetry was retained in a deferred task"
+        );
     }
 
     #[test]
-    fn submit_daemon_internal_telemetry_waits_without_runtime() {
+    fn daemon_internal_telemetry_submits_immediately_when_buffer_is_available() {
         let handle = DaemonTelemetryWorkerHandle::new_noop();
 
-        submit_daemon_internal_telemetry_with_handle(
-            handle.clone(),
-            vec![test_message_envelope("sync")],
-        );
+        submit_daemon_internal_telemetry_with_handle(&handle, vec![test_message_envelope("sync")]);
 
         let guard = handle.buffer.try_lock().unwrap();
         assert_eq!(guard.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn daemon_internal_cas_does_not_defer_when_buffer_is_busy() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+        let guard = handle.buffer.lock().await;
+
+        let submitted = submit_daemon_internal_cas_with_handle(
+            &handle,
+            vec![CasSyncPayload {
+                hash: "hash".to_string(),
+                data: "data".to_string(),
+                metadata: None,
+            }],
+        );
+
+        assert!(submitted);
+        assert!(guard.cas_records.is_empty());
+        drop(guard);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            handle.buffer.lock().await.cas_records.is_empty(),
+            "contended CAS payload was retained in a deferred task"
+        );
+    }
+
+    #[test]
+    fn metric_persistence_queue_is_bounded_while_database_is_busy() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let block_first = Arc::new(AtomicBool::new(true));
+        let worker_block_first = Arc::clone(&block_first);
+        let handle = DaemonTelemetryWorkerHandle::new_with_metric_persister(move |_| {
+            if worker_block_first.swap(false, Ordering::Relaxed) {
+                let _ = started_tx.try_send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            }
+        });
+
+        handle.enqueue_metrics(vec![metric_event_with_payload(16)]);
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("persistence worker should receive first metric");
+
+        for _ in 0..(METRIC_PERSISTENCE_QUEUE_CAPACITY + 10) {
+            handle.enqueue_metrics(vec![metric_event_with_payload(16)]);
+        }
+
+        assert_eq!(
+            handle.pending_metric_events.load(Ordering::Relaxed),
+            METRIC_PERSISTENCE_QUEUE_CAPACITY + 1
+        );
+        assert_eq!(handle.dropped_metric_events.load(Ordering::Relaxed), 10);
+
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while handle.pending_metric_events.load(Ordering::Relaxed) > 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(handle.pending_metric_events.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -2272,6 +2531,65 @@ mod tests {
         assert_eq!(buffer.daemon_logs.len(), 1);
         assert!(buffer.daemon_log_bytes <= MAX_DAEMON_LOG_BUFFER_BYTES);
         assert!(buffer.daemon_logs[0].message.starts_with("new-"));
+    }
+
+    #[test]
+    fn telemetry_buffer_caps_generic_event_count() {
+        let mut buffer = TelemetryBuffer::new();
+        let envelopes = (0..5002)
+            .map(|index| test_message_envelope(&index.to_string()))
+            .collect();
+
+        buffer.ingest_envelopes(envelopes);
+
+        assert!(buffer.messages.len() <= 5000);
+        assert_eq!(buffer.dropped_telemetry_events, 2);
+    }
+
+    #[test]
+    fn telemetry_buffer_caps_generic_event_bytes() {
+        let mut buffer = TelemetryBuffer::new();
+        let large_message = "x".repeat(4 * 1024 * 1024);
+        let envelopes = (0..3)
+            .map(|_| test_message_envelope(&large_message))
+            .collect();
+
+        buffer.ingest_envelopes(envelopes);
+
+        let retained_bytes = buffer
+            .messages
+            .iter()
+            .map(|event| event.timestamp.len() + event.message.len() + event.level.len())
+            .sum::<usize>();
+        assert!(retained_bytes <= 8 * 1024 * 1024);
+        assert_eq!(buffer.dropped_telemetry_events, 3);
+    }
+
+    #[test]
+    fn telemetry_buffer_caps_cas_count_and_bytes() {
+        let mut buffer = TelemetryBuffer::new();
+        let records = (0..1002)
+            .map(|index| CasSyncPayload {
+                hash: index.to_string(),
+                data: "x".repeat(16 * 1024),
+                metadata: None,
+            })
+            .collect();
+
+        buffer.ingest_cas(records);
+
+        let retained_bytes = buffer
+            .cas_records
+            .iter()
+            .map(|record| {
+                record.hash.len()
+                    + record.data.len()
+                    + record.metadata.as_ref().map_or(0, String::len)
+            })
+            .sum::<usize>();
+        assert!(buffer.cas_records.len() <= 1000);
+        assert!(retained_bytes <= 8 * 1024 * 1024);
+        assert!(buffer.dropped_cas_records > 0);
     }
 
     #[test]

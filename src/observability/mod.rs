@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::daemon::daemon_log_layer::{MAX_MESSAGE_LENGTH, bounded_copy, bounded_display_string};
 use crate::metrics::MetricEvent;
 
 pub mod performance_targets;
@@ -24,7 +25,7 @@ fn submit_telemetry_envelope(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
 pub fn log_error(error: &dyn std::error::Error, context: Option<serde_json::Value>) {
     let envelope = crate::daemon::TelemetryEnvelope::Error {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        message: error.to_string(),
+        message: bounded_display_string(error, MAX_MESSAGE_LENGTH),
         context,
     };
     submit_telemetry_envelope(vec![envelope]);
@@ -52,7 +53,7 @@ pub fn log_performance(
 pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value>) {
     let envelope = crate::daemon::TelemetryEnvelope::Message {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        message: message.to_string(),
+        message: bounded_copy(message, MAX_MESSAGE_LENGTH),
         level: level.to_string(),
         context,
     };

@@ -5,6 +5,11 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
+use crate::daemon::daemon_log_layer::{
+    MAX_FIELD_VALUE_LENGTH, MAX_FIELDS_PER_EVENT, MAX_MESSAGE_LENGTH, bounded_copy,
+    bounded_debug_string, sanitize_log_string,
+};
+
 /// A tracing Layer that intercepts ERROR-level events and routes them
 /// to the daemon's telemetry worker as `TelemetryEnvelope::Error` events,
 /// which get forwarded to both enterprise and OSS Sentry DSNs.
@@ -22,48 +27,66 @@ impl MessageVisitor {
             fields: serde_json::Map::new(),
         }
     }
+
+    fn record_string(&mut self, field: &Field, value: String) {
+        if field.name() == "message" {
+            self.message = sanitize_log_string(&value, MAX_MESSAGE_LENGTH);
+        } else if self.fields.len() < MAX_FIELDS_PER_EVENT || self.fields.contains_key(field.name())
+        {
+            self.fields.insert(
+                field.name().to_string(),
+                serde_json::Value::String(sanitize_log_string(&value, MAX_FIELD_VALUE_LENGTH)),
+            );
+        }
+    }
+
+    fn can_record_field(&self, field: &Field) -> bool {
+        self.fields.len() < MAX_FIELDS_PER_EVENT || self.fields.contains_key(field.name())
+    }
 }
 
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{:?}", value);
+        let max_len = if field.name() == "message" {
+            MAX_MESSAGE_LENGTH
         } else {
-            self.fields.insert(
-                field.name().to_string(),
-                serde_json::Value::String(format!("{:?}", value)),
-            );
-        }
+            MAX_FIELD_VALUE_LENGTH
+        };
+        self.record_string(field, bounded_debug_string(value, max_len));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
+        let max_len = if field.name() == "message" {
+            MAX_MESSAGE_LENGTH
         } else {
+            MAX_FIELD_VALUE_LENGTH
+        };
+        self.record_string(field, bounded_copy(value, max_len));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        if self.can_record_field(field) {
             self.fields.insert(
                 field.name().to_string(),
-                serde_json::Value::String(value.to_string()),
+                serde_json::Value::Number(value.into()),
             );
         }
     }
 
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::Value::Number(value.into()),
-        );
-    }
-
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::Value::Number(value.into()),
-        );
+        if self.can_record_field(field) {
+            self.fields.insert(
+                field.name().to_string(),
+                serde_json::Value::Number(value.into()),
+            );
+        }
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields
-            .insert(field.name().to_string(), serde_json::Value::Bool(value));
+        if self.can_record_field(field) {
+            self.fields
+                .insert(field.name().to_string(), serde_json::Value::Bool(value));
+        }
     }
 }
 

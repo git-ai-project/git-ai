@@ -11,11 +11,11 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
-const MAX_MESSAGE_LENGTH: usize = 16_000;
+pub(crate) const MAX_MESSAGE_LENGTH: usize = 16_000;
 const MAX_TARGET_LENGTH: usize = 512;
 const MAX_FIELD_KEY_LENGTH: usize = 256;
-const MAX_FIELD_VALUE_LENGTH: usize = 4096;
-const MAX_FIELDS_PER_EVENT: usize = 64;
+pub(crate) const MAX_FIELD_VALUE_LENGTH: usize = 4096;
+pub(crate) const MAX_FIELDS_PER_EVENT: usize = 64;
 const MAX_SECRET_SCAN_TOKEN_LENGTH: usize = 90;
 const DAEMON_LOG_CAPTURE_ELIGIBILITY_TTL: Duration = Duration::from_secs(30);
 
@@ -200,7 +200,7 @@ fn sanitize_field_value(value: DaemonLogFieldValue) -> DaemonLogFieldValue {
     }
 }
 
-fn sanitize_log_string(value: &str, max_len: usize) -> String {
+pub(crate) fn sanitize_log_string(value: &str, max_len: usize) -> String {
     let (redacted, _) = redact_secrets_in_text(value);
     truncate_string(&redacted, max_len)
 }
@@ -217,17 +217,17 @@ fn bounded_raw_len(max_len: usize) -> usize {
     max_len.saturating_add(MAX_SECRET_SCAN_TOKEN_LENGTH)
 }
 
-fn bounded_copy(value: &str, max_len: usize) -> String {
+pub(crate) fn bounded_copy(value: &str, max_len: usize) -> String {
     truncate_string(value, bounded_raw_len(max_len))
 }
 
-fn bounded_debug_string(value: &dyn std::fmt::Debug, max_len: usize) -> String {
+pub(crate) fn bounded_debug_string(value: &dyn std::fmt::Debug, max_len: usize) -> String {
     let mut writer = BoundedStringWriter::new(bounded_raw_len(max_len));
     let _ = write!(&mut writer, "{value:?}");
     writer.into_string()
 }
 
-fn bounded_display_string(value: &dyn std::fmt::Display, max_len: usize) -> String {
+pub(crate) fn bounded_display_string(value: &dyn std::fmt::Display, max_len: usize) -> String {
     let mut writer = BoundedStringWriter::new(bounded_raw_len(max_len));
     let _ = write!(&mut writer, "{value}");
     writer.into_string()
