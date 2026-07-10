@@ -3,12 +3,35 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
+const MAX_REF_FILE_BYTES: u64 = 4 * 1_024;
+// Above these fast-path limits callers fall back to a Git plumbing command.
+// Keep them low because repository actors can resolve different repos concurrently.
+const MAX_PACKED_REFS_BYTES: u64 = 1_024 * 1_024;
+const MAX_LOOSE_OBJECT_COMPRESSED_BYTES: u64 = 8 * 1_024 * 1_024;
+const MAX_LOOSE_OBJECT_DECOMPRESSED_BYTES: u64 = 4 * 1_024 * 1_024;
+const MAX_LOOSE_OBJECT_HEADER_BYTES: u64 = 4 * 1_024;
+
 fn is_valid_git_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn oid_byte_len(oid: &str) -> usize {
     oid.len() / 2
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+    let file = fs::File::open(path).ok()?;
+    let byte_len = file.metadata().ok()?.len();
+    if byte_len > max_bytes {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(byte_len as usize);
+    file.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max_bytes).then_some(bytes)
+}
+
+fn read_bounded_text_file(path: &Path, max_bytes: u64) -> Option<String> {
+    String::from_utf8(read_bounded_file(path, max_bytes)?).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +63,7 @@ impl<'a> FastRefReader<'a> {
     /// detached HEAD, or `None` if HEAD can't be read or has unexpected format.
     pub fn try_read_head(&self) -> Option<HeadKind> {
         let head_path = self.git_dir.join("HEAD");
-        let content = fs::read_to_string(&head_path).ok()?;
+        let content = read_bounded_text_file(&head_path, MAX_REF_FILE_BYTES)?;
         let trimmed = content.trim();
 
         if let Some(refname) = trimmed.strip_prefix("ref: ") {
@@ -73,7 +96,7 @@ impl<'a> FastRefReader<'a> {
         // Check loose refs: common_dir first, then git_dir
         for base in [self.common_dir, self.git_dir] {
             let path = base.join(refname);
-            if let Ok(contents) = fs::read_to_string(&path) {
+            if let Some(contents) = read_bounded_text_file(&path, MAX_REF_FILE_BYTES) {
                 let candidate = contents.trim();
                 if is_valid_git_oid(candidate) {
                     return Some(candidate.to_string());
@@ -93,7 +116,7 @@ impl<'a> FastRefReader<'a> {
     fn resolve_without_recursion(&self, refname: &str) -> Option<String> {
         for base in [self.common_dir, self.git_dir] {
             let path = base.join(refname);
-            if let Ok(contents) = fs::read_to_string(&path) {
+            if let Some(contents) = read_bounded_text_file(&path, MAX_REF_FILE_BYTES) {
                 let candidate = contents.trim();
                 if is_valid_git_oid(candidate) {
                     return Some(candidate.to_string());
@@ -105,7 +128,7 @@ impl<'a> FastRefReader<'a> {
 
     fn try_packed_ref(&self, refname: &str) -> Option<String> {
         let packed_refs_path = self.common_dir.join("packed-refs");
-        let contents = fs::read_to_string(packed_refs_path).ok()?;
+        let contents = read_bounded_text_file(&packed_refs_path, MAX_PACKED_REFS_BYTES)?;
 
         for line in contents.lines() {
             let line = line.trim();
@@ -156,21 +179,41 @@ impl<'a> FastObjectReader<'a> {
         )
     }
 
-    fn decompress_object(&self, oid: &str) -> Option<Vec<u8>> {
+    fn object_decoder(&self, oid: &str) -> Option<ZlibDecoder<fs::File>> {
         if self.has_alternates() {
             return None;
         }
         let path = self.object_path(oid)?;
-        let compressed = fs::read(&path).ok()?;
-        let mut decoder = ZlibDecoder::new(&compressed[..]);
+        let file = fs::File::open(path).ok()?;
+        if file.metadata().ok()?.len() > MAX_LOOSE_OBJECT_COMPRESSED_BYTES {
+            return None;
+        }
+        Some(ZlibDecoder::new(file))
+    }
+
+    fn decompress_object_with_limit(&self, oid: &str, max_bytes: u64) -> Option<Vec<u8>> {
+        let decoder = self.object_decoder(oid)?;
         let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed).ok()?;
-        Some(decompressed)
+        decoder
+            .take(max_bytes + 1)
+            .read_to_end(&mut decompressed)
+            .ok()?;
+        (decompressed.len() as u64 <= max_bytes).then_some(decompressed)
+    }
+
+    fn read_object_header(&self, oid: &str) -> Option<Vec<u8>> {
+        let decoder = self.object_decoder(oid)?;
+        let mut prefix = Vec::new();
+        decoder
+            .take(MAX_LOOSE_OBJECT_HEADER_BYTES)
+            .read_to_end(&mut prefix)
+            .ok()?;
+        Some(prefix)
     }
 
     /// Read just the type from a loose object header without fully decompressing the content.
     pub fn try_read_object_type(&self, oid: &str) -> Option<String> {
-        let data = self.decompress_object(oid)?;
+        let data = self.read_object_header(oid)?;
         let null_pos = data.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&data[..null_pos]).ok()?;
         let type_str = header.split(' ').next()?;
@@ -181,27 +224,33 @@ impl<'a> FastObjectReader<'a> {
     ///
     /// Returns None if the object doesn't exist (packed), isn't a blob, or can't be read.
     pub fn try_read_blob(&self, oid: &str) -> Option<Vec<u8>> {
-        let data = self.decompress_object(oid)?;
+        let mut data =
+            self.decompress_object_with_limit(oid, MAX_LOOSE_OBJECT_DECOMPRESSED_BYTES)?;
         let null_pos = data.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&data[..null_pos]).ok()?;
         if !header.starts_with("blob ") {
             return None;
         }
-        Some(data[null_pos + 1..].to_vec())
+        let content_start = null_pos + 1;
+        let content_len = data.len().saturating_sub(content_start);
+        data.copy_within(content_start.., 0);
+        data.truncate(content_len);
+        Some(data)
     }
 
     /// Read a loose commit object and extract its tree OID.
     ///
     /// Commit format after header: `tree {hex-oid}\n...`
     pub fn try_read_commit_tree_oid(&self, commit_oid: &str) -> Option<String> {
-        let data = self.decompress_object(commit_oid)?;
+        let data = self.read_object_header(commit_oid)?;
         let null_pos = data.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&data[..null_pos]).ok()?;
         if !header.starts_with("commit ") {
             return None;
         }
-        let body = std::str::from_utf8(&data[null_pos + 1..]).ok()?;
-        let first_line = body.lines().next()?;
+        let body = &data[null_pos + 1..];
+        let first_line_end = body.iter().position(|byte| *byte == b'\n')?;
+        let first_line = std::str::from_utf8(&body[..first_line_end]).ok()?;
         let tree_oid = first_line.strip_prefix("tree ")?;
         let tree_oid = tree_oid.trim();
         if is_valid_git_oid(tree_oid) {
@@ -248,7 +297,8 @@ impl<'a> FastObjectReader<'a> {
 
     /// Find a named entry in a tree object, returning its OID.
     fn find_tree_entry(&self, tree_oid: &str, name: &str) -> Option<String> {
-        let data = self.decompress_object(tree_oid)?;
+        let data =
+            self.decompress_object_with_limit(tree_oid, MAX_LOOSE_OBJECT_DECOMPRESSED_BYTES)?;
         let null_pos = data.iter().position(|&b| b == 0)?;
         let header = std::str::from_utf8(&data[..null_pos]).ok()?;
         if !header.starts_with("tree ") {
@@ -374,6 +424,17 @@ mod tests {
     }
 
     #[test]
+    fn test_oversized_head_returns_none() {
+        let temp = setup_git_dir();
+        let contents = format!("ref: refs/heads/main{}", " ".repeat(4 * 1_024));
+        fs::write(temp.path().join("HEAD"), contents).unwrap();
+
+        let reader = FastRefReader::new(temp.path(), temp.path());
+
+        assert_eq!(reader.try_read_head(), None);
+    }
+
+    #[test]
     fn test_resolve_loose_ref() {
         let temp = setup_git_dir();
         let sha = "abc123def456789012345678901234567890abcd";
@@ -382,6 +443,21 @@ mod tests {
         let reader = FastRefReader::new(temp.path(), temp.path());
         let result = reader.try_resolve_ref("refs/heads/main");
         assert_eq!(result, Some(sha.to_string()));
+    }
+
+    #[test]
+    fn test_oversized_loose_ref_returns_none() {
+        let temp = setup_git_dir();
+        let sha = "abc123def456789012345678901234567890abcd";
+        fs::write(
+            temp.path().join("refs/heads/main"),
+            format!("{sha}{}", " ".repeat(4 * 1_024)),
+        )
+        .unwrap();
+
+        let reader = FastRefReader::new(temp.path(), temp.path());
+
+        assert_eq!(reader.try_resolve_ref("refs/heads/main"), None);
     }
 
     #[test]
@@ -397,6 +473,19 @@ mod tests {
         let reader = FastRefReader::new(temp.path(), temp.path());
         let result = reader.try_resolve_ref("refs/heads/packed-branch");
         assert_eq!(result, Some(sha.to_string()));
+    }
+
+    #[test]
+    fn test_oversized_packed_refs_returns_none() {
+        let temp = setup_git_dir();
+        let sha = "abc123def456789012345678901234567890abcd";
+        let mut packed = format!("{sha} refs/heads/main\n").into_bytes();
+        packed.resize(1_024 * 1_024 + 1, b'\n');
+        fs::write(temp.path().join("packed-refs"), packed).unwrap();
+
+        let reader = FastRefReader::new(temp.path(), temp.path());
+
+        assert_eq!(reader.try_resolve_ref("refs/heads/main"), None);
     }
 
     #[test]
@@ -519,6 +608,18 @@ mod tests {
     }
 
     #[test]
+    fn test_object_type_reads_header_without_expanding_oversized_blob() {
+        let temp = setup_git_dir();
+        let sha = "abc123def456789012345678901234567890abcd";
+        write_loose_object(temp.path(), sha, "blob", &vec![b'x'; 4 * 1_024 * 1_024 + 1]);
+
+        let reader = FastObjectReader::new(temp.path());
+
+        assert_eq!(reader.try_read_object_type(sha), Some("blob".to_string()));
+        assert!(reader.try_read_blob(sha).is_none());
+    }
+
+    #[test]
     fn test_read_commit_tree_oid() {
         let temp = setup_git_dir();
         let commit_sha = "abc123def456789012345678901234567890abcd";
@@ -532,6 +633,33 @@ mod tests {
         let reader = FastObjectReader::new(temp.path());
         let result = reader.try_read_commit_tree_oid(commit_sha);
         assert_eq!(result, Some(tree_sha.to_string()));
+    }
+
+    #[test]
+    fn test_commit_tree_oid_ignores_truncated_utf8_after_tree_line() {
+        let temp = setup_git_dir();
+        let commit_sha = "abc123def456789012345678901234567890abcd";
+        let tree_sha = "def456789012345678901234567890abcdef0123";
+        let tree_line = format!("tree {tree_sha}\n");
+        let content_len = 5_000;
+        let object_header_len = format!("commit {content_len}\0").len();
+        let split_offset = MAX_LOOSE_OBJECT_HEADER_BYTES as usize - object_header_len - 1;
+        let mut commit_body = tree_line.into_bytes();
+        commit_body.resize(split_offset, b'x');
+        commit_body.extend_from_slice(&[0xc3, 0xa9]);
+        commit_body.resize(content_len, b'y');
+        assert_eq!(
+            object_header_len + split_offset + 1,
+            MAX_LOOSE_OBJECT_HEADER_BYTES as usize
+        );
+        write_loose_object(temp.path(), commit_sha, "commit", &commit_body);
+
+        let reader = FastObjectReader::new(temp.path());
+
+        assert_eq!(
+            reader.try_read_commit_tree_oid(commit_sha),
+            Some(tree_sha.to_string())
+        );
     }
 
     #[test]
