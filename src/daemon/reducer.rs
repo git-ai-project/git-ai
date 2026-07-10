@@ -5,6 +5,9 @@ use crate::daemon::domain::{
 use crate::error::GitAiError;
 use std::path::{Path, PathBuf};
 
+const MAX_RETAINED_REFS_PER_FAMILY: usize = 4_096;
+const MAX_RETAINED_WORKTREES_PER_FAMILY: usize = 256;
+
 pub fn reduce_family_command(
     state: &mut FamilyState,
     cmd: NormalizedCommand,
@@ -84,6 +87,16 @@ fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
         if change.new.trim().is_empty() || is_zero_oid(&change.new) {
             state.refs.remove(&change.reference);
         } else {
+            if !state.refs.contains_key(&change.reference)
+                && state.refs.len() >= MAX_RETAINED_REFS_PER_FAMILY
+                && let Some(evicted) = state
+                    .refs
+                    .keys()
+                    .find(|reference| reference.as_str() != "HEAD")
+                    .cloned()
+            {
+                state.refs.remove(&evicted);
+            }
             state
                 .refs
                 .insert(change.reference.clone(), change.new.clone());
@@ -145,6 +158,19 @@ fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
             last_updated_ns: cmd.finished_at_ns,
         },
     );
+    if state.worktrees.len() > MAX_RETAINED_WORKTREES_PER_FAMILY
+        && let Some(oldest) = state
+            .worktrees
+            .iter()
+            .min_by(|(left_path, left), (right_path, right)| {
+                left.last_updated_ns
+                    .cmp(&right.last_updated_ns)
+                    .then_with(|| left_path.cmp(right_path))
+            })
+            .map(|(path, _)| path.clone())
+    {
+        state.worktrees.remove(&oldest);
+    }
 }
 
 fn unique_branch_for_head_change(
@@ -369,6 +395,58 @@ mod tests {
         let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
 
         assert!(!state.refs.contains_key("refs/heads/feature"));
+    }
+
+    #[test]
+    fn reducer_bounds_retained_refs_and_preserves_head_and_latest_change() {
+        const EXPECTED_LIMIT: usize = 4_096;
+
+        let mut state = family_state();
+        state.refs.insert("HEAD".to_string(), "head".to_string());
+        let registry = AnalyzerRegistry::new();
+        let mut command = normalized();
+        command.ref_changes = (1..=EXPECTED_LIMIT)
+            .map(|index| RefChange {
+                reference: format!("refs/heads/generated-{index}"),
+                old: String::new(),
+                new: format!("{index:040x}"),
+            })
+            .collect();
+
+        reduce_family_command(&mut state, command, &registry).unwrap();
+
+        assert_eq!(state.refs.len(), EXPECTED_LIMIT);
+        assert!(state.refs.contains_key("HEAD"));
+        assert!(
+            state
+                .refs
+                .contains_key(&format!("refs/heads/generated-{EXPECTED_LIMIT}"))
+        );
+    }
+
+    #[test]
+    fn reducer_bounds_retained_worktrees_and_keeps_most_recent() {
+        const EXPECTED_LIMIT: usize = 256;
+
+        let mut state = family_state();
+        let registry = AnalyzerRegistry::new();
+        for index in 0..=EXPECTED_LIMIT {
+            let mut command = normalized();
+            command.worktree = Some(PathBuf::from(format!("/missing/worktree-{index}")));
+            command.finished_at_ns = index as u128;
+            command.ref_changes.clear();
+            reduce_family_command(&mut state, command, &registry).unwrap();
+        }
+
+        assert_eq!(state.worktrees.len(), EXPECTED_LIMIT);
+        assert!(
+            !state
+                .worktrees
+                .contains_key(&PathBuf::from("/missing/worktree-0"))
+        );
+        assert!(state.worktrees.contains_key(&PathBuf::from(format!(
+            "/missing/worktree-{EXPECTED_LIMIT}"
+        ))));
     }
 
     #[test]

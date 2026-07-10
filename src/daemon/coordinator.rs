@@ -6,15 +6,62 @@ use crate::daemon::family_actor::{FamilyActorHandle, spawn_family_actor};
 use crate::daemon::git_backend::GitBackend;
 use crate::daemon::global_actor::{GlobalActorHandle, spawn_global_actor};
 use crate::error::GitAiError;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+const MAX_RETAINED_FAMILY_ACTORS: usize = 1_024;
+
+struct FamilyActorRegistry {
+    actors: HashMap<String, FamilyActorHandle>,
+    insertion_order: VecDeque<String>,
+    saturated: bool,
+}
+
+impl FamilyActorRegistry {
+    fn new() -> Self {
+        Self {
+            actors: HashMap::new(),
+            insertion_order: VecDeque::new(),
+            saturated: false,
+        }
+    }
+
+    fn evict_oldest_idle(&mut self) -> Option<FamilyActorHandle> {
+        for _ in 0..self.insertion_order.len() {
+            let key = self.insertion_order.pop_front()?;
+            let Some(actor) = self.actors.get(&key) else {
+                continue;
+            };
+            if actor.is_closed() || actor.is_idle_for_eviction() {
+                return self.actors.remove(&key);
+            }
+            self.insertion_order.push_back(key);
+        }
+        None
+    }
+}
+
+fn configured_family_actor_capacity() -> usize {
+    let is_test_daemon = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
+    if is_test_daemon
+        && let Some(capacity) = std::env::var("GIT_AI_TEST_MAX_FAMILY_ACTORS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|capacity| *capacity > 0)
+    {
+        return capacity;
+    }
+    MAX_RETAINED_FAMILY_ACTORS
+}
+
 pub struct Coordinator<B: GitBackend> {
     backend: Arc<B>,
     global: GlobalActorHandle,
-    families: Mutex<HashMap<String, FamilyActorHandle>>,
+    families: Mutex<FamilyActorRegistry>,
+    max_family_actors: usize,
 }
 
 impl<B: GitBackend> Coordinator<B> {
@@ -22,7 +69,8 @@ impl<B: GitBackend> Coordinator<B> {
         Self {
             backend,
             global: spawn_global_actor(),
-            families: Mutex::new(HashMap::new()),
+            families: tokio::sync::Mutex::new(FamilyActorRegistry::new()),
+            max_family_actors: configured_family_actor_capacity(),
         }
     }
 
@@ -72,8 +120,8 @@ impl<B: GitBackend> Coordinator<B> {
 
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
         let actors = {
-            let map = self.families.lock().await;
-            map.values().cloned().collect::<Vec<_>>()
+            let registry = self.families.lock().await;
+            registry.actors.values().cloned().collect::<Vec<_>>()
         };
         for actor in actors {
             let _ = actor.shutdown().await;
@@ -82,12 +130,36 @@ impl<B: GitBackend> Coordinator<B> {
     }
 
     async fn get_or_create_family_actor(&self, family_key: FamilyKey) -> FamilyActorHandle {
-        let mut map = self.families.lock().await;
-        if let Some(existing) = map.get(&family_key.0) {
+        let mut registry = self.families.lock().await;
+        if let Some(existing) = registry.actors.get(&family_key.0) {
             return existing.clone();
         }
+
+        while registry.actors.len() >= self.max_family_actors {
+            let Some(evicted) = registry.evict_oldest_idle() else {
+                if !registry.saturated {
+                    registry.saturated = true;
+                    tracing::warn!(
+                        capacity = self.max_family_actors,
+                        "family actor registry is full; using a transient actor for a new repository"
+                    );
+                }
+                return spawn_family_actor(family_key);
+            };
+            tracing::debug!(
+                family = %evicted.family_key.0,
+                capacity = self.max_family_actors,
+                "evicted idle family actor"
+            );
+            drop(evicted);
+        }
+
+        registry.saturated = false;
         let created = spawn_family_actor(family_key.clone());
-        map.insert(family_key.0.clone(), created.clone());
+        registry.insertion_order.push_back(family_key.0.clone());
+        registry
+            .actors
+            .insert(family_key.0.clone(), created.clone());
         created
     }
 }
@@ -212,5 +284,57 @@ mod tests {
         assert_eq!(f.seq, 1);
 
         coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn family_actor_registry_is_bounded() {
+        const EXPECTED_FAMILY_ACTOR_LIMIT: usize = 1_024;
+
+        let coordinator = Coordinator::new(Arc::new(MockBackend::default()));
+        for index in 0..=EXPECTED_FAMILY_ACTOR_LIMIT {
+            let actor = coordinator
+                .get_or_create_family_actor(FamilyKey::new(format!("family-{index}")))
+                .await;
+            drop(actor);
+        }
+
+        assert_eq!(
+            coordinator.families.lock().await.actors.len(),
+            EXPECTED_FAMILY_ACTOR_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn family_actor_registry_never_evicts_a_borrowed_actor() {
+        let coordinator = Coordinator {
+            backend: Arc::new(MockBackend::default()),
+            global: spawn_global_actor(),
+            families: tokio::sync::Mutex::new(FamilyActorRegistry::new()),
+            max_family_actors: 1,
+        };
+        let active = coordinator
+            .get_or_create_family_actor(FamilyKey::new("active"))
+            .await;
+
+        let transient = coordinator
+            .get_or_create_family_actor(FamilyKey::new("transient"))
+            .await;
+        {
+            let registry = coordinator.families.lock().await;
+            assert!(registry.actors.contains_key("active"));
+            assert!(!registry.actors.contains_key("transient"));
+        }
+        drop(transient);
+
+        active.apply_checkpoint().await.unwrap();
+        drop(active);
+        let replacement = coordinator
+            .get_or_create_family_actor(FamilyKey::new("replacement"))
+            .await;
+        let registry = coordinator.families.lock().await;
+        assert!(!registry.actors.contains_key("active"));
+        assert!(registry.actors.contains_key("replacement"));
+        drop(registry);
+        replacement.shutdown().await.unwrap();
     }
 }

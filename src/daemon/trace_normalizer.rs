@@ -59,6 +59,7 @@ pub struct TraceNormalizer<B: GitBackend> {
 }
 
 const COMPLETED_ROOT_RETENTION_LIMIT: usize = 16_384;
+const MAX_OBSERVED_CHILD_COMMANDS: usize = 64;
 
 impl<B: GitBackend> TraceNormalizer<B> {
     pub fn new(backend: Arc<B>) -> Self {
@@ -465,7 +466,27 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         if let Some(pending) = self.state.pending.get_mut(root_sid) {
-            pending.observed_child_commands.push(cmd);
+            let already_retained = pending
+                .observed_child_commands
+                .iter()
+                .any(|retained| retained == &cmd);
+            if !already_retained {
+                if pending.observed_child_commands.len() < MAX_OBSERVED_CHILD_COMMANDS {
+                    pending.observed_child_commands.push(cmd);
+                } else {
+                    let has_primary_child = pending
+                        .observed_child_commands
+                        .iter()
+                        .any(|retained| !is_git_binary(retained));
+                    let preserve_late_signal =
+                        cmd == "rebase" || (!has_primary_child && !is_git_binary(&cmd));
+                    if preserve_late_signal
+                        && let Some(last) = pending.observed_child_commands.last_mut()
+                    {
+                        *last = cmd;
+                    }
+                }
+            }
         }
         self.refresh_pending_mutation_capture(root_sid)?;
         Ok(None)
@@ -1639,6 +1660,51 @@ mod tests {
         let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.observed_child_commands, vec!["status".to_string()]);
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
+    }
+
+    #[test]
+    fn child_command_retention_is_bounded_and_preserves_rebase_signal() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo", "/repo/.git");
+        let mut normalizer = TraceNormalizer::new(backend);
+        normalizer
+            .ingest_payload(&serde_json::json!({
+                "event":"start",
+                "sid":"many-children",
+                "ts":1,
+                "argv":["git","pull"],
+                "worktree":"/repo"
+            }))
+            .unwrap();
+
+        for index in 0..64 {
+            normalizer
+                .ingest_payload(&serde_json::json!({
+                    "event":"cmd_name",
+                    "sid":format!("many-children/child-{index}"),
+                    "ts":index + 2,
+                    "name":format!("child-{index}")
+                }))
+                .unwrap();
+        }
+        normalizer
+            .ingest_payload(&serde_json::json!({
+                "event":"cmd_name",
+                "sid":"many-children/rebase",
+                "ts":100,
+                "name":"rebase"
+            }))
+            .unwrap();
+
+        let children = &normalizer
+            .state()
+            .pending
+            .get("many-children")
+            .expect("pending root")
+            .observed_child_commands;
+        assert_eq!(children.len(), 64);
+        assert_eq!(children.first().map(String::as_str), Some("child-0"));
+        assert!(children.iter().any(|child| child == "rebase"));
     }
 
     #[test]

@@ -42,6 +42,9 @@ pub trait GitBackend: Send + Sync + 'static {
 }
 
 const ALIAS_CACHE_TTL_SECS: u64 = 60;
+const MAX_ALIAS_CACHE_FAMILIES: usize = 1_024;
+const MAX_ALIASES_PER_FAMILY: usize = 256;
+const MAX_RETAINED_ALIAS_BYTES_PER_FAMILY: usize = 64 * 1_024;
 
 struct AliasCacheEntry {
     /// Resolved alias name → expansion value (e.g. "ci" → "commit -v")
@@ -230,6 +233,12 @@ fn refresh_alias_cache(
         }
     };
     if let Ok(mut cache) = alias_cache.lock() {
+        if !cache.contains_key(family_key)
+            && cache.len() >= MAX_ALIAS_CACHE_FAMILIES
+            && let Some(evicted) = cache.keys().next().cloned()
+        {
+            cache.remove(&evicted);
+        }
         cache.insert(
             family_key.to_string(),
             AliasCacheEntry {
@@ -243,6 +252,7 @@ fn refresh_alias_cache(
 
 fn read_all_aliases_from_config(config: &gix_config::File<'_>) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
+    let mut retained_bytes = 0usize;
     let Some(sections) = config.sections_by_name("alias") else {
         return aliases;
     };
@@ -254,7 +264,24 @@ fn read_all_aliases_from_config(config: &gix_config::File<'_>) -> HashMap<String
                 continue;
             }
             if let Some(value) = body.value(&key_str) {
-                aliases.insert(key_str.to_ascii_lowercase(), value.to_string());
+                let key = key_str.to_ascii_lowercase();
+                if aliases.len() >= MAX_ALIASES_PER_FAMILY && !aliases.contains_key(&key) {
+                    continue;
+                }
+                let value = value.to_string();
+                let previous_bytes = aliases
+                    .get(&key)
+                    .map(|previous: &String| key.len().saturating_add(previous.len()))
+                    .unwrap_or_default();
+                let entry_bytes = key.len().saturating_add(value.len());
+                let next_retained_bytes = retained_bytes
+                    .saturating_sub(previous_bytes)
+                    .saturating_add(entry_bytes);
+                if next_retained_bytes > MAX_RETAINED_ALIAS_BYTES_PER_FAMILY {
+                    continue;
+                }
+                aliases.insert(key, value);
+                retained_bytes = next_retained_bytes;
             }
         }
     }
@@ -562,10 +589,15 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitBackend, SystemGitBackend, clone_init_positionals, default_clone_target_from_source,
+        AliasCacheEntry, GitBackend, MAX_ALIAS_CACHE_FAMILIES, MAX_ALIASES_PER_FAMILY,
+        MAX_RETAINED_ALIAS_BYTES_PER_FAMILY, SystemGitBackend, clone_init_positionals,
+        default_clone_target_from_source, read_all_aliases_from_config, refresh_alias_cache,
     };
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::time::Instant;
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -809,5 +841,59 @@ mod tests {
                 .is_err(),
             "unknown commands should still consult repository alias config"
         );
+    }
+
+    #[test]
+    fn alias_cache_does_not_retain_unbounded_repository_families() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let git_dir = temp.path().join(".git");
+        fs::create_dir_all(&git_dir).expect("create git dir");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+        fs::write(git_dir.join("config"), "[alias]\n    ci = commit\n").expect("write config");
+
+        let cache = Mutex::new(
+            (0..MAX_ALIAS_CACHE_FAMILIES)
+                .map(|index| {
+                    (
+                        format!("family-{index}"),
+                        AliasCacheEntry {
+                            aliases: HashMap::new(),
+                            refreshed_at: Instant::now(),
+                            refresh_in_progress: false,
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        );
+
+        refresh_alias_cache(temp.path(), "new-family", &cache);
+
+        let cache = cache.lock().expect("cache lock");
+        assert_eq!(cache.len(), MAX_ALIAS_CACHE_FAMILIES);
+        assert!(cache.contains_key("new-family"));
+    }
+
+    #[test]
+    fn alias_cache_entry_has_count_and_byte_limits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config");
+        let mut contents = String::from("[alias]\n");
+        for index in 0..1_025 {
+            contents.push_str(&format!("    alias{index} = commit\n"));
+        }
+        contents.push_str(&format!("    huge = {}\n", "x".repeat(1024 * 1024)));
+        fs::write(&config_path, contents).expect("write config");
+        let config =
+            gix_config::File::from_path_no_includes(config_path, gix_config::Source::Local)
+                .expect("parse config");
+
+        let aliases = read_all_aliases_from_config(&config);
+        let retained_bytes = aliases
+            .iter()
+            .map(|(key, value)| key.len().saturating_add(value.len()))
+            .sum::<usize>();
+
+        assert!(aliases.len() <= MAX_ALIASES_PER_FAMILY);
+        assert!(retained_bytes <= MAX_RETAINED_ALIAS_BYTES_PER_FAMILY);
     }
 }

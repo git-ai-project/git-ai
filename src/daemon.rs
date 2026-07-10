@@ -36,7 +36,7 @@ use named_pipe::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -100,6 +100,8 @@ const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(windows))]
 const TRACE_SOCKET_RECV_BUFFER_BYTES: usize = 512 * 1024;
 const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
+const MAX_RETAINED_AUXILIARY_STATE_KEYS: usize = 1_024;
+const MAX_RETAINED_PENDING_OIDS: usize = 4_096;
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
@@ -111,6 +113,15 @@ const WINDOWS_STDOUT_HANDLE: u32 = (-11i32) as u32;
 #[cfg(windows)]
 const WINDOWS_STDERR_HANDLE: u32 = (-12i32) as u32;
 static DAEMON_PROCESS_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn make_room_for_bounded_key<V>(map: &mut HashMap<String, V>, key: &str) {
+    if !map.contains_key(key)
+        && map.len() >= MAX_RETAINED_AUXILIARY_STATE_KEYS
+        && let Some(evicted) = map.keys().next().cloned()
+    {
+        map.remove(&evicted);
+    }
+}
 
 #[cfg(windows)]
 unsafe extern "system" {
@@ -1299,50 +1310,6 @@ fn apply_checkout_switch_working_log_side_effect(
     Ok(())
 }
 
-fn recent_checkout_switch_prerequisite_from_command(
-    cmd: &crate::daemon::domain::NormalizedCommand,
-) -> Option<RecentReplayPrerequisite> {
-    let parsed = parsed_invocation_for_normalized_command(cmd);
-    let (old_head, new_head) = ActorDaemonCoordinator::resolve_heads_for_command(cmd);
-
-    if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
-        return None;
-    }
-
-    if cmd.primary_command.as_deref() == Some("checkout") && !parsed.pathspecs().is_empty() {
-        return None;
-    }
-
-    let is_force = match cmd.primary_command.as_deref() {
-        Some("checkout") => parsed.has_command_flag("--force") || parsed.has_command_flag("-f"),
-        Some("switch") => {
-            parsed.has_command_flag("--discard-changes")
-                || parsed.has_command_flag("--force")
-                || parsed.has_command_flag("-f")
-        }
-        _ => false,
-    };
-    if is_force {
-        return None;
-    }
-
-    let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
-    if is_merge {
-        return None;
-    }
-
-    Some(RecentReplayPrerequisite::CheckoutSwitchRename {
-        target_head: new_head,
-        old_head,
-    })
-}
-fn family_key_for_repository(repo: &Repository) -> String {
-    repo.common_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.common_dir().to_path_buf())
-        .to_string_lossy()
-        .to_string()
-}
 fn is_valid_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -2465,20 +2432,6 @@ struct PendingCherryPickNoCommit {
     head: String,
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-enum RecentReplayPrerequisite {
-    CheckoutSwitchRename {
-        target_head: String,
-        old_head: String,
-    },
-    CheckoutSwitchMerge {
-        target_head: String,
-        old_head: String,
-        final_state: HashMap<String, String>,
-    },
-}
-
 #[derive(Debug, Default, Clone)]
 struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
@@ -2519,8 +2472,6 @@ pub struct ActorDaemonCoordinator {
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     commit_file_timestamp_snapshots_by_root:
         Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
-    recent_replay_prerequisites_by_family:
-        Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     bash_sessions: Mutex<crate::daemon::bash_sessions::BashSessionState>,
@@ -2604,7 +2555,6 @@ impl ActorDaemonCoordinator {
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
-            recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
@@ -2906,9 +2856,6 @@ impl ActorDaemonCoordinator {
         // NOTE: Do NOT call normalizer.sweep_orphans() here — it removes ALL
         // pending/deferred roots unconditionally which destroys in-flight trace
         // state.  sweep_orphans() is only safe at daemon shutdown.
-        if let Ok(mut map) = self.recent_replay_prerequisites_by_family.lock() {
-            map.retain(|_, entries| !entries.is_empty());
-        }
         if let Ok(mut map) = self.side_effect_errors_by_family.lock() {
             map.retain(|_, errors| !errors.is_empty());
         }
@@ -2916,7 +2863,7 @@ impl ActorDaemonCoordinator {
             map.retain(|_, state| !state.entries.is_empty());
         }
         if let Ok(mut map) = self.side_effect_exec_locks.lock() {
-            map.retain(|_, lock| Arc::strong_count(lock) <= 1);
+            map.retain(|_, lock| Arc::strong_count(lock) > 1);
         }
         if let Ok(mut map) = self.pending_rebase_original_head_by_worktree.lock() {
             map.shrink_to_fit();
@@ -2945,6 +2892,9 @@ impl ActorDaemonCoordinator {
                 map.retain(|_, family_map| !family_map.is_empty());
             }
         }
+        if let Ok(mut sessions) = self.bash_sessions.lock() {
+            sessions.prune_stale_sessions();
+        }
     }
 
     fn canonicalize_path(path: &str) -> String {
@@ -2956,8 +2906,9 @@ impl ActorDaemonCoordinator {
     fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
         let now_ns = now_unix_nanos();
         if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
+            make_room_for_bounded_key(&mut map, family);
             let family_map = map.entry(family.to_string()).or_default();
-            for file in file_paths {
+            for file in file_paths.iter().take(MAX_RETAINED_PENDING_OIDS) {
                 family_map.insert(Self::canonicalize_path(file), now_ns);
             }
         }
@@ -3266,9 +3217,16 @@ impl ActorDaemonCoordinator {
             .side_effect_errors_by_family
             .lock()
             .map_err(|_| GitAiError::Generic("side effect errors map lock poisoned".to_string()))?;
+        make_room_for_bounded_key(&mut map, family);
         let family_errors = map.entry(family.to_string()).or_insert_with(BTreeMap::new);
-        family_errors.insert(seq, error.to_string());
-        while family_errors.len() > 256 {
+        family_errors.insert(
+            seq,
+            crate::daemon::daemon_log_layer::bounded_display_string(
+                error,
+                crate::daemon::daemon_log_layer::MAX_MESSAGE_LENGTH,
+            ),
+        );
+        while family_errors.len() > 1 {
             if let Some(oldest) = family_errors.keys().next().copied() {
                 family_errors.remove(&oldest);
             } else {
@@ -3286,27 +3244,6 @@ impl ActorDaemonCoordinator {
         Ok(map
             .get(family)
             .and_then(|errors| errors.iter().next_back().map(|(_, error)| error.clone())))
-    }
-
-    fn record_recent_replay_prerequisite(
-        &self,
-        family: &str,
-        prerequisite: RecentReplayPrerequisite,
-    ) -> Result<(), GitAiError> {
-        const MAX_RECENT_REPLAY_PREREQUISITES_PER_FAMILY: usize = 256;
-
-        let mut map = self
-            .recent_replay_prerequisites_by_family
-            .lock()
-            .map_err(|_| {
-                GitAiError::Generic("recent replay prerequisites map lock poisoned".to_string())
-            })?;
-        let entries = map.entry(family.to_string()).or_insert_with(VecDeque::new);
-        entries.push_back(prerequisite);
-        while entries.len() > MAX_RECENT_REPLAY_PREREQUISITES_PER_FAMILY {
-            let _ = entries.pop_front();
-        }
-        Ok(())
     }
 
     fn maybe_append_test_completion_log(
@@ -4008,10 +3945,22 @@ impl ActorDaemonCoordinator {
             .side_effect_exec_locks
             .lock()
             .map_err(|_| GitAiError::Generic("side effect lock map lock poisoned".to_string()))?;
-        Ok(map
-            .entry(family.to_string())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone())
+        if let Some(lock) = map.get(family) {
+            return Ok(lock.clone());
+        }
+        if map.len() >= MAX_RETAINED_AUXILIARY_STATE_KEYS
+            && let Some(idle) = map
+                .iter()
+                .find(|(_, lock)| Arc::strong_count(lock) == 1)
+                .map(|(family, _)| family.clone())
+        {
+            map.remove(&idle);
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        if map.len() < MAX_RETAINED_AUXILIARY_STATE_KEYS {
+            map.insert(family.to_string(), lock.clone());
+        }
+        Ok(lock)
     }
 
     async fn append_checkpoint_to_family_sequencer(
@@ -4438,7 +4387,9 @@ impl ActorDaemonCoordinator {
             .map_err(|_| {
                 GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
             })?;
-        map.insert(Self::worktree_state_key(worktree), (original_head, onto));
+        let key = Self::worktree_state_key(worktree);
+        make_room_for_bounded_key(&mut map, &key);
+        map.insert(key, (original_head, onto));
         Ok(())
     }
 
@@ -4472,7 +4423,7 @@ impl ActorDaemonCoordinator {
     fn set_pending_cherry_pick_sources_for_worktree(
         &self,
         worktree: &Path,
-        sources: Vec<String>,
+        mut sources: Vec<String>,
     ) -> Result<(), GitAiError> {
         let mut map = self
             .pending_cherry_pick_sources_by_worktree
@@ -4484,6 +4435,8 @@ impl ActorDaemonCoordinator {
         if sources.is_empty() {
             map.remove(&key);
         } else {
+            sources.truncate(MAX_RETAINED_PENDING_OIDS);
+            make_room_for_bounded_key(&mut map, &key);
             map.insert(key, sources);
         }
         Ok(())
@@ -4537,7 +4490,7 @@ impl ActorDaemonCoordinator {
     fn set_pending_cherry_pick_no_commit_for_worktree(
         &self,
         worktree: &Path,
-        source_commits: Vec<String>,
+        mut source_commits: Vec<String>,
         head: String,
     ) -> Result<(), GitAiError> {
         let mut map = self
@@ -4550,6 +4503,8 @@ impl ActorDaemonCoordinator {
         if source_commits.is_empty() || head.is_empty() {
             map.remove(&key);
         } else {
+            source_commits.truncate(MAX_RETAINED_PENDING_OIDS);
+            make_room_for_bounded_key(&mut map, &key);
             map.insert(
                 key,
                 PendingCherryPickNoCommit {
@@ -4597,10 +4552,9 @@ impl ActorDaemonCoordinator {
         let mut map = self.pending_squash_merge_by_worktree.lock().map_err(|_| {
             GitAiError::Generic("pending squash merge map lock poisoned".to_string())
         })?;
-        map.insert(
-            Self::worktree_state_key(worktree),
-            PendingSquashMerge { source_head, onto },
-        );
+        let key = Self::worktree_state_key(worktree);
+        make_room_for_bounded_key(&mut map, &key);
+        map.insert(key, PendingSquashMerge { source_head, onto });
         Ok(())
     }
 
@@ -4931,6 +4885,7 @@ impl ActorDaemonCoordinator {
                     "commit file timestamp snapshot cache lock poisoned".to_string(),
                 )
             })?;
+        make_room_for_bounded_key(&mut cache, &command.root_sid);
         cache.insert(command.root_sid.clone(), handles);
         Ok(())
     }
@@ -5236,7 +5191,7 @@ impl ActorDaemonCoordinator {
             // Fix #957: `checkout/switch --merge` exits with code 1 when it produces
             // conflict markers but HEAD still moves to the target branch.  We must not
             // return early here — fall through so apply_checkout_switch_working_log_side_effect
-            // and recent_checkout_switch_prerequisite_from_command can migrate the working log.
+            // can migrate the working log.
             let is_merge_checkout =
                 matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) && {
                     let p = parsed_invocation_for_normalized_command(cmd);
@@ -5665,18 +5620,6 @@ impl ActorDaemonCoordinator {
         }
 
         if matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) {
-            if let Some(prerequisite) = recent_checkout_switch_prerequisite_from_command(cmd) {
-                let family = family.map(std::borrow::ToOwned::to_owned).or_else(|| {
-                    cmd.worktree.as_ref().and_then(|worktree| {
-                        find_repository_in_path(&worktree.to_string_lossy())
-                            .ok()
-                            .map(|repo| family_key_for_repository(&repo))
-                    })
-                });
-                if let Some(family) = family {
-                    self.record_recent_replay_prerequisite(&family, prerequisite)?;
-                }
-            }
             apply_checkout_switch_working_log_side_effect(cmd)?;
         }
 
@@ -6081,7 +6024,7 @@ impl ActorDaemonCoordinator {
                 }
 
                 let mut state = self.bash_sessions.lock().unwrap();
-                state.start_session(crate::daemon::bash_sessions::BashSessionStart {
+                if !state.start_session(crate::daemon::bash_sessions::BashSessionStart {
                     session_id,
                     tool_use_id,
                     repo_work_dir: worktree_key,
@@ -6091,7 +6034,11 @@ impl ActorDaemonCoordinator {
                     start_trace_id: trace_id,
                     started_at_ns,
                     command,
-                });
+                }) {
+                    tracing::warn!(
+                        "bash session snapshot exceeded daemon retention limits; post-hook will fall back gracefully"
+                    );
+                }
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionEnd {
@@ -6228,7 +6175,8 @@ impl ActorDaemonCoordinator {
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionQuery { repo_work_dir } => {
-                let state = self.bash_sessions.lock().unwrap();
+                let mut state = self.bash_sessions.lock().unwrap();
+                state.prune_stale_sessions();
                 let repo_work_dir = Self::worktree_state_key(Path::new(&repo_work_dir));
                 let response = match state.query_active_for_repo(&repo_work_dir) {
                     Some((key, session)) => {
@@ -6260,7 +6208,8 @@ impl ActorDaemonCoordinator {
                 session_id,
                 tool_use_id,
             } => {
-                let state = self.bash_sessions.lock().unwrap();
+                let mut state = self.bash_sessions.lock().unwrap();
+                state.prune_stale_sessions();
                 let response = match state.get_snapshot(&session_id, &tool_use_id) {
                     Some(snapshot) => {
                         let data = serde_json::to_value(BashSnapshotQueryResponse {
@@ -8179,6 +8128,62 @@ mod tests {
         // This assertion documents the intent: if symlink and target mtimes differ,
         // the watermark must track the symlink, not the target.
         let _ = target_mtime; // used only as documentation; may equal symlink_mtime on some FS
+    }
+
+    #[tokio::test]
+    async fn stale_family_state_gc_drops_idle_locks_and_preserves_active_locks() {
+        let coordinator = ActorDaemonCoordinator::new();
+        let idle = coordinator.side_effect_exec_lock("idle").unwrap();
+        drop(idle);
+        let active = coordinator.side_effect_exec_lock("active").unwrap();
+
+        coordinator.gc_stale_family_state();
+
+        let locks = coordinator.side_effect_exec_locks.lock().unwrap();
+        assert!(!locks.contains_key("idle"));
+        assert!(locks.contains_key("active"));
+        drop(locks);
+        drop(active);
+    }
+
+    #[tokio::test]
+    async fn retained_family_and_worktree_auxiliary_maps_are_bounded() {
+        const EXPECTED_LIMIT: usize = 1_024;
+
+        let coordinator = ActorDaemonCoordinator::new();
+        for index in 0..=EXPECTED_LIMIT {
+            coordinator
+                .record_side_effect_error(
+                    &format!("family-{index}"),
+                    index as u64,
+                    &GitAiError::Generic(format!("error-{index}")),
+                )
+                .unwrap();
+            coordinator
+                .set_pending_rebase_original_head_for_worktree(
+                    Path::new(&format!("/missing/repo-{index}")),
+                    format!("{index:040x}"),
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            coordinator
+                .side_effect_errors_by_family
+                .lock()
+                .unwrap()
+                .len(),
+            EXPECTED_LIMIT
+        );
+        assert_eq!(
+            coordinator
+                .pending_rebase_original_head_by_worktree
+                .lock()
+                .unwrap()
+                .len(),
+            EXPECTED_LIMIT
+        );
     }
 
     #[test]
