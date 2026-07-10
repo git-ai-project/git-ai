@@ -151,6 +151,7 @@ mod test_utils_unit;
 mod tls_native_certs;
 mod transcript_discovery_memory;
 mod transcript_memory;
+mod transcript_monolithic_memory;
 mod transcript_queue_memory;
 mod utf8_filenames;
 mod virtual_attribution_unit;

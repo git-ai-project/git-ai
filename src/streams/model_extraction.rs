@@ -25,14 +25,11 @@ pub fn extract_model(
 pub fn extract_model_from_droid_settings(
     settings_path: &Path,
 ) -> Result<Option<String>, StreamError> {
-    let content = match std::fs::read_to_string(settings_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
-        Err(_) => return Ok(None),
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
+    let json = match crate::streams::types::read_bounded_json_file(
+        settings_path,
+        "Droid model metadata",
+        crate::streams::types::MAX_JSON_METADATA_BYTES,
+    ) {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
@@ -150,14 +147,14 @@ pub fn extract_model_from_copilot_models_json(
         .join(session_id)
         .join("models.json");
 
-    let content = match std::fs::read_to_string(&models_path) {
-        Ok(c) => c,
+    let models = match crate::streams::types::read_bounded_json_file(
+        &models_path,
+        "Copilot model metadata",
+        crate::streams::types::MAX_JSON_METADATA_BYTES,
+    ) {
+        Ok(serde_json::Value::Array(models)) => models,
         Err(_) => return Ok(None),
-    };
-
-    let models: Vec<serde_json::Value> = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
+        Ok(_) => return Ok(None),
     };
 
     let model = models.iter().find_map(|m| {
@@ -260,12 +257,7 @@ fn extract_model_from_copilot_otel_sqlite(
 }
 
 fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>, StreamError> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
+    let json = match crate::streams::types::read_monolithic_transcript_json(path) {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
@@ -285,12 +277,7 @@ fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>
 }
 
 fn extract_model_from_amp_thread_json(path: &Path) -> Result<Option<String>, StreamError> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
+    let json = match crate::streams::types::read_monolithic_transcript_json(path) {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };

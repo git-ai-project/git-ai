@@ -3,7 +3,7 @@
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::streams::sweep::{BoundedPathCollector, DiscoveredSession, StreamFormat, SweepStrategy};
-use crate::streams::types::{StreamBatch, StreamError};
+use crate::streams::types::{StreamBatch, StreamError, read_monolithic_transcript_json};
 use crate::streams::watermark::{RecordIndexWatermark, WatermarkStrategy};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -151,29 +151,7 @@ impl Agent for AmpAgent {
 
         let skip_count = record_watermark.0 as usize;
 
-        let file = fs::File::open(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                StreamError::Fatal {
-                    message: format!("Transcript file not found: {}", path.display()),
-                }
-            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                StreamError::Fatal {
-                    message: format!("Permission denied reading transcript: {}", path.display()),
-                }
-            } else {
-                StreamError::Transient {
-                    message: format!("Failed to read transcript file: {}", e),
-                    retry_after: Duration::from_secs(5),
-                }
-            }
-        })?;
-
-        let reader = std::io::BufReader::new(file);
-        let mut parsed: serde_json::Value =
-            serde_json::from_reader(reader).map_err(|e| StreamError::Parse {
-                line: 0,
-                message: format!("Invalid JSON in {}: {}", path.display(), e),
-            })?;
+        let mut parsed = read_monolithic_transcript_json(path)?;
 
         let messages = match parsed
             .as_object_mut()

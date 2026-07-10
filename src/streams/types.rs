@@ -1,6 +1,6 @@
 //! Core types for transcript processing.
 
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::time::Duration;
 
 /// Maximum retained size of one JSONL transcript record.
@@ -11,6 +11,56 @@ pub const MAX_JSONL_EVENT_BYTES: usize = 1024 * 1024;
 /// The record that crosses this threshold remains in the batch, so the hard
 /// upper bound is this value plus [`MAX_JSONL_EVENT_BYTES`].
 pub const MAX_JSONL_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Maximum size of vendor transcript formats that require whole-document JSON parsing.
+pub const MAX_MONOLITHIC_JSON_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Maximum size of auxiliary JSON metadata consulted during transcript processing.
+pub const MAX_JSON_METADATA_BYTES: u64 = 1024 * 1024;
+
+pub fn read_bounded_json_file(
+    path: &std::path::Path,
+    kind: &str,
+    max_bytes: u64,
+) -> Result<serde_json::Value, StreamError> {
+    let file = std::fs::File::open(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => StreamError::Fatal {
+            message: format!("{kind} file not found: {}", path.display()),
+        },
+        std::io::ErrorKind::PermissionDenied => StreamError::Fatal {
+            message: format!("permission denied reading {kind}: {}", path.display()),
+        },
+        _ => StreamError::Transient {
+            message: format!("failed to open {kind} {}: {error}", path.display()),
+            retry_after: Duration::from_secs(5),
+        },
+    })?;
+    let size_bytes = file.metadata().map_err(|error| StreamError::Transient {
+        message: format!("failed to inspect {kind} {}: {error}", path.display()),
+        retry_after: Duration::from_secs(5),
+    })?;
+    if size_bytes.len() > max_bytes {
+        return Err(StreamError::Fatal {
+            message: format!(
+                "{kind} exceeded the {max_bytes} byte limit ({}): {}",
+                size_bytes.len(),
+                path.display()
+            ),
+        });
+    }
+
+    let reader = std::io::BufReader::new(file.take(max_bytes.saturating_add(1)));
+    serde_json::from_reader(reader).map_err(|error| StreamError::Parse {
+        line: error.line(),
+        message: format!("invalid JSON in {kind} {}: {error}", path.display()),
+    })
+}
+
+pub fn read_monolithic_transcript_json(
+    path: &std::path::Path,
+) -> Result<serde_json::Value, StreamError> {
+    read_bounded_json_file(path, "monolithic transcript", MAX_MONOLITHIC_JSON_BYTES)
+}
 
 #[derive(Default)]
 pub struct JsonlReadStats {
