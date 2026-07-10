@@ -10,6 +10,18 @@ use crate::api::types::{
     ApiErrorResponse, NotesReadResponse, NotesUploadRequest, NotesUploadResponse,
 };
 use crate::error::GitAiError;
+use crate::git::repository::{BatchMaterializationBudget, ensure_batch_git_item_limit};
+
+const MAX_NOTES_API_ITEMS: usize = 100;
+
+fn ensure_notes_api_item_limit(kind: &str, count: usize) -> Result<(), GitAiError> {
+    if count > MAX_NOTES_API_ITEMS {
+        return Err(GitAiError::Generic(format!(
+            "{kind} count exceeded the {MAX_NOTES_API_ITEMS} item limit ({count})"
+        )));
+    }
+    Ok(())
+}
 
 impl ApiClient {
     /// Upload a batch of authorship notes to the remote backend.
@@ -24,6 +36,11 @@ impl ApiClient {
         &self,
         request: NotesUploadRequest,
     ) -> Result<NotesUploadResponse, GitAiError> {
+        ensure_notes_api_item_limit("note upload", request.entries.len())?;
+        let mut materialization_budget = BatchMaterializationBudget::new();
+        for entry in &request.entries {
+            materialization_budget.reserve("note upload content", entry.content.len())?;
+        }
         let response = self.context().post_json("/worker/notes/upload", &request)?;
         let status_code = response.status_code;
 
@@ -59,6 +76,7 @@ impl ApiClient {
     /// * `Ok(NotesReadResponse)` - Response mapping commit_sha → note content
     /// * `Err(GitAiError)` - On invalid input, network, or server errors
     pub fn read_notes(&self, commit_shas: &[&str]) -> Result<NotesReadResponse, GitAiError> {
+        ensure_notes_api_item_limit("note read", commit_shas.len())?;
         // Validate that all SHAs are hex strings before making the request
         for sha in commit_shas {
             if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -79,7 +97,17 @@ impl ApiClient {
             .map_err(|e| GitAiError::Generic(format!("Failed to read response body: {}", e)))?;
 
         match status_code {
-            200 => serde_json::from_str(body).map_err(GitAiError::JsonError),
+            200 => {
+                let parsed: NotesReadResponse =
+                    serde_json::from_str(body).map_err(GitAiError::JsonError)?;
+                ensure_notes_api_item_limit("note response", parsed.notes.len())?;
+                ensure_batch_git_item_limit("note response", parsed.notes.len())?;
+                let mut materialization_budget = BatchMaterializationBudget::new();
+                for content in parsed.notes.values() {
+                    materialization_budget.reserve("note response content", content.len())?;
+                }
+                Ok(parsed)
+            }
             404 => Ok(NotesReadResponse {
                 notes: std::collections::HashMap::new(),
             }),
@@ -109,6 +137,46 @@ mod tests {
             err.contains("non-hex"),
             "error should mention non-hex: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_read_notes_rejects_oversized_batch_before_http() {
+        let ctx = ApiContext::without_auth(Some("https://127.0.0.1:1".to_string()));
+        let client = ApiClient::new(ctx);
+        let shas = (0..=100)
+            .map(|index| format!("{index:040x}"))
+            .collect::<Vec<_>>();
+        let refs = shas.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let error = client
+            .read_notes(&refs)
+            .expect_err("notes reads must enforce the documented API batch size");
+
+        assert!(error.to_string().contains("100 item limit"));
+    }
+
+    #[test]
+    fn test_upload_notes_rejects_oversized_content_before_http() {
+        let ctx = ApiContext::without_auth(Some("https://127.0.0.1:1".to_string()));
+        let client = ApiClient::new(ctx);
+        let content = "x".repeat(1_024 * 1_024);
+        let entries = (0..=crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES
+            / content.len())
+            .map(|index| NoteEntry {
+                commit_sha: format!("{index:040x}"),
+                content: content.clone(),
+            })
+            .collect();
+
+        let error = client
+            .upload_notes(NotesUploadRequest { entries })
+            .expect_err("notes uploads must be bounded before JSON serialization");
+
+        assert!(
+            error
+                .to_string()
+                .contains("materialized note upload content")
         );
     }
 

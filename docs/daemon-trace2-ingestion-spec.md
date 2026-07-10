@@ -85,6 +85,13 @@ otherwise unbounded map. Index parsing is rejected above 32 MiB, and staged
 content uses the same constant two-process batch path rather than spawning Git
 once per file.
 
+Authorship-note reads and writes use the same 4,096-item and 16 MiB
+materialization limits. The byte budget is applied after note-blob
+deduplication, across cache, HTTP, and Git fallback sources, so one shared note
+blob cannot be cloned once per commit. The notes SQLite cache enforces the
+budget while rows are read and rolls back queue locks if a pending batch is too
+large. HTTP note requests are limited to 100 entries before JSON serialization.
+
 Separation of concerns:
 
 - The **normalizer** parses trace2/argv facts only. It never reads mutable
@@ -260,6 +267,9 @@ Deterministic tests must cover, at minimum:
     traffic, and never deadlocks checkpoints behind unidentified sockets
 12. oversized historical reflogs remain memory-bounded, fail closed for the
     affected boundary, and preserve exact attribution for the next command
+13. repeated large file blobs remain bounded during batched materialization
+14. repeated large note blobs remain bounded during rewrite-note migration,
+    fail closed, and preserve attribution for the next command
 
 Primary suites: `tests/daemon_mode.rs`, `tests/commit_tree_update_ref.rs`,
 `tests/integration/rewrite_ops_attribution.rs`, ref-cursor unit tests in

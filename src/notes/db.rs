@@ -11,6 +11,7 @@
 //! or migrations to `internal_db` for this feature is explicitly not what we do here.
 
 use crate::error::GitAiError;
+use crate::git::repository::{BatchMaterializationBudget, ensure_batch_git_item_limit};
 use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -233,6 +234,8 @@ impl NotesDatabase {
     /// - If the content changed, `synced` and `attempts` are reset to 0 so the
     ///   updated note is queued for re-upload.
     pub fn upsert_note(&mut self, commit_sha: &str, content: &str) -> Result<(), GitAiError> {
+        let mut budget = BatchMaterializationBudget::new();
+        budget.reserve("note content", content.len())?;
         let now = unix_now();
         self.conn.execute(
             r#"
@@ -255,6 +258,7 @@ impl NotesDatabase {
         if entries.is_empty() {
             return Ok(());
         }
+        validate_note_entries("database note", entries)?;
         let now = unix_now();
         let tx = self.conn.transaction()?;
         {
@@ -286,6 +290,7 @@ impl NotesDatabase {
         if entries.is_empty() {
             return Ok(());
         }
+        validate_note_entries("cached note", entries)?;
         let now = unix_now();
         let tx = self.conn.transaction()?;
         {
@@ -318,11 +323,13 @@ impl NotesDatabase {
     ///
     /// Rows with `attempts >= 6` are skipped (permanent failure backoff).
     pub fn dequeue_pending(&mut self, batch_size: usize) -> Result<Vec<PendingNote>, GitAiError> {
+        ensure_batch_git_item_limit("pending note", batch_size)?;
         let now = unix_now();
         let stale_cutoff = now - 600; // 10 minutes
+        let tx = self.conn.transaction()?;
 
         // Release stale processing locks so they can be retried.
-        self.conn.execute(
+        tx.execute(
             r#"UPDATE notes
                SET processing_started_at = NULL
                WHERE synced = 0
@@ -334,7 +341,7 @@ impl NotesDatabase {
         // Select eligible rows first, then lock them. Two-step approach avoids
         // UPDATE ... RETURNING which requires SQLite 3.35+.
         let shas: Vec<String> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = tx.prepare(
                 r#"SELECT commit_sha FROM notes
                    WHERE synced = 0
                      AND processing_started_at IS NULL
@@ -350,6 +357,7 @@ impl NotesDatabase {
         };
 
         if shas.is_empty() {
+            tx.commit()?;
             return Ok(Vec::new());
         }
 
@@ -369,36 +377,42 @@ impl NotesDatabase {
             params_vec.push(Box::new(sha.clone()));
         }
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-        self.conn.execute(&update_sql, param_refs.as_slice())?;
+        tx.execute(&update_sql, param_refs.as_slice())?;
 
         // Read back the locked rows.
         let select_sql = format!(
-            "SELECT commit_sha, content, attempts FROM notes WHERE commit_sha IN ({})",
+            "SELECT commit_sha, length(CAST(content AS BLOB)), content, attempts \
+             FROM notes WHERE commit_sha IN ({})",
             shas.iter()
                 .enumerate()
                 .map(|(i, _)| format!("?{}", i + 1))
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        let mut stmt = self.conn.prepare(&select_sql)?;
-        let sha_params: Vec<Box<dyn rusqlite::ToSql>> = shas
-            .iter()
-            .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>)
-            .collect();
-        let sha_param_refs: Vec<&dyn rusqlite::ToSql> =
-            sha_params.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(sha_param_refs.as_slice(), |row| {
-            Ok(PendingNote {
-                commit_sha: row.get(0)?,
-                content: row.get(1)?,
-                attempts: row.get(2)?,
-            })
-        })?;
+        let out = {
+            let mut stmt = tx.prepare(&select_sql)?;
+            let sha_params: Vec<Box<dyn rusqlite::ToSql>> = shas
+                .iter()
+                .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>)
+                .collect();
+            let sha_param_refs: Vec<&dyn rusqlite::ToSql> =
+                sha_params.iter().map(|b| b.as_ref()).collect();
+            let mut rows = stmt.query(sha_param_refs.as_slice())?;
 
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
+            let mut budget = BatchMaterializationBudget::new();
+            let mut out = Vec::with_capacity(shas.len());
+            while let Some(row) = rows.next()? {
+                let content_len = note_content_len(row, 1)?;
+                budget.reserve("pending note content", content_len)?;
+                out.push(PendingNote {
+                    commit_sha: row.get(0)?,
+                    content: row.get(2)?,
+                    attempts: row.get(3)?,
+                });
+            }
+            out
+        };
+        tx.commit()?;
         Ok(out)
     }
 
@@ -410,6 +424,7 @@ impl NotesDatabase {
         if commit_shas.is_empty() {
             return Ok(0);
         }
+        ensure_batch_git_item_limit("synced note", commit_shas.len())?;
         let now = unix_now();
 
         // Build a parameterised `IN (...)` clause.
@@ -442,6 +457,7 @@ impl NotesDatabase {
         if commit_shas.is_empty() {
             return Ok(());
         }
+        ensure_batch_git_item_limit("failed note", commit_shas.len())?;
         let now = unix_now();
         let tx = self.conn.transaction()?;
         for sha in commit_shas {
@@ -464,15 +480,17 @@ impl NotesDatabase {
 
     /// Retrieve the note content for a single commit SHA.
     pub fn get_note(&self, commit_sha: &str) -> Result<Option<String>, GitAiError> {
-        match self.conn.query_row(
-            "SELECT content FROM notes WHERE commit_sha = ?1",
-            params![commit_sha],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(c) => Ok(Some(c)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        let mut stmt = self.conn.prepare(
+            "SELECT length(CAST(content AS BLOB)), content FROM notes WHERE commit_sha = ?1",
+        )?;
+        let mut rows = stmt.query(params![commit_sha])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let content_len = note_content_len(row, 0)?;
+        let mut budget = BatchMaterializationBudget::new();
+        budget.reserve("note content", content_len)?;
+        Ok(Some(row.get(1)?))
     }
 
     /// Return the subset of `commit_shas` that exist in the DB with `synced = 1`.
@@ -480,6 +498,7 @@ impl NotesDatabase {
         if commit_shas.is_empty() {
             return Ok(HashSet::new());
         }
+        ensure_batch_git_item_limit("database note", commit_shas.len())?;
         let placeholders: String = commit_shas
             .iter()
             .enumerate()
@@ -511,6 +530,7 @@ impl NotesDatabase {
         if commit_shas.is_empty() {
             return Ok(HashMap::new());
         }
+        ensure_batch_git_item_limit("database note", commit_shas.len())?;
         let placeholders: String = commit_shas
             .iter()
             .enumerate()
@@ -518,7 +538,8 @@ impl NotesDatabase {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT commit_sha, content FROM notes WHERE commit_sha IN ({})",
+            "SELECT commit_sha, length(CAST(content AS BLOB)), content \
+             FROM notes WHERE commit_sha IN ({})",
             placeholders
         );
         let params_vec: Vec<&dyn rusqlite::ToSql> = commit_shas
@@ -527,14 +548,14 @@ impl NotesDatabase {
             .collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_vec.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let mut rows = stmt.query(params_vec.as_slice())?;
 
-        let mut result = HashMap::new();
-        for row in rows {
-            let (sha, content) = row?;
-            result.insert(sha, content);
+        let mut budget = BatchMaterializationBudget::new();
+        let mut result = HashMap::with_capacity(commit_shas.len());
+        while let Some(row) = rows.next()? {
+            let content_len = note_content_len(row, 1)?;
+            budget.reserve("note content", content_len)?;
+            result.insert(row.get(0)?, row.get(2)?);
         }
         Ok(result)
     }
@@ -561,6 +582,21 @@ impl NotesDatabase {
         )?;
         Ok(deleted)
     }
+}
+
+fn validate_note_entries(kind: &str, entries: &[(String, String)]) -> Result<(), GitAiError> {
+    ensure_batch_git_item_limit(kind, entries.len())?;
+    let mut budget = BatchMaterializationBudget::new();
+    for (_, content) in entries {
+        budget.reserve("note content", content.len())?;
+    }
+    Ok(())
+}
+
+fn note_content_len(row: &rusqlite::Row<'_>, index: usize) -> Result<usize, GitAiError> {
+    let content_len: i64 = row.get(index)?;
+    usize::try_from(content_len)
+        .map_err(|_| GitAiError::Generic(format!("invalid note content length: {content_len}")))
 }
 
 fn unix_now() -> i64 {
@@ -674,6 +710,26 @@ mod tests {
     }
 
     #[test]
+    fn test_get_note_rejects_legacy_oversized_content() {
+        let (db, _tmp) = create_test_db();
+        let content = "x".repeat(crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES + 1);
+        let now = unix_now();
+        db.conn
+            .execute(
+                "INSERT INTO notes (commit_sha, content, synced, created_at, updated_at, next_retry_at) \
+                 VALUES ('oversized', ?1, 1, ?2, ?2, 0)",
+                params![content, now],
+            )
+            .unwrap();
+
+        let error = db
+            .get_note("oversized")
+            .expect_err("legacy oversized notes must fail closed");
+
+        assert!(error.to_string().contains("materialized note content"));
+    }
+
+    #[test]
     fn test_upsert_new_content_resets_synced() {
         let (mut db, _tmp) = create_test_db();
 
@@ -753,6 +809,43 @@ mod tests {
         // Second dequeue should return nothing (row is now synced = 1).
         let batch2 = db.dequeue_pending(10).unwrap();
         assert!(batch2.is_empty(), "no pending rows after mark_synced");
+    }
+
+    #[test]
+    fn test_dequeue_budget_error_does_not_leave_rows_locked() {
+        let (mut db, _tmp) = create_test_db();
+        let content = "x".repeat(1_024 * 1_024);
+        let now = unix_now();
+        let note_count =
+            crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES / content.len() + 1;
+        for index in 0..note_count {
+            db.conn
+                .execute(
+                    "INSERT INTO notes (commit_sha, content, synced, created_at, updated_at, next_retry_at) \
+                     VALUES (?1, ?2, 0, ?3, ?3, 0)",
+                    params![format!("{index:040x}"), content, now],
+                )
+                .unwrap();
+        }
+
+        let error = db
+            .dequeue_pending(note_count)
+            .expect_err("pending note reads must respect the materialization budget");
+        assert!(
+            error
+                .to_string()
+                .contains("materialized pending note content")
+        );
+
+        let locked: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE processing_started_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(locked, 0, "a failed dequeue must roll back row locks");
     }
 
     #[test]
@@ -874,6 +967,65 @@ mod tests {
             !results.contains_key("sha_missing"),
             "missing SHA should not be in result"
         );
+    }
+
+    #[test]
+    fn test_get_notes_rejects_oversized_materialized_content() {
+        let (db, _tmp) = create_test_db();
+        let content = "x".repeat(1_024 * 1_024);
+        let now = unix_now();
+        let mut shas = Vec::new();
+        for index in
+            0..=crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES / content.len()
+        {
+            let sha = format!("{index:040x}");
+            db.conn
+                .execute(
+                    "INSERT INTO notes (commit_sha, content, synced, created_at, updated_at, next_retry_at) \
+                     VALUES (?1, ?2, 1, ?3, ?3, 0)",
+                    params![sha, content, now],
+                )
+                .unwrap();
+            shas.push(sha);
+        }
+        let refs = shas.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let error = db
+            .get_notes(&refs)
+            .expect_err("database note reads must respect the materialization budget");
+
+        assert!(error.to_string().contains("materialized note content"));
+    }
+
+    #[test]
+    fn test_get_notes_rejects_oversized_request_before_query() {
+        let (db, _tmp) = create_test_db();
+        let shas = (0..=crate::git::repository::MAX_BATCH_GIT_ITEMS)
+            .map(|index| format!("{index:040x}"))
+            .collect::<Vec<_>>();
+        let refs = shas.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let error = db
+            .get_notes(&refs)
+            .expect_err("oversized database note reads must fail before querying SQLite");
+
+        assert!(error.to_string().contains("database note count"));
+    }
+
+    #[test]
+    fn test_upsert_notes_batch_rejects_oversized_materialized_content() {
+        let (mut db, _tmp) = create_test_db();
+        let content = "x".repeat(1_024 * 1_024);
+        let entries = (0..=crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES
+            / content.len())
+            .map(|index| (format!("{index:040x}"), content.clone()))
+            .collect::<Vec<_>>();
+
+        let error = db
+            .upsert_notes_batch(&entries)
+            .expect_err("database note writes must respect the materialization budget");
+
+        assert!(error.to_string().contains("materialized note content"));
     }
 
     // --- database_path ---

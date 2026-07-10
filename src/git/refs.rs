@@ -1,7 +1,9 @@
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git, exec_git_stdin};
+use crate::git::repository::{
+    BatchMaterializationBudget, Repository, ensure_batch_git_item_limit, exec_git, exec_git_stdin,
+};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 
@@ -129,6 +131,7 @@ fn batch_read_blob_contents(
     if blob_oids.is_empty() {
         return Ok(HashMap::new());
     }
+    ensure_batch_git_item_limit("note blob", blob_oids.len())?;
 
     let mut args = repo.global_args_for_exec();
     args.push("cat-file".to_string());
@@ -169,6 +172,7 @@ pub fn notes_for_commits(
     if commit_shas.is_empty() {
         return Ok(HashMap::new());
     }
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
 
     let note_blob_oids = note_blob_oids_for_commits(repo, commit_shas)?;
     if note_blob_oids.is_empty() {
@@ -183,14 +187,24 @@ pub fn notes_for_commits(
         .collect();
     let blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
 
-    Ok(note_blob_oids
-        .into_iter()
-        .filter_map(|(commit_sha, blob_oid)| {
-            blob_contents
-                .get(&blob_oid)
-                .map(|content| (commit_sha, content.clone()))
-        })
-        .collect())
+    materialize_note_contents(note_blob_oids, &blob_contents)
+}
+
+fn materialize_note_contents(
+    note_blob_oids: HashMap<String, String>,
+    blob_contents: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    ensure_batch_git_item_limit("materialized note", note_blob_oids.len())?;
+    let mut budget = BatchMaterializationBudget::new();
+    let mut notes = HashMap::with_capacity(note_blob_oids.len());
+    for (commit_sha, blob_oid) in note_blob_oids {
+        let Some(content) = blob_contents.get(&blob_oid) else {
+            continue;
+        };
+        budget.reserve("note content", content.len())?;
+        notes.insert(commit_sha, content.clone());
+    }
+    Ok(notes)
 }
 
 /// Resolve authorship note blob OIDs for a set of commits from a specific notes ref.
@@ -205,6 +219,7 @@ pub fn note_blob_oids_for_commits_from_ref(
     if commit_shas.is_empty() {
         return Ok(HashMap::new());
     }
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
 
     let mut path_to_commit = HashMap::new();
     let mut fanout_prefixes = HashSet::new();
@@ -322,6 +337,7 @@ fn parse_ls_tree_note_entries(data: &[u8]) -> Result<Vec<LsTreeNoteEntry>, GitAi
                 "Malformed ls-tree output: missing object id".to_string(),
             ));
         };
+        ensure_batch_git_item_limit("note tree entry", entries.len().saturating_add(1))?;
         entries.push(LsTreeNoteEntry {
             object_type: object_type.to_string(),
             oid: oid.to_string(),
@@ -343,7 +359,11 @@ pub fn copy_missing_notes_for_commits_from_ref(
     source_ref: &str,
     commit_shas: &[String],
 ) -> Result<usize, GitAiError> {
-    if commit_shas.is_empty() || !ref_exists(repo, source_ref) {
+    if commit_shas.is_empty() {
+        return Ok(0);
+    }
+    ensure_batch_git_item_limit("copied note commit", commit_shas.len())?;
+    if !ref_exists(repo, source_ref) {
         return Ok(0);
     }
 
@@ -372,6 +392,7 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     if entries.is_empty() {
         return Ok(());
     }
+    let deduped_entries = dedupe_note_entries(entries)?;
 
     let mut args = repo.global_args_for_exec();
     args.push("rev-parse".to_string());
@@ -385,15 +406,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
         Err(e) => return Err(e),
     };
-
-    let mut deduped_entries: Vec<(String, String)> = Vec::new();
-    let mut seen = HashSet::new();
-    for (commit_sha, note_content) in entries.iter().rev() {
-        if seen.insert(commit_sha.as_str()) {
-            deduped_entries.push((commit_sha.clone(), note_content.clone()));
-        }
-    }
-    deduped_entries.reverse();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -437,6 +449,21 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     Ok(())
 }
 
+fn dedupe_note_entries(entries: &[(String, String)]) -> Result<Vec<(String, String)>, GitAiError> {
+    ensure_batch_git_item_limit("note write", entries.len())?;
+    let mut budget = BatchMaterializationBudget::new();
+    let mut deduped_entries = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::new();
+    for (commit_sha, note_content) in entries.iter().rev() {
+        if seen.insert(commit_sha.as_str()) {
+            budget.reserve("note write content", note_content.len())?;
+            deduped_entries.push((commit_sha.clone(), note_content.clone()));
+        }
+    }
+    deduped_entries.reverse();
+    Ok(deduped_entries)
+}
+
 /// Batch-attach existing note blobs to commits without rewriting blob contents.
 ///
 /// Each entry is (commit_sha, existing_note_blob_oid).
@@ -448,6 +475,7 @@ pub fn notes_add_blob_batch(
     if entries.is_empty() {
         return Ok(());
     }
+    ensure_batch_git_item_limit("note blob write", entries.len())?;
 
     let mut args = repo.global_args_for_exec();
     args.push("rev-parse".to_string());
@@ -514,14 +542,15 @@ pub fn notes_add_blob_batch(
             unique_blob_oids.sort();
             let blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
 
-            Ok(deduped_entries
-                .iter()
-                .filter_map(|(commit_sha, blob_oid)| {
-                    blob_contents
-                        .get(blob_oid)
-                        .map(|note_content| (commit_sha.clone(), note_content.clone()))
-                })
-                .collect())
+            let mut budget = BatchMaterializationBudget::new();
+            let mut hook_entries = Vec::with_capacity(deduped_entries.len());
+            for (commit_sha, blob_oid) in &deduped_entries {
+                if let Some(note_content) = blob_contents.get(blob_oid) {
+                    budget.reserve("note hook content", note_content.len())?;
+                    hook_entries.push((commit_sha.clone(), note_content.clone()));
+                }
+            }
+            Ok(hook_entries)
         })();
         match hook_entries {
             Ok(entries) if !entries.is_empty() => {
@@ -561,6 +590,7 @@ pub fn get_commits_with_notes_from_list(
     if commit_shas.is_empty() {
         return Ok(Vec::new());
     }
+    ensure_batch_git_item_limit("note commit", commit_shas.len())?;
 
     // Get the git authors for all commits using git rev-list
     // This approach works in both bare and normal repositories
@@ -611,6 +641,7 @@ pub fn get_commits_with_notes_from_list(
 
     // Build the result Vec
     let mut result = Vec::new();
+    let mut materialization_budget = BatchMaterializationBudget::new();
     for sha in commit_shas {
         let git_author = commit_authors
             .get(sha)
@@ -619,14 +650,21 @@ pub fn get_commits_with_notes_from_list(
 
         if let Some(blob_oid) = note_blob_oids.get(sha)
             && let Some(content) = note_blob_contents.get(blob_oid)
-            && let Ok(mut authorship_log) = AuthorshipLog::deserialize_from_string(content)
         {
-            authorship_log.metadata.base_commit_sha = sha.clone();
-            result.push(CommitAuthorship::Log {
-                sha: sha.clone(),
-                git_author,
-                authorship_log,
-            });
+            materialization_budget.reserve("deserialized note content", content.len())?;
+            if let Ok(mut authorship_log) = AuthorshipLog::deserialize_from_string(content) {
+                authorship_log.metadata.base_commit_sha = sha.clone();
+                result.push(CommitAuthorship::Log {
+                    sha: sha.clone(),
+                    git_author,
+                    authorship_log,
+                });
+            } else {
+                result.push(CommitAuthorship::NoLog {
+                    sha: sha.clone(),
+                    git_author,
+                });
+            }
         } else {
             result.push(CommitAuthorship::NoLog {
                 sha: sha.clone(),
@@ -953,6 +991,67 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_materialization_rejects_shared_blob_amplification() {
+        let blob_oid = "a".repeat(40);
+        let content = "x".repeat(1_024 * 1_024);
+        let note_blob_oids = (0..=crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES
+            / content.len())
+            .map(|index| (format!("{index:040x}"), blob_oid.clone()))
+            .collect::<HashMap<_, _>>();
+        let blob_contents = HashMap::from([(blob_oid, content)]);
+
+        let error = materialize_note_contents(note_blob_oids, &blob_contents)
+            .expect_err("shared note clones must respect the materialization budget");
+
+        assert!(error.to_string().contains("materialized note content"));
+    }
+
+    #[test]
+    fn note_write_deduplication_rejects_oversized_content() {
+        let content = "x".repeat(1_024 * 1_024);
+        let entries = (0..=crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES
+            / content.len())
+            .map(|index| (format!("{index:040x}"), content.clone()))
+            .collect::<Vec<_>>();
+
+        let error = dedupe_note_entries(&entries)
+            .expect_err("note writes must be bounded before content is cloned");
+
+        assert!(
+            error
+                .to_string()
+                .contains("materialized note write content")
+        );
+    }
+
+    #[test]
+    fn note_tree_parser_rejects_oversized_entry_set() {
+        let oid = "a".repeat(40);
+        let mut data = Vec::new();
+        for index in 0..=crate::git::repository::MAX_BATCH_GIT_ITEMS {
+            data.extend_from_slice(format!("100644 blob {oid}\t{index:040x}\0").as_bytes());
+        }
+
+        let error =
+            parse_ls_tree_note_entries(&data).expect_err("oversized notes trees must fail closed");
+
+        assert!(error.to_string().contains("note tree entry count"));
+    }
+
+    #[test]
+    fn notes_for_commits_rejects_oversized_request_before_git() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let commits = (0..=crate::git::repository::MAX_BATCH_GIT_ITEMS)
+            .map(|index| format!("{index:040x}"))
+            .collect::<Vec<_>>();
+
+        let error = notes_for_commits(tmp.gitai_repo(), &commits)
+            .expect_err("oversized note requests must fail closed");
+
+        assert!(error.to_string().contains("note commit count"));
+    }
 
     #[test]
     fn test_parse_batch_check_blob_oid_accepts_sha1_and_sha256() {
