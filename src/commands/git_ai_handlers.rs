@@ -218,6 +218,12 @@ pub fn handle_git_ai(args: &[String]) {
         "blame-analysis" => {
             handle_blame_analysis_internal(&args[1..]);
         }
+        "note-metadata" => {
+            handle_note_metadata_internal(&args[1..]);
+        }
+        "analyze-commit-diff" => {
+            handle_analyze_commit_diff_internal(&args[1..]);
+        }
         "fetch-authorship-notes" | "fetch_authorship_notes" => {
             handle_fetch_authorship_notes_internal(&args[1..]);
         }
@@ -759,6 +765,229 @@ pub(crate) fn handle_push_authorship_notes_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
+/// `git-ai note-metadata --json '{"content":"…"}'`
+///
+/// Parses an authorship note body and returns its prompts and sessions maps.
+pub(crate) fn handle_note_metadata_internal(args: &[String]) {
+    disable_debug_logs_for_machine_command();
+    let payload =
+        parse_machine_json_arg(args, "note-metadata").unwrap_or_else(|e| emit_machine_json_error(e));
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NoteMetadataRequest {
+        content: String,
+    }
+
+    let request: NoteMetadataRequest = serde_json::from_str(&payload)
+        .unwrap_or_else(|e| emit_machine_json_error(format!("Invalid JSON payload: {}", e)));
+
+    let log =
+        crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(
+            &request.content,
+        )
+        .unwrap_or_else(|e| emit_machine_json_error(format!("Invalid note content: {}", e)));
+
+    let response = serde_json::json!({
+        "prompts": log.metadata.prompts,
+        "sessions": log.metadata.sessions,
+    });
+    print_machine_json(&response);
+}
+
+/// Parsed statistics from a unified diff: which new-file line numbers were
+/// added per file, plus the total added and deleted line counts.
+struct UnifiedDiffStats {
+    added_lines_by_file: std::collections::HashMap<String, Vec<u32>>,
+    git_lines_added: u32,
+    git_lines_deleted: u32,
+}
+
+/// Unquote a C-style quoted path as produced by git for paths that contain
+/// special characters (leading/trailing quotes already stripped by caller).
+fn unquote_diff_path(inner: &str) -> String {
+    let mut result = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => result.push('"'),
+                Some('\\') => result.push('\\'),
+                Some('t') => result.push('\t'),
+                Some('n') => result.push('\n'),
+                Some(other) => result.push(other),
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Resolve the file path from a `+++ ` header line. Returns `None` for
+/// `/dev/null` (file deletion target).
+fn parse_plus_file_path(line: &str) -> Option<String> {
+    let raw = line.strip_prefix("+++ ")?.trim();
+    if raw == "/dev/null" {
+        return None;
+    }
+
+    let unquoted = if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        unquote_diff_path(&raw[1..raw.len() - 1])
+    } else {
+        raw.to_string()
+    };
+
+    let stripped = unquoted
+        .strip_prefix("b/")
+        .or_else(|| unquoted.strip_prefix("a/"))
+        .map(|s| s.to_string())
+        .unwrap_or(unquoted);
+
+    Some(stripped)
+}
+
+/// Parse a unified diff into per-file added line numbers and total add/delete
+/// counts. Self-contained; only understands the standard unified diff grammar.
+fn parse_unified_diff_stats(diff: &str) -> UnifiedDiffStats {
+    let mut added_lines_by_file: std::collections::HashMap<String, Vec<u32>> =
+        std::collections::HashMap::new();
+    let mut git_lines_added: u32 = 0;
+    let mut git_lines_deleted: u32 = 0;
+
+    let mut current_file: Option<String> = None;
+    let mut in_hunk = false;
+    let mut new_line: u32 = 0;
+
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            // Hunk header: "@@ -old,count +new,count @@ ...". The second
+            // whitespace-delimited token carries the new-file start line.
+            let new_line_token = rest.split_whitespace().nth(1).unwrap_or("");
+            let start = new_line_token
+                .strip_prefix('+')
+                .unwrap_or(new_line_token)
+                .split(',')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            new_line = start;
+            in_hunk = true;
+            continue;
+        }
+
+        if line.starts_with("diff --git ") {
+            current_file = None;
+            in_hunk = false;
+            continue;
+        }
+
+        if !in_hunk {
+            if line.starts_with("+++ ") {
+                current_file = parse_plus_file_path(line);
+            }
+            continue;
+        }
+
+        // Inside a hunk body.
+        if line.starts_with("\\ No newline at end of file") {
+            continue;
+        }
+
+        if let Some(stripped) = line.strip_prefix('+') {
+            let _ = stripped;
+            git_lines_added = git_lines_added.saturating_add(1);
+            if let Some(file) = &current_file {
+                added_lines_by_file
+                    .entry(file.clone())
+                    .or_default()
+                    .push(new_line);
+            }
+            new_line = new_line.saturating_add(1);
+        } else if line.starts_with('-') {
+            git_lines_deleted = git_lines_deleted.saturating_add(1);
+        } else if line.is_empty() || line.starts_with(' ') {
+            new_line = new_line.saturating_add(1);
+        }
+    }
+
+    for lines in added_lines_by_file.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
+
+    UnifiedDiffStats {
+        added_lines_by_file,
+        git_lines_added,
+        git_lines_deleted,
+    }
+}
+
+/// `git-ai analyze-commit-diff --json '{...}'`
+///
+/// Combines an authorship note with a commit's unified diff to report how many
+/// added lines are attributable to AI, to known humans, or unknown, along with
+/// a per-tool/model breakdown of AI-added lines.
+pub(crate) fn handle_analyze_commit_diff_internal(args: &[String]) {
+    disable_debug_logs_for_machine_command();
+    let payload = parse_machine_json_arg(args, "analyze-commit-diff")
+        .unwrap_or_else(|e| emit_machine_json_error(e));
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AnalyzeCommitDiffRequest {
+        commit_sha: String,
+        unified_diff: String,
+        authorship_note: String,
+        #[serde(default)]
+        is_merge_commit: bool,
+    }
+
+    let request: AnalyzeCommitDiffRequest = serde_json::from_str(&payload)
+        .unwrap_or_else(|e| emit_machine_json_error(format!("Invalid JSON payload: {}", e)));
+
+    let log =
+        crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(
+            &request.authorship_note,
+        )
+        .unwrap_or_else(|e| emit_machine_json_error(format!("Invalid note content: {}", e)));
+
+    let diff_stats = parse_unified_diff_stats(&request.unified_diff);
+
+    let (ai_lines_added, human_lines_added, tool_model_counts) =
+        crate::authorship::stats::accepted_lines_from_attestations(
+            Some(&log),
+            &diff_stats.added_lines_by_file,
+            request.is_merge_commit,
+        );
+
+    let unknown_lines_added = diff_stats
+        .git_lines_added
+        .saturating_sub(ai_lines_added.saturating_add(human_lines_added));
+
+    let tool_model_breakdown: serde_json::Map<String, serde_json::Value> = tool_model_counts
+        .into_iter()
+        .map(|(key, count)| {
+            (
+                key,
+                serde_json::json!({ "ai_lines_added": count }),
+            )
+        })
+        .collect();
+
+    let response = serde_json::json!({
+        "commit_sha": request.commit_sha,
+        "git_lines_added": diff_stats.git_lines_added,
+        "git_lines_deleted": diff_stats.git_lines_deleted,
+        "ai_lines_added": ai_lines_added,
+        "human_lines_added": human_lines_added,
+        "unknown_lines_added": unknown_lines_added,
+        "tool_model_breakdown": tool_model_breakdown,
+    });
+    print_machine_json(&response);
+}
+
 fn handle_ai_blame(args: &[String]) {
     if args.is_empty() {
         eprintln!("Error: blame requires a file argument");
@@ -1194,4 +1423,124 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod internal_note_json_tests {
+    use super::*;
+    use crate::authorship::authorship_log::{LineRange, PromptRecord};
+    use crate::authorship::authorship_log_serialization::{
+        AttestationEntry, AuthorshipLog, FileAttestation,
+    };
+    use crate::authorship::stats::accepted_lines_from_attestations;
+    use crate::authorship::working_log::AgentId;
+
+    /// Build an authorship log attributing `line_ranges` of `file` to a single
+    /// AI prompt for tool/model, mirroring the crate's own serialization tests.
+    fn ai_log_for(file: &str, hash: &str, line_ranges: Vec<LineRange>) -> AuthorshipLog {
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "base".to_string();
+        log.metadata.prompts.insert(
+            hash.to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "claude".to_string(),
+                    id: "session_abc".to_string(),
+                    model: "opus".to_string(),
+                },
+                human_author: None,
+                messages_url: None,
+                total_additions: 0,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                custom_attributes: None,
+            },
+        );
+        let mut attestation = FileAttestation::new(file.to_string());
+        attestation.add_entry(AttestationEntry::new(hash.to_string(), line_ranges));
+        log.attestations.push(attestation);
+        log
+    }
+
+    #[test]
+    fn note_metadata_exposes_prompts_and_sessions() {
+        let log = ai_log_for("src/f.rs", "abc123", vec![LineRange::Single(1)]);
+        let value = serde_json::json!({
+            "prompts": log.metadata.prompts,
+            "sessions": log.metadata.sessions,
+        });
+        assert!(value["prompts"]["abc123"].is_object());
+        assert_eq!(value["prompts"]["abc123"]["agent_id"]["tool"], "claude");
+        // No sessions were added, so the sessions map is empty.
+        assert!(value["sessions"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_unified_diff_counts_added_and_deleted_lines() {
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,1 +1,3 @@\n keep\n+new1\n+new2\n";
+        let stats = parse_unified_diff_stats(diff);
+        assert_eq!(stats.git_lines_added, 2);
+        assert_eq!(stats.git_lines_deleted, 0);
+        // "keep" is line 1, added lines land on 2 and 3.
+        assert_eq!(stats.added_lines_by_file.get("f").unwrap(), &vec![2, 3]);
+    }
+
+    #[test]
+    fn computes_ai_human_and_unknown_added_lines() {
+        // Diff adds two lines (2 and 3) to file "f"; attest both to AI.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,1 +1,3 @@\n keep\n+new1\n+new2\n";
+        let stats = parse_unified_diff_stats(diff);
+        let log = ai_log_for("f", "abc123", vec![LineRange::Range(2, 3)]);
+
+        let (ai, human, by_tool) =
+            accepted_lines_from_attestations(Some(&log), &stats.added_lines_by_file, false);
+        assert_eq!(ai, 2);
+        assert_eq!(human, 0);
+        let unknown = stats.git_lines_added.saturating_sub(ai.saturating_add(human));
+        assert_eq!(unknown, 0);
+        assert_eq!(*by_tool.get("claude::opus").unwrap(), 2);
+    }
+
+    #[test]
+    fn partially_attributed_diff_leaves_unknown_remainder() {
+        // Diff adds lines 2 and 3, but only line 2 is attributed to AI.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,1 +1,3 @@\n keep\n+new1\n+new2\n";
+        let stats = parse_unified_diff_stats(diff);
+        let log = ai_log_for("f", "abc123", vec![LineRange::Single(2)]);
+
+        let (ai, human, _by_tool) =
+            accepted_lines_from_attestations(Some(&log), &stats.added_lines_by_file, false);
+        assert_eq!(ai, 1);
+        let unknown = stats.git_lines_added.saturating_sub(ai.saturating_add(human));
+        assert_eq!(unknown, 1);
+    }
+
+    #[test]
+    fn deletion_only_diff_has_zero_added_authorship() {
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n keep\n-gone\n";
+        let stats = parse_unified_diff_stats(diff);
+        assert_eq!(stats.git_lines_added, 0);
+        assert_eq!(stats.git_lines_deleted, 1);
+        assert!(stats.added_lines_by_file.is_empty());
+
+        let log = ai_log_for("f", "abc123", vec![LineRange::Range(1, 10)]);
+        let (ai, human, _by_tool) =
+            accepted_lines_from_attestations(Some(&log), &stats.added_lines_by_file, false);
+        assert_eq!(ai, 0);
+        assert_eq!(human, 0);
+    }
+
+    #[test]
+    fn parse_unified_diff_unquotes_and_strips_prefix_on_plus_header() {
+        assert_eq!(
+            parse_plus_file_path("+++ b/src/normal.rs").as_deref(),
+            Some("src/normal.rs")
+        );
+        assert_eq!(parse_plus_file_path("+++ /dev/null"), None);
+        assert_eq!(
+            parse_plus_file_path("+++ \"b/with space.rs\"").as_deref(),
+            Some("with space.rs")
+        );
+    }
 }
