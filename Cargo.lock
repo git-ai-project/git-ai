@@ -1021,6 +1021,7 @@ dependencies = [
 name = "git-ai"
 version = "1.6.13"
 dependencies = [
+ "bstr",
  "chrono",
  "clap",
  "criterion",
@@ -1031,7 +1032,9 @@ dependencies = [
  "futures",
  "git-ai",
  "gix-config",
+ "gix-glob",
  "gix-index",
+ "gix-path",
  "glob",
  "ignore",
  "imara-diff",

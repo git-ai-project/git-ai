@@ -286,11 +286,7 @@ fn load_config(
     path: &Path,
     source: gix_config::Source,
 ) -> Result<gix_config::File<'static>, GitAiError> {
-    if path.exists() {
-        return gix_config::File::from_path_no_includes(path.to_path_buf(), source)
-            .map_err(|e| GitAiError::GixError(e.to_string()));
-    }
-    Ok(gix_config::File::default())
+    Ok(crate::git::config_reader::load_single_git_config(path, source)?.unwrap_or_default())
 }
 
 fn write_config(path: &Path, cfg: &gix_config::File<'_>) -> Result<(), GitAiError> {
@@ -612,4 +608,20 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
     }
 
     Some(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_config;
+
+    #[test]
+    fn hook_config_loader_rejects_oversized_file_before_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config");
+        std::fs::write(&path, vec![b'#'; 512 * 1_024]).unwrap();
+
+        let error = load_config(&path, gix_config::Source::Local)
+            .expect_err("oversized hook config must be rejected");
+        assert!(error.to_string().contains("byte limit"));
+    }
 }

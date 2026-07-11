@@ -882,10 +882,13 @@ mod tests {
             contents.push_str(&format!("    alias{index} = commit\n"));
         }
         contents.push_str(&format!("    huge = {}\n", "x".repeat(1024 * 1024)));
-        fs::write(&config_path, contents).expect("write config");
-        let config =
-            gix_config::File::from_path_no_includes(config_path, gix_config::Source::Local)
-                .expect("parse config");
+        fs::write(&config_path, &contents).expect("write config");
+        let config = gix_config::File::from_bytes_no_includes(
+            contents.as_bytes(),
+            gix_config::file::Metadata::api(),
+            Default::default(),
+        )
+        .expect("parse config");
 
         let aliases = read_all_aliases_from_config(&config);
         let retained_bytes = aliases

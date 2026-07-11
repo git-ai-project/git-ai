@@ -1,5 +1,6 @@
 pub mod cli_parser;
 pub mod command_classification;
+pub(crate) mod config_reader;
 pub mod fast_reader;
 pub mod notes_api;
 pub mod refs;

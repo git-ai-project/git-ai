@@ -43,6 +43,8 @@ const INTERNAL_GIT_READER_STACK_BYTES: usize = 512 * 1_024;
 pub(crate) const MAX_BATCH_GIT_ITEMS: usize = 4_096;
 pub(crate) const MAX_BATCH_MATERIALIZED_CONTENT_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_GIT_INDEX_BYTES: u64 = 32 * 1_024 * 1_024;
+const MAX_GIT_CONFIG_QUERY_ITEMS: usize = 4_096;
+const MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES: usize = 1_024 * 1_024;
 
 pub(crate) fn ensure_batch_git_item_limit(kind: &str, count: usize) -> Result<(), GitAiError> {
     if count > MAX_BATCH_GIT_ITEMS {
@@ -1138,8 +1140,7 @@ pub fn global_git_config_committer_identity() -> Result<GitAuthorIdentity, GitAi
 }
 
 pub fn global_git_config_identity_resolution() -> Result<GitConfigIdentityResolution, GitAiError> {
-    let config =
-        gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
+    let config = crate::git::config_reader::load_global_git_config()?;
     Ok(git_config_identity_resolution_from_config(&config))
 }
 
@@ -1409,6 +1410,7 @@ impl Repository {
     pub fn remotes_with_urls(&self) -> Result<Vec<(String, String)>, GitAiError> {
         let config = self.get_git_config_file()?;
         let mut remotes = Vec::new();
+        let mut retained_bytes = 0usize;
 
         for section in config.sections() {
             if !section.header().name().eq_ignore_ascii_case(b"remote") {
@@ -1420,22 +1422,22 @@ impl Repository {
             let Some(url) = section.body().value("url") else {
                 continue;
             };
-            remotes.push((name.to_string(), url.to_string()));
+            let name = name.to_string();
+            let url = url.to_string();
+            retained_bytes = retained_bytes
+                .saturating_add(name.len())
+                .saturating_add(url.len());
+            if remotes.len() >= MAX_GIT_CONFIG_QUERY_ITEMS
+                || retained_bytes > MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES
+            {
+                return Err(GitAiError::Generic(
+                    "Git remote config output exceeded its retention limit".to_string(),
+                ));
+            }
+            remotes.push((name, url));
         }
 
         Ok(remotes)
-    }
-
-    fn load_optional_config_file(
-        path: &Path,
-        source: gix_config::Source,
-    ) -> Result<Option<gix_config::File<'static>>, GitAiError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        gix_config::File::from_path_no_includes(path.to_path_buf(), source)
-            .map(Some)
-            .map_err(|e| GitAiError::GixError(e.to_string()))
     }
 
     pub(crate) fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
@@ -1521,6 +1523,7 @@ impl Repository {
 
         let config = self.get_git_config_file()?;
         let mut matches: HashMap<String, String> = HashMap::new();
+        let mut retained_bytes = 0usize;
 
         for section in config.sections() {
             let section_name = section.header().name().to_string().to_lowercase();
@@ -1537,7 +1540,24 @@ impl Repository {
                 if re.is_match(&full_key)
                     && let Some(value) = section.body().value(value_name).map(|c| c.to_string())
                 {
+                    let previous_bytes = matches
+                        .get(&full_key)
+                        .map(|previous| full_key.len().saturating_add(previous.len()))
+                        .unwrap_or(0);
+                    let next_retained_bytes = retained_bytes
+                        .saturating_sub(previous_bytes)
+                        .saturating_add(full_key.len())
+                        .saturating_add(value.len());
+                    if (!matches.contains_key(&full_key)
+                        && matches.len() >= MAX_GIT_CONFIG_QUERY_ITEMS)
+                        || next_retained_bytes > MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES
+                    {
+                        return Err(GitAiError::Generic(format!(
+                            "Git config query exceeded the {MAX_GIT_CONFIG_QUERY_OUTPUT_BYTES} output byte limit"
+                        )));
+                    }
                     matches.insert(full_key, value);
+                    retained_bytes = next_retained_bytes;
                 }
             }
         }
@@ -2368,63 +2388,7 @@ fn git_config_file_for_repo_paths(
     git_dir: &Path,
     git_common_dir: &Path,
 ) -> Result<gix_config::File<'static>, GitAiError> {
-    let mut config =
-        gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-    let home = dirs::home_dir();
-    let options = gix_config::file::init::Options {
-        includes: gix_config::file::includes::Options::follow(
-            gix_config::path::interpolate::Context {
-                home_dir: home.as_deref(),
-                ..Default::default()
-            },
-            gix_config::file::includes::conditional::Context {
-                git_dir: Some(git_dir),
-                branch_name: None,
-            },
-        ),
-        ..Default::default()
-    };
-
-    config
-        .resolve_includes(options)
-        .map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-    let local_config_path = git_common_dir.join("config");
-    let local_config =
-        Repository::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
-    let worktree_config_enabled = local_config
-        .as_ref()
-        .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
-        .and_then(Result::ok)
-        .unwrap_or(false);
-
-    if let Some(mut local_config) = local_config {
-        local_config
-            .resolve_includes(options)
-            .map_err(|e| GitAiError::GixError(e.to_string()))?;
-        config.append(local_config);
-    }
-
-    if worktree_config_enabled {
-        let worktree_config_path = git_dir.join("config.worktree");
-        if let Some(mut worktree_config) = Repository::load_optional_config_file(
-            &worktree_config_path,
-            gix_config::Source::Worktree,
-        )? {
-            worktree_config
-                .resolve_includes(options)
-                .map_err(|e| GitAiError::GixError(e.to_string()))?;
-            config.append(worktree_config);
-        }
-    }
-
-    config.append(
-        gix_config::File::from_environment_overrides()
-            .map_err(|e| GitAiError::GixError(e.to_string()))?,
-    );
-
-    Ok(config)
+    crate::git::config_reader::load_repository_git_config(git_dir, git_common_dir)
 }
 
 pub fn config_get_str_for_path_no_git_exec(

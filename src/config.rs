@@ -2,7 +2,6 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::feature_flags::FeatureFlags;
 use crate::git::repository::Repository;
 use crate::mdm::utils::home_dir;
+use crate::utils::read_file_with_limit;
 
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::RwLock;
@@ -1456,23 +1456,6 @@ fn parse_file_config_bytes(data: &[u8]) -> Result<FileConfig, serde_json::Error>
     let mut config = serde_json::from_slice::<FileConfig>(data)?;
     bound_file_config_collections(&mut config);
     Ok(config)
-}
-
-fn read_file_with_limit(path: &Path, max_bytes: u64, kind: &str) -> std::io::Result<Vec<u8>> {
-    let file = fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "{kind} exceeded the {max_bytes} byte limit ({})",
-                bytes.len()
-            ),
-        ));
-    }
-    Ok(bytes)
 }
 
 fn bound_file_config_collections(config: &mut FileConfig) {
