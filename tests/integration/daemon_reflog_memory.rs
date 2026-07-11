@@ -75,3 +75,28 @@ fn oversized_historical_reflog_keeps_daemon_bounded_and_next_commit_attributed()
         .unwrap();
     file.assert_committed_lines(lines!["base".unattributed_human(), "ai line".ai()]);
 }
+
+#[test]
+fn many_working_log_bases_keep_ref_cursor_and_attribution_working() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    let file_path = repo.path().join("tracked.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("tracked.txt");
+    file.assert_committed_lines(lines!["base".unattributed_human()]);
+    drop(file);
+
+    let working_logs = repo.path().join(".git/ai/working_logs");
+    for index in 1..=5_000_u64 {
+        fs::create_dir_all(working_logs.join(format!("{index:040x}"))).unwrap();
+    }
+    repo.restart_dedicated_daemon_for_test();
+
+    fs::write(&file_path, "base\nai line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "tracked.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit after working-log pressure")
+        .unwrap();
+    let mut file = repo.filename("tracked.txt");
+    file.assert_committed_lines(lines!["base".unattributed_human(), "ai line".ai()]);
+}

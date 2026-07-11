@@ -4,8 +4,8 @@ use crate::error::GitAiError;
 use crate::git::cli_parser::{
     explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
-use crate::git::find_repository_in_path;
 use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
+use crate::git::repository::discover_repository_in_path_no_git_exec;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -23,6 +23,8 @@ const MAX_DISCOVERED_REFLOGS: usize = 4_096;
 const MAX_REFLOG_DISCOVERY_ENTRIES: usize = 8_192;
 const MAX_REFLOG_DISCOVERY_DEPTH: usize = 64;
 const MAX_PENDING_REFLOG_DIRECTORIES: usize = 4_096;
+const MAX_WORKING_LOG_BASE_OIDS: usize = 4_096;
+const MAX_WORKING_LOG_DIRECTORY_ENTRIES: usize = 8_192;
 
 #[derive(Debug)]
 pub struct RefCursor {
@@ -3573,18 +3575,22 @@ fn parse_branch_lifecycle_message(
 
 fn working_log_base_oids(worktree: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
-    let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy()) else {
+    let Ok(repo) = discover_repository_in_path_no_git_exec(worktree) else {
         return out;
     };
     let Ok(entries) = fs::read_dir(&repo.storage.working_logs) else {
         return out;
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
+    for entry in entries.take(MAX_WORKING_LOG_DIRECTORY_ENTRIES).flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         if name == "initial" {
             out.insert("0000000000000000000000000000000000000000".to_string());
         } else if valid_non_zero_oid(&name) {
-            out.insert(name);
+            out.insert(name.into_owned());
+        }
+        if out.len() >= MAX_WORKING_LOG_BASE_OIDS {
+            break;
         }
     }
     out
@@ -3911,6 +3917,24 @@ mod tests {
         });
 
         assert!(format!("{anchor:?}").len() < 512);
+    }
+
+    #[test]
+    fn working_log_base_oid_fallback_is_bounded() {
+        let repo = crate::git::test_utils::TmpRepo::new().unwrap();
+        for index in 1..=4_097_u64 {
+            fs::create_dir_all(
+                repo.gitai_repo()
+                    .storage
+                    .working_logs
+                    .join(format!("{index:040x}")),
+            )
+            .unwrap();
+        }
+
+        let base_oids = working_log_base_oids(repo.path());
+
+        assert!(base_oids.len() <= 4_096);
     }
 
     #[test]
