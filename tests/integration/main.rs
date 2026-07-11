@@ -59,6 +59,7 @@ mod daemon_config_memory;
 mod daemon_control_metadata_memory;
 mod daemon_git_config_memory;
 mod daemon_git_output_memory;
+mod daemon_hook_memory;
 mod daemon_http_memory;
 mod daemon_ignore_memory;
 mod daemon_ipc_memory;
