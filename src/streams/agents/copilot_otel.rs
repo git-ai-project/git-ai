@@ -49,8 +49,12 @@ pub fn read_otel_spans_incremental(
     }
 
     let span_ids: Vec<&str> = spans.iter().map(|s| s.span_id.as_str()).collect();
-    let attributes = read_attributes_for_spans(&conn, &span_ids)?;
-    let events = read_events_for_spans(&conn, &span_ids)?;
+    let mut auxiliary_bytes = 0usize;
+    let mut auxiliary_rows = 0usize;
+    let attributes =
+        read_attributes_for_spans(&conn, &span_ids, &mut auxiliary_rows, &mut auxiliary_bytes)?;
+    let events =
+        read_events_for_spans(&conn, &span_ids, &mut auxiliary_rows, &mut auxiliary_bytes)?;
 
     let last_span = spans.last().unwrap();
     let new_watermark =
@@ -96,6 +100,33 @@ struct SpanRow {
     chat_session_id: Option<String>,
     turn_index: Option<i64>,
     ttft_ms: Option<f64>,
+}
+
+impl SpanRow {
+    fn retained_text_bytes(&self) -> usize {
+        let required = self
+            .span_id
+            .len()
+            .saturating_add(self.trace_id.len())
+            .saturating_add(self.name.len());
+        [
+            self.parent_span_id.as_ref(),
+            self.status_message.as_ref(),
+            self.operation_name.as_ref(),
+            self.provider_name.as_ref(),
+            self.agent_name.as_ref(),
+            self.conversation_id.as_ref(),
+            self.request_model.as_ref(),
+            self.response_model.as_ref(),
+            self.tool_name.as_ref(),
+            self.tool_call_id.as_ref(),
+            self.tool_type.as_ref(),
+            self.chat_session_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(required, |bytes, value| bytes.saturating_add(value.len()))
+    }
 }
 
 fn read_spans_after(
@@ -188,21 +219,43 @@ fn read_spans_after(
         })
         .map_err(|e| map_sqlite_error(e, "Failed to query spans"))?;
 
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| map_sqlite_error(e, "Failed to read span row"))
+    let mut spans = Vec::new();
+    let mut batch_bytes = 0usize;
+    for row in rows {
+        let span = row.map_err(|e| map_sqlite_error(e, "Failed to read span row"))?;
+        let row_bytes = span.retained_text_bytes();
+        if row_bytes > crate::streams::types::MAX_JSONL_EVENT_BYTES {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL span {} exceeded the {} byte row limit",
+                    span.span_id,
+                    crate::streams::types::MAX_JSONL_EVENT_BYTES
+                ),
+            });
+        }
+        batch_bytes = batch_bytes.saturating_add(row_bytes);
+        spans.push(span);
+        if crate::streams::types::jsonl_batch_limit_reached(spans.len(), limit, batch_bytes) {
+            break;
+        }
+    }
+    Ok(spans)
 }
 
 fn read_attributes_for_spans(
     conn: &Connection,
     span_ids: &[&str],
+    auxiliary_rows: &mut usize,
+    auxiliary_bytes: &mut usize,
 ) -> Result<HashMap<String, HashMap<String, String>>, StreamError> {
     if span_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let placeholders: String = span_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT span_id, key, value FROM span_attributes WHERE span_id IN ({})",
-        placeholders
+        "SELECT span_id, key, value FROM span_attributes WHERE span_id IN ({}) LIMIT {}",
+        placeholders,
+        crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH + 1
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -222,6 +275,36 @@ fn read_attributes_for_spans(
     for row in rows {
         let (span_id, key, value) =
             row.map_err(|e| map_sqlite_error(e, "Failed to read attribute row"))?;
+        *auxiliary_rows = auxiliary_rows.saturating_add(1);
+        if *auxiliary_rows > crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL attribute fanout exceeded the {} row limit",
+                    crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH
+                ),
+            });
+        }
+        let row_bytes = span_id
+            .len()
+            .saturating_add(key.len())
+            .saturating_add(value.as_ref().map_or(0, String::len));
+        if row_bytes > crate::streams::types::MAX_JSONL_EVENT_BYTES {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL attribute exceeded the {} byte row limit",
+                    crate::streams::types::MAX_JSONL_EVENT_BYTES
+                ),
+            });
+        }
+        *auxiliary_bytes = auxiliary_bytes.saturating_add(row_bytes);
+        if *auxiliary_bytes > crate::streams::types::MAX_SQLITE_AUX_BATCH_BYTES {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL auxiliary data exceeded the {} byte batch limit",
+                    crate::streams::types::MAX_SQLITE_AUX_BATCH_BYTES
+                ),
+            });
+        }
         if let Some(v) = value {
             result.entry(span_id).or_default().insert(key, v);
         }
@@ -232,6 +315,8 @@ fn read_attributes_for_spans(
 fn read_events_for_spans(
     conn: &Connection,
     span_ids: &[&str],
+    auxiliary_rows: &mut usize,
+    auxiliary_bytes: &mut usize,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, StreamError> {
     if span_ids.is_empty() {
         return Ok(HashMap::new());
@@ -239,8 +324,9 @@ fn read_events_for_spans(
     let placeholders: String = span_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT span_id, name, CAST(timestamp_ms AS INTEGER), attributes FROM span_events \
-         WHERE span_id IN ({}) ORDER BY timestamp_ms ASC",
-        placeholders
+         WHERE span_id IN ({}) ORDER BY timestamp_ms ASC LIMIT {}",
+        placeholders,
+        crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH + 1
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -261,6 +347,36 @@ fn read_events_for_spans(
     for row in rows {
         let (span_id, name, timestamp_ms, attributes_json) =
             row.map_err(|e| map_sqlite_error(e, "Failed to read event row"))?;
+        *auxiliary_rows = auxiliary_rows.saturating_add(1);
+        if *auxiliary_rows > crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL span-event fanout exceeded the {} row limit",
+                    crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH
+                ),
+            });
+        }
+        let row_bytes = span_id
+            .len()
+            .saturating_add(name.len())
+            .saturating_add(attributes_json.as_ref().map_or(0, String::len));
+        if row_bytes > crate::streams::types::MAX_JSONL_EVENT_BYTES {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL span event exceeded the {} byte row limit",
+                    crate::streams::types::MAX_JSONL_EVENT_BYTES
+                ),
+            });
+        }
+        *auxiliary_bytes = auxiliary_bytes.saturating_add(row_bytes);
+        if *auxiliary_bytes > crate::streams::types::MAX_SQLITE_AUX_BATCH_BYTES {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "Copilot OTEL auxiliary data exceeded the {} byte batch limit",
+                    crate::streams::types::MAX_SQLITE_AUX_BATCH_BYTES
+                ),
+            });
+        }
         let attrs: serde_json::Value = attributes_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::Value::Null);
@@ -535,6 +651,32 @@ mod tests {
         assert_eq!(events[0]["name"], "tool_call");
         assert_eq!(events[0]["timestamp_ms"], 500);
         assert_eq!(events[0]["attributes"]["tool"], "read_file");
+    }
+
+    #[test]
+    fn test_span_event_fanout_exceeding_row_limit_is_rejected() {
+        let (_dir, db_path) = create_test_otel_db();
+        let mut conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        insert_span(&conn, "span1", 1000, 100, 50);
+        let transaction = conn.transaction().unwrap();
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO span_events (span_id, name, timestamp_ms, attributes) VALUES ('span1', 'tool_call', ?1, '{}')",
+                )
+                .unwrap();
+            for index in 0..4_097 {
+                statement.execute([index]).unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        match read_otel_spans_incremental(&db_path, watermark, 100) {
+            Err(error) => assert!(error.to_string().contains("row limit")),
+            Ok(_) => panic!("unbounded span-event fanout should be rejected"),
+        }
     }
 
     #[test]

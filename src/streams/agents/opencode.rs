@@ -33,6 +33,11 @@ pub fn open_sqlite_readonly(path: &Path) -> Result<Connection, StreamError> {
                 message: format!("Failed to open OpenCode database {}: {}", path.display(), e),
             })?;
 
+    conn.set_limit(
+        rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
+        crate::streams::types::MAX_SQLITE_TRANSCRIPT_ROW_BYTES as i32,
+    );
+
     conn.execute_batch("PRAGMA busy_timeout = 5000;")
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to set PRAGMAs: {}", e),
@@ -74,11 +79,26 @@ fn read_session_messages_raw_with_limit(
         })?;
 
     let mut messages = Vec::new();
+    let mut batch_bytes = 0usize;
     for row in rows {
         let (id, row_session_id, time_created, time_updated, data) =
             row.map_err(|e| StreamError::Fatal {
                 message: format!("Failed to read message row: {}", e),
             })?;
+
+        if data.len() > crate::streams::types::MAX_JSONL_EVENT_BYTES {
+            return Err(StreamError::Fatal {
+                message: format!(
+                    "OpenCode message {} exceeded the {} byte row limit",
+                    id,
+                    crate::streams::types::MAX_JSONL_EVENT_BYTES
+                ),
+            });
+        }
+        let row_bytes = id
+            .len()
+            .saturating_add(row_session_id.len())
+            .saturating_add(data.len());
 
         let parsed_data: serde_json::Value =
             serde_json::from_str(&data).map_err(|e| StreamError::Parse {
@@ -104,6 +124,10 @@ fn read_session_messages_raw_with_limit(
         map.insert("data".into(), parsed_data);
 
         messages.push((id, time_updated, serde_json::Value::Object(map)));
+        batch_bytes = batch_bytes.saturating_add(row_bytes);
+        if crate::streams::types::jsonl_batch_limit_reached(messages.len(), limit, batch_bytes) {
+            break;
+        }
     }
 
     Ok(messages)
@@ -115,74 +139,111 @@ fn read_session_messages_raw_with_limit(
 /// grouped by message_id.
 fn read_parts_for_messages_with_limit(
     conn: &Connection,
-    session_id: &str,
-    after_updated: i64,
-    limit: usize,
+    message_ids: &[String],
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, StreamError> {
-    let mut stmt = conn
-        .prepare(
+    let mut parts_by_message: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut row_count = 0usize;
+    let mut batch_bytes = 0usize;
+    const QUERY_IDS_PER_CHUNK: usize = 512;
+
+    for message_id_chunk in message_ids.chunks(QUERY_IDS_PER_CHUNK) {
+        let placeholders = std::iter::repeat_n("?", message_id_chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
             "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
-             WHERE message_id IN ( \
-                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? ORDER BY time_updated ASC, id ASC LIMIT ? \
-             ) \
-             ORDER BY message_id ASC, time_updated ASC, id ASC",
-        )
-        .map_err(|e| StreamError::Fatal {
+             WHERE message_id IN ({placeholders}) \
+             ORDER BY message_id ASC, time_updated ASC, id ASC \
+             LIMIT {}",
+            crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH + 1
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| StreamError::Fatal {
             message: format!("Failed to prepare part query: {}", e),
         })?;
-
-    let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
-            let id: String = row.get(0)?;
-            let message_id: String = row.get(1)?;
-            let row_session_id: String = row.get(2)?;
-            let time_created: i64 = row.get(3)?;
-            let time_updated: i64 = row.get(4)?;
-            let data: String = row.get(5)?;
-            Ok((
-                id,
-                message_id,
-                row_session_id,
-                time_created,
-                time_updated,
-                data,
-            ))
-        })
-        .map_err(|e| StreamError::Fatal {
-            message: format!("Failed to query parts: {}", e),
-        })?;
-
-    let mut parts_by_message: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    for row in rows {
-        let (id, message_id, row_session_id, time_created, time_updated, data) =
-            row.map_err(|e| StreamError::Fatal {
-                message: format!("Failed to read part row: {}", e),
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(message_id_chunk.iter()), |row| {
+                let id: String = row.get(0)?;
+                let message_id: String = row.get(1)?;
+                let row_session_id: String = row.get(2)?;
+                let time_created: i64 = row.get(3)?;
+                let time_updated: i64 = row.get(4)?;
+                let data: String = row.get(5)?;
+                Ok((
+                    id,
+                    message_id,
+                    row_session_id,
+                    time_created,
+                    time_updated,
+                    data,
+                ))
+            })
+            .map_err(|e| StreamError::Fatal {
+                message: format!("Failed to query parts: {}", e),
             })?;
 
-        if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
-            let mut map = serde_json::Map::with_capacity(6);
-            map.insert("id".into(), serde_json::Value::String(id));
-            map.insert(
-                "message_id".into(),
-                serde_json::Value::String(message_id.clone()),
-            );
-            map.insert(
-                "session_id".into(),
-                serde_json::Value::String(row_session_id),
-            );
-            map.insert(
-                "time_created".into(),
-                serde_json::Value::Number(time_created.into()),
-            );
-            map.insert(
-                "time_updated".into(),
-                serde_json::Value::Number(time_updated.into()),
-            );
-            map.insert("data".into(), parsed_data);
-            parts_by_message
-                .entry(message_id)
-                .or_default()
-                .push(serde_json::Value::Object(map));
+        for row in rows {
+            let (id, message_id, row_session_id, time_created, time_updated, data) =
+                row.map_err(|e| StreamError::Fatal {
+                    message: format!("Failed to read part row: {}", e),
+                })?;
+            row_count = row_count.saturating_add(1);
+            if row_count > crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH {
+                return Err(StreamError::Fatal {
+                    message: format!(
+                        "OpenCode part fanout exceeded the {} row limit",
+                        crate::streams::types::MAX_SQLITE_AUX_ROWS_PER_BATCH
+                    ),
+                });
+            }
+            if data.len() > crate::streams::types::MAX_JSONL_EVENT_BYTES {
+                return Err(StreamError::Fatal {
+                    message: format!(
+                        "OpenCode part {} exceeded the {} byte row limit",
+                        id,
+                        crate::streams::types::MAX_JSONL_EVENT_BYTES
+                    ),
+                });
+            }
+            let row_bytes = id
+                .len()
+                .saturating_add(message_id.len())
+                .saturating_add(row_session_id.len())
+                .saturating_add(data.len());
+            batch_bytes = batch_bytes.saturating_add(row_bytes);
+            if batch_bytes > crate::streams::types::MAX_SQLITE_AUX_BATCH_BYTES {
+                return Err(StreamError::Fatal {
+                    message: format!(
+                        "OpenCode part fanout exceeded the SQLite batch byte limit of {}",
+                        crate::streams::types::MAX_SQLITE_AUX_BATCH_BYTES
+                    ),
+                });
+            }
+
+            if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
+                let mut map = serde_json::Map::with_capacity(6);
+                map.insert("id".into(), serde_json::Value::String(id));
+                map.insert(
+                    "message_id".into(),
+                    serde_json::Value::String(message_id.clone()),
+                );
+                map.insert(
+                    "session_id".into(),
+                    serde_json::Value::String(row_session_id),
+                );
+                map.insert(
+                    "time_created".into(),
+                    serde_json::Value::Number(time_created.into()),
+                );
+                map.insert(
+                    "time_updated".into(),
+                    serde_json::Value::Number(time_updated.into()),
+                );
+                map.insert("data".into(), parsed_data);
+                parts_by_message
+                    .entry(message_id)
+                    .or_default()
+                    .push(serde_json::Value::Object(map));
+            }
         }
     }
 
@@ -249,13 +310,13 @@ impl Agent for OpenCodeAgent {
             });
         }
 
-        // Read only parts for the matched messages (IN-subquery, single scan)
-        let mut parts_by_message = read_parts_for_messages_with_limit(
-            &conn,
-            session_id,
-            watermark_millis,
-            self.batch_size,
-        )?;
+        // Read only parts for the matched messages in a constant number of
+        // bounded IN queries.
+        let message_ids = messages
+            .iter()
+            .map(|(message_id, _, _)| message_id.clone())
+            .collect::<Vec<_>>();
+        let mut parts_by_message = read_parts_for_messages_with_limit(&conn, &message_ids)?;
 
         let mut max_updated: i64 = watermark_millis;
         let mut events = Vec::with_capacity(messages.len());
@@ -539,6 +600,20 @@ mod tests {
     }
 
     #[test]
+    fn test_sqlite_open_sets_external_row_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        drop(crate::sqlite::open_with_memory_limits(&db_path).unwrap());
+
+        let conn = open_sqlite_readonly(&db_path).unwrap();
+
+        assert_eq!(
+            conn.limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH),
+            crate::streams::types::MAX_SQLITE_TRANSCRIPT_ROW_BYTES as i32
+        );
+    }
+
+    #[test]
     fn test_limit_caps_memory_and_watermark_still_drains_all() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -586,15 +661,48 @@ mod tests {
     }
 
     #[test]
+    fn test_part_fanout_exceeding_batch_bytes_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 1);
+
+        let mut conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        let transaction = conn.transaction().unwrap();
+        let payload = format!(r#"{{"type":"text","text":"{}"}}"#, "x".repeat(256 * 1024));
+        for index in 1..40 {
+            transaction
+                .execute(
+                    "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, 'msg-0', 'test-session', ?2, ?2, ?3)",
+                    rusqlite::params![format!("fanout-part-{index}"), 1001 + index, payload],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(conn);
+
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampWatermark::new(
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        ));
+        let result = OpenCodeAgent::new().read_incremental(&db_path, watermark, "test-session");
+        match result {
+            Err(error) => assert!(error.to_string().contains("batch byte limit")),
+            Ok(_) => panic!("unbounded part fanout should be rejected"),
+        }
+    }
+
+    #[test]
     fn test_parts_are_batch_loaded_not_per_message() {
         let db_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/opencode-sqlite/opencode.db");
         let conn = open_sqlite_readonly(&db_path).unwrap();
         // watermark=0 matches all messages in the fixture
-        let parts = read_parts_for_messages_with_limit(&conn, "test-session-123", 0, 1000).unwrap();
-        // Verify IN-subquery loading returns parts grouped by message_id.
-        // Single query with IN-subquery instead of one per message,
-        // prevents full-table-scan memory blowup on large unindexed databases.
+        let message_ids = read_session_messages_raw_with_limit(&conn, "test-session-123", 0, 1000)
+            .unwrap()
+            .into_iter()
+            .map(|(message_id, _, _)| message_id)
+            .collect::<Vec<_>>();
+        let parts = read_parts_for_messages_with_limit(&conn, &message_ids).unwrap();
+        // Verify batched IN loading returns parts grouped by message_id.
         assert!(
             !parts.is_empty(),
             "batch parts query must return data from fixture"

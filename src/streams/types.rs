@@ -18,6 +18,18 @@ pub const MAX_MONOLITHIC_JSON_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum size of auxiliary JSON metadata consulted during transcript processing.
 pub const MAX_JSON_METADATA_BYTES: u64 = 1024 * 1024;
 
+/// Maximum SQLite string/BLOB or aggregate table-row size accepted from an
+/// external transcript database. This is slightly larger than one event so
+/// SQLite can return the event plus its identifying columns.
+pub const MAX_SQLITE_TRANSCRIPT_ROW_BYTES: usize = 2 * 1024 * 1024;
+
+/// Maximum number of auxiliary rows (parts, attributes, or span events)
+/// materialized for one SQLite transcript batch.
+pub const MAX_SQLITE_AUX_ROWS_PER_BATCH: usize = 4_096;
+
+/// Maximum raw auxiliary data retained for one SQLite transcript batch.
+pub const MAX_SQLITE_AUX_BATCH_BYTES: usize = MAX_JSONL_BATCH_BYTES;
+
 pub fn read_bounded_json_file(
     path: &std::path::Path,
     kind: &str,
