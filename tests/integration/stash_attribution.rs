@@ -1358,7 +1358,9 @@ fn test_repeated_stash_pop_does_not_duplicate_checkpoints() {
 
 #[test]
 fn test_partial_stash_truncates_oversized_live_checkpoints_before_filtering() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_CHECKPOINTS_JSONL_MAX_BYTES", "64")]);
+    const TEST_CHECKPOINT_LIMIT_BYTES: usize = 64 * 1_024;
+    let repo =
+        TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_CHECKPOINTS_JSONL_MAX_BYTES", "65536")]);
     fs::write(repo.path().join("a.txt"), "base a\n").unwrap();
     fs::write(repo.path().join("b.txt"), "base b\n").unwrap();
     repo.stage_all_and_commit("initial").unwrap();
@@ -1375,9 +1377,10 @@ fn test_partial_stash_truncates_oversized_live_checkpoints_before_filtering() {
         .find(|line| !line.trim().is_empty())
         .expect("checkpoint fixture should contain one line")
         .to_string();
+    let repetitions = TEST_CHECKPOINT_LIMIT_BYTES / (checkpoint_line.len() + 1) + 2;
     fs::write(
         &checkpoints_file,
-        (0..8)
+        (0..repetitions)
             .map(|_| checkpoint_line.as_str())
             .collect::<Vec<_>>()
             .join("\n")
@@ -1385,7 +1388,7 @@ fn test_partial_stash_truncates_oversized_live_checkpoints_before_filtering() {
     )
     .expect("inflate checkpoint file above test limit");
     assert!(
-        fs::metadata(&checkpoints_file).unwrap().len() > 64,
+        fs::metadata(&checkpoints_file).unwrap().len() > TEST_CHECKPOINT_LIMIT_BYTES as u64,
         "test setup should exceed the daemon's test checkpoint size limit"
     );
 
