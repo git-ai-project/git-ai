@@ -7807,22 +7807,42 @@ fn write_all_daemon_client_stream(
     Ok(())
 }
 
-fn read_daemon_client_line(
+pub(crate) fn read_daemon_client_line(
     reader: &mut BufReader<DaemonClientStream>,
     socket_path: &Path,
     response_timeout: Duration,
 ) -> Result<String, GitAiError> {
-    let mut line = String::new();
+    let mut line = Vec::with_capacity(MAX_CONTROL_JSON_LINE_BYTES.min(8 * 1024));
     let deadline = std::time::Instant::now() + response_timeout;
     loop {
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                return Err(GitAiError::Generic(format!(
-                    "daemon socket {} closed without a response",
-                    socket_path.display()
-                )));
+        match reader.fill_buf() {
+            Ok([]) => {
+                if line.is_empty() {
+                    return Err(GitAiError::Generic(format!(
+                        "daemon socket {} closed without a response",
+                        socket_path.display()
+                    )));
+                }
+                break;
             }
-            Ok(_) => return Ok(line),
+            Ok(available) => {
+                let chunk_len = available
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(available.len(), |index| index + 1);
+                if line.len().saturating_add(chunk_len) > MAX_CONTROL_JSON_LINE_BYTES {
+                    return Err(GitAiError::Generic(format!(
+                        "daemon response from {} exceeds {} bytes",
+                        socket_path.display(),
+                        MAX_CONTROL_JSON_LINE_BYTES
+                    )));
+                }
+                line.extend_from_slice(&available[..chunk_len]);
+                reader.consume(chunk_len);
+                if line.last() == Some(&b'\n') {
+                    break;
+                }
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -7847,6 +7867,9 @@ fn read_daemon_client_line(
             }
         }
     }
+
+    String::from_utf8(line)
+        .map_err(|error| GitAiError::IoError(io::Error::new(io::ErrorKind::InvalidData, error)))
 }
 
 #[cfg(windows)]
