@@ -67,6 +67,7 @@ mod daemon_line_range_memory;
 mod daemon_log_memory;
 mod daemon_note_materialization_memory;
 mod daemon_notes_flush_memory;
+mod daemon_recovery_query_memory;
 mod daemon_reflog_memory;
 mod daemon_repository_reader_memory;
 mod daemon_retained_state_memory;

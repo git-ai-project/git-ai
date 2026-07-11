@@ -22,6 +22,7 @@ const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
 pub(crate) const MAX_METRIC_EVENT_JSON_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_METRIC_UPLOAD_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SESSION_EVENT_RECOVERY_CANDIDATES: usize = 1_024;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
 /// Database migrations - each migration upgrades the schema by one version
@@ -1032,6 +1033,7 @@ impl MetricsDatabase {
         else {
             return Ok(Vec::new());
         };
+        let candidate_limit = session_event_recovery_candidate_limit();
 
         let mut stmt = self.conn.prepare(
             r#"
@@ -1056,13 +1058,15 @@ impl MetricsDatabase {
               AND external_session_id IS NOT NULL
               AND external_session_id != ''
             ORDER BY id ASC
+            LIMIT ?4
             "#,
         )?;
         let rows = stmt.query_map(
             params![
                 MetricEventId::SessionEvent as i64,
                 min_event_ts as i64,
-                max_event_ts as i64
+                max_event_ts as i64,
+                candidate_limit.saturating_add(1) as i64,
             ],
             |row| {
                 Ok((
@@ -1079,7 +1083,16 @@ impl MetricsDatabase {
         )?;
 
         let mut candidates = Vec::new();
+        let mut scanned = 0usize;
         for row in rows {
+            scanned += 1;
+            if scanned > candidate_limit {
+                tracing::debug!(
+                    limit = candidate_limit,
+                    "session-event attribution recovery skipped at candidate limit"
+                );
+                return Ok(Vec::new());
+            }
             let (
                 row_id,
                 event_json,
@@ -1363,6 +1376,17 @@ impl MetricsDatabase {
         tx.commit()?;
         Ok(should_emit)
     }
+}
+
+fn session_event_recovery_candidate_limit() -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(value) = std::env::var("GIT_AI_TEST_ATTRIBUTION_RECOVERY_CANDIDATE_LIMIT")
+        && let Ok(value) = value.parse::<usize>()
+        && value > 0
+    {
+        return value.min(MAX_SESSION_EVENT_RECOVERY_CANDIDATES);
+    }
+    MAX_SESSION_EVENT_RECOVERY_CANDIDATES
 }
 
 fn current_unix_ts() -> u64 {
