@@ -65,6 +65,7 @@ mod daemon_ignore_memory;
 mod daemon_ipc_memory;
 mod daemon_line_range_memory;
 mod daemon_log_memory;
+mod daemon_metric_prune_memory;
 mod daemon_note_materialization_memory;
 mod daemon_notes_flush_memory;
 mod daemon_recovery_query_memory;

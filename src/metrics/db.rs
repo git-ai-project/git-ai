@@ -19,6 +19,7 @@ const SCHEMA_VERSION: usize = 4;
 
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
+const METRIC_PRUNE_SCAN_BATCH_SIZE: usize = 256;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
 pub(crate) const MAX_METRIC_EVENT_JSON_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_METRIC_UPLOAD_BATCH_BYTES: usize = 8 * 1024 * 1024;
@@ -139,6 +140,12 @@ struct MetricEventMetadata {
     external_event_id: Option<String>,
     external_parent_event_id: Option<String>,
     external_tool_use_id: Option<String>,
+}
+
+struct MetricPruneScanBatch {
+    ids: Vec<i64>,
+    last_id: Option<i64>,
+    scanned: usize,
 }
 
 /// Database wrapper for metrics storage
@@ -907,45 +914,95 @@ impl MetricsDatabase {
         }
 
         let cutoff = now.saturating_sub(Self::METRICS_RETENTION_SECS);
-        let rows_to_prune = self.old_metric_row_ids(cutoff)?;
+        self.conn.execute(
+            "DELETE FROM metrics \
+             WHERE event_ts IS NOT NULL \
+               AND event_ts >= 0 \
+               AND event_ts < ?1",
+            params![i64::try_from(cutoff).unwrap_or(i64::MAX)],
+        )?;
+
+        let mut after_id = 0i64;
+        loop {
+            let batch = self.old_legacy_metric_row_ids_after(
+                cutoff,
+                after_id,
+                METRIC_PRUNE_SCAN_BATCH_SIZE,
+            )?;
+            if !batch.ids.is_empty() {
+                let tx = self.conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached("DELETE FROM metrics WHERE id = ?1")?;
+                    for id in batch.ids {
+                        stmt.execute(params![id])?;
+                    }
+                }
+                tx.commit()?;
+            }
+            let Some(last_id) = batch.last_id else {
+                break;
+            };
+            after_id = last_id;
+            if batch.scanned < METRIC_PRUNE_SCAN_BATCH_SIZE {
+                break;
+            }
+        }
+
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('metrics_last_prune_ts', ?1)",
             params![now.to_string()],
         )?;
-        {
-            let mut stmt = tx.prepare_cached("DELETE FROM metrics WHERE id = ?1")?;
-            for id in rows_to_prune {
-                stmt.execute(params![id])?;
-            }
-        }
         tx.commit()?;
 
         Ok(())
     }
 
-    fn old_metric_row_ids(&self, cutoff: u64) -> Result<Vec<i64>, GitAiError> {
+    fn old_legacy_metric_row_ids_after(
+        &self,
+        cutoff: u64,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<MetricPruneScanBatch, GitAiError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_json, event_ts, delivered_ts FROM metrics ORDER BY id ASC",
+            "SELECT id, length(CAST(event_json AS BLOB)), event_json, event_ts, delivered_ts \
+             FROM metrics \
+             WHERE id > ?1 AND (event_ts IS NULL OR event_ts < 0) \
+             ORDER BY id ASC \
+             LIMIT ?2",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })?;
+        let mut rows = stmt.query(params![after_id, i64::try_from(limit).unwrap_or(i64::MAX)])?;
 
         let mut ids = Vec::new();
-        for row in rows {
-            let (id, event_json, event_ts, delivered_ts) = row?;
-            if metric_row_is_older_than_cutoff(&event_json, event_ts, delivered_ts, cutoff) {
+        let mut last_id = None;
+        let mut scanned = 0usize;
+        while let Some(row) = rows.next()? {
+            let id = row.get::<_, i64>(0)?;
+            let event_json_bytes = row.get::<_, i64>(1)?.max(0);
+            let event_ts = row.get::<_, Option<i64>>(3)?;
+            let delivered_ts = row.get::<_, Option<i64>>(4)?;
+            last_id = Some(id);
+            scanned = scanned.saturating_add(1);
+            let is_old = if event_json_bytes
+                > i64::try_from(MAX_METRIC_EVENT_JSON_BYTES).unwrap_or(i64::MAX)
+            {
+                delivered_ts
+                    .and_then(|timestamp| u64::try_from(timestamp).ok())
+                    .is_some_and(|timestamp| timestamp < cutoff)
+            } else {
+                let event_json = row.get::<_, String>(2)?;
+                metric_row_is_older_than_cutoff(&event_json, event_ts, delivered_ts, cutoff)
+            };
+            if is_old {
                 ids.push(id);
             }
         }
 
-        Ok(ids)
+        Ok(MetricPruneScanBatch {
+            ids,
+            last_id,
+            scanned,
+        })
     }
 
     /// Get count of pending metrics.
@@ -2981,6 +3038,62 @@ mod tests {
             unix_now().saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
         db.insert_events_with_delivered_ts(&["not-json".to_string()], Some(old_delivered_ts))
             .unwrap();
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_prunes_legacy_rows_after_full_retained_scan_batch() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        let old_delivered_ts = now.saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let tx = db.conn.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO metrics (event_json, delivered_ts) VALUES (?1, ?2)")
+                .unwrap();
+            for index in 0..=METRIC_PRUNE_SCAN_BATCH_SIZE {
+                let delivered_ts = if index == METRIC_PRUNE_SCAN_BATCH_SIZE {
+                    old_delivered_ts
+                } else {
+                    now
+                };
+                insert
+                    .execute(params![format!("not-json-{index}"), delivered_ts as i64])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        db.prune_old_metrics_if_due().unwrap();
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, METRIC_PRUNE_SCAN_BATCH_SIZE as i64);
+    }
+
+    #[test]
+    fn test_prunes_oversized_legacy_row_without_parsing_json() {
+        let (mut db, _temp_dir) = create_test_db();
+        let old_delivered_ts =
+            unix_now().saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json, delivered_ts) VALUES (?1, ?2)",
+                params![
+                    "x".repeat(MAX_METRIC_EVENT_JSON_BYTES + 1),
+                    old_delivered_ts as i64,
+                ],
+            )
+            .unwrap();
+
+        db.prune_old_metrics_if_due().unwrap();
 
         let total: i64 = db
             .conn
