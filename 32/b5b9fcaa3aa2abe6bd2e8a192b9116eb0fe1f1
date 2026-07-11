@@ -5,7 +5,7 @@ tests/integration/main.rs
 tests/integration/daemon_notes_flush_memory.rs
   s_59382cac373d67::t_03c639eb9c5e74 23
   s_59382cac373d67::t_691bbc8b5858ac 1-2
-  s_59382cac373d67::t_f6d876186831cd 3-22,24-54
+  s_59382cac373d67::t_f6d876186831cd 3-22,3-8,9-21,22,24-54
 src/daemon.rs
   s_59382cac373d67::t_ea5bdad0c31034 2620-2635,2712,2808,6315-6321
 ---
