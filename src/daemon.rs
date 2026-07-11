@@ -5998,6 +5998,23 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        #[cfg(feature = "test-support")]
+        if std::env::var("GIT_AI_TEST_FORCE_REWRITE_METRICS_ON_AMEND").as_deref() == Ok("1")
+            && primary == "commit"
+            && cmd.invoked_args.iter().any(|arg| arg == "--amend")
+            && let Some(worktree) = cmd.worktree.as_ref()
+        {
+            let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+            crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                &repo,
+                vec![crate::authorship::rewrite::RewriteMetricCommit::new(
+                    "ffffffffffffffffffffffffffffffffffffffff".to_string(),
+                    vec!["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string()],
+                    crate::authorship::rewrite::RewriteMetricOperation::Amend,
+                )],
+            );
+        }
+
         if matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) {
             apply_checkout_switch_working_log_side_effect(cmd)?;
         }
