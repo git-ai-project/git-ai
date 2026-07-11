@@ -2193,21 +2193,35 @@ fn pid_metadata_path(config: &DaemonConfig) -> PathBuf {
 
 const MAX_PID_METADATA_BYTES: u64 = 4 * 1_024;
 
-fn read_pid_metadata(config: &DaemonConfig) -> Result<DaemonPidMeta, GitAiError> {
+fn read_pid_metadata_if_present(
+    config: &DaemonConfig,
+) -> Result<Option<DaemonPidMeta>, GitAiError> {
     let meta_path = pid_metadata_path(config);
-    let contents = crate::utils::read_text_file_with_limit(
+    let contents = match crate::utils::read_text_file_with_limit(
         &meta_path,
         MAX_PID_METADATA_BYTES,
         "daemon PID metadata",
-    )
-    .map_err(|e| {
+    ) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GitAiError::Generic(format!(
+                "failed to read daemon pid metadata at {}: {}",
+                meta_path.display(),
+                error
+            )));
+        }
+    };
+    Ok(Some(serde_json::from_str(&contents)?))
+}
+
+fn read_pid_metadata(config: &DaemonConfig) -> Result<DaemonPidMeta, GitAiError> {
+    read_pid_metadata_if_present(config)?.ok_or_else(|| {
         GitAiError::Generic(format!(
-            "failed to read daemon pid metadata at {}: {}",
-            meta_path.display(),
-            e
+            "daemon pid metadata does not exist at {}",
+            pid_metadata_path(config).display()
         ))
-    })?;
-    Ok(serde_json::from_str(&contents)?)
+    })
 }
 
 /// Returns the log file path for the currently running daemon, if any.
@@ -2231,6 +2245,16 @@ fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
 /// Read the PID of the currently running daemon from the pid metadata file.
 pub fn read_daemon_pid(config: &DaemonConfig) -> Result<u32, GitAiError> {
     Ok(read_pid_metadata(config)?.pid)
+}
+
+pub fn read_daemon_started_at_ns(config: &DaemonConfig) -> Result<u128, GitAiError> {
+    Ok(read_pid_metadata(config)?.started_at_ns)
+}
+
+pub fn read_daemon_started_at_ns_if_present(
+    config: &DaemonConfig,
+) -> Result<Option<u128>, GitAiError> {
+    Ok(read_pid_metadata_if_present(config)?.map(|metadata| metadata.started_at_ns))
 }
 
 fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {

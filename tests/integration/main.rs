@@ -14,6 +14,7 @@ mod ai_tab;
 mod amend;
 mod amp;
 mod attribution_tracker_comprehensive;
+mod auxiliary_input_memory;
 mod background_agent_attribution;
 mod bash_attribution;
 mod bash_tool_benchmark;

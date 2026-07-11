@@ -6,6 +6,8 @@ use crate::daemon::{
 use crate::utils::LockFile;
 #[cfg(windows)]
 use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+#[cfg(not(windows))]
+use std::io::Read;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -100,6 +102,24 @@ fn daemon_startup_timeout() -> Duration {
     }
 }
 
+#[cfg(not(windows))]
+const MAX_DAEMON_STARTUP_STDERR_BYTES: usize = 1024 * 1024;
+
+#[cfg(not(windows))]
+fn read_daemon_startup_stderr(reader: impl Read) -> String {
+    let mut bytes = Vec::new();
+    let _ = reader
+        .take(MAX_DAEMON_STARTUP_STDERR_BYTES as u64 + 1)
+        .read_to_end(&mut bytes);
+    let truncated = bytes.len() > MAX_DAEMON_STARTUP_STDERR_BYTES;
+    bytes.truncate(MAX_DAEMON_STARTUP_STDERR_BYTES);
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        text.push_str("\n[daemon startup stderr truncated at byte limit]");
+    }
+    text
+}
+
 /// Spawn a daemon and wait for it to become healthy. Used by explicit CLI
 /// commands (`bg start`, `bg restart`) — NOT guarded for test builds.
 ///
@@ -131,11 +151,11 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
             }
             match child.try_wait() {
                 Ok(Some(status)) if !status.success() => {
-                    let mut stderr_buf = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = stderr.read_to_string(&mut stderr_buf);
-                    }
+                    let stderr_buf = child
+                        .stderr
+                        .take()
+                        .map(read_daemon_startup_stderr)
+                        .unwrap_or_default();
                     let detail = if stderr_buf.trim().is_empty() {
                         format!("daemon process exited with {}", status)
                     } else {
@@ -839,5 +859,14 @@ mod tests {
         });
 
         assert!(peak.load(Ordering::SeqCst) <= DAEMON_RUNTIME_MAX_BLOCKING_THREADS);
+    }
+
+    #[test]
+    fn daemon_startup_stderr_is_bounded() {
+        let input = std::io::Cursor::new(vec![b'x'; MAX_DAEMON_STARTUP_STDERR_BYTES + 1]);
+        let output = read_daemon_startup_stderr(input);
+
+        assert!(output.len() < MAX_DAEMON_STARTUP_STDERR_BYTES + 100);
+        assert!(output.contains("byte limit"));
     }
 }

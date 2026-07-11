@@ -117,15 +117,19 @@ fn resolve_hostname() -> Option<String> {
     {
         return Some(h.trim().to_string());
     }
-    let mut cmd = std::process::Command::new("hostname");
-    #[cfg(windows)]
-    {
-        use crate::utils::CREATE_NO_WINDOW;
-        std::os::windows::process::CommandExt::creation_flags(&mut cmd, CREATE_NO_WINDOW);
+    let output = crate::process_timeout::run_command_with_timeout(
+        "hostname",
+        &[],
+        None,
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(10),
+        &[],
+    )
+    .ok()?;
+    if output.timed_out || output.status != Some(0) {
+        return None;
     }
-    let output = cmd.output().ok()?;
-    let h = String::from_utf8(output.stdout).ok()?;
-    let h = h.trim();
+    let h = output.stdout.trim();
     if h.is_empty() {
         None
     } else {

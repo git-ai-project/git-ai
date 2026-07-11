@@ -136,7 +136,7 @@ fn get_update_check_cache_path() -> Option<PathBuf> {
 
 fn read_update_cache() -> Option<UpdateCache> {
     let path = get_update_check_cache_path()?;
-    let bytes = fs::read(path).ok()?;
+    let bytes = crate::utils::read_file_with_limit(&path, 64 * 1024, "update cache").ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
