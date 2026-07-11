@@ -14,9 +14,115 @@ use crate::config::{Config, NotesBackendKind};
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::notes::db::NotesDatabase;
+#[cfg(test)]
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+
+const MIGRATION_UPLOAD_ITEMS: usize = 50;
+const MAX_NOTE_BLOB_BYTES: usize = crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES;
+const MAX_CAT_FILE_HEADER_BYTES: usize = 1024;
+const MAX_CAT_FILE_STDERR_BYTES: usize = 1024 * 1024;
+
+struct MigrationUploader<'a> {
+    client: &'a ApiClient,
+    entries: Vec<(String, String)>,
+    content_bytes: usize,
+    total_uploaded: usize,
+    total_failed: usize,
+    total_cached: usize,
+}
+
+impl<'a> MigrationUploader<'a> {
+    fn new(client: &'a ApiClient) -> Self {
+        Self {
+            client,
+            entries: Vec::with_capacity(MIGRATION_UPLOAD_ITEMS),
+            content_bytes: 0,
+            total_uploaded: 0,
+            total_failed: 0,
+            total_cached: 0,
+        }
+    }
+
+    fn push(&mut self, commit_sha: &str, content: String) -> Result<(), GitAiError> {
+        if content.len() > MAX_NOTE_BLOB_BYTES {
+            return Err(GitAiError::Generic(format!(
+                "note blob exceeded the {MAX_NOTE_BLOB_BYTES} byte limit ({})",
+                content.len()
+            )));
+        }
+        if !self.entries.is_empty()
+            && (self.entries.len() >= MIGRATION_UPLOAD_ITEMS
+                || self.content_bytes.saturating_add(content.len()) > MAX_NOTE_BLOB_BYTES)
+        {
+            self.flush();
+        }
+
+        self.content_bytes = self.content_bytes.saturating_add(content.len());
+        self.entries.push((commit_sha.to_string(), content));
+        if self.entries.len() >= MIGRATION_UPLOAD_ITEMS || self.content_bytes >= MAX_NOTE_BLOB_BYTES
+        {
+            self.flush();
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) {
+        self.flush();
+    }
+
+    fn flush(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.content_bytes = 0;
+        let entries = std::mem::replace(
+            &mut self.entries,
+            Vec::with_capacity(MIGRATION_UPLOAD_ITEMS),
+        );
+        let chunk_len = entries.len();
+        let request = NotesUploadRequest {
+            entries: entries
+                .iter()
+                .map(|(commit_sha, content)| NoteEntry {
+                    commit_sha: commit_sha.clone(),
+                    content: content.clone(),
+                })
+                .collect(),
+        };
+
+        match self.client.upload_notes(request) {
+            Ok(response) => {
+                eprintln!(
+                    "  chunk: {} uploaded, {} failed",
+                    response.success_count, response.failure_count
+                );
+                self.total_uploaded = self.total_uploaded.saturating_add(response.success_count);
+                self.total_failed = self.total_failed.saturating_add(response.failure_count);
+
+                match cache_migrated_notes(&entries) {
+                    Ok(()) => {
+                        self.total_cached = self.total_cached.saturating_add(entries.len());
+                    }
+                    Err(error) => eprintln!("warning: failed to cache notes locally: {error}"),
+                }
+            }
+            Err(error) => {
+                eprintln!("  error uploading chunk of {chunk_len}: {error}");
+                self.total_failed = self.total_failed.saturating_add(chunk_len);
+            }
+        }
+    }
+}
+
+fn cache_migrated_notes(entries: &[(String, String)]) -> Result<(), GitAiError> {
+    let db = NotesDatabase::global()?;
+    let mut lock = db
+        .lock()
+        .map_err(|error| GitAiError::Generic(format!("notes-db lock poisoned: {error}")))?;
+    lock.cache_synced_notes(entries)
+}
 
 /// Entry point for `git-ai notes migrate`.
 pub fn handle_notes_migrate(args: &[String]) {
@@ -88,7 +194,7 @@ pub fn handle_notes_migrate(args: &[String]) {
     eprintln!("Listing notes from refs/notes/ai ...");
 
     // 4. List notes: `git notes --ref=ai list` → "blob_sha commit_sha\n" lines.
-    let note_pairs = match list_notes(&repo) {
+    let mut note_pairs = match list_notes(&repo) {
         Ok(pairs) => pairs,
         Err(e) => {
             eprintln!("error: failed to list notes: {}", e);
@@ -101,137 +207,84 @@ pub fn handle_notes_migrate(args: &[String]) {
         return;
     }
 
-    eprintln!("Found {} note(s). Reading content ...", note_pairs.len());
-
-    // 5. Bulk-read note content via `git cat-file --batch`.
-    let blob_to_commit: HashMap<String, String> = note_pairs
-        .iter()
-        .map(|(blob, commit)| (blob.clone(), commit.clone()))
-        .collect();
-
-    let blob_shas: Vec<String> = note_pairs.iter().map(|(b, _)| b.clone()).collect();
-    let blob_contents = match cat_file_batch(&repo, &blob_shas) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to read note content: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Build (commit_sha, content) pairs.
-    let mut entries: Vec<(String, String)> = Vec::new();
-    for (blob_sha, content) in &blob_contents {
-        if let Some(commit_sha) = blob_to_commit.get(blob_sha) {
-            entries.push((commit_sha.clone(), content.clone()));
-        }
-    }
+    eprintln!("Found {} note(s).", note_pairs.len());
 
     // Skip entries already confirmed synced (enables safe re-run after interruption).
     // Only skip synced=1 entries — pending (synced=0) entries still need uploading.
     if !force {
-        let pre_cached_count = entries.len();
-        if let Ok(db) = NotesDatabase::global()
-            && let Ok(lock) = db.lock()
-        {
-            let all_shas: Vec<&str> = entries.iter().map(|(s, _)| s.as_str()).collect();
-            if let Ok(synced) = lock.get_synced_shas(&all_shas) {
-                entries.retain(|(sha, _)| !synced.contains(sha));
-            }
-        }
-        if entries.len() < pre_cached_count {
-            eprintln!(
-                "Skipping {} already-cached note(s).",
-                pre_cached_count - entries.len()
-            );
+        let skipped = filter_synced_notes(&mut note_pairs);
+        if skipped > 0 {
+            eprintln!("Skipping {skipped} already-cached note(s).");
         }
 
-        if entries.is_empty() {
+        if note_pairs.is_empty() {
             eprintln!("All notes already migrated. Nothing to upload.");
             return;
         }
     }
 
     eprintln!(
-        "Read {} note(s). Uploading in chunks of 50 ...",
-        entries.len()
+        "Reading and uploading {} note(s) in bounded chunks ...",
+        note_pairs.len()
     );
 
-    // 6. Upload in chunks of 50 and cache locally.
-    let mut total_uploaded = 0usize;
-    let mut total_failed = 0usize;
-    let mut cached_entries: Vec<(String, String)> = Vec::new();
-
-    for chunk in entries.chunks(50) {
-        let note_entries: Vec<NoteEntry> = chunk
-            .iter()
-            .map(|(commit_sha, content)| NoteEntry {
-                commit_sha: commit_sha.clone(),
-                content: content.clone(),
-            })
-            .collect();
-
-        let chunk_len = note_entries.len();
-        let request = NotesUploadRequest {
-            entries: note_entries,
-        };
-
-        match client.upload_notes(request) {
-            Ok(response) => {
-                eprintln!(
-                    "  chunk: {} uploaded, {} failed",
-                    response.success_count, response.failure_count
-                );
-                total_uploaded += response.success_count;
-                total_failed += response.failure_count;
-
-                // Cache the whole chunk best-effort — the server doesn't
-                // tell us which specific entries failed.
-                cached_entries.extend_from_slice(chunk);
-            }
-            Err(e) => {
-                eprintln!("  error uploading chunk of {}: {}", chunk_len, e);
-                total_failed += chunk_len;
-            }
-        }
+    let mut uploader = MigrationUploader::new(&client);
+    if let Err(error) = cat_file_for_each(&repo, &note_pairs, |_, commit_sha, content| {
+        uploader.push(commit_sha, content)
+    }) {
+        eprintln!("error: failed to read note content: {error}");
+        std::process::exit(1);
     }
-
-    // Write all successfully-uploaded notes to local notes-db with synced = 1.
-    if !cached_entries.is_empty() {
-        match NotesDatabase::global() {
-            Ok(db) => match db.lock() {
-                Ok(mut lock) => {
-                    if let Err(e) = lock.cache_synced_notes(&cached_entries) {
-                        eprintln!("warning: failed to cache notes locally: {}", e);
-                    } else {
-                        eprintln!("Cached {} note(s) in local notes-db.", cached_entries.len());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("warning: notes-db lock poisoned: {}", e);
-                }
-            },
-            Err(e) => {
-                eprintln!("warning: failed to open notes-db: {}", e);
-            }
-        }
+    uploader.finish();
+    if uploader.total_cached > 0 {
+        eprintln!(
+            "Cached {} note(s) in local notes-db.",
+            uploader.total_cached
+        );
     }
 
     // 8. Summary.
     eprintln!();
-    if total_failed == 0 {
+    if uploader.total_failed == 0 {
         eprintln!(
             "Migration complete: {} note(s) uploaded successfully.",
-            total_uploaded
+            uploader.total_uploaded
         );
     } else {
         eprintln!(
             "Migration finished: {} uploaded, {} failed.",
-            total_uploaded, total_failed
+            uploader.total_uploaded, uploader.total_failed
         );
-        if total_failed > 0 {
-            std::process::exit(1);
+        std::process::exit(1);
+    }
+}
+
+fn filter_synced_notes(note_pairs: &mut Vec<(String, String)>) -> usize {
+    let Ok(db) = NotesDatabase::global() else {
+        return 0;
+    };
+    let Ok(lock) = db.lock() else {
+        return 0;
+    };
+    let mut skipped = 0usize;
+    for chunk in note_pairs.chunks_mut(crate::git::repository::MAX_BATCH_GIT_ITEMS) {
+        let commit_shas: Vec<&str> = chunk
+            .iter()
+            .map(|(_, commit_sha)| commit_sha.as_str())
+            .collect();
+        let Ok(synced) = lock.get_synced_shas(&commit_shas) else {
+            continue;
+        };
+        for (_, commit_sha) in chunk {
+            if synced.contains(commit_sha) {
+                commit_sha.clear();
+                skipped += 1;
+            }
         }
     }
+    drop(lock);
+    note_pairs.retain(|(_, commit_sha)| !commit_sha.is_empty());
+    skipped
 }
 
 /// Run `git notes --ref=ai list` and return `(blob_sha, commit_sha)` pairs.
@@ -276,22 +329,19 @@ fn list_notes(
     Ok(pairs)
 }
 
-/// Bulk-read blob contents via `git cat-file --batch`.
-///
-/// Feeds the blob SHAs on stdin and parses the binary protocol output.
-/// Returns a map of `blob_sha → content`.
-fn cat_file_batch(
+/// Stream blob contents through one `git cat-file --batch` process.
+fn cat_file_for_each<F>(
     repo: &crate::git::repository::Repository,
-    blob_shas: &[String],
-) -> Result<HashMap<String, String>, GitAiError> {
-    if blob_shas.is_empty() {
-        return Ok(HashMap::new());
+    note_pairs: &[(String, String)],
+    mut callback: F,
+) -> Result<(), GitAiError>
+where
+    F: FnMut(&str, &str, String) -> Result<(), GitAiError>,
+{
+    if note_pairs.is_empty() {
+        return Ok(());
     }
 
-    // `global_args_for_exec()` returns the per-repository flags (e.g. `-C <path>
-    // --no-pager`) but NOT the git binary itself.  The git binary comes from
-    // `Config::get().git_cmd()`, matching the pattern used in `exec_git` in
-    // repository.rs.
     let git_bin = crate::config::Config::get().git_cmd().to_string();
     let git_flags = repo.global_args_for_exec();
 
@@ -307,93 +357,238 @@ fn cat_file_batch(
     let mut child = cmd
         .spawn()
         .map_err(|e| GitAiError::Generic(format!("failed to spawn git cat-file --batch: {}", e)))?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GitAiError::Generic(
+            "failed to open git cat-file --batch stdin".to_string(),
+        ));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GitAiError::Generic(
+            "failed to open git cat-file --batch stdout".to_string(),
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GitAiError::Generic(
+            "failed to open git cat-file --batch stderr".to_string(),
+        ));
+    };
 
-    // Take stdin out of the child so we can write in a separate thread.
-    // This avoids a pipe deadlock: with many notes, stdout fills its buffer
-    // and the child blocks on write, while the parent is still writing to
-    // stdin and blocks there too.
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        GitAiError::Generic("failed to open git cat-file --batch stdin".to_string())
-    })?;
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || -> Result<(), std::io::Error> {
+            for (blob_sha, _) in note_pairs {
+                writeln!(stdin, "{blob_sha}")?;
+            }
+            Ok(())
+        });
+        let stderr_reader =
+            scope.spawn(move || drain_stream_with_limit(stderr, MAX_CAT_FILE_STDERR_BYTES));
 
-    let blob_shas_owned: Vec<String> = blob_shas.to_vec();
-    let writer_thread = std::thread::spawn(move || -> Result<(), std::io::Error> {
-        for sha in &blob_shas_owned {
-            writeln!(stdin, "{}", sha)?;
+        let mut reader = BufReader::new(stdout);
+        let stream_result = parse_cat_file_stream(&mut reader, note_pairs, &mut callback);
+        // Closing the pipe unblocks a Windows git child that may still be writing
+        // rejected oversized content after its launcher process is terminated.
+        drop(reader);
+        if stream_result.is_err() {
+            let _ = child.kill();
+        }
+        let status_result = child.wait();
+        let writer_result = writer.join().map_err(|_| {
+            GitAiError::Generic("git cat-file --batch stdin writer panicked".to_string())
+        })?;
+        let stderr_result = stderr_reader.join().map_err(|_| {
+            GitAiError::Generic("git cat-file --batch stderr reader panicked".to_string())
+        })?;
+
+        stream_result?;
+        writer_result.map_err(GitAiError::IoError)?;
+        let (stderr, stderr_truncated) = stderr_result.map_err(GitAiError::IoError)?;
+        if stderr_truncated {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file --batch stderr exceeded the {MAX_CAT_FILE_STDERR_BYTES} byte limit"
+            )));
+        }
+        let status = status_result.map_err(GitAiError::IoError)?;
+        if !status.success() {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file --batch exited {status}: {}",
+                String::from_utf8_lossy(&stderr)
+            )));
         }
         Ok(())
-    });
+    })
+}
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| GitAiError::Generic(format!("git cat-file --batch failed: {}", e)))?;
-
-    if let Err(e) = writer_thread.join().expect("stdin writer thread panicked")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(GitAiError::IoError(e));
-    }
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GitAiError::Generic(format!(
-            "git cat-file --batch exited {}: {}",
-            output.status, stderr
-        )));
-    }
-
-    // Parse the output format:
-    //   <sha> <type> <size>\n<content-bytes>\n
-    // We process byte-by-byte to handle binary-safe output.
-    let data = output.stdout;
-    let mut result = HashMap::new();
-    let mut pos = 0usize;
-
-    while pos < data.len() {
-        // Find the end of the header line.
-        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-            Some(off) => pos + off,
-            None => break,
-        };
-        let header = std::str::from_utf8(&data[pos..header_end])
-            .unwrap_or("")
-            .trim();
-        pos = header_end + 1; // skip the '\n'
-
-        // Header format: "<sha> <type> <size>" or "<sha> missing"
-        let mut parts = header.splitn(3, ' ');
-        let sha = match parts.next() {
-            Some(s) => s.to_string(),
-            None => break,
-        };
-        let obj_type = parts.next().unwrap_or("missing");
-
-        if obj_type == "missing" {
-            // Object not in repo; skip.
+fn parse_cat_file_stream<R, F>(
+    reader: &mut R,
+    note_pairs: &[(String, String)],
+    callback: &mut F,
+) -> Result<(), GitAiError>
+where
+    R: BufRead,
+    F: FnMut(&str, &str, String) -> Result<(), GitAiError>,
+{
+    for (expected_blob_sha, commit_sha) in note_pairs {
+        let mut header = read_bounded_header(reader)?.ok_or_else(|| {
+            GitAiError::Generic("git cat-file --batch ended before all notes were read".to_string())
+        })?;
+        while header
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            header.pop();
+        }
+        let header = std::str::from_utf8(&header).map_err(|error| {
+            GitAiError::Generic(format!("git cat-file --batch header is not UTF-8: {error}"))
+        })?;
+        let mut parts = header.split_whitespace();
+        let blob_sha = parts.next().ok_or_else(|| {
+            GitAiError::Generic("git cat-file --batch returned an empty header".to_string())
+        })?;
+        if blob_sha != expected_blob_sha {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file --batch returned {blob_sha}, expected {expected_blob_sha}"
+            )));
+        }
+        let object_type = parts.next().ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "git cat-file --batch omitted the object type for {blob_sha}"
+            ))
+        })?;
+        if object_type == "missing" {
             continue;
         }
-
-        let size_str = parts.next().unwrap_or("0");
-        let size: usize = size_str.parse().unwrap_or(0);
-
-        // Read exactly `size` bytes of content, then skip the trailing '\n'.
-        if pos + size > data.len() {
-            break;
+        if object_type != "blob" {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file --batch returned unexpected object type {object_type} for {blob_sha}"
+            )));
         }
-        let content_bytes = &data[pos..pos + size];
-        pos += size;
-        // Skip the trailing newline separator (if present).
-        if pos < data.len() && data[pos] == b'\n' {
-            pos += 1;
+        let size = parts
+            .next()
+            .ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "git cat-file --batch omitted the size for {blob_sha}"
+                ))
+            })?
+            .parse::<u64>()
+            .map_err(|error| {
+                GitAiError::Generic(format!(
+                    "git cat-file --batch returned an invalid size for {blob_sha}: {error}"
+                ))
+            })?;
+        if size > MAX_NOTE_BLOB_BYTES as u64 {
+            return Err(GitAiError::Generic(format!(
+                "note blob exceeded the {MAX_NOTE_BLOB_BYTES} byte limit ({size})"
+            )));
         }
-
-        // Convert content to UTF-8 (note content is always text).
-        if let Ok(content) = std::str::from_utf8(content_bytes) {
-            result.insert(sha, content.to_string());
+        let size = usize::try_from(size).map_err(|_| {
+            GitAiError::Generic(format!("note blob size does not fit in memory: {size}"))
+        })?;
+        let mut content = Vec::new();
+        content.try_reserve_exact(size).map_err(|error| {
+            GitAiError::Generic(format!("failed to reserve note blob buffer: {error}"))
+        })?;
+        content.resize(size, 0);
+        reader.read_exact(&mut content).map_err(|error| {
+            GitAiError::Generic(format!(
+                "git cat-file --batch returned incomplete content for {blob_sha}: {error}"
+            ))
+        })?;
+        let mut separator = [0u8; 1];
+        reader.read_exact(&mut separator).map_err(|error| {
+            GitAiError::Generic(format!(
+                "git cat-file --batch omitted the separator for {blob_sha}: {error}"
+            ))
+        })?;
+        if separator[0] != b'\n' {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file --batch returned an invalid separator for {blob_sha}"
+            )));
         }
+        let content = String::from_utf8(content).map_err(|error| {
+            GitAiError::Generic(format!("note blob {blob_sha} is not UTF-8: {error}"))
+        })?;
+        callback(blob_sha, commit_sha, content)?;
     }
 
-    Ok(result)
+    let mut extra = [0u8; 1];
+    if reader.read(&mut extra).map_err(GitAiError::IoError)? != 0 {
+        return Err(GitAiError::Generic(
+            "git cat-file --batch returned unexpected extra output".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_header(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, GitAiError> {
+    let mut header = Vec::new();
+    loop {
+        let available = reader.fill_buf().map_err(GitAiError::IoError)?;
+        if available.is_empty() {
+            if header.is_empty() {
+                return Ok(None);
+            }
+            return Err(GitAiError::Generic(
+                "git cat-file --batch returned an incomplete header".to_string(),
+            ));
+        }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if header.len().saturating_add(consumed) > MAX_CAT_FILE_HEADER_BYTES {
+            return Err(GitAiError::Generic(format!(
+                "git cat-file --batch header exceeded the {MAX_CAT_FILE_HEADER_BYTES} byte limit"
+            )));
+        }
+        header.extend_from_slice(&available[..consumed]);
+        let complete = available[..consumed].ends_with(b"\n");
+        reader.consume(consumed);
+        if complete {
+            return Ok(Some(header));
+        }
+    }
+}
+
+fn drain_stream_with_limit(
+    mut reader: impl Read,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut retained = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
+    }
+    Ok((retained, truncated))
+}
+
+#[cfg(test)]
+fn cat_file_batch(
+    repo: &crate::git::repository::Repository,
+    blob_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let note_pairs = blob_shas
+        .iter()
+        .map(|blob_sha| (blob_sha.clone(), blob_sha.clone()))
+        .collect::<Vec<_>>();
+    let mut contents = HashMap::new();
+    cat_file_for_each(repo, &note_pairs, |blob_sha, _, content| {
+        contents.insert(blob_sha.to_string(), content);
+        Ok(())
+    })?;
+    Ok(contents)
 }
 
 fn print_help() {
@@ -597,6 +792,33 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
         let result = cat_file_batch(repo.gitai_repo(), &[]).expect("cat_file_batch");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn cat_file_stream_rejects_announced_oversized_blob_before_callback() {
+        let blob_sha = "a".repeat(40);
+        let note_pairs = vec![(blob_sha.clone(), "b".repeat(40))];
+        let protocol = format!("{blob_sha} blob {}\n", MAX_NOTE_BLOB_BYTES + 1);
+        let mut reader = std::io::Cursor::new(protocol.into_bytes());
+        let mut called = false;
+
+        let error = parse_cat_file_stream(&mut reader, &note_pairs, &mut |_, _, _| {
+            called = true;
+            Ok(())
+        })
+        .expect_err("oversized announced blob must be rejected");
+
+        assert!(error.to_string().contains("note blob exceeded"));
+        assert!(!called, "callback must not receive oversized content");
+    }
+
+    #[test]
+    fn cat_file_stderr_drain_discards_bytes_beyond_limit() {
+        let input = std::io::Cursor::new(vec![b'x'; 1025]);
+        let (retained, truncated) = drain_stream_with_limit(input, 1024).unwrap();
+
+        assert_eq!(retained.len(), 1024);
+        assert!(truncated);
     }
 
     /// Integration test: `--force` re-uploads notes that are already cached as synced.
