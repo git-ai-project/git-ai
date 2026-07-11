@@ -144,18 +144,8 @@ impl AmpPreset {
                 continue;
             }
 
-            // Quick string check before full parse
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if !content.contains(tool_use_id) {
-                continue;
-            }
-
-            // Verify structurally: look for tool_use content block with matching id
-            let parsed: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
+            let parsed = match crate::streams::types::read_monolithic_transcript_json(&path) {
+                Ok(parsed) => parsed,
                 Err(_) => continue,
             };
             let has_match = parsed
@@ -377,6 +367,7 @@ mod tests {
     use super::*;
     use crate::commands::checkpoint_agent::presets::*;
     use serde_json::json;
+    use std::io::Write;
 
     fn make_amp_input(event: &str, tool: &str) -> String {
         json!({
@@ -541,5 +532,25 @@ mod tests {
             }
             _ => panic!("Expected PostFileEdit"),
         }
+    }
+
+    #[test]
+    fn oversized_thread_file_is_not_materialized_during_fallback_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("oversized.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(br#"{"padding":""#).unwrap();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..33 {
+            file.write_all(&chunk).unwrap();
+        }
+        file.write_all(br#"","messages":[{"content":[{"type":"tool_use","id":"needle"}]}]}"#)
+            .unwrap();
+        file.flush().unwrap();
+
+        assert_eq!(
+            AmpPreset::find_thread_file_by_tool_use_id(temp.path(), "needle"),
+            None
+        );
     }
 }

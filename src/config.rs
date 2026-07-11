@@ -22,6 +22,9 @@ pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
 pub const DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 3 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
+pub const HARD_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 16 * 1024 * 1024;
+pub const HARD_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
+pub const HARD_MAX_CHECKPOINT_TOTAL_LINES: usize = 1_000_000;
 const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_CONFIG_COLLECTION_ITEMS: usize = 4_096;
 const MAX_CONFIG_PATTERN_BYTES: usize = 4 * 1024;
@@ -653,16 +656,19 @@ impl Config {
     /// Returns the per-file size limit for checkpoint content reads.
     pub fn max_checkpoint_file_size_bytes(&self) -> usize {
         self.max_checkpoint_file_size_bytes
+            .min(HARD_MAX_CHECKPOINT_FILE_SIZE_BYTES)
     }
 
     /// Returns the total byte budget for content in one checkpoint request.
     pub fn max_checkpoint_total_size_bytes(&self) -> usize {
         self.max_checkpoint_total_size_bytes
+            .min(HARD_MAX_CHECKPOINT_TOTAL_SIZE_BYTES)
     }
 
     /// Returns the total line budget for content in one checkpoint request.
     pub fn max_checkpoint_total_lines(&self) -> usize {
         self.max_checkpoint_total_lines
+            .min(HARD_MAX_CHECKPOINT_TOTAL_LINES)
     }
 
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)

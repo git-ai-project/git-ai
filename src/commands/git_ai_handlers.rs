@@ -397,10 +397,27 @@ fn handle_checkpoint(args: &[String]) {
                 if i + 1 < args.len() {
                     hook_input = Some(strip_utf8_bom(args[i + 1].clone()));
                     if hook_input.as_ref().unwrap() == "stdin" {
-                        let mut stdin = std::io::stdin();
+                        let stdin = std::io::stdin();
                         let mut buffer = Vec::new();
-                        if let Err(e) = stdin.read_to_end(&mut buffer) {
+                        if let Err(e) = stdin
+                            .take(
+                                crate::commands::checkpoint_agent::orchestrator::MAX_CHECKPOINT_HOOK_INPUT_BYTES
+                                    as u64
+                                    + 1,
+                            )
+                            .read_to_end(&mut buffer)
+                        {
                             eprintln!("Failed to read stdin for hook input: {}", e);
+                            std::process::exit(0);
+                        }
+                        if buffer.len()
+                            > crate::commands::checkpoint_agent::orchestrator::MAX_CHECKPOINT_HOOK_INPUT_BYTES
+                        {
+                            eprintln!(
+                                "Failed to read stdin for hook input: hook input exceeded the {} byte limit ({})",
+                                crate::commands::checkpoint_agent::orchestrator::MAX_CHECKPOINT_HOOK_INPUT_BYTES,
+                                buffer.len()
+                            );
                             std::process::exit(0);
                         }
                         let buffer = match decode_hook_input_bytes(buffer) {
