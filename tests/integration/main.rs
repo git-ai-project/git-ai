@@ -68,6 +68,7 @@ mod daemon_notes_flush_memory;
 mod daemon_reflog_memory;
 mod daemon_repository_reader_memory;
 mod daemon_retained_state_memory;
+mod daemon_rewrite_metrics_memory;
 mod daemon_snapshot_memory;
 mod daemon_working_log_memory;
 mod diff;

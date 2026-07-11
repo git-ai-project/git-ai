@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::effective_ignore_patterns;
@@ -8,6 +9,31 @@ use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, RewriteCommittedValues};
+
+const MAX_CONCURRENT_REWRITE_METRIC_WORKERS: usize = 2;
+const REWRITE_METRIC_WORKER_STACK_BYTES: usize = 512 * 1024;
+static ACTIVE_REWRITE_METRIC_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+struct RewriteMetricWorkerPermit {
+    active: &'static AtomicUsize,
+}
+
+impl Drop for RewriteMetricWorkerPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_rewrite_metric_worker(
+    active: &'static AtomicUsize,
+) -> Option<RewriteMetricWorkerPermit> {
+    active
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < MAX_CONCURRENT_REWRITE_METRIC_WORKERS).then_some(current + 1)
+        })
+        .ok()
+        .map(|_| RewriteMetricWorkerPermit { active })
+}
 
 pub(crate) fn spawn_rewrite_commit_metrics(
     repo: &Repository,
@@ -19,11 +45,19 @@ pub(crate) fn spawn_rewrite_commit_metrics(
     if metric_commits.is_empty() {
         return;
     }
+    let Some(permit) = try_acquire_rewrite_metric_worker(&ACTIVE_REWRITE_METRIC_WORKERS) else {
+        tracing::debug!(
+            limit = MAX_CONCURRENT_REWRITE_METRIC_WORKERS,
+            "rewrite metrics worker skipped at capacity"
+        );
+        return;
+    };
 
     let repo = repo.clone();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 build_rewrite_metric_events(&repo, &metric_commits)
             })
             .await;
@@ -32,10 +66,15 @@ pub(crate) fn spawn_rewrite_commit_metrics(
                 Err(err) => tracing::warn!(%err, "rewrite metrics worker panicked"),
             }
         });
-    } else {
-        std::thread::spawn(move || {
+    } else if let Err(error) = std::thread::Builder::new()
+        .name("git-ai-rewrite-metrics".to_string())
+        .stack_size(REWRITE_METRIC_WORKER_STACK_BYTES)
+        .spawn(move || {
+            let _permit = permit;
             submit_events(build_rewrite_metric_events(&repo, &metric_commits));
-        });
+        })
+    {
+        tracing::debug!(%error, "failed to spawn rewrite metrics worker");
     }
 }
 
@@ -94,6 +133,15 @@ fn build_rewrite_metric_events(
     repo: &Repository,
     metric_commits: &[RewriteMetricCommit],
 ) -> Vec<MetricEvent> {
+    #[cfg(feature = "test-support")]
+    if let Ok(delay_ms) = std::env::var("GIT_AI_TEST_REWRITE_METRICS_DELAY_MS")
+        .unwrap_or_default()
+        .parse::<u64>()
+        && delay_ms > 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    }
+
     let mut metric_commits = dedupe_metric_commits(metric_commits.to_vec());
     hydrate_missing_parent_shas(repo, &mut metric_commits);
     hydrate_missing_parent_diffs(repo, &mut metric_commits);
@@ -414,6 +462,28 @@ mod tests {
     use crate::metrics::EventValues;
     use crate::metrics::events::rewrite_committed_pos;
     use std::collections::HashMap;
+
+    #[test]
+    fn rewrite_metric_worker_slots_are_bounded_and_reusable() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        let first = try_acquire_rewrite_metric_worker(&ACTIVE)
+            .expect("first rewrite metric worker slot should be available");
+        let second = try_acquire_rewrite_metric_worker(&ACTIVE)
+            .expect("second rewrite metric worker slot should be available");
+
+        assert!(
+            try_acquire_rewrite_metric_worker(&ACTIVE).is_none(),
+            "rewrite metric workers must stop spawning at capacity"
+        );
+        assert_eq!(ACTIVE.load(Ordering::Acquire), 2);
+
+        drop(first);
+        let replacement = try_acquire_rewrite_metric_worker(&ACTIVE)
+            .expect("released rewrite metric worker slots must be reusable");
+        drop(second);
+        drop(replacement);
+        assert_eq!(ACTIVE.load(Ordering::Acquire), 0);
+    }
 
     fn metric_commit(
         new_sha: &str,
