@@ -1,5 +1,6 @@
 use crate::error::GitAiError;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -8,6 +9,27 @@ static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[inline]
 pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+pub(crate) fn read_file_with_limit(
+    path: &Path,
+    max_bytes: u64,
+    kind: &str,
+) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{kind} exceeded the {max_bytes} byte limit ({})",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
