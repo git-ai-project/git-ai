@@ -50,6 +50,7 @@ impl DaemonTelemetryHandle {
     fn send(&mut self, request: &ControlRequest) -> Result<ControlResponse, String> {
         match self.send_inner(request) {
             Ok(resp) => Ok(resp),
+            Err(error) if matches!(request, ControlRequest::CheckpointRun { .. }) => Err(error),
             Err(first_err) => {
                 // Connection may have been dropped by the daemon; try reconnecting once.
                 match open_local_socket_stream_with_timeout(
@@ -86,7 +87,7 @@ impl DaemonTelemetryHandle {
         let line = crate::daemon::read_daemon_client_line(
             &mut self.conn,
             &self.socket_path,
-            DAEMON_SOCKET_IO_TIMEOUT,
+            crate::daemon::control_request_response_timeout(request),
         )
         .map_err(|e| format!("read: {}", e))?;
         if line.trim().is_empty() {

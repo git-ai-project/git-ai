@@ -21,6 +21,20 @@ fn daemon_hwm_kib(repo: &TestRepo) -> u64 {
         .expect("daemon status should include VmHWM")
 }
 
+#[cfg(target_os = "linux")]
+fn daemon_vm_size_kib(repo: &TestRepo) -> u64 {
+    let pid = repo.daemon_pid().expect("test repo should own a daemon");
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmSize:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+        })
+        .expect("daemon status should include VmSize")
+}
+
 #[test]
 fn test_checkpoint_size_logging_large_ai_rewrites() {
     eprintln!("test_checkpoint_size_logging_large_ai_rewrites started...");
@@ -405,6 +419,44 @@ fn test_duplicate_dirty_file_paths_keep_daemon_bounded_and_recover() {
     base.assert_committed_lines(crate::lines!["base".unattributed_human()]);
     let mut recovery = repo.filename("recovery.txt");
     recovery.assert_committed_lines(crate::lines!["AI recovery".ai()]);
+}
+
+#[test]
+fn test_repeated_checkpoints_reuse_bounded_daemon_runtime() {
+    let repo = TestRepo::new_dedicated_daemon();
+    #[cfg(target_os = "linux")]
+    let baseline_vm_size_kib = daemon_vm_size_kib(&repo);
+
+    let file_path = repo.path().join("runtime.txt");
+    let mut content = "base\n".to_string();
+    fs::write(&file_path, &content).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("runtime.txt");
+    let mut expected = vec!["base".unattributed_human()];
+    file.assert_committed_lines(expected.clone());
+
+    for iteration in 1..=12 {
+        repo.git_ai(&["checkpoint", "human", "runtime.txt"])
+            .unwrap();
+        content.push_str(&format!("AI line {iteration}\n"));
+        fs::write(&file_path, &content).unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", "runtime.txt"])
+            .unwrap();
+        repo.stage_all_and_commit(&format!("AI checkpoint {iteration}"))
+            .unwrap();
+        expected.push(format!("AI line {iteration}").ai());
+        file.assert_committed_lines(expected.clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let growth_kib = daemon_vm_size_kib(&repo).saturating_sub(baseline_vm_size_kib);
+        eprintln!("repeated checkpoint daemon VmSize growth: {growth_kib} KiB");
+        assert!(
+            growth_kib < 512 * 1024,
+            "repeated checkpoints grew daemon VmSize by {growth_kib} KiB"
+        );
+    }
 }
 
 crate::reuse_tests_in_worktree!(test_checkpoint_size_logging_large_ai_rewrites,);
