@@ -26,7 +26,7 @@ tests/integration/repo_storage_unit.rs
   s_59382cac373d67::t_87b9d7abd77824 337-372,420
 tests/integration/daemon_working_log_memory.rs
   s_59382cac373d67::t_340966a4517dfe 4
-  s_59382cac373d67::t_0f53f3439db272 1-3,5-126
+  s_59382cac373d67::t_0f53f3439db272 1-3,5-126,5-52,54-108,110,113-127
   s_59382cac373d67::t_a618c50177bc2a 127
 ---
 {
