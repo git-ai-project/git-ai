@@ -11,7 +11,7 @@ use crate::error::GitAiError;
 use crate::git::repo_state::{read_head_state_for_worktree, worktree_root_for_path};
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -57,15 +57,104 @@ struct RepoContext {
 }
 
 const MAX_CHECKPOINT_FILES: usize = 1000;
+const MAX_CHECKPOINT_REPOSITORIES: usize = 64;
+const MAX_CHECKPOINT_CONTEXT_STRING_BYTES: usize = 64 * 1024;
+const MAX_CHECKPOINT_METADATA_ITEMS: usize = 64;
+const MAX_CHECKPOINT_METADATA_KEY_BYTES: usize = 1024;
+const MAX_CHECKPOINT_METADATA_VALUE_BYTES: usize = 64 * 1024;
+const MAX_CHECKPOINT_METADATA_BYTES: usize = 256 * 1024;
+const MAX_CHECKPOINT_COMMAND_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_HOOK_INPUT_BYTES: usize = 32 * 1024 * 1024;
 
-fn apply_checkpoint_content_budget(files: &mut [CheckpointFile]) {
-    let mut budget = CheckpointContentBudget::from_config(config::Config::get());
-    for file in files {
-        let Some(content) = file.content.as_ref() else {
-            continue;
-        };
-        if !budget.reserve(file.path.display(), content) {
-            file.content = None;
+fn agent_identity_is_bounded(agent: &AgentId) -> bool {
+    [agent.tool.as_str(), agent.id.as_str(), agent.model.as_str()]
+        .into_iter()
+        .all(|value| value.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES)
+}
+
+fn stream_source_is_bounded(source: &StreamSource) -> bool {
+    source.path.to_string_lossy().len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+        && source.session_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+        && source.external_session_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+        && source
+            .external_parent_session_id
+            .as_ref()
+            .is_none_or(|value| value.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES)
+}
+
+fn metadata_is_bounded(metadata: &HashMap<String, String>) -> bool {
+    if metadata.len() > MAX_CHECKPOINT_METADATA_ITEMS {
+        return false;
+    }
+    let mut total_bytes = 0usize;
+    metadata.iter().all(|(key, value)| {
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+        key.len() <= MAX_CHECKPOINT_METADATA_KEY_BYTES
+            && value.len() <= MAX_CHECKPOINT_METADATA_VALUE_BYTES
+            && total_bytes <= MAX_CHECKPOINT_METADATA_BYTES
+    })
+}
+
+fn preset_context_is_bounded(
+    context: &crate::commands::checkpoint_agent::presets::PresetContext,
+) -> bool {
+    agent_identity_is_bounded(&context.agent_id)
+        && context.external_session_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+        && context.trace_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+        && context.cwd.to_string_lossy().len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+        && metadata_is_bounded(&context.metadata)
+}
+
+fn parsed_hook_event_is_bounded(event: &ParsedHookEvent) -> bool {
+    match event {
+        ParsedHookEvent::PreFileEdit(event) => {
+            preset_context_is_bounded(&event.context)
+                && event
+                    .tool_use_id
+                    .as_ref()
+                    .is_none_or(|value| value.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES)
+        }
+        ParsedHookEvent::PostFileEdit(event) => {
+            preset_context_is_bounded(&event.context)
+                && event
+                    .tool_use_id
+                    .as_ref()
+                    .is_none_or(|value| value.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES)
+                && event
+                    .stream_source
+                    .as_ref()
+                    .is_none_or(stream_source_is_bounded)
+        }
+        ParsedHookEvent::PreBashCall(event) => {
+            preset_context_is_bounded(&event.context)
+                && event.tool_use_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+                && event
+                    .command
+                    .as_ref()
+                    .is_none_or(|value| value.len() <= MAX_CHECKPOINT_COMMAND_BYTES)
+        }
+        ParsedHookEvent::PostBashCall(event) => {
+            preset_context_is_bounded(&event.context)
+                && event.tool_use_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+                && event
+                    .command
+                    .as_ref()
+                    .is_none_or(|value| value.len() <= MAX_CHECKPOINT_COMMAND_BYTES)
+                && event
+                    .stream_source
+                    .as_ref()
+                    .is_none_or(stream_source_is_bounded)
+        }
+        ParsedHookEvent::KnownHumanEdit(event) => {
+            event.trace_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+                && event.cwd.to_string_lossy().len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+                && metadata_is_bounded(&event.editor_metadata)
+        }
+        ParsedHookEvent::UntrackedEdit(event) => {
+            event.trace_id.len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
+                && event.cwd.to_string_lossy().len() <= MAX_CHECKPOINT_CONTEXT_STRING_BYTES
         }
     }
 }
@@ -74,12 +163,22 @@ fn apply_dirty_file_overrides(
     files: &mut [CheckpointFile],
     dirty_files: &HashMap<PathBuf, String>,
 ) {
-    for file in &mut *files {
+    let mut budget = CheckpointContentBudget::from_config(config::Config::get());
+    for file in files {
         if let Some(override_content) = dirty_files.get(&file.path) {
-            file.content = Some(override_content.clone());
+            file.content = if budget.reserve(file.path.display(), override_content) {
+                Some(override_content.clone())
+            } else {
+                None
+            };
+        } else if file
+            .content
+            .as_ref()
+            .is_some_and(|content| !budget.reserve(file.path.display(), content))
+        {
+            file.content = None;
         }
     }
-    apply_checkpoint_content_budget(files);
 }
 
 fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>, GitAiError> {
@@ -92,14 +191,16 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
             MAX_CHECKPOINT_FILES,
         );
     }
-    let capped_paths = &file_paths[..file_paths.len().min(MAX_CHECKPOINT_FILES)];
-
     let mut repo_cache: HashMap<PathBuf, RepoContext> = HashMap::new();
     let mut files = Vec::new();
     let mut content_budget = CheckpointContentBudget::from_config(config::Config::get());
     let max_size = content_budget.max_file_size_bytes();
+    let mut seen_paths = HashSet::new();
 
-    for path in capped_paths {
+    for path in file_paths.iter().take(MAX_CHECKPOINT_FILES) {
+        if !seen_paths.insert(path.clone()) {
+            continue;
+        }
         if !path.is_absolute() {
             return Err(GitAiError::PresetError(format!(
                 "file path must be absolute: {}",
@@ -149,7 +250,7 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
 
         let t_read = std::time::Instant::now();
         let content = if let Ok(meta) = fs::metadata(path) {
-            if meta.len() as usize > max_size {
+            if meta.len() > max_size as u64 {
                 tracing::warn!(
                     "skipping file larger than max_checkpoint_file_size_bytes: {} ({} bytes)",
                     path.display(),
@@ -157,7 +258,7 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
                 );
                 continue;
             }
-            fs::read_to_string(path).ok()
+            crate::utils::read_text_file_with_limit(path, max_size as u64, "checkpoint file").ok()
         } else {
             Some(String::new())
         };
@@ -187,6 +288,13 @@ pub fn execute_preset_checkpoint(
     preset_name: &str,
     hook_input: &str,
 ) -> Result<Vec<CheckpointRequest>, GitAiError> {
+    if hook_input.len() > MAX_CHECKPOINT_HOOK_INPUT_BYTES {
+        return Err(GitAiError::PresetError(format!(
+            "hook input exceeded the {} byte limit ({})",
+            MAX_CHECKPOINT_HOOK_INPUT_BYTES,
+            hook_input.len()
+        )));
+    }
     let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
     let t0 = std::time::Instant::now();
 
@@ -205,6 +313,10 @@ pub fn execute_preset_checkpoint(
 
     let mut requests = Vec::new();
     for event in events {
+        if !parsed_hook_event_is_bounded(&event) {
+            tracing::warn!("skipping checkpoint event with oversized context");
+            continue;
+        }
         let t_event = std::time::Instant::now();
         let event_name = format!("{:?}", std::mem::discriminant(&event));
         let new_requests = execute_event(event, preset_name)?;
@@ -321,13 +433,53 @@ fn split_files_into_requests(
     stream_source: Option<StreamSource>,
     metadata: HashMap<String, String>,
 ) -> Vec<CheckpointRequest> {
+    if agent_id
+        .as_ref()
+        .is_some_and(|agent| !agent_identity_is_bounded(agent))
+    {
+        tracing::warn!("skipping checkpoint with oversized agent identity");
+        return Vec::new();
+    }
+    if stream_source
+        .as_ref()
+        .is_some_and(|source| !stream_source_is_bounded(source))
+    {
+        tracing::warn!("skipping checkpoint with oversized stream source");
+        return Vec::new();
+    }
+
+    let mut bounded_metadata = HashMap::new();
+    let mut metadata_bytes = 0usize;
+    for (key, value) in metadata {
+        let item_bytes = key.len().saturating_add(value.len());
+        if bounded_metadata.len() >= MAX_CHECKPOINT_METADATA_ITEMS
+            || key.len() > MAX_CHECKPOINT_METADATA_KEY_BYTES
+            || value.len() > MAX_CHECKPOINT_METADATA_VALUE_BYTES
+            || metadata_bytes.saturating_add(item_bytes) > MAX_CHECKPOINT_METADATA_BYTES
+        {
+            tracing::warn!("dropping oversized checkpoint metadata item");
+            continue;
+        }
+        metadata_bytes += item_bytes;
+        bounded_metadata.insert(key, value);
+    }
+
     let all_files: Vec<CheckpointFile> = all_files
         .into_iter()
         .filter(|f| f.content.is_some())
         .collect();
     let mut by_repo: HashMap<PathBuf, Vec<CheckpointFile>> = HashMap::new();
     for f in all_files {
-        by_repo.entry(f.repo_work_dir.clone()).or_default().push(f);
+        if let Some(repo_files) = by_repo.get_mut(&f.repo_work_dir) {
+            repo_files.push(f);
+        } else if by_repo.len() < MAX_CHECKPOINT_REPOSITORIES {
+            by_repo.insert(f.repo_work_dir.clone(), vec![f]);
+        } else {
+            tracing::warn!(
+                max_repositories = MAX_CHECKPOINT_REPOSITORIES,
+                "dropping checkpoint file beyond repository fanout limit"
+            );
+        }
     }
 
     by_repo
@@ -339,7 +491,7 @@ fn split_files_into_requests(
             files,
             path_role,
             stream_source: stream_source.clone(),
-            metadata: metadata.clone(),
+            metadata: bounded_metadata.clone(),
         })
         .collect()
 }
@@ -576,4 +728,70 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         e.stream_source,
         metadata,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkpoint_file(repo: &str) -> CheckpointFile {
+        CheckpointFile {
+            path: PathBuf::from(format!("/{repo}/file.txt")),
+            content: Some("content".to_string()),
+            repo_work_dir: PathBuf::from(format!("/{repo}")),
+            base_commit: BaseCommit::Initial,
+        }
+    }
+
+    fn split_for_test(
+        files: Vec<CheckpointFile>,
+        agent_id: Option<AgentId>,
+        metadata: HashMap<String, String>,
+    ) -> Vec<CheckpointRequest> {
+        split_files_into_requests(
+            files,
+            "trace".to_string(),
+            CheckpointKind::AiAgent,
+            agent_id,
+            PreparedPathRole::Edited,
+            None,
+            metadata,
+        )
+    }
+
+    #[test]
+    fn split_checkpoint_requests_bounds_repository_fanout() {
+        let files = (0..65)
+            .map(|index| checkpoint_file(&format!("repo-{index}")))
+            .collect();
+
+        assert_eq!(split_for_test(files, None, HashMap::new()).len(), 64);
+    }
+
+    #[test]
+    fn split_checkpoint_requests_rejects_oversized_agent_identity() {
+        let agent_id = AgentId {
+            tool: "tool".to_string(),
+            id: "x".repeat(64 * 1024 + 1),
+            model: "model".to_string(),
+        };
+
+        assert!(
+            split_for_test(
+                vec![checkpoint_file("repo")],
+                Some(agent_id),
+                HashMap::new()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn split_checkpoint_requests_drops_oversized_metadata_values() {
+        let metadata = HashMap::from([("command".to_string(), "x".repeat(64 * 1024 + 1))]);
+        let requests = split_for_test(vec![checkpoint_file("repo")], None, metadata);
+
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].metadata.contains_key("command"));
+    }
 }

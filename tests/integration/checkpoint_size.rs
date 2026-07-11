@@ -4,6 +4,7 @@ use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::git::repository::find_repository_in_path;
 use rand::{RngExt, distr::Alphanumeric};
 use serde_json::json;
+use std::io::Write;
 use std::{fs, time::Instant};
 
 #[cfg(target_os = "linux")]
@@ -18,6 +19,20 @@ fn daemon_vm_size_kib(repo: &TestRepo) -> u64 {
                 .and_then(|value| value.parse().ok())
         })
         .expect("daemon status should include VmSize")
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_hwm_kib(repo: &TestRepo) -> u64 {
+    let pid = repo.daemon_pid().expect("test repo should own a daemon");
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmHWM:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+        })
+        .expect("daemon status should include VmHWM")
 }
 
 #[test]
@@ -340,6 +355,130 @@ fn test_repeated_checkpoints_plateau_after_runtime_warmup() {
             "late checkpoint window grew daemon VmSize by {late_window_growth_kib} KiB"
         );
     }
+}
+
+#[test]
+fn test_checkpoint_hard_limit_keeps_smaller_file_attribution_working() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    repo.patch_git_ai_config(|patch| {
+        patch.max_checkpoint_file_size_bytes = Some(usize::MAX);
+        patch.max_checkpoint_total_size_bytes = Some(usize::MAX);
+        patch.max_checkpoint_total_lines = Some(usize::MAX);
+    });
+
+    let base_path = repo.path().join("base.txt");
+    fs::write(&base_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut base = repo.filename("base.txt");
+    base.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+
+    let small_path = repo.path().join("small.txt");
+    fs::write(&small_path, "AI line\n").unwrap();
+    let oversized_path = repo.path().join("oversized.txt");
+    let mut oversized = fs::File::create(&oversized_path).unwrap();
+    let chunk = vec![b'x'; 1024 * 1024];
+    for _ in 0..40 {
+        oversized.write_all(&chunk).unwrap();
+    }
+    oversized.flush().unwrap();
+    drop(oversized);
+
+    repo.git_ai(&["checkpoint", "mock_ai", "small.txt", "oversized.txt"])
+        .unwrap();
+    fs::remove_file(oversized_path).unwrap();
+    repo.git(&["add", "small.txt"]).unwrap();
+    repo.commit("AI edit with oversized sibling").unwrap();
+
+    base.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+    let mut small = repo.filename("small.txt");
+    small.assert_committed_lines(crate::lines!["AI line".ai()]);
+}
+
+#[test]
+fn test_checkpoint_rejects_oversized_stdin_and_recovers() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let tracked_path = repo.path().join("tracked.txt");
+    fs::write(&tracked_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut tracked = repo.filename("tracked.txt");
+    tracked.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+
+    let oversized_input = vec![b' '; 32 * 1024 * 1024 + 1];
+    let output = repo
+        .git_ai_with_stdin(
+            &["checkpoint", "codex", "--hook-input", "stdin"],
+            &oversized_input,
+        )
+        .unwrap();
+    assert!(
+        output.contains("byte limit"),
+        "oversized hook input should fail at the byte limit: {output}"
+    );
+    drop(oversized_input);
+
+    fs::write(&tracked_path, "base\nAI recovery\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "tracked.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("AI recovery after oversized input")
+        .unwrap();
+    tracked.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI recovery".ai(),
+    ]);
+}
+
+#[test]
+fn test_duplicate_dirty_file_paths_keep_daemon_bounded_and_recover() {
+    let repo = TestRepo::new_dedicated_daemon();
+    fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut base = repo.filename("base.txt");
+    base.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+
+    let pressure_path = repo.canonical_path().join("pressure.txt");
+    let pressure_content = "x".repeat(64 * 1024);
+    fs::write(&pressure_path, &pressure_content).unwrap();
+    let duplicate_paths = vec![pressure_path.to_string_lossy().to_string(); 1000];
+    let hook_input = json!({
+        "hook_event_name": "after_edit",
+        "tool": "memory-test",
+        "model": "memory-test",
+        "repo_working_dir": repo.canonical_path(),
+        "completion_id": "duplicate-dirty-files",
+        "edited_filepaths": duplicate_paths,
+        "dirty_files": {
+            pressure_path.to_string_lossy().to_string(): pressure_content,
+        },
+    })
+    .to_string();
+
+    #[cfg(target_os = "linux")]
+    let baseline_hwm = daemon_hwm_kib(&repo);
+    repo.git_ai_with_stdin(
+        &["checkpoint", "ai_tab", "--hook-input", "stdin"],
+        hook_input.as_bytes(),
+    )
+    .unwrap();
+
+    #[cfg(target_os = "linux")]
+    {
+        let hwm_growth_kib = daemon_hwm_kib(&repo).saturating_sub(baseline_hwm);
+        eprintln!("duplicate dirty-file checkpoint HWM growth: {hwm_growth_kib} KiB");
+        assert!(
+            hwm_growth_kib < 24 * 1024,
+            "duplicate dirty-file checkpoint grew daemon HWM by {hwm_growth_kib} KiB"
+        );
+    }
+
+    fs::remove_file(pressure_path).unwrap();
+    fs::write(repo.path().join("recovery.txt"), "AI recovery\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "recovery.txt"])
+        .unwrap();
+    repo.git(&["add", "recovery.txt"]).unwrap();
+    repo.commit("AI recovery after duplicate pressure").unwrap();
+    base.assert_committed_lines(crate::lines!["base".unattributed_human()]);
+    let mut recovery = repo.filename("recovery.txt");
+    recovery.assert_committed_lines(crate::lines!["AI recovery".ai()]);
 }
 
 crate::reuse_tests_in_worktree!(test_checkpoint_size_logging_large_ai_rewrites,);
