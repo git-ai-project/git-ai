@@ -5,6 +5,7 @@
 //! Server handles idempotency.
 
 use crate::error::GitAiError;
+use crate::git::repository::BatchMaterializationBudget;
 use crate::metrics::attrs::attr_pos;
 use crate::metrics::events::{checkpoint_pos, otel_trace_pos, session_event_pos};
 use crate::metrics::pos_encoded::sparse_get_string;
@@ -575,7 +576,7 @@ impl MetricsDatabase {
         let tx = self.conn.transaction()?;
         let (ids, oversized_ids) = {
             let mut stmt = tx.prepare(
-                "SELECT id, length(CAST(event_json AS BLOB)) FROM metrics \
+                "SELECT id, octet_length(event_json) FROM metrics \
                  WHERE delivered_ts IS NULL \
                    AND processing_started_at IS NULL \
                    AND next_retry_at <= ?1 \
@@ -964,13 +965,17 @@ impl MetricsDatabase {
         after_id: i64,
         limit: usize,
     ) -> Result<MetricPruneScanBatch, GitAiError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, length(CAST(event_json AS BLOB)), event_json, event_ts, delivered_ts \
+        let sql = format!(
+            "SELECT id, octet_length(event_json), \
+                    CASE WHEN octet_length(event_json) <= {} THEN event_json END, \
+                    event_ts, delivered_ts \
              FROM metrics \
              WHERE id > ?1 AND (event_ts IS NULL OR event_ts < 0) \
              ORDER BY id ASC \
              LIMIT ?2",
-        )?;
+            MAX_METRIC_EVENT_JSON_BYTES
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params![after_id, i64::try_from(limit).unwrap_or(i64::MAX)])?;
 
         let mut ids = Vec::new();
@@ -990,7 +995,12 @@ impl MetricsDatabase {
                     .and_then(|timestamp| u64::try_from(timestamp).ok())
                     .is_some_and(|timestamp| timestamp < cutoff)
             } else {
-                let event_json = row.get::<_, String>(2)?;
+                let event_json = row.get::<_, Option<String>>(2)?.ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "legacy metric payload missing within {} byte limit",
+                        MAX_METRIC_EVENT_JSON_BYTES
+                    ))
+                })?;
                 metric_row_is_older_than_cutoff(&event_json, event_ts, delivered_ts, cutoff)
             };
             if is_old {
@@ -1092,56 +1102,72 @@ impl MetricsDatabase {
         };
         let candidate_limit = session_event_recovery_candidate_limit();
 
-        let mut stmt = self.conn.prepare(
+        let candidate_payload_limit = crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES;
+        let event_payload_limit = MAX_METRIC_EVENT_JSON_BYTES;
+        let sql = format!(
             r#"
+            WITH sized AS MATERIALIZED (
+                SELECT
+                    id,
+                    octet_length(event_json) AS event_bytes,
+                    octet_length(event_json)
+                        + COALESCE(octet_length(session_id), 0)
+                        + COALESCE(octet_length(trace_id), 0)
+                        + COALESCE(octet_length(tool), 0)
+                        + COALESCE(octet_length(external_session_id), 0)
+                        + COALESCE(octet_length(external_tool_use_id), 0) AS retained_bytes
+                FROM metrics
+                WHERE event_kind = ?1
+                  AND event_ts >= ?2
+                  AND event_ts <= ?3
+                  AND octet_length(session_id) > 0
+                  AND octet_length(tool) > 0
+                  AND CASE WHEN octet_length(tool) = 7
+                           THEN tool != 'mock_ai'
+                           ELSE 1 END
+                  AND octet_length(external_session_id) > 0
+                ORDER BY id ASC
+                LIMIT ?4
+            )
             SELECT
-                id,
-                event_json,
-                event_ts,
-                session_id,
-                trace_id,
-                tool,
-                external_session_id,
-                external_tool_use_id
-            FROM metrics
-            WHERE event_kind = ?1
-              AND event_ts >= ?2
-              AND event_ts <= ?3
-              AND session_id IS NOT NULL
-              AND session_id != ''
-              AND tool IS NOT NULL
-              AND tool != ''
-              AND tool != 'mock_ai'
-              AND external_session_id IS NOT NULL
-              AND external_session_id != ''
-            ORDER BY id ASC
-            LIMIT ?4
-            "#,
-        )?;
-        let rows = stmt.query_map(
-            params![
-                MetricEventId::SessionEvent as i64,
-                min_event_ts as i64,
-                max_event_ts as i64,
-                candidate_limit.saturating_add(1) as i64,
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            },
-        )?;
+                metrics.id,
+                sized.retained_bytes,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.event_json END,
+                metrics.event_ts,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.session_id END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.trace_id END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.tool END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.external_session_id END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.external_tool_use_id END
+            FROM sized
+            JOIN metrics ON metrics.id = sized.id
+            ORDER BY metrics.id ASC
+            "#
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![
+            MetricEventId::SessionEvent as i64,
+            min_event_ts as i64,
+            max_event_ts as i64,
+            candidate_limit.saturating_add(1) as i64,
+        ])?;
 
         let mut candidates = Vec::new();
         let mut scanned = 0usize;
-        for row in rows {
+        let mut budget = BatchMaterializationBudget::new();
+        while let Some(row) = rows.next()? {
             scanned += 1;
             if scanned > candidate_limit {
                 tracing::debug!(
@@ -1150,17 +1176,32 @@ impl MetricsDatabase {
                 );
                 return Ok(Vec::new());
             }
-            let (
-                row_id,
-                event_json,
-                event_ts,
-                session_id,
-                trace_id,
-                tool,
-                external_session_id,
-                external_tool_use_id,
-            ) = row?;
+            let retained_bytes = sqlite_byte_len(row, 1, "session-event recovery candidate")?;
+            if let Err(error) = budget.reserve("session-event recovery candidate", retained_bytes) {
+                tracing::debug!(
+                    %error,
+                    "session-event attribution recovery skipped at payload limit"
+                );
+                return Ok(Vec::new());
+            }
+            let Some(event_json) = row.get::<_, Option<String>>(2)? else {
+                tracing::debug!(
+                    limit = MAX_METRIC_EVENT_JSON_BYTES,
+                    "session-event attribution recovery skipped at event payload limit"
+                );
+                return Ok(Vec::new());
+            };
+            let row_id = row.get::<_, i64>(0)?;
+            let event_ts = row.get::<_, i64>(3)?;
+            let session_id = row.get::<_, String>(4)?;
+            let trace_id = row.get::<_, Option<String>>(5)?;
+            let tool = row.get::<_, String>(6)?;
+            let external_session_id = row.get::<_, String>(7)?;
+            let external_tool_use_id = row.get::<_, Option<String>>(8)?;
             if event_ts < 0 || event_ts > u32::MAX as i64 {
+                continue;
+            }
+            if tool == "mock_ai" {
                 continue;
             }
             let event_ts = event_ts as u32;
@@ -1198,30 +1239,57 @@ impl MetricsDatabase {
         let placeholders = std::iter::repeat_n("?", tools.len())
             .collect::<Vec<_>>()
             .join(", ");
+        let candidate_payload_limit = crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES;
+        let event_payload_limit = MAX_METRIC_EVENT_JSON_BYTES;
         let sql = format!(
             r#"
+            WITH sized AS MATERIALIZED (
+                SELECT
+                    id,
+                    octet_length(event_json) AS event_bytes,
+                    octet_length(event_json)
+                        + COALESCE(octet_length(session_id), 0)
+                        + COALESCE(octet_length(trace_id), 0)
+                        + COALESCE(octet_length(tool), 0)
+                        + COALESCE(octet_length(external_session_id), 0)
+                        + COALESCE(octet_length(external_tool_use_id), 0) AS retained_bytes
+                FROM metrics
+                WHERE event_kind = ?1
+                  AND tool IN ({placeholders})
+                  AND event_ts IS NOT NULL
+                  AND octet_length(session_id) > 0
+                  AND CASE WHEN octet_length(tool) = 7
+                           THEN tool != 'mock_ai'
+                           ELSE 1 END
+                  AND octet_length(external_session_id) > 0
+                ORDER BY event_ts DESC, id DESC
+                LIMIT 100
+            )
             SELECT
-                id,
-                event_json,
-                event_ts,
-                session_id,
-                trace_id,
-                tool,
-                external_session_id,
-                external_tool_use_id
-            FROM metrics
-            WHERE event_kind = ?1
-              AND tool IN ({placeholders})
-              AND event_ts IS NOT NULL
-              AND session_id IS NOT NULL
-              AND session_id != ''
-              AND tool IS NOT NULL
-              AND tool != ''
-              AND tool != 'mock_ai'
-              AND external_session_id IS NOT NULL
-              AND external_session_id != ''
-            ORDER BY event_ts DESC, id DESC
-            LIMIT 100
+                metrics.id,
+                sized.retained_bytes,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.event_json END,
+                metrics.event_ts,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.session_id END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.trace_id END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.tool END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.external_session_id END,
+                CASE WHEN sized.retained_bytes <= {candidate_payload_limit}
+                           AND sized.event_bytes <= {event_payload_limit}
+                     THEN metrics.external_tool_use_id END
+            FROM sized
+            JOIN metrics ON metrics.id = sized.id
+            ORDER BY metrics.event_ts DESC, metrics.id DESC
             "#
         );
 
@@ -1236,32 +1304,37 @@ impl MetricsDatabase {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-            ))
-        })?;
+        let mut rows = stmt.query(params_from_iter(values.iter()))?;
 
         let mut candidates = Vec::new();
-        for row in rows {
-            let (
-                row_id,
-                event_json,
-                event_ts,
-                session_id,
-                trace_id,
-                tool,
-                external_session_id,
-                external_tool_use_id,
-            ) = row?;
+        let mut budget = BatchMaterializationBudget::new();
+        while let Some(row) = rows.next()? {
+            let retained_bytes = sqlite_byte_len(row, 1, "latest session-event candidate")?;
+            if let Err(error) = budget.reserve("latest session-event candidate", retained_bytes) {
+                tracing::debug!(
+                    %error,
+                    "latest session-event recovery skipped at payload limit"
+                );
+                return Ok(Vec::new());
+            }
+            let Some(event_json) = row.get::<_, Option<String>>(2)? else {
+                tracing::debug!(
+                    limit = MAX_METRIC_EVENT_JSON_BYTES,
+                    "latest session-event recovery skipped at event payload limit"
+                );
+                return Ok(Vec::new());
+            };
+            let row_id = row.get::<_, i64>(0)?;
+            let event_ts = row.get::<_, i64>(3)?;
+            let session_id = row.get::<_, String>(4)?;
+            let trace_id = row.get::<_, Option<String>>(5)?;
+            let tool = row.get::<_, String>(6)?;
+            let external_session_id = row.get::<_, String>(7)?;
+            let external_tool_use_id = row.get::<_, Option<String>>(8)?;
             if event_ts < 0 || event_ts > u32::MAX as i64 {
+                continue;
+            }
+            if tool == "mock_ai" {
                 continue;
             }
 
@@ -1306,10 +1379,6 @@ impl MetricsDatabase {
                 break;
             };
             after_id = id;
-
-            if summary.scanned < METADATA_BACKFILL_BATCH_SIZE {
-                break;
-            }
         }
 
         Ok(total)
@@ -1324,25 +1393,49 @@ impl MetricsDatabase {
             return Ok((MetricMetadataBackfillSummary::default(), None));
         }
 
-        let rows = {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, event_json FROM metrics \
+        let (rows, scanned, last_id) = {
+            let sql = format!(
+                "SELECT id, octet_length(event_json), \
+                        CASE WHEN octet_length(event_json) <= {} THEN event_json END \
+                 FROM metrics \
                  WHERE id > ?1 AND (event_ts IS NULL OR event_kind IS NULL) \
                  ORDER BY id ASC \
                  LIMIT ?2",
-            )?;
-            let mapped = stmt.query_map(params![after_id, limit as i64], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?;
-            mapped.collect::<Result<Vec<_>, _>>()?
+                MAX_METRIC_EVENT_JSON_BYTES
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut query = stmt.query(params![after_id, limit as i64])?;
+            let mut rows = Vec::new();
+            let mut scanned = 0usize;
+            let mut last_id = None;
+            let mut retained_bytes = 0usize;
+            while let Some(row) = query.next()? {
+                let id = row.get::<_, i64>(0)?;
+                let event_bytes = sqlite_byte_len(row, 1, "metric metadata backfill row")?;
+                if event_bytes <= MAX_METRIC_EVENT_JSON_BYTES
+                    && retained_bytes.saturating_add(event_bytes) > MAX_METRIC_UPLOAD_BATCH_BYTES
+                {
+                    break;
+                }
+                scanned = scanned.saturating_add(1);
+                last_id = Some(id);
+                if event_bytes > MAX_METRIC_EVENT_JSON_BYTES {
+                    continue;
+                }
+                let Some(event_json) = row.get::<_, Option<String>>(2)? else {
+                    continue;
+                };
+                retained_bytes = retained_bytes.saturating_add(event_bytes);
+                rows.push((id, event_json));
+            }
+            (rows, scanned, last_id)
         };
 
         let mut summary = MetricMetadataBackfillSummary {
-            scanned: rows.len(),
+            scanned,
             updated: 0,
         };
-        let last_id = rows.last().map(|(id, _)| *id);
-        if rows.is_empty() {
+        if scanned == 0 {
             return Ok((summary, last_id));
         }
 
@@ -1444,6 +1537,12 @@ fn session_event_recovery_candidate_limit() -> usize {
         return value.min(MAX_SESSION_EVENT_RECOVERY_CANDIDATES);
     }
     MAX_SESSION_EVENT_RECOVERY_CANDIDATES
+}
+
+fn sqlite_byte_len(row: &rusqlite::Row<'_>, index: usize, kind: &str) -> Result<usize, GitAiError> {
+    let bytes: i64 = row.get(index)?;
+    usize::try_from(bytes)
+        .map_err(|_| GitAiError::Generic(format!("invalid {kind} byte length: {bytes}")))
 }
 
 fn current_unix_ts() -> u64 {
@@ -2341,6 +2440,59 @@ mod tests {
     }
 
     #[test]
+    fn test_latest_session_event_candidates_filter_tools_and_mock_agent() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts = seconds_ago(30);
+        db.insert_events(&[
+            session_event_json(ts, "session-codex", "external-codex", "codex", None),
+            session_event_json(
+                ts + 1,
+                "session-claude",
+                "external-claude",
+                "claude-code",
+                None,
+            ),
+            session_event_json(ts + 2, "session-mock", "external-mock", "mock_ai", None),
+        ])
+        .unwrap();
+
+        let candidates = db
+            .latest_session_event_candidates_for_tools(&["codex", "mock_ai"])
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].session_id, "session-codex");
+    }
+
+    #[test]
+    fn test_session_event_candidates_reject_oversized_legacy_payload() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts = seconds_ago(30);
+        let event = format!(
+            r#"{{
+                "t":{ts},
+                "e":5,
+                "v":{{"0":{{"padding":"{}"}}}},
+                "a":{{
+                    "20":"codex",
+                    "21":"gpt-5",
+                    "23":"external-oversized",
+                    "24":"session-oversized",
+                    "25":"trace-oversized"
+                }}
+            }}"#,
+            "x".repeat(MAX_METRIC_EVENT_JSON_BYTES)
+        );
+        db.insert_events(&[event]).unwrap();
+
+        let candidates = db
+            .session_event_candidates_near_timestamps(&[ts as u128 * NS_PER_SECOND], 3_000_000_000)
+            .unwrap();
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
     fn test_insert_events_leaves_event_metadata_null_for_invalid_json() {
         let (mut db, _temp_dir) = create_test_db();
         let recent_event_ts = days_ago(1);
@@ -2525,6 +2677,43 @@ mod tests {
             .unwrap();
         assert_eq!(empty_summary, MetricMetadataBackfillSummary::default());
         assert_eq!(empty_last_id, None);
+    }
+
+    #[test]
+    fn test_backfill_event_metadata_paginates_by_payload_bytes() {
+        let (mut db, _temp_dir) = create_test_db();
+        let tx = db.conn.transaction().unwrap();
+        for index in 0..10 {
+            tx.execute(
+                "INSERT INTO metrics (event_json) VALUES (?1)",
+                params![event_json_with_payload(days_ago(index + 1), 1024 * 1024)],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut after_id = 0;
+        let mut batches = 0;
+        let mut scanned = 0;
+        let mut updated = 0;
+        loop {
+            let (summary, last_id) = db
+                .backfill_event_metadata_batch_after(after_id, 100)
+                .unwrap();
+            scanned += summary.scanned;
+            updated += summary.updated;
+
+            let Some(last_id) = last_id else {
+                break;
+            };
+            assert!(summary.scanned > 0);
+            after_id = last_id;
+            batches += 1;
+        }
+
+        assert_eq!(scanned, 10);
+        assert_eq!(updated, 10);
+        assert!(batches >= 2);
     }
 
     #[test]

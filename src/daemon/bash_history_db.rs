@@ -1,5 +1,6 @@
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
+use crate::git::repository::BatchMaterializationBudget;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ const SCHEMA_VERSION: usize = 2;
 const RETENTION_SECS: u64 = 30 * 24 * 3600;
 const PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
 const MAX_BASH_RECOVERY_CANDIDATES: usize = 1_024;
+const MAX_BASH_RECOVERY_CANDIDATE_BYTES: usize = 2 * 1024 * 1024;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -542,29 +544,59 @@ impl BashHistoryDatabase {
 
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
-                   session_id, tool_use_id, agent_tool, agent_external_id, agent_model,
-                   start_trace_id, end_trace_id, start_time_ns, end_time_ns,
-                   command, metadata_json
-            FROM bash_checkpoint_calls
-            WHERE start_time_ns <= ?1
-              AND COALESCE(end_time_ns, start_time_ns) >= ?2
-            ORDER BY id ASC
-            LIMIT ?3
+            WITH sized AS MATERIALIZED (
+                SELECT id,
+                       octet_length(invocation_key)
+                         + octet_length(original_cwd)
+                         + COALESCE(octet_length(repo_work_dir), 0)
+                         + COALESCE(octet_length(repo_discovery_error), 0)
+                         + octet_length(session_id)
+                         + octet_length(tool_use_id)
+                         + octet_length(agent_tool)
+                         + octet_length(agent_external_id)
+                         + octet_length(agent_model)
+                         + COALESCE(octet_length(start_trace_id), 0)
+                         + COALESCE(octet_length(end_trace_id), 0)
+                         + COALESCE(octet_length(command), 0)
+                         + octet_length(metadata_json) AS retained_bytes
+                FROM bash_checkpoint_calls
+                WHERE start_time_ns <= ?1
+                  AND COALESCE(end_time_ns, start_time_ns) >= ?2
+                ORDER BY id ASC
+                LIMIT ?3
+            )
+            SELECT calls.id,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.invocation_key END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.original_cwd END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.repo_work_dir END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.repo_discovery_error END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.session_id END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.tool_use_id END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.agent_tool END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.agent_external_id END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.agent_model END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.start_trace_id END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.end_trace_id END,
+                   calls.start_time_ns, calls.end_time_ns,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.command END,
+                   CASE WHEN sized.retained_bytes <= ?4 THEN calls.metadata_json END,
+                   sized.retained_bytes
+            FROM sized
+            JOIN bash_checkpoint_calls AS calls ON calls.id = sized.id
+            ORDER BY calls.id ASC
             "#,
         )?;
-        let rows = stmt.query_map(
-            params![
-                ns_to_i64(max_ts)?,
-                ns_to_i64(min_ts)?,
-                candidate_limit.saturating_add(1) as i64,
-            ],
-            row_to_call,
-        )?;
+        let mut rows = stmt.query(params![
+            ns_to_i64(max_ts)?,
+            ns_to_i64(min_ts)?,
+            candidate_limit.saturating_add(1) as i64,
+            MAX_BASH_RECOVERY_CANDIDATE_BYTES as i64,
+        ])?;
 
         let mut calls = Vec::new();
         let mut scanned = 0usize;
-        for row in rows {
+        let mut budget = BatchMaterializationBudget::new();
+        while let Some(row) = rows.next()? {
             scanned += 1;
             if scanned > candidate_limit {
                 tracing::debug!(
@@ -573,7 +605,22 @@ impl BashHistoryDatabase {
                 );
                 return Ok(Vec::new());
             }
-            let call = row?;
+            let retained_bytes = sqlite_byte_len(row, 16, "bash recovery candidate")?;
+            if retained_bytes > MAX_BASH_RECOVERY_CANDIDATE_BYTES {
+                tracing::debug!(
+                    limit = MAX_BASH_RECOVERY_CANDIDATE_BYTES,
+                    "bash attribution recovery skipped at per-candidate payload limit"
+                );
+                return Ok(Vec::new());
+            }
+            if let Err(error) = budget.reserve("bash recovery candidate", retained_bytes) {
+                tracing::debug!(
+                    %error,
+                    "bash attribution recovery skipped at payload limit"
+                );
+                return Ok(Vec::new());
+            }
+            let call = row_to_call(row)?;
             if timestamps_ns
                 .iter()
                 .any(|ts| distance_to_call_window(*ts, &call) <= window_ns)
@@ -687,6 +734,12 @@ fn ns_to_i64(ns: u128) -> Result<i64, GitAiError> {
 
 fn i64_to_ns(ns: i64) -> u128 {
     u128::try_from(ns).unwrap_or_default()
+}
+
+fn sqlite_byte_len(row: &rusqlite::Row<'_>, index: usize, kind: &str) -> Result<usize, GitAiError> {
+    let bytes: i64 = row.get(index)?;
+    usize::try_from(bytes)
+        .map_err(|_| GitAiError::Generic(format!("invalid {kind} byte length: {bytes}")))
 }
 
 fn row_to_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<BashCheckpointCall> {
@@ -954,6 +1007,32 @@ mod tests {
         tx.commit().unwrap();
 
         let candidates = db.candidates_near_timestamps(&[1_500], 1_000).unwrap();
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn candidate_query_fails_closed_above_payload_byte_limit() {
+        let (mut db, _dir) = test_db();
+        let metadata = HashMap::from([(
+            "oversized".to_string(),
+            "x".repeat(MAX_BASH_RECOVERY_CANDIDATE_BYTES),
+        )]);
+        db.record_start(&BashCallStart {
+            original_cwd: "/repo".to_string(),
+            repo_work_dir: Some("/repo".to_string()),
+            repo_discovery_error: None,
+            session_id: "oversized-session".to_string(),
+            tool_use_id: "oversized-tool".to_string(),
+            agent_id: test_agent(),
+            start_trace_id: "oversized-trace".to_string(),
+            started_at_ns: 1_000,
+            command: None,
+            metadata,
+        })
+        .unwrap();
+
+        let candidates = db.candidates_near_timestamps(&[1_000], 1_000).unwrap();
 
         assert!(candidates.is_empty());
     }

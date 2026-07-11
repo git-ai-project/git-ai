@@ -381,8 +381,10 @@ impl NotesDatabase {
 
         // Read back the locked rows.
         let select_sql = format!(
-            "SELECT commit_sha, length(CAST(content AS BLOB)), content, attempts \
+            "SELECT commit_sha, octet_length(content), \
+                    CASE WHEN octet_length(content) <= {} THEN content END, attempts \
              FROM notes WHERE commit_sha IN ({})",
+            crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES,
             shas.iter()
                 .enumerate()
                 .map(|(i, _)| format!("?{}", i + 1))
@@ -406,7 +408,9 @@ impl NotesDatabase {
                 budget.reserve("pending note content", content_len)?;
                 out.push(PendingNote {
                     commit_sha: row.get(0)?,
-                    content: row.get(2)?,
+                    content: row.get::<_, Option<String>>(2)?.ok_or_else(|| {
+                        GitAiError::Generic("pending note content exceeded limit".to_string())
+                    })?,
                     attempts: row.get(3)?,
                 });
             }
@@ -480,9 +484,13 @@ impl NotesDatabase {
 
     /// Retrieve the note content for a single commit SHA.
     pub fn get_note(&self, commit_sha: &str) -> Result<Option<String>, GitAiError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT length(CAST(content AS BLOB)), content FROM notes WHERE commit_sha = ?1",
-        )?;
+        let sql = format!(
+            "SELECT octet_length(content), \
+                    CASE WHEN octet_length(content) <= {} THEN content END \
+             FROM notes WHERE commit_sha = ?1",
+            crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params![commit_sha])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
@@ -490,7 +498,9 @@ impl NotesDatabase {
         let content_len = note_content_len(row, 0)?;
         let mut budget = BatchMaterializationBudget::new();
         budget.reserve("note content", content_len)?;
-        Ok(Some(row.get(1)?))
+        Ok(Some(row.get::<_, Option<String>>(1)?.ok_or_else(|| {
+            GitAiError::Generic("note content exceeded limit".to_string())
+        })?))
     }
 
     /// Return the subset of `commit_shas` that exist in the DB with `synced = 1`.
@@ -538,8 +548,10 @@ impl NotesDatabase {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT commit_sha, length(CAST(content AS BLOB)), content \
+            "SELECT commit_sha, octet_length(content), \
+                    CASE WHEN octet_length(content) <= {} THEN content END \
              FROM notes WHERE commit_sha IN ({})",
+            crate::git::repository::MAX_BATCH_MATERIALIZED_CONTENT_BYTES,
             placeholders
         );
         let params_vec: Vec<&dyn rusqlite::ToSql> = commit_shas
@@ -555,7 +567,12 @@ impl NotesDatabase {
         while let Some(row) = rows.next()? {
             let content_len = note_content_len(row, 1)?;
             budget.reserve("note content", content_len)?;
-            result.insert(row.get(0)?, row.get(2)?);
+            result.insert(
+                row.get(0)?,
+                row.get::<_, Option<String>>(2)?.ok_or_else(|| {
+                    GitAiError::Generic("note content exceeded limit".to_string())
+                })?,
+            );
         }
         Ok(result)
     }
