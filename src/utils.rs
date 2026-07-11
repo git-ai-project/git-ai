@@ -32,6 +32,19 @@ pub(crate) fn read_file_with_limit(
     Ok(bytes)
 }
 
+pub(crate) fn read_text_file_with_limit(
+    path: &Path,
+    max_bytes: u64,
+    kind: &str,
+) -> std::io::Result<String> {
+    String::from_utf8(read_file_with_limit(path, max_bytes, kind)?).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{kind} is not UTF-8: {error}"),
+        )
+    })
+}
+
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 

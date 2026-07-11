@@ -8,7 +8,7 @@ use crate::git::cli_parser::{
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
-    common_dir_for_worktree, git_dir_for_worktree, worktree_root_for_path,
+    common_dir_for_worktree, git_dir_for_worktree, read_git_control_file, worktree_root_for_path,
 };
 use crate::git::repository::{
     Repository, discover_repository_in_path_no_git_exec, exec_git, exec_git_stdin,
@@ -371,7 +371,7 @@ fn daemon_worktree_from_repo_path(repo_path: &Path) -> Option<PathBuf> {
 
     let linked_gitdir_file = repo_path.join("gitdir");
     if linked_gitdir_file.is_file() {
-        let content = fs::read_to_string(&linked_gitdir_file).ok()?;
+        let content = read_git_control_file(&linked_gitdir_file)?;
         let linked = PathBuf::from(content.trim());
         if linked.file_name().and_then(|name| name.to_str()) == Some(".git") {
             return linked.parent().map(PathBuf::from);
@@ -2191,18 +2191,29 @@ fn pid_metadata_path(config: &DaemonConfig) -> PathBuf {
         .join(PID_META_FILE)
 }
 
-/// Returns the log file path for the currently running daemon, if any.
-/// Reads the PID from daemon.pid.json and constructs the log path.
-pub fn daemon_log_file_path(config: &DaemonConfig) -> Result<PathBuf, GitAiError> {
+const MAX_PID_METADATA_BYTES: u64 = 4 * 1_024;
+
+fn read_pid_metadata(config: &DaemonConfig) -> Result<DaemonPidMeta, GitAiError> {
     let meta_path = pid_metadata_path(config);
-    let contents = fs::read_to_string(&meta_path).map_err(|e| {
+    let contents = crate::utils::read_text_file_with_limit(
+        &meta_path,
+        MAX_PID_METADATA_BYTES,
+        "daemon PID metadata",
+    )
+    .map_err(|e| {
         GitAiError::Generic(format!(
             "failed to read daemon pid metadata at {}: {}",
             meta_path.display(),
             e
         ))
     })?;
-    let meta: DaemonPidMeta = serde_json::from_str(&contents)?;
+    Ok(serde_json::from_str(&contents)?)
+}
+
+/// Returns the log file path for the currently running daemon, if any.
+/// Reads the PID from daemon.pid.json and constructs the log path.
+pub fn daemon_log_file_path(config: &DaemonConfig) -> Result<PathBuf, GitAiError> {
+    let meta = read_pid_metadata(config)?;
     let log_dir = config.internal_dir.join("daemon").join("logs");
     Ok(log_dir.join(format!("{}.log", meta.pid)))
 }
@@ -2219,16 +2230,7 @@ fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
 
 /// Read the PID of the currently running daemon from the pid metadata file.
 pub fn read_daemon_pid(config: &DaemonConfig) -> Result<u32, GitAiError> {
-    let meta_path = pid_metadata_path(config);
-    let contents = fs::read_to_string(&meta_path).map_err(|e| {
-        GitAiError::Generic(format!(
-            "failed to read daemon pid metadata at {}: {}",
-            meta_path.display(),
-            e
-        ))
-    })?;
-    let meta: DaemonPidMeta = serde_json::from_str(&contents)?;
-    Ok(meta.pid)
+    Ok(read_pid_metadata(config)?.pid)
 }
 
 fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {

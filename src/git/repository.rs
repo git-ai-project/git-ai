@@ -1,7 +1,7 @@
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
-    common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
+    common_dir_for_git_dir, git_dir_for_worktree, read_git_control_file, worktree_root_for_path,
 };
 use crate::git::repo_storage::RepoStorage;
 use crate::git::status::MAX_PATHSPEC_ARGS;
@@ -2565,7 +2565,7 @@ fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
 /// Returns `true` if `git_file` is a `.git` file that points to a linked
 /// worktree (i.e., the `gitdir:` target path contains `/worktrees/`).
 fn is_linked_worktree_git_file(git_file: &Path) -> bool {
-    let Ok(contents) = std::fs::read_to_string(git_file) else {
+    let Some(contents) = read_git_control_file(git_file) else {
         return false;
     };
     // Format: "gitdir: <path>\n"
@@ -2645,7 +2645,7 @@ pub fn find_repository_for_file(
             // Submodules have a .git file (not directory) that points to the parent's .git/modules
             if git_path.is_file() {
                 // This is a submodule - read the file to check if it points to modules/
-                if let Ok(content) = std::fs::read_to_string(&git_path)
+                if let Some(content) = read_git_control_file(&git_path)
                     && content.contains("gitdir:")
                     && content.contains("/modules/")
                 {

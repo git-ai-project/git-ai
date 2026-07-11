@@ -8,6 +8,7 @@
 //!   during the transition period.
 
 use crate::error::GitAiError;
+use crate::git::repo_state::read_git_control_file;
 use crate::git::repository::Repository;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -23,6 +24,7 @@ const REPO_HOOK_ENABLEMENT_FILE: &str = "git_hooks_enabled";
 const REBASE_HOOK_MASK_STATE_FILE: &str = "rebase_hook_mask_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "hooks";
 const REPO_HOOK_STATE_SCHEMA_VERSION: &str = "repo_hooks/2";
+const MAX_REPO_HOOK_STATE_BYTES: u64 = 256 * 1_024;
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
 // Intentionally avoid a GIT_* prefix so git alias shell-command tests don't
@@ -353,7 +355,11 @@ fn read_repo_hook_state(path: &Path) -> Result<Option<RepoHookState>, GitAiError
     if !path.exists() {
         return Ok(None);
     }
-    let content = fs::read_to_string(path)?;
+    let content = crate::utils::read_text_file_with_limit(
+        path,
+        MAX_REPO_HOOK_STATE_BYTES,
+        "repo hook state",
+    )?;
     match serde_json::from_str::<RepoHookState>(&content) {
         Ok(state) => Ok(Some(state)),
         Err(err) => {
@@ -485,7 +491,7 @@ fn git_dir_from_context() -> Option<PathBuf> {
 
 fn worktree_root_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
     let gitdir_file = git_dir.join("gitdir");
-    let gitdir_target = fs::read_to_string(gitdir_file).ok()?;
+    let gitdir_target = read_git_control_file(&gitdir_file)?;
     let gitdir_target = gitdir_target.trim();
     if gitdir_target.is_empty() {
         return None;
@@ -612,7 +618,7 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
 
 #[cfg(test)]
 mod tests {
-    use super::load_config;
+    use super::{load_config, read_repo_hook_state};
 
     #[test]
     fn hook_config_loader_rejects_oversized_file_before_parsing() {
@@ -622,6 +628,17 @@ mod tests {
 
         let error = load_config(&path, gix_config::Source::Local)
             .expect_err("oversized hook config must be rejected");
+        assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[test]
+    fn repo_hook_state_rejects_oversized_file_before_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("git_hooks_state.json");
+        std::fs::write(&path, vec![b' '; 512 * 1_024]).unwrap();
+
+        let error =
+            read_repo_hook_state(&path).expect_err("oversized repo hook state must be rejected");
         assert!(error.to_string().contains("byte limit"));
     }
 }

@@ -2,8 +2,10 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
+use git_ai::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::repo_storage::InitialAttributions;
+use git_ai::git::repository::find_repository_in_path;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
@@ -1605,6 +1607,30 @@ fn test_stash_push_pathspec_excludes_unstashed_file_from_stash_log() {
     repo.stage_all_and_commit("apply partial stash").unwrap();
     a.assert_committed_lines(vec!["a line 1".ai(), "a line 2".ai()]);
     b.assert_committed_lines(vec!["b line 1".ai(), "b line 2".ai()]);
+}
+
+#[test]
+fn test_stash_metadata_rejects_oversized_file_before_parsing() {
+    let repo = TestRepo::new();
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    repo.stage_all_and_commit("initial commit").unwrap();
+    readme.assert_committed_lines(vec!["# Test Repo".human()]);
+
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let metadata_path = gitai_repo
+        .storage
+        .ai_dir
+        .join("stashes_v2")
+        .join("oversized")
+        .join("metadata.json");
+    fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    fs::write(&metadata_path, vec![b' '; 2 * 1_024 * 1_024]).unwrap();
+
+    let error = handle_stash_pop_or_apply_with_head(&gitai_repo, "oversized", false, Some("HEAD"))
+        .expect_err("oversized stash metadata must be rejected");
+    assert!(error.to_string().contains("byte limit"));
+    readme.assert_committed_lines(vec!["# Test Repo".human()]);
 }
 
 crate::reuse_tests_in_worktree!(

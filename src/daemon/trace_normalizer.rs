@@ -3,11 +3,13 @@ use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::repo_state::{
-    common_dir_for_repo_path, common_dir_for_worktree, worktree_root_for_path,
+    common_dir_for_repo_path, common_dir_for_worktree, read_git_control_file,
+    worktree_root_for_path,
 };
 use crate::observability;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -850,7 +852,7 @@ fn worktree_from_def_repo_repo(repo: &Path) -> Option<PathBuf> {
 
     let linked_gitdir = repo.join("gitdir");
     if linked_gitdir.is_file() {
-        let content = fs::read_to_string(&linked_gitdir).ok()?;
+        let content = read_git_control_file(&linked_gitdir)?;
         let path = PathBuf::from(content.trim());
         if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
             return path.parent().map(PathBuf::from);

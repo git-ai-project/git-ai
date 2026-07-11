@@ -54,6 +54,23 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
     DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
+#[test]
+fn daemon_pid_metadata_rejects_oversized_file_before_parsing() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let config = DaemonConfig::from_home(&repo.daemon_home_path());
+    let metadata_path = config
+        .lock_path
+        .parent()
+        .expect("daemon lock has a parent")
+        .join("daemon.pid.json");
+    fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    fs::write(&metadata_path, vec![b' '; 64 * 1_024]).unwrap();
+
+    let error =
+        read_daemon_pid(&config).expect_err("oversized daemon PID metadata must be rejected");
+    assert!(error.to_string().contains("byte limit"));
+}
+
 #[allow(clippy::zombie_processes)]
 fn start_daemon_for_repo(repo: &TestRepo) {
     let daemon_home = repo.daemon_home_path();
