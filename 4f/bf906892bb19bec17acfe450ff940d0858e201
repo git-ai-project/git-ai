@@ -1,5 +1,5 @@
 tests/integration/daemon_alias_refresh_memory.rs
-  s_59382cac373d67::t_de6086921bd64a 3-22,24-33,35-57,59-72
+  s_59382cac373d67::t_de6086921bd64a 3-22,3-6,7-19,20-22,24-33,35-57,59-72
   s_59382cac373d67::t_da5abee0401a7a 23,34,58
   s_59382cac373d67::t_6cf4baafca57f8 1-2
 tests/integration/main.rs
