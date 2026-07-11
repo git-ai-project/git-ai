@@ -8,6 +8,7 @@ use std::sync::{Mutex, OnceLock};
 const SCHEMA_VERSION: usize = 2;
 const RETENTION_SECS: u64 = 30 * 24 * 3600;
 const PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
+const MAX_BASH_RECOVERY_CANDIDATES: usize = 1_024;
 
 const MIGRATIONS: &[&str] = &[
     r#"
@@ -537,6 +538,7 @@ impl BashHistoryDatabase {
             .max()
             .unwrap_or_default()
             .saturating_add(window_ns);
+        let candidate_limit = bash_recovery_candidate_limit();
 
         let mut stmt = self.conn.prepare(
             r#"
@@ -548,12 +550,29 @@ impl BashHistoryDatabase {
             WHERE start_time_ns <= ?1
               AND COALESCE(end_time_ns, start_time_ns) >= ?2
             ORDER BY id ASC
+            LIMIT ?3
             "#,
         )?;
-        let rows = stmt.query_map(params![ns_to_i64(max_ts)?, ns_to_i64(min_ts)?], row_to_call)?;
+        let rows = stmt.query_map(
+            params![
+                ns_to_i64(max_ts)?,
+                ns_to_i64(min_ts)?,
+                candidate_limit.saturating_add(1) as i64,
+            ],
+            row_to_call,
+        )?;
 
         let mut calls = Vec::new();
+        let mut scanned = 0usize;
         for row in rows {
+            scanned += 1;
+            if scanned > candidate_limit {
+                tracing::debug!(
+                    limit = candidate_limit,
+                    "bash attribution recovery skipped at candidate limit"
+                );
+                return Ok(Vec::new());
+            }
             let call = row?;
             if timestamps_ns
                 .iter()
@@ -631,6 +650,17 @@ impl BashHistoryDatabase {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn bash_recovery_candidate_limit() -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(value) = std::env::var("GIT_AI_TEST_ATTRIBUTION_RECOVERY_CANDIDATE_LIMIT")
+        && let Ok(value) = value.parse::<usize>()
+        && value > 0
+    {
+        return value.min(MAX_BASH_RECOVERY_CANDIDATES);
+    }
+    MAX_BASH_RECOVERY_CANDIDATES
 }
 
 fn invocation_key(session_id: &str, tool_use_id: &str) -> String {
@@ -888,6 +918,44 @@ mod tests {
         let calls = db.candidates_near_timestamps(&[5_000], 3_000).unwrap();
         let ids: Vec<_> = calls.iter().map(|c| c.tool_use_id.as_str()).collect();
         assert_eq!(ids, vec!["near-before", "near-after"]);
+    }
+
+    #[test]
+    fn candidate_query_fails_closed_above_materialization_limit() {
+        let (mut db, _dir) = test_db();
+        let tx = db.conn.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare(
+                    r#"
+                    INSERT INTO bash_checkpoint_calls (
+                        invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
+                        session_id, tool_use_id, agent_tool, agent_external_id, agent_model,
+                        start_trace_id, end_trace_id, start_time_ns, end_time_ns,
+                        command, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?1, '/repo', '/repo', NULL, ?2, ?3, 'codex', ?2, 'gpt-5',
+                            ?4, ?5, 1000, 2000, NULL, '{}', 1, 1)
+                    "#,
+                )
+                .unwrap();
+            for index in 0..=MAX_BASH_RECOVERY_CANDIDATES {
+                insert
+                    .execute(params![
+                        format!("invocation-{index}"),
+                        format!("session-{index}"),
+                        format!("tool-{index}"),
+                        format!("start-{index}"),
+                        format!("end-{index}"),
+                    ])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let candidates = db.candidates_near_timestamps(&[1_500], 1_000).unwrap();
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
