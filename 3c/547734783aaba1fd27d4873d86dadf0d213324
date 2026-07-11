@@ -1,6 +1,6 @@
 tests/integration/daemon_rewrite_metrics_memory.rs
   s_59382cac373d67::t_1e988974c8bd60 38
-  s_59382cac373d67::t_a33de50bd3f926 3-20,25-37,39-59
+  s_59382cac373d67::t_a33de50bd3f926 3-20,3-6,7-19,20,25-37,39-59
   s_59382cac373d67::t_522e3d52aa9700 21-24
   s_59382cac373d67::t_683eb70ca7ba59 1-2
 tests/integration/main.rs
