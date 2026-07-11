@@ -108,6 +108,7 @@ const MAX_TRACE_CONNECTION_ROOTS: usize = 64;
 const MAX_TRACE_SID_BYTES: usize = 1_024;
 const MAX_TRACE_CONNECTIONS: usize = 128;
 const MAX_CONTROL_CONNECTIONS: usize = 16;
+const MAX_COMMIT_FILE_TIMESTAMP_SNAPSHOTS: usize = 2;
 const CONNECTION_HANDLER_STACK_BYTES: usize = 512 * 1024;
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
@@ -2612,6 +2613,16 @@ type CommitFileTimestampSnapshotHandle =
     tokio::task::JoinHandle<Option<crate::authorship::attribution_recovery::FileTimestampsByPath>>;
 type CommitFileTimestampSnapshotHandles = HashMap<String, CommitFileTimestampSnapshotHandle>;
 
+struct CommitFileTimestampSnapshotPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for CommitFileTimestampSnapshotPermit {
+    fn drop(&mut self) {
+        release_connection_slot(&self.active);
+    }
+}
+
 const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
 const SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_RECOVERY_PREFLIGHT_POLL: Duration = Duration::from_millis(100);
@@ -2679,6 +2690,7 @@ pub struct ActorDaemonCoordinator {
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     commit_file_timestamp_snapshots_by_root:
         Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
+    active_commit_file_timestamp_snapshots: Arc<AtomicUsize>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     bash_sessions: Mutex<crate::daemon::bash_sessions::BashSessionState>,
@@ -2766,6 +2778,7 @@ impl ActorDaemonCoordinator {
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
+            active_commit_file_timestamp_snapshots: Arc::new(AtomicUsize::new(0)),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
@@ -2925,7 +2938,8 @@ impl ActorDaemonCoordinator {
             .unwrap_or_default();
         if timestamps.is_empty()
             && let Ok(workdir) = repo.workdir()
-            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+            && let Ok(Some(fallback_timestamps)) =
+                self.capture_commit_file_timestamps_if_available(&workdir, commit_sha)
         {
             timestamps = fallback_timestamps
                 .iter()
@@ -2945,7 +2959,8 @@ impl ActorDaemonCoordinator {
         }
         if timestamps.is_empty()
             && let Ok(workdir) = repo.workdir()
-            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+            && let Ok(Some(fallback_timestamps)) =
+                self.capture_commit_file_timestamps_if_available(&workdir, commit_sha)
         {
             timestamps = fallback_timestamps
                 .values()
@@ -5124,7 +5139,36 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    fn try_acquire_commit_file_timestamp_snapshot(
+        &self,
+    ) -> Option<CommitFileTimestampSnapshotPermit> {
+        let active = self.active_commit_file_timestamp_snapshots.clone();
+        if try_acquire_connection_slot(&active, MAX_COMMIT_FILE_TIMESTAMP_SNAPSHOTS) {
+            Some(CommitFileTimestampSnapshotPermit { active })
+        } else {
+            None
+        }
+    }
+
+    fn capture_commit_file_timestamps_if_available(
+        &self,
+        worktree: &Path,
+        commit_sha: &str,
+    ) -> Result<Option<crate::authorship::attribution_recovery::FileTimestampsByPath>, GitAiError>
+    {
+        let Some(_permit) = self.try_acquire_commit_file_timestamp_snapshot() else {
+            tracing::debug!(
+                %commit_sha,
+                limit = MAX_COMMIT_FILE_TIMESTAMP_SNAPSHOTS,
+                "commit-time file timestamp snapshot skipped at capacity"
+            );
+            return Ok(None);
+        };
+        capture_commit_file_timestamps(worktree, commit_sha).map(Some)
+    }
+
     fn start_commit_file_timestamp_snapshots_for_command(
+        &self,
         command: &crate::daemon::domain::NormalizedCommand,
     ) -> CommitFileTimestampSnapshotHandles {
         let Some(worktree) = command.worktree.clone() else {
@@ -5135,13 +5179,40 @@ impl ActorDaemonCoordinator {
         }
 
         let (_, new_head) = Self::resolve_heads_for_command(command);
+        #[cfg(feature = "test-support")]
+        let new_head = if new_head.is_empty()
+            && std::env::var("GIT_AI_TEST_FORCE_COMMIT_FILE_TIMESTAMP_SNAPSHOT").as_deref()
+                == Ok("1")
+        {
+            "ffffffffffffffffffffffffffffffffffffffff".to_string()
+        } else {
+            new_head
+        };
         if new_head.is_empty() || !is_valid_oid(&new_head) || is_zero_oid(&new_head) {
             return HashMap::new();
         }
+        let Some(permit) = self.try_acquire_commit_file_timestamp_snapshot() else {
+            tracing::debug!(
+                commit_sha = %new_head,
+                limit = MAX_COMMIT_FILE_TIMESTAMP_SNAPSHOTS,
+                "commit-time file timestamp snapshot skipped at capacity"
+            );
+            return HashMap::new();
+        };
 
         let mut handles = HashMap::new();
         let task_commit_sha = new_head.clone();
         let handle = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            #[cfg(any(test, feature = "test-support"))]
+            if let Ok(delay_ms) =
+                std::env::var("GIT_AI_TEST_COMMIT_FILE_TIMESTAMP_SNAPSHOT_DELAY_MS")
+                    .unwrap_or_default()
+                    .parse::<u64>()
+                && delay_ms > 0
+            {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
             match capture_commit_file_timestamps(&worktree, &task_commit_sha) {
                 Ok(timestamps) => Some(timestamps),
                 Err(error) => {
@@ -5163,7 +5234,7 @@ impl ActorDaemonCoordinator {
         &self,
         command: &crate::daemon::domain::NormalizedCommand,
     ) -> Result<(), GitAiError> {
-        let handles = Self::start_commit_file_timestamp_snapshots_for_command(command);
+        let handles = self.start_commit_file_timestamp_snapshots_for_command(command);
         if handles.is_empty() {
             return Ok(());
         }
@@ -6103,7 +6174,7 @@ impl ActorDaemonCoordinator {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
                     let mut commit_file_timestamp_snapshots =
-                        Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
+                        self.start_commit_file_timestamp_snapshots_for_command(&applied.command);
                     let result = self
                         .maybe_apply_side_effects_for_applied_command(
                             Some(&family),
@@ -8641,6 +8712,43 @@ mod tests {
             old: old.to_string(),
             new: new.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn commit_file_timestamp_snapshot_slots_are_bounded_and_reusable() {
+        let coordinator = ActorDaemonCoordinator::new();
+        let first = coordinator
+            .try_acquire_commit_file_timestamp_snapshot()
+            .expect("first snapshot slot should be available");
+        let second = coordinator
+            .try_acquire_commit_file_timestamp_snapshot()
+            .expect("second snapshot slot should be available");
+
+        assert!(
+            coordinator
+                .try_acquire_commit_file_timestamp_snapshot()
+                .is_none(),
+            "commit timestamp snapshots must stop spawning at capacity"
+        );
+        assert_eq!(
+            coordinator
+                .active_commit_file_timestamp_snapshots
+                .load(Ordering::Acquire),
+            MAX_COMMIT_FILE_TIMESTAMP_SNAPSHOTS
+        );
+
+        drop(first);
+        let replacement = coordinator
+            .try_acquire_commit_file_timestamp_snapshot()
+            .expect("released snapshot slots must be reusable");
+        drop(second);
+        drop(replacement);
+        assert_eq!(
+            coordinator
+                .active_commit_file_timestamp_snapshots
+                .load(Ordering::Acquire),
+            0
+        );
     }
 
     #[test]

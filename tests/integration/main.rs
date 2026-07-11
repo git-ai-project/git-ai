@@ -67,6 +67,7 @@ mod daemon_note_materialization_memory;
 mod daemon_reflog_memory;
 mod daemon_repository_reader_memory;
 mod daemon_retained_state_memory;
+mod daemon_snapshot_memory;
 mod daemon_working_log_memory;
 mod diff;
 mod diff_comprehensive;
