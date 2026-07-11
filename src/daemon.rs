@@ -2623,6 +2623,22 @@ impl Drop for CommitFileTimestampSnapshotPermit {
     }
 }
 
+fn spawn_notes_flush_worker() -> mpsc::Sender<()> {
+    let (tx, mut rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        while rx.recv().await.is_some() {
+            if let Err(error) = tokio::task::spawn_blocking(|| {
+                crate::daemon::telemetry_worker::flush_notes();
+            })
+            .await
+            {
+                tracing::warn!(%error, "notes flush worker panicked");
+            }
+        }
+    });
+    tx
+}
+
 const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
 const SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_RECOVERY_PREFLIGHT_POLL: Duration = Duration::from_millis(100);
@@ -2700,6 +2716,7 @@ pub struct ActorDaemonCoordinator {
     // exits via the shutdown select! arm instead of relying on channel closure.
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
+    notes_flush_tx: mpsc::Sender<()>,
     stream_worker: Option<crate::daemon::stream_worker::StreamWorkerHandle>,
     transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     streams_db: Option<Arc<crate::streams::db::StreamsDatabase>>,
@@ -2795,6 +2812,7 @@ impl ActorDaemonCoordinator {
             test_completion_log_lock: Mutex::new(()),
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
+            notes_flush_tx: spawn_notes_flush_worker(),
             stream_worker: None,
             transcript_shutdown_notify: std::sync::OnceLock::new(),
             streams_db: None,
@@ -6344,11 +6362,13 @@ impl ActorDaemonCoordinator {
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::FlushNotes => {
-                // Trigger an immediate notes flush in a blocking task.
-                // Fire-and-forget: the periodic flush loop is the safety net.
-                tokio::task::spawn_blocking(|| {
-                    crate::daemon::telemetry_worker::flush_notes();
-                });
+                // One active flush and one queued follow-up are sufficient: each
+                // flush drains a batch from the same durable notes database.
+                if let Err(error) = self.notes_flush_tx.try_send(())
+                    && !matches!(error, mpsc::error::TrySendError::Full(_))
+                {
+                    tracing::debug!(%error, "notes flush worker is unavailable");
+                }
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionStart {

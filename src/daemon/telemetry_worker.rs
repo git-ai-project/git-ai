@@ -1495,6 +1495,15 @@ pub fn flush_notes() {
     use crate::api::types::{NoteEntry, NotesUploadRequest};
     use crate::config::NotesBackendKind;
 
+    #[cfg(feature = "test-support")]
+    if let Ok(delay_ms) = std::env::var("GIT_AI_TEST_FLUSH_NOTES_DELAY_MS")
+        .unwrap_or_default()
+        .parse::<u64>()
+        && delay_ms > 0
+    {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+
     let cfg = Config::fresh();
     if cfg.notes_backend_kind() != NotesBackendKind::Http {
         tracing::debug!("notes: skipping flush, backend is not Http");
