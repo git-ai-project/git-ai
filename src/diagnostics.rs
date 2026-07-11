@@ -19,6 +19,7 @@ const SELF_CHECK_CONTENT_AI: &str = "Untracked line\nKnown human line\nAI line\n
 const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
 const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
 const TRACE2_EVENT_NESTING_VALUE: &str = "0";
+const MAX_SELF_CHECK_TRACE_BYTES: u64 = 1024 * 1024;
 const SELF_CHECK_TRACE_ENV_REMOVE: &[&str] = &[
     "GIT_TRACE2_PARENT_SID",
     "GIT_TRACE2_PARENT_NAME",
@@ -507,8 +508,12 @@ pub fn run_trace2_file_self_check(target: &GitDiagnosticTarget) -> DiagnosticChe
             deadline,
         )?;
 
-        let trace2_json = fs::read_to_string(&trace_path)
-            .map_err(|e| format!("failed to read {}: {}", trace_path.display(), e))?;
+        let trace2_json = crate::utils::read_text_file_with_limit(
+            &trace_path,
+            MAX_SELF_CHECK_TRACE_BYTES,
+            "diagnostic trace2 file",
+        )
+        .map_err(|e| format!("failed to read {}: {}", trace_path.display(), e))?;
         let details = validate_trace2_command_events(&trace2_json, "init")?;
         Ok((details, trace2_json))
     })();
@@ -947,22 +952,12 @@ fn daemon_binary_is_stale(config: &crate::daemon::DaemonConfig) -> Result<bool, 
 
 fn read_daemon_started_at_ns(config: &crate::daemon::DaemonConfig) -> Result<Option<u128>, String> {
     let pid_path = config.internal_dir.join("daemon").join("daemon.pid.json");
-    let contents = match fs::read_to_string(&pid_path) {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(format!(
-                "failed to read daemon pid metadata at {}: {}",
-                pid_path.display(),
-                err
-            ));
-        }
-    };
-    let value: Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-    Ok(value
-        .get("started_at_ns")
-        .and_then(Value::as_u64)
-        .map(u128::from))
+    if !pid_path.exists() {
+        return Ok(None);
+    }
+    crate::daemon::read_daemon_started_at_ns(config)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn current_binary_modified_ns() -> Result<u128, String> {

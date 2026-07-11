@@ -2233,6 +2233,10 @@ pub fn read_daemon_pid(config: &DaemonConfig) -> Result<u32, GitAiError> {
     Ok(read_pid_metadata(config)?.pid)
 }
 
+pub fn read_daemon_started_at_ns(config: &DaemonConfig) -> Result<u128, GitAiError> {
+    Ok(read_pid_metadata(config)?.started_at_ns)
+}
+
 fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     let path = pid_metadata_path(config);
     if path.exists() {

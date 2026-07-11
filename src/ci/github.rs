@@ -7,6 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const GITHUB_CI_TEMPLATE_YAML: &str = include_str!("workflow_templates/github.yaml");
+const MAX_GITHUB_EVENT_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 struct GithubCiEventPayload {
@@ -50,9 +51,7 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
         return Ok(None);
     }
 
-    let event_payload =
-        serde_json::from_str::<GithubCiEventPayload>(&std::fs::read_to_string(env_event_path)?)
-            .unwrap_or_default();
+    let event_payload = read_github_event_payload(std::path::Path::new(&env_event_path))?;
     if event_payload.pull_request.is_none() {
         return Ok(None);
     }
@@ -226,6 +225,15 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     }))
 }
 
+fn read_github_event_payload(path: &std::path::Path) -> Result<GithubCiEventPayload, GitAiError> {
+    let content = crate::utils::read_text_file_with_limit(
+        path,
+        MAX_GITHUB_EVENT_PAYLOAD_BYTES,
+        "GitHub event payload",
+    )?;
+    Ok(serde_json::from_str(&content).unwrap_or_default())
+}
+
 fn authenticate_clone_url(clone_url: &str, token: &str) -> String {
     format!(
         "https://x-access-token:{}@{}",
@@ -313,5 +321,16 @@ mod tests {
         assert!(!pull_request.merged);
         assert_eq!(pull_request.base.ref_name, "main");
         assert_eq!(pull_request.head.ref_name, "feature");
+    }
+
+    #[test]
+    fn oversized_github_event_payload_is_rejected_before_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("event.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_GITHUB_EVENT_PAYLOAD_BYTES + 1).unwrap();
+
+        let error = read_github_event_payload(&path).expect_err("payload must be rejected");
+        assert!(error.to_string().contains("byte limit"));
     }
 }

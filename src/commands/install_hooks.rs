@@ -415,7 +415,14 @@ fn detect_install_git_path(binary_path: &Path) -> Option<String> {
 
     #[cfg(windows)]
     {
-        parse_git_og_cmd_path(&fs::read_to_string(install_dir.join("git-og.cmd")).ok()?)
+        parse_git_og_cmd_path(
+            &crate::utils::read_text_file_with_limit(
+                &install_dir.join("git-og.cmd"),
+                64 * 1024,
+                "git-og command shim",
+            )
+            .ok()?,
+        )
     }
 
     #[cfg(not(windows))]
