@@ -5,6 +5,7 @@ use crate::git::repo_state::{common_dir_for_repo_path, common_dir_for_worktree};
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -45,6 +46,39 @@ const ALIAS_CACHE_TTL_SECS: u64 = 60;
 const MAX_ALIAS_CACHE_FAMILIES: usize = 1_024;
 const MAX_ALIASES_PER_FAMILY: usize = 256;
 const MAX_RETAINED_ALIAS_BYTES_PER_FAMILY: usize = 64 * 1_024;
+const MAX_CONCURRENT_ALIAS_REFRESHES: usize = 2;
+const ALIAS_REFRESH_STACK_BYTES: usize = 512 * 1024;
+static ACTIVE_ALIAS_REFRESHES: AtomicUsize = AtomicUsize::new(0);
+
+struct AliasRefreshPermit {
+    active: &'static AtomicUsize,
+}
+
+impl Drop for AliasRefreshPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_alias_refresh(active: &'static AtomicUsize) -> Option<AliasRefreshPermit> {
+    active
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < MAX_CONCURRENT_ALIAS_REFRESHES).then_some(current + 1)
+        })
+        .ok()
+        .map(|_| AliasRefreshPermit { active })
+}
+
+#[cfg(feature = "test-support")]
+fn test_alias_cache_ttl_secs() -> u64 {
+    if let Ok(ttl) = std::env::var("GIT_AI_TEST_ALIAS_CACHE_TTL_SECS")
+        .unwrap_or_default()
+        .parse::<u64>()
+    {
+        return ttl;
+    }
+    ALIAS_CACHE_TTL_SECS
+}
 
 struct AliasCacheEntry {
     /// Resolved alias name → expansion value (e.g. "ci" → "commit -v")
@@ -97,31 +131,39 @@ impl SystemGitBackend {
             None => return self.resolve_alias_uncached(worktree, alias_name),
         };
 
-        let cache = self
+        let mut cache = self
             .alias_cache
             .lock()
             .map_err(|_| GitAiError::Generic("alias cache lock poisoned".to_string()))?;
 
-        if let Some(entry) = cache.get(&family_key) {
+        if let Some(entry) = cache.get_mut(&family_key) {
             let normalized_alias = alias_name.to_ascii_lowercase();
             let result = entry.aliases.get(&normalized_alias).cloned();
-            if entry.refreshed_at.elapsed().as_secs() >= ALIAS_CACHE_TTL_SECS
-                && !entry.refresh_in_progress
-            {
-                // Stale — return cached value but kick off background refresh.
-                // Mark in-progress to prevent thundering-herd thread spawns.
-                drop(cache);
-                if let Ok(mut cache) = self.alias_cache.lock()
-                    && let Some(entry) = cache.get_mut(&family_key)
-                {
-                    entry.refresh_in_progress = true;
+            #[cfg(feature = "test-support")]
+            let cache_expired =
+                entry.refreshed_at.elapsed().as_secs() >= test_alias_cache_ttl_secs();
+            #[cfg(not(feature = "test-support"))]
+            let cache_expired = entry.refreshed_at.elapsed().as_secs() >= ALIAS_CACHE_TTL_SECS;
+            let refresh_permit = if cache_expired && !entry.refresh_in_progress {
+                match try_acquire_alias_refresh(&ACTIVE_ALIAS_REFRESHES) {
+                    Some(permit) => {
+                        entry.refresh_in_progress = true;
+                        Some(permit)
+                    }
+                    None => None,
                 }
-                let worktree = worktree.to_path_buf();
-                let family_key = family_key.clone();
-                let alias_cache = self.alias_cache.clone();
-                std::thread::spawn(move || {
-                    refresh_alias_cache(&worktree, &family_key, &alias_cache);
-                });
+            } else {
+                None
+            };
+            drop(cache);
+
+            if let Some(permit) = refresh_permit {
+                spawn_alias_cache_refresh(
+                    worktree.to_path_buf(),
+                    family_key.clone(),
+                    self.alias_cache.clone(),
+                    permit,
+                );
             }
             return Ok(result);
         }
@@ -210,6 +252,46 @@ impl SystemGitBackend {
     }
 }
 
+fn clear_alias_refresh_in_progress(
+    alias_cache: &Mutex<HashMap<String, AliasCacheEntry>>,
+    family_key: &str,
+) {
+    if let Ok(mut cache) = alias_cache.lock()
+        && let Some(entry) = cache.get_mut(family_key)
+    {
+        entry.refresh_in_progress = false;
+    }
+}
+
+fn spawn_alias_cache_refresh(
+    worktree: PathBuf,
+    family_key: String,
+    alias_cache: Arc<Mutex<HashMap<String, AliasCacheEntry>>>,
+    permit: AliasRefreshPermit,
+) {
+    let error_cache = alias_cache.clone();
+    let error_family = family_key.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("git-ai-alias-refresh".to_string())
+        .stack_size(ALIAS_REFRESH_STACK_BYTES)
+        .spawn(move || {
+            let _permit = permit;
+            #[cfg(feature = "test-support")]
+            if let Ok(delay_ms) = std::env::var("GIT_AI_TEST_ALIAS_REFRESH_DELAY_MS")
+                .unwrap_or_default()
+                .parse::<u64>()
+                && delay_ms > 0
+            {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            refresh_alias_cache(&worktree, &family_key, &alias_cache);
+        })
+    {
+        clear_alias_refresh_in_progress(&error_cache, &error_family);
+        tracing::debug!(%error, "failed to spawn alias refresh worker");
+    }
+}
+
 /// Load aliases from disk and store them in the cache. Safe to call from any
 /// thread — errors are silently swallowed when running as a background refresh.
 fn refresh_alias_cache(
@@ -223,12 +305,7 @@ fn refresh_alias_cache(
     }) {
         Ok(aliases) => aliases,
         Err(_) => {
-            // Clear refresh_in_progress so a future attempt can retry.
-            if let Ok(mut cache) = alias_cache.lock()
-                && let Some(entry) = cache.get_mut(family_key)
-            {
-                entry.refresh_in_progress = false;
-            }
+            clear_alias_refresh_in_progress(alias_cache, family_key);
             return;
         }
     };
@@ -590,14 +667,41 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 mod tests {
     use super::{
         AliasCacheEntry, GitBackend, MAX_ALIAS_CACHE_FAMILIES, MAX_ALIASES_PER_FAMILY,
-        MAX_RETAINED_ALIAS_BYTES_PER_FAMILY, SystemGitBackend, clone_init_positionals,
-        default_clone_target_from_source, read_all_aliases_from_config, refresh_alias_cache,
+        MAX_CONCURRENT_ALIAS_REFRESHES, MAX_RETAINED_ALIAS_BYTES_PER_FAMILY, SystemGitBackend,
+        clone_init_positionals, default_clone_target_from_source, read_all_aliases_from_config,
+        refresh_alias_cache, try_acquire_alias_refresh,
     };
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+
+    #[test]
+    fn alias_refresh_slots_are_bounded_and_reusable() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        let first = try_acquire_alias_refresh(&ACTIVE)
+            .expect("first alias refresh slot should be available");
+        let second = try_acquire_alias_refresh(&ACTIVE)
+            .expect("second alias refresh slot should be available");
+
+        assert!(
+            try_acquire_alias_refresh(&ACTIVE).is_none(),
+            "alias refreshes must stop spawning at capacity"
+        );
+        assert_eq!(
+            ACTIVE.load(Ordering::Acquire),
+            MAX_CONCURRENT_ALIAS_REFRESHES
+        );
+
+        drop(first);
+        let replacement = try_acquire_alias_refresh(&ACTIVE)
+            .expect("released alias refresh slots must be reusable");
+        drop(second);
+        drop(replacement);
+        assert_eq!(ACTIVE.load(Ordering::Acquire), 0);
+    }
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()

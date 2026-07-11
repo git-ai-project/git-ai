@@ -52,6 +52,7 @@ mod config_pattern_detection;
 mod continue_cli;
 mod cross_repo_cwd_attribution;
 mod cursor;
+mod daemon_alias_refresh_memory;
 mod daemon_batch_materialization_memory;
 mod daemon_commit_carryover;
 mod daemon_config_memory;
