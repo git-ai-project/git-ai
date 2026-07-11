@@ -2,6 +2,7 @@ use crate::error::GitAiError;
 use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
+use crate::mdm::utils::run_installer_command;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -225,29 +226,27 @@ fn find_visual_studio_windows() -> Vec<VsInstallation> {
         }
     };
 
-    let output = match std::process::Command::new(&vswhere)
-        .args([
-            "-all",
-            "-format",
-            "json",
-            "-property",
-            "installationPath",
-            "-property",
-            "installationVersion",
-            "-property",
-            "instanceId",
-        ])
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
+    let mut command = std::process::Command::new(&vswhere);
+    command.args([
+        "-all",
+        "-format",
+        "json",
+        "-property",
+        "installationPath",
+        "-property",
+        "installationVersion",
+        "-property",
+        "instanceId",
+    ]);
+    let output = match run_installer_command(command, "vswhere.exe") {
+        Ok(out) if out.status == Some(0) => out,
         _ => {
             tracing::debug!("Visual Studio: vswhere.exe failed");
             return Vec::new();
         }
     };
 
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    let entries: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
+    let entries: Vec<serde_json::Value> = match serde_json::from_str(&output.stdout) {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!("Visual Studio: Failed to parse vswhere output: {}", e);

@@ -321,15 +321,16 @@ impl HookInstaller for ClaudeCodeInstaller {
             });
         }
 
-        if has_binary
-            && let Ok(version_str) = get_binary_version("claude")
-            && let Some(version) = parse_version(&version_str)
-            && !version_meets_requirement(version, MIN_CLAUDE_VERSION)
-        {
-            return Err(GitAiError::Generic(format!(
-                "Claude Code version {}.{} detected, but minimum version {}.{} is required",
-                version.0, version.1, MIN_CLAUDE_VERSION.0, MIN_CLAUDE_VERSION.1
-            )));
+        if has_binary {
+            let version_str = get_binary_version("claude")?;
+            if let Some(version) = parse_version(&version_str)
+                && !version_meets_requirement(version, MIN_CLAUDE_VERSION)
+            {
+                return Err(GitAiError::Generic(format!(
+                    "Claude Code version {}.{} detected, but minimum version {}.{} is required",
+                    version.0, version.1, MIN_CLAUDE_VERSION.0, MIN_CLAUDE_VERSION.1
+                )));
+            }
         }
 
         let settings_path = Self::settings_path();

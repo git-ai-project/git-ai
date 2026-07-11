@@ -75,15 +75,16 @@ impl HookInstaller for GitHubCopilotInstaller {
         }
 
         // If we have a CLI, check version.
-        if let Some(cli) = &resolved_cli
-            && let Ok(version_str) = get_editor_version(cli)
-            && let Some(version) = parse_version(&version_str)
-            && !version_meets_requirement(version, MIN_CODE_VERSION)
-        {
-            return Err(GitAiError::Generic(format!(
-                "VS Code version {}.{} detected, but minimum version {}.{} is required",
-                version.0, version.1, MIN_CODE_VERSION.0, MIN_CODE_VERSION.1
-            )));
+        if let Some(cli) = &resolved_cli {
+            let version_str = get_editor_version(cli)?;
+            if let Some(version) = parse_version(&version_str)
+                && !version_meets_requirement(version, MIN_CODE_VERSION)
+            {
+                return Err(GitAiError::Generic(format!(
+                    "VS Code version {}.{} detected, but minimum version {}.{} is required",
+                    version.0, version.1, MIN_CODE_VERSION.0, MIN_CODE_VERSION.1
+                )));
+            }
         }
 
         let hooks_path = Self::hooks_path();

@@ -5,7 +5,7 @@ use crate::mdm::agents::get_all_installers;
 use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
-use crate::mdm::utils::get_current_binary_path;
+use crate::mdm::utils::{get_current_binary_path, run_installer_command};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,30 +132,28 @@ fn find_running_pids(process_names: &[&str]) -> Vec<(u32, String)> {
     let output = {
         #[cfg(unix)]
         {
-            Command::new("ps")
-                .args(["axo", "pid,comm"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
+            let mut command = Command::new("ps");
+            command.args(["axo", "pid,comm"]);
+            run_installer_command(command, "process listing")
         }
         #[cfg(windows)]
         {
-            Command::new("tasklist")
-                .args(["/FO", "CSV", "/NH"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
+            let mut command = Command::new("tasklist");
+            command.args(["/FO", "CSV", "/NH"]);
+            run_installer_command(command, "process listing")
         }
     };
 
     let Ok(output) = output else {
         return vec![];
     };
+    if output.status != Some(0) {
+        return vec![];
+    }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut results: Vec<(u32, String)> = Vec::new();
 
-    for line in stdout.lines() {
+    for line in output.stdout.lines() {
         #[cfg(unix)]
         {
             let trimmed = line.trim();
@@ -745,14 +743,12 @@ fn warn_if_git_version_too_old() {
         .stderr(Stdio::null());
     crate::git::repository::apply_internal_git_env(&mut command);
 
-    let output = command.output();
+    let output = run_installer_command(command, "git --version");
 
     let version = match output {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            parse_git_version(&text)
-        }
+        Ok(o) if o.status == Some(0) => parse_git_version(&o.stdout),
         Err(_) => None,
+        _ => None,
     };
 
     if let Some(v) = version {

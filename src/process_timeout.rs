@@ -117,10 +117,7 @@ pub(crate) fn run_command_with_timeout_and_env(
     env_set: &[(&str, &str)],
 ) -> Result<TimedCommandOutput, String> {
     let mut command = Command::new(program);
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(args);
     for key in env_remove {
         command.env_remove(key);
     }
@@ -130,6 +127,16 @@ pub(crate) fn run_command_with_timeout_and_env(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+
+    run_prepared_command_with_timeout(command, timeout, poll_interval)
+}
+
+pub(crate) fn run_prepared_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<TimedCommandOutput, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
@@ -368,5 +375,27 @@ mod tests {
 
         assert_eq!(queued_bytes, MAX_TIMED_COMMAND_OUTPUT_BYTES);
         assert!(truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_command_output_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes x | head -c 2097152"]);
+
+        let output = run_prepared_command_with_timeout(
+            command,
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+
+        assert!(output.stdout.len() <= MAX_TIMED_COMMAND_OUTPUT_BYTES);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("stdout exceeded"))
+        );
     }
 }

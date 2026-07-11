@@ -59,15 +59,16 @@ impl HookInstaller for CursorInstaller {
         }
 
         // If we have a CLI, check version
-        if let Some(cli) = &resolved_cli
-            && let Ok(version_str) = get_editor_version(cli)
-            && let Some(version) = parse_version(&version_str)
-            && !version_meets_requirement(version, MIN_CURSOR_VERSION)
-        {
-            return Err(GitAiError::Generic(format!(
-                "Cursor version {}.{} detected, but minimum version {}.{} is required",
-                version.0, version.1, MIN_CURSOR_VERSION.0, MIN_CURSOR_VERSION.1
-            )));
+        if let Some(cli) = &resolved_cli {
+            let version_str = get_editor_version(cli)?;
+            if let Some(version) = parse_version(&version_str)
+                && !version_meets_requirement(version, MIN_CURSOR_VERSION)
+            {
+                return Err(GitAiError::Generic(format!(
+                    "Cursor version {}.{} detected, but minimum version {}.{} is required",
+                    version.0, version.1, MIN_CURSOR_VERSION.0, MIN_CURSOR_VERSION.1
+                )));
+            }
         }
 
         // Check if hooks are installed
