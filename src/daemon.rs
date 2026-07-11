@@ -109,6 +109,10 @@ const MAX_TRACE_SID_BYTES: usize = 1_024;
 const MAX_TRACE_CONNECTIONS: usize = 128;
 const MAX_CONTROL_CONNECTIONS: usize = 16;
 const MAX_COMMIT_FILE_TIMESTAMP_SNAPSHOTS: usize = 2;
+const MAX_FAMILY_SEQUENCER_ENTRIES: usize = 1_024;
+const MAX_SEQUENCER_PENDING_ROOTS: usize = MAX_TRACE_CONNECTIONS * MAX_TRACE_CONNECTION_ROOTS;
+const MAX_SEQUENCER_READY_COMMANDS: usize = 1_024;
+const MAX_SEQUENCER_CHECKPOINTS: usize = 8;
 const CONNECTION_HANDLER_STACK_BYTES: usize = 512 * 1024;
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
@@ -2545,6 +2549,15 @@ fn release_connection_slot(counter: &AtomicUsize) {
     });
 }
 
+fn release_slots(counter: &AtomicUsize, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        Some(active.saturating_sub(count))
+    });
+}
+
 fn configured_connection_limit(env_name: &str, default: usize) -> usize {
     let is_test_daemon = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
@@ -2570,6 +2583,24 @@ enum FamilySequencerEntry {
     Canceled,
 }
 
+#[derive(Clone, Copy)]
+enum SequencerRetentionKind {
+    PendingRoot,
+    ReadyCommand,
+    Checkpoint,
+}
+
+impl FamilySequencerEntry {
+    fn retention_kind(&self) -> Option<SequencerRetentionKind> {
+        match self {
+            Self::PendingRoot => Some(SequencerRetentionKind::PendingRoot),
+            Self::ReadyCommand(_) => Some(SequencerRetentionKind::ReadyCommand),
+            Self::Checkpoint { .. } => Some(SequencerRetentionKind::Checkpoint),
+            Self::Canceled => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct FamilySequencerOrder {
     started_at_ns: u128,
@@ -2586,6 +2617,53 @@ struct FamilySequencerState {
 struct PendingRootSlot {
     family: String,
     order: FamilySequencerOrder,
+}
+
+struct SequencerSlotReleaseGuard<'a> {
+    counter: &'a AtomicUsize,
+}
+
+impl Drop for SequencerSlotReleaseGuard<'_> {
+    fn drop(&mut self) {
+        release_connection_slot(self.counter);
+    }
+}
+
+struct SequencerReadyRetentionGuard<'a> {
+    ready_commands: &'a AtomicUsize,
+    checkpoints: &'a AtomicUsize,
+    ready_command_count: usize,
+    checkpoint_count: usize,
+}
+
+impl<'a> SequencerReadyRetentionGuard<'a> {
+    fn new(ready_commands: &'a AtomicUsize, checkpoints: &'a AtomicUsize) -> Self {
+        Self {
+            ready_commands,
+            checkpoints,
+            ready_command_count: 0,
+            checkpoint_count: 0,
+        }
+    }
+
+    fn record(&mut self, kind: SequencerRetentionKind) {
+        match kind {
+            SequencerRetentionKind::ReadyCommand => {
+                self.ready_command_count = self.ready_command_count.saturating_add(1);
+            }
+            SequencerRetentionKind::Checkpoint => {
+                self.checkpoint_count = self.checkpoint_count.saturating_add(1);
+            }
+            SequencerRetentionKind::PendingRoot => {}
+        }
+    }
+}
+
+impl Drop for SequencerReadyRetentionGuard<'_> {
+    fn drop(&mut self) {
+        release_slots(self.ready_commands, self.ready_command_count);
+        release_slots(self.checkpoints, self.checkpoint_count);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2707,6 +2785,12 @@ pub struct ActorDaemonCoordinator {
     commit_file_timestamp_snapshots_by_root:
         Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
     active_commit_file_timestamp_snapshots: Arc<AtomicUsize>,
+    retained_sequencer_pending_roots: AtomicUsize,
+    retained_sequencer_ready_commands: AtomicUsize,
+    retained_sequencer_checkpoints: AtomicUsize,
+    max_sequencer_pending_roots: usize,
+    max_sequencer_ready_commands: usize,
+    max_sequencer_checkpoints: usize,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     bash_sessions: Mutex<crate::daemon::bash_sessions::BashSessionState>,
@@ -2796,6 +2880,21 @@ impl ActorDaemonCoordinator {
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
             active_commit_file_timestamp_snapshots: Arc::new(AtomicUsize::new(0)),
+            retained_sequencer_pending_roots: AtomicUsize::new(0),
+            retained_sequencer_ready_commands: AtomicUsize::new(0),
+            retained_sequencer_checkpoints: AtomicUsize::new(0),
+            max_sequencer_pending_roots: configured_connection_limit(
+                "GIT_AI_TEST_MAX_SEQUENCER_PENDING_ROOTS",
+                MAX_SEQUENCER_PENDING_ROOTS,
+            ),
+            max_sequencer_ready_commands: configured_connection_limit(
+                "GIT_AI_TEST_MAX_SEQUENCER_READY_COMMANDS",
+                MAX_SEQUENCER_READY_COMMANDS,
+            ),
+            max_sequencer_checkpoints: configured_connection_limit(
+                "GIT_AI_TEST_MAX_SEQUENCER_CHECKPOINTS",
+                MAX_SEQUENCER_CHECKPOINTS,
+            ),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
@@ -3259,22 +3358,76 @@ impl ActorDaemonCoordinator {
         })
     }
 
+    fn sequencer_counter_and_limit(
+        &self,
+        kind: SequencerRetentionKind,
+    ) -> (&AtomicUsize, usize, &'static str) {
+        match kind {
+            SequencerRetentionKind::PendingRoot => (
+                &self.retained_sequencer_pending_roots,
+                self.max_sequencer_pending_roots,
+                "pending root",
+            ),
+            SequencerRetentionKind::ReadyCommand => (
+                &self.retained_sequencer_ready_commands,
+                self.max_sequencer_ready_commands,
+                "ready command",
+            ),
+            SequencerRetentionKind::Checkpoint => (
+                &self.retained_sequencer_checkpoints,
+                self.max_sequencer_checkpoints,
+                "checkpoint",
+            ),
+        }
+    }
+
+    fn try_acquire_sequencer_slot(&self, kind: SequencerRetentionKind) -> bool {
+        let (counter, limit, _) = self.sequencer_counter_and_limit(kind);
+        try_acquire_connection_slot(counter, limit)
+    }
+
+    fn release_sequencer_slot(&self, kind: SequencerRetentionKind) {
+        let (counter, _, _) = self.sequencer_counter_and_limit(kind);
+        release_connection_slot(counter);
+    }
+
+    fn sequencer_capacity_error(&self, kind: SequencerRetentionKind) -> GitAiError {
+        let (_, limit, name) = self.sequencer_counter_and_limit(kind);
+        GitAiError::Generic(format!(
+            "family sequencer {name} capacity reached ({limit})"
+        ))
+    }
+
+    fn ensure_family_sequencer_capacity(
+        state: &FamilySequencerState,
+        family: &str,
+    ) -> Result<(), GitAiError> {
+        if state.entries.len() >= MAX_FAMILY_SEQUENCER_ENTRIES {
+            return Err(GitAiError::Generic(format!(
+                "family sequencer entry capacity reached for {family} ({MAX_FAMILY_SEQUENCER_ENTRIES})"
+            )));
+        }
+        Ok(())
+    }
+
     fn append_pending_root_entry(
         &self,
         family: &str,
         root_sid: &str,
         started_at_ns: u128,
     ) -> Result<(), GitAiError> {
-        {
-            let pending_slots = self.pending_root_slots_by_root.lock().map_err(|_| {
-                GitAiError::Generic("pending root slots map lock poisoned".to_string())
-            })?;
-            if pending_slots.contains_key(root_sid) {
-                return Ok(());
-            }
+        let mut pending_slots = self
+            .pending_root_slots_by_root
+            .lock()
+            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))?;
+        if pending_slots.contains_key(root_sid) {
+            return Ok(());
+        }
+        if !self.try_acquire_sequencer_slot(SequencerRetentionKind::PendingRoot) {
+            return Err(self.sequencer_capacity_error(SequencerRetentionKind::PendingRoot));
         }
 
-        let order = {
+        let order_result = (|| {
             let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
@@ -3285,6 +3438,7 @@ impl ActorDaemonCoordinator {
                         next_ordinal: 1,
                         entries: BTreeMap::new(),
                     });
+            Self::ensure_family_sequencer_capacity(state, family)?;
             let order = FamilySequencerOrder {
                 started_at_ns,
                 ordinal: state.next_ordinal,
@@ -3293,19 +3447,23 @@ impl ActorDaemonCoordinator {
             state
                 .entries
                 .insert(order, FamilySequencerEntry::PendingRoot);
-            order
+            Ok::<_, GitAiError>(order)
+        })();
+        let order = match order_result {
+            Ok(order) => order,
+            Err(error) => {
+                self.release_sequencer_slot(SequencerRetentionKind::PendingRoot);
+                return Err(error);
+            }
         };
 
-        self.pending_root_slots_by_root
-            .lock()
-            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))?
-            .insert(
-                root_sid.to_string(),
-                PendingRootSlot {
-                    family: family.to_string(),
-                    order,
-                },
-            );
+        pending_slots.insert(
+            root_sid.to_string(),
+            PendingRootSlot {
+                family: family.to_string(),
+                order,
+            },
+        );
         Ok(())
     }
 
@@ -3373,7 +3531,10 @@ impl ActorDaemonCoordinator {
     ) -> Result<(), GitAiError> {
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
-        {
+        if !self.try_acquire_sequencer_slot(SequencerRetentionKind::ReadyCommand) {
+            return Err(self.sequencer_capacity_error(SequencerRetentionKind::ReadyCommand));
+        }
+        let insert_result = (|| {
             let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
@@ -3384,6 +3545,7 @@ impl ActorDaemonCoordinator {
                         next_ordinal: 1,
                         entries: BTreeMap::new(),
                     });
+            Self::ensure_family_sequencer_capacity(state, family)?;
             let order = FamilySequencerOrder {
                 started_at_ns: command.started_at_ns,
                 ordinal: state.next_ordinal,
@@ -3392,6 +3554,11 @@ impl ActorDaemonCoordinator {
             state
                 .entries
                 .insert(order, FamilySequencerEntry::ReadyCommand(Box::new(command)));
+            Ok::<_, GitAiError>(())
+        })();
+        if let Err(error) = insert_result {
+            self.release_sequencer_slot(SequencerRetentionKind::ReadyCommand);
+            return Err(error);
         }
         self.drain_ready_family_sequencer_entries_locked(family)
             .await
@@ -3436,10 +3603,24 @@ impl ActorDaemonCoordinator {
         let Some(slot) = self.take_pending_root_slot(root_sid)? else {
             return Ok(None);
         };
+        let pending_root_retention = SequencerSlotReleaseGuard {
+            counter: &self.retained_sequencer_pending_roots,
+        };
         let family = slot.family.clone();
         let exec_lock = self.side_effect_exec_lock(&family)?;
         let _guard = exec_lock.lock().await;
-        {
+        let replacement_kind = replacement.retention_kind();
+        let replacement_acquired =
+            replacement_kind.is_none_or(|kind| self.try_acquire_sequencer_slot(kind));
+        let capacity_error = (!replacement_acquired)
+            .then(|| self.sequencer_capacity_error(replacement_kind.unwrap()));
+        let replacement = if replacement_acquired {
+            replacement
+        } else {
+            FamilySequencerEntry::Canceled
+        };
+        let remove_entry = matches!(&replacement, FamilySequencerEntry::Canceled);
+        let replace_result = (|| {
             let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
@@ -3449,26 +3630,37 @@ impl ActorDaemonCoordinator {
                     next_ordinal: 1,
                     entries: BTreeMap::new(),
                 });
-            let Some(entry) = state.entries.get_mut(&slot.order) else {
+            let Some(entry) = state.entries.get(&slot.order) else {
                 return Err(GitAiError::Generic(format!(
                     "missing pending root sequencer entry for sid={} family={} order={:?}",
                     root_sid, family, slot.order
                 )));
             };
-            match entry {
-                FamilySequencerEntry::PendingRoot => {
-                    *entry = replacement;
-                }
-                _ => {
-                    return Err(GitAiError::Generic(format!(
-                        "sequencer entry for sid={} family={} order={:?} was not pending",
-                        root_sid, family, slot.order
-                    )));
-                }
+            if !matches!(entry, FamilySequencerEntry::PendingRoot) {
+                return Err(GitAiError::Generic(format!(
+                    "sequencer entry for sid={} family={} order={:?} was not pending",
+                    root_sid, family, slot.order
+                )));
             }
+            if remove_entry {
+                state.entries.remove(&slot.order);
+            } else if let Some(entry) = state.entries.get_mut(&slot.order) {
+                *entry = replacement;
+            }
+            Ok::<_, GitAiError>(())
+        })();
+        if let Err(error) = replace_result {
+            if replacement_acquired && let Some(kind) = replacement_kind {
+                self.release_sequencer_slot(kind);
+            }
+            return Err(error);
         }
+        drop(pending_root_retention);
         self.drain_ready_family_sequencer_entries_locked(&family)
             .await?;
+        if let Some(error) = capacity_error {
+            return Err(error);
+        }
         Ok(Some(family))
     }
 
@@ -4299,7 +4491,10 @@ impl ActorDaemonCoordinator {
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
 
-        {
+        if !self.try_acquire_sequencer_slot(SequencerRetentionKind::Checkpoint) {
+            return Err(self.sequencer_capacity_error(SequencerRetentionKind::Checkpoint));
+        }
+        let insert_result = (|| {
             let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
@@ -4310,6 +4505,7 @@ impl ActorDaemonCoordinator {
                         next_ordinal: 1,
                         entries: BTreeMap::new(),
                     });
+            Self::ensure_family_sequencer_capacity(state, family)?;
             let order = FamilySequencerOrder {
                 started_at_ns: now_unix_nanos(),
                 ordinal: state.next_ordinal,
@@ -4322,6 +4518,11 @@ impl ActorDaemonCoordinator {
                     respond_to,
                 },
             );
+            Ok::<_, GitAiError>(())
+        })();
+        if let Err(error) = insert_result {
+            self.release_sequencer_slot(SequencerRetentionKind::Checkpoint);
+            return Err(error);
         }
 
         self.drain_ready_family_sequencer_entries_locked(family)
@@ -4334,6 +4535,10 @@ impl ActorDaemonCoordinator {
     ) -> Result<(), GitAiError> {
         let mut ready: Vec<(u64, FamilySequencerEntry)> = Vec::new();
         let mut progressed = false;
+        let mut retention_guard = SequencerReadyRetentionGuard::new(
+            &self.retained_sequencer_ready_commands,
+            &self.retained_sequencer_checkpoints,
+        );
         {
             let mut map = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
@@ -4365,6 +4570,9 @@ impl ActorDaemonCoordinator {
                         unreachable!("pending root should not be removed from sequencer front");
                     }
                     other => {
+                        if let Some(kind) = other.retention_kind() {
+                            retention_guard.record(kind);
+                        }
                         ready.push((order.ordinal, other));
                         progressed = true;
                     }
@@ -4375,6 +4583,8 @@ impl ActorDaemonCoordinator {
         if ready.is_empty() {
             return Ok(());
         }
+
+        let _retention_guard = retention_guard;
 
         let _ = self.begin_family_effect(family);
         for (order, ready_entry) in ready {
@@ -8296,6 +8506,23 @@ mod tests {
         assert_eq!(counter.load(Ordering::Acquire), 2);
     }
 
+    #[test]
+    fn sequencer_retention_guard_releases_removed_entries_on_early_error() {
+        let ready_commands = AtomicUsize::new(1);
+        let checkpoints = AtomicUsize::new(1);
+
+        let result = {
+            let mut guard = SequencerReadyRetentionGuard::new(&ready_commands, &checkpoints);
+            guard.record(SequencerRetentionKind::ReadyCommand);
+            guard.record(SequencerRetentionKind::Checkpoint);
+            Err::<(), _>(GitAiError::Generic("later drain failed".to_string()))
+        };
+
+        assert!(result.is_err());
+        assert_eq!(ready_commands.load(Ordering::Acquire), 0);
+        assert_eq!(checkpoints.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn trace_connection_tracks_only_a_bounded_number_of_roots() {
         let coordinator = Arc::new(ActorDaemonCoordinator::new());
@@ -9480,6 +9707,184 @@ mod tests {
             response.ok,
             "checkpoint response should be ok: {response:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn family_sequencer_bounds_retained_checkpoints_and_releases_capacity() {
+        let mut coord = ActorDaemonCoordinator::new();
+        coord.max_sequencer_checkpoints = 2;
+        let family = "checkpoint-capacity-family";
+        let root_sid = "checkpoint-capacity-root";
+        coord
+            .append_pending_root_entry(family, root_sid, 1)
+            .unwrap();
+
+        let request = CheckpointRequest {
+            trace_id: "checkpoint-capacity".to_string(),
+            checkpoint_kind: CheckpointKind::Human,
+            agent_id: None,
+            files: Vec::new(),
+            path_role: PreparedPathRole::Edited,
+            stream_source: None,
+            metadata: HashMap::new(),
+        };
+        for _ in 0..2 {
+            coord
+                .append_checkpoint_to_family_sequencer(family, request.clone(), None)
+                .await
+                .unwrap();
+        }
+
+        let error = coord
+            .append_checkpoint_to_family_sequencer(family, request, None)
+            .await
+            .expect_err("the third retained checkpoint should fail closed");
+        assert!(error.to_string().contains("checkpoint capacity"));
+        assert_eq!(
+            coord.retained_sequencer_checkpoints.load(Ordering::Acquire),
+            2
+        );
+
+        coord
+            .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
+            .await
+            .unwrap();
+        assert_eq!(
+            coord.retained_sequencer_checkpoints.load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn family_sequencer_does_not_retain_canceled_capacity_rejections() {
+        let mut coord = ActorDaemonCoordinator::new();
+        coord.max_sequencer_checkpoints = 1;
+        let family = "checkpoint-rejection-family";
+        coord
+            .append_pending_root_entry(family, "blocking-root", 1)
+            .unwrap();
+        coord
+            .append_pending_root_entry(family, "accepted-root", 2)
+            .unwrap();
+        coord
+            .append_pending_root_entry(family, "rejected-root", 3)
+            .unwrap();
+
+        let request = || CheckpointRequest {
+            trace_id: "checkpoint-rejection".to_string(),
+            checkpoint_kind: CheckpointKind::Human,
+            agent_id: None,
+            files: Vec::new(),
+            path_role: PreparedPathRole::Edited,
+            stream_source: None,
+            metadata: HashMap::new(),
+        };
+        coord
+            .replace_pending_root_entry(
+                "accepted-root",
+                FamilySequencerEntry::Checkpoint {
+                    request: Box::new(request()),
+                    respond_to: None,
+                },
+            )
+            .await
+            .unwrap();
+        coord
+            .replace_pending_root_entry(
+                "rejected-root",
+                FamilySequencerEntry::Checkpoint {
+                    request: Box::new(request()),
+                    respond_to: None,
+                },
+            )
+            .await
+            .expect_err("the excess replacement should fail closed");
+
+        assert_eq!(
+            coord
+                .family_sequencers_by_family
+                .lock()
+                .unwrap()
+                .get(family)
+                .unwrap()
+                .entries
+                .len(),
+            2,
+            "a rejected replacement must not leave a canceled entry behind"
+        );
+
+        coord
+            .replace_pending_root_entry("blocking-root", FamilySequencerEntry::Canceled)
+            .await
+            .unwrap();
+        assert_eq!(
+            coord.retained_sequencer_checkpoints.load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_pending_root_replacement_releases_capacity() {
+        for (missing_entry, expected_error) in [
+            (true, "missing pending root sequencer entry"),
+            (false, "was not pending"),
+        ] {
+            let mut coord = ActorDaemonCoordinator::new();
+            coord.max_sequencer_pending_roots = 1;
+            let family = "failed-replacement-family";
+            let root_sid = if missing_entry {
+                "missing-entry-root"
+            } else {
+                "replaced-entry-root"
+            };
+            coord
+                .append_pending_root_entry(family, root_sid, 1)
+                .unwrap();
+
+            {
+                let slot = coord
+                    .pending_root_slots_by_root
+                    .lock()
+                    .unwrap()
+                    .get(root_sid)
+                    .unwrap()
+                    .clone();
+                let mut sequencers = coord.family_sequencers_by_family.lock().unwrap();
+                let entries = &mut sequencers.get_mut(family).unwrap().entries;
+                if missing_entry {
+                    entries.remove(&slot.order);
+                } else {
+                    entries.insert(slot.order, FamilySequencerEntry::Canceled);
+                }
+            }
+
+            let error = coord
+                .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
+                .await
+                .expect_err("the inconsistent sequencer entry should fail closed");
+            assert!(error.to_string().contains(expected_error));
+            assert_eq!(
+                coord
+                    .retained_sequencer_pending_roots
+                    .load(Ordering::Acquire),
+                0,
+                "a failed replacement must release the removed pending-root slot"
+            );
+
+            coord
+                .append_pending_root_entry(family, "recovery-root", 2)
+                .expect("pending-root capacity should recover after the failure");
+            coord
+                .replace_pending_root_entry("recovery-root", FamilySequencerEntry::Canceled)
+                .await
+                .unwrap();
+            assert_eq!(
+                coord
+                    .retained_sequencer_pending_roots
+                    .load(Ordering::Acquire),
+                0
+            );
+        }
     }
 
     #[tokio::test]
