@@ -694,7 +694,7 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
     let mut after_id = 0;
 
     loop {
-        let (summary, last_id) = {
+        let (_, last_id) = {
             let mut db_lock = db
                 .lock()
                 .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
@@ -705,10 +705,6 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
             break;
         };
         after_id = id;
-
-        if summary.scanned < METADATA_BACKFILL_BATCH_SIZE {
-            break;
-        }
     }
 
     Ok(())
