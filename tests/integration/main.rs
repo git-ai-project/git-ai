@@ -107,6 +107,7 @@ mod metrics_memory;
 mod multi_repo_workspace;
 mod non_utf8_files;
 mod notes_merge_mixed_fanout;
+mod notes_migrate_memory;
 mod opencode;
 mod pending_ai_edit_suppression;
 mod performance;
