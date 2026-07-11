@@ -12,7 +12,7 @@ use crate::daemon::control_api::{
     CasSyncPayload, ControlRequest, ControlResponse, TelemetryEnvelope,
 };
 use crate::daemon::{DaemonClientStream, open_local_socket_stream_with_timeout};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -112,10 +112,12 @@ impl DaemonTelemetryHandle {
             .flush()
             .map_err(|e| format!("flush: {}", e))?;
 
-        let mut line = String::new();
-        self.conn
-            .read_line(&mut line)
-            .map_err(|e| format!("read: {}", e))?;
+        let line = crate::daemon::read_daemon_client_line(
+            &mut self.conn,
+            &self.socket_path,
+            crate::daemon::control_request_response_timeout(request),
+        )
+        .map_err(|e| format!("read: {}", e))?;
         if line.trim().is_empty() {
             return Err("empty response from daemon".to_string());
         }

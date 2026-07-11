@@ -4,10 +4,19 @@ use crate::repos::test_repo::TestRepo;
 use crate::repos::test_repo::new_daemon_test_sync_session_id;
 use git_ai::daemon::open_local_socket_stream_with_timeout;
 #[cfg(not(windows))]
-use git_ai::daemon::{ControlRequest, send_control_request_with_timeout};
+use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request_with_timeout};
+#[cfg(not(windows))]
+use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
 use std::fs;
 use std::io::Write;
+#[cfg(not(windows))]
+use std::io::{BufRead, BufReader};
+#[cfg(not(windows))]
+use std::thread;
 use std::time::Duration;
+
+#[cfg(not(windows))]
+const MAX_CONTROL_RESPONSE_BYTES: usize = 36 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 fn daemon_hwm_kib(repo: &TestRepo) -> u64 {
@@ -263,6 +272,73 @@ fn control_connection_limit_backpressures_without_dropping_requests() {
     repo.git_ai(&["checkpoint", "mock_ai", "tracked.txt"])
         .unwrap();
     repo.stage_all_and_commit("AI edit after control pressure")
+        .unwrap();
+    file.assert_committed_lines(lines!["base".unattributed_human(), "ai line".ai()]);
+}
+
+#[test]
+#[cfg(not(windows))]
+fn oversized_control_response_is_rejected_and_attribution_recovers() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let file_path = repo.path().join("tracked.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("tracked.txt");
+    file.assert_committed_lines(lines!["base".unattributed_human()]);
+
+    let fake_home = repo.test_home_path().join("oversized-control-response");
+    let socket_path = DaemonConfig::from_home(&fake_home).control_socket_path;
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let socket_name = socket_path
+        .as_path()
+        .to_fs_name::<GenericFilePath>()
+        .expect("fake control socket path should be valid");
+    let listener = ListenerOptions::new()
+        .name(socket_name)
+        .create_sync()
+        .expect("fake control socket should bind");
+
+    let server = thread::spawn(move || {
+        let stream = listener
+            .incoming()
+            .next()
+            .expect("fake control server should receive a connection")
+            .expect("fake control connection should succeed");
+        let mut stream = BufReader::new(stream);
+        let mut request = String::new();
+        stream
+            .read_line(&mut request)
+            .expect("fake control server should read a request");
+
+        let chunk = [b'x'; 64 * 1024];
+        let mut remaining = MAX_CONTROL_RESPONSE_BYTES + 1;
+        while remaining > 0 {
+            let write_len = remaining.min(chunk.len());
+            if stream.get_mut().write_all(&chunk[..write_len]).is_err() {
+                return;
+            }
+            remaining -= write_len;
+        }
+        let _ = stream.get_mut().write_all(b"\n");
+        let _ = stream.get_mut().flush();
+    });
+
+    let error = send_control_request_with_timeout(
+        &socket_path,
+        &ControlRequest::Ping,
+        Duration::from_secs(10),
+    )
+    .expect_err("oversized control response must be rejected before JSON parsing");
+    assert!(
+        error.to_string().contains("exceeds 37748736 bytes"),
+        "unexpected oversized response error: {error}"
+    );
+    server.join().unwrap();
+
+    fs::write(&file_path, "base\nai line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "tracked.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("AI edit after oversized control response")
         .unwrap();
     file.assert_committed_lines(lines!["base".unattributed_human(), "ai line".ai()]);
 }
