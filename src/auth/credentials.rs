@@ -1,6 +1,8 @@
 #[cfg(all(not(test), feature = "keyring"))]
 use crate::auth::credential_backend::KeyringBackend;
-use crate::auth::credential_backend::{CredentialBackend, FileBackend};
+use crate::auth::credential_backend::{
+    CredentialBackend, FileBackend, MAX_STORED_CREDENTIAL_BYTES,
+};
 use crate::auth::types::StoredCredentials;
 #[cfg(not(test))]
 use crate::config::Config;
@@ -105,6 +107,13 @@ impl CredentialStore {
     pub fn store(&self, creds: &StoredCredentials) -> Result<(), String> {
         let json = serde_json::to_string(creds)
             .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
+        if json.len() > MAX_STORED_CREDENTIAL_BYTES {
+            return Err(format!(
+                "Serialized credentials exceeded the {} byte limit ({})",
+                MAX_STORED_CREDENTIAL_BYTES,
+                json.len()
+            ));
+        }
 
         self.backend.store(&json)
     }
@@ -115,6 +124,13 @@ impl CredentialStore {
 
         match json {
             Some(json) => {
+                if json.len() > MAX_STORED_CREDENTIAL_BYTES {
+                    return Err(format!(
+                        "Stored credentials exceeded the {} byte limit ({})",
+                        MAX_STORED_CREDENTIAL_BYTES,
+                        json.len()
+                    ));
+                }
                 let creds: StoredCredentials = serde_json::from_str(&json)
                     .map_err(|e| format!("Failed to parse credentials: {}", e))?;
                 Ok(Some(creds))
