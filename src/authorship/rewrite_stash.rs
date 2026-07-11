@@ -15,6 +15,8 @@ use crate::git::repository::{
     exec_git_allow_nonzero_with_env,
 };
 
+const MAX_STASH_METADATA_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StashMetadata {
     pub base_commit: String,
@@ -148,6 +150,13 @@ pub fn handle_stash_create(
 
     let metadata_path = stash_metadata_path(repo, stash_sha);
     let json = serde_json::to_string_pretty(&metadata)?;
+    if json.len() as u64 > MAX_STASH_METADATA_BYTES {
+        return Err(GitAiError::Generic(format!(
+            "stash metadata exceeded the {} byte limit ({})",
+            MAX_STASH_METADATA_BYTES,
+            json.len()
+        )));
+    }
     fs::write(&metadata_path, json)?;
 
     // Save compact stashed file attributions before cleaning them from the working log.
@@ -172,7 +181,11 @@ pub fn handle_stash_pop_or_apply_with_head(
         return Ok(());
     }
 
-    let content = fs::read_to_string(&metadata_path)?;
+    let content = crate::utils::read_text_file_with_limit(
+        &metadata_path,
+        MAX_STASH_METADATA_BYTES,
+        "stash metadata",
+    )?;
     let metadata: StashMetadata = serde_json::from_str(&content)?;
 
     let Some(current_head) = target_head.filter(|h| !h.is_empty()) else {

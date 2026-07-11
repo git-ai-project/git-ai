@@ -1,5 +1,13 @@
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const MAX_GIT_CONTROL_FILE_BYTES: u64 = 64 * 1_024;
+
+pub(crate) fn read_git_control_file(path: &Path) -> Option<String> {
+    crate::utils::read_text_file_with_limit(path, MAX_GIT_CONTROL_FILE_BYTES, "Git control file")
+        .ok()
+}
 
 pub fn is_valid_git_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
@@ -30,7 +38,7 @@ pub fn git_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
     if dot_git.is_dir() {
         return Some(dot_git);
     }
-    let contents = fs::read_to_string(&dot_git).ok()?;
+    let contents = read_git_control_file(&dot_git)?;
     let pointer = contents.strip_prefix("gitdir:")?.trim();
     let candidate = PathBuf::from(pointer);
     if candidate.is_absolute() {
@@ -62,7 +70,7 @@ pub fn common_dir_for_repo_path(path: &Path) -> Option<PathBuf> {
     }
 
     if path.file_name().and_then(|name| name.to_str()) == Some(".git") && path.is_file() {
-        let contents = fs::read_to_string(path).ok()?;
+        let contents = read_git_control_file(path)?;
         let pointer = contents.strip_prefix("gitdir:")?.trim();
         let candidate = PathBuf::from(pointer);
         let git_dir = if candidate.is_absolute() {
@@ -142,5 +150,15 @@ mod tests {
         );
         assert_eq!(state.branch.as_deref(), Some("main"));
         assert!(!state.detached);
+    }
+
+    #[test]
+    fn git_dir_for_worktree_rejects_oversized_pointer_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut pointer = String::from("gitdir: ");
+        pointer.push_str(&"x".repeat(128 * 1_024));
+        fs::write(temp.path().join(".git"), pointer).unwrap();
+
+        assert_eq!(git_dir_for_worktree(temp.path()), None);
     }
 }
