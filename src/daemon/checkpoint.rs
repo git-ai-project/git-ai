@@ -657,14 +657,6 @@ fn get_checkpoint_entry_for_file(
             return Ok(None);
         }
 
-        // Build a set of lines covered by INITIAL attributions
-        let mut initial_covered_lines: HashSet<u32> = HashSet::new();
-        for attr in &initial_attrs_for_file {
-            for line in attr.start_line..=attr.end_line {
-                initial_covered_lines.insert(line);
-            }
-        }
-
         // Start with INITIAL attributions (they win), augmented by parent note
         let mut prev_line_attributions = initial_attrs_for_file.clone();
 
@@ -699,7 +691,10 @@ fn get_checkpoint_entry_for_file(
         if kind.is_ai() {
             let total_lines = current_content.lines().count() as u32;
             for line_num in 1..=total_lines {
-                if !initial_covered_lines.contains(&line_num) && !blamed_lines.contains(&line_num) {
+                let covered_by_initial = initial_attrs_for_file.iter().any(|attribution| {
+                    attribution.start_line <= line_num && line_num <= attribution.end_line
+                });
+                if !covered_by_initial && !blamed_lines.contains(&line_num) {
                     prev_line_attributions.push(LineAttribution {
                         start_line: line_num,
                         end_line: line_num,

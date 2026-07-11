@@ -70,7 +70,9 @@ impl LineAttribution {
         if self.start_line > self.end_line {
             0
         } else {
-            self.end_line - self.start_line + 1
+            self.end_line
+                .saturating_sub(self.start_line)
+                .saturating_add(1)
         }
     }
 
