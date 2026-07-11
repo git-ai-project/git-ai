@@ -76,7 +76,7 @@ impl GeminiInstaller {
         }
 
         let existing_content = if settings_path.exists() {
-            fs::read_to_string(settings_path)?
+            crate::mdm::utils::read_installer_config(settings_path)?
         } else {
             String::new()
         };
@@ -255,7 +255,7 @@ impl GeminiInstaller {
             return Ok(None);
         }
 
-        let existing_content = fs::read_to_string(settings_path)?;
+        let existing_content = crate::mdm::utils::read_installer_config(settings_path)?;
         let existing: Value = serde_json::from_str(&existing_content)?;
 
         let mut merged = existing.clone();
@@ -344,7 +344,7 @@ impl HookInstaller for GeminiInstaller {
             });
         }
 
-        let content = fs::read_to_string(&settings_path)?;
+        let content = crate::mdm::utils::read_installer_config(&settings_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
         let (hooks_installed, hooks_up_to_date) = Self::hook_status(&existing);
 

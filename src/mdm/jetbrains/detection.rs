@@ -160,7 +160,7 @@ fn get_macos_build_metadata(app_path: &Path) -> (Option<String>, Option<u32>, Op
     // Try product-info.json first (newer JetBrains IDEs)
     let product_info_path = app_path.join("Contents/Resources/product-info.json");
     if product_info_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&product_info_path)
+        && let Ok(content) = crate::mdm::utils::read_installer_config(&product_info_path)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
         && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str())
     {
@@ -315,7 +315,7 @@ fn get_windows_build_metadata(
 ) -> (Option<String>, Option<u32>, Option<String>) {
     let product_info_path = install_path.join("product-info.json");
     if product_info_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&product_info_path)
+        && let Ok(content) = crate::mdm::utils::read_installer_config(&product_info_path)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
         && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str())
     {
@@ -451,7 +451,7 @@ fn detect_linux_ide(ide: &'static JetBrainsIde, install_path: &Path) -> Option<D
 fn get_linux_build_metadata(install_path: &Path) -> (Option<String>, Option<u32>, Option<String>) {
     let product_info_path = install_path.join("product-info.json");
     if product_info_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&product_info_path)
+        && let Ok(content) = crate::mdm::utils::read_installer_config(&product_info_path)
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
         && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str())
     {

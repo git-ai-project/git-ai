@@ -691,13 +691,13 @@ impl HookInstaller for CodexInstaller {
 
         let config_path = Self::config_path();
         let config = if config_path.exists() {
-            Self::parse_config_toml(&fs::read_to_string(&config_path)?)?
+            Self::parse_config_toml(&crate::mdm::utils::read_installer_config(&config_path)?)?
         } else {
             TomlValue::Table(Map::new())
         };
         let hooks_json_path = Self::hooks_json_path();
         let hooks_json = if hooks_json_path.exists() {
-            Self::parse_hooks_json(&fs::read_to_string(&hooks_json_path)?)?
+            Self::parse_hooks_json(&crate::mdm::utils::read_installer_config(&hooks_json_path)?)?
         } else {
             json!({})
         };
@@ -749,7 +749,7 @@ impl HookInstaller for CodexInstaller {
         }
 
         let existing_config_content = if config_path.exists() {
-            fs::read_to_string(&config_path)?
+            crate::mdm::utils::read_installer_config(&config_path)?
         } else {
             String::new()
         };
@@ -757,7 +757,7 @@ impl HookInstaller for CodexInstaller {
         let existing_config = Self::parse_config_toml(&existing_config_content)?;
 
         let existing_hooks_content = if hooks_json_path.exists() {
-            fs::read_to_string(&hooks_json_path)?
+            crate::mdm::utils::read_installer_config(&hooks_json_path)?
         } else {
             String::new()
         };
@@ -880,7 +880,7 @@ impl HookInstaller for CodexInstaller {
         }
 
         let existing_config_content = if config_path.exists() {
-            fs::read_to_string(&config_path)?
+            crate::mdm::utils::read_installer_config(&config_path)?
         } else {
             String::new()
         };
@@ -895,7 +895,7 @@ impl HookInstaller for CodexInstaller {
 
         // Check if legacy hooks.json needs cleanup
         let (hooks_json_changed, existing_hooks_content) = if hooks_json_path.exists() {
-            let content = fs::read_to_string(&hooks_json_path)?;
+            let content = crate::mdm::utils::read_installer_config(&hooks_json_path)?;
             let existing_hooks = Self::parse_hooks_json(&content)?;
             let (_cleaned_hooks, changed) = Self::remove_codex_hooks_from_json(&existing_hooks)?;
             (changed, content)

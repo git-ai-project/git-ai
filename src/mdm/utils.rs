@@ -12,6 +12,15 @@ pub const MIN_CURSOR_VERSION: (u32, u32) = (1, 7);
 pub const MIN_CODE_VERSION: (u32, u32) = (1, 99);
 pub const MIN_CLAUDE_VERSION: (u32, u32) = (2, 0);
 pub const MIN_CODEX_VERSION: (u32, u32) = (0, 124);
+pub const MAX_INSTALLER_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+
+pub fn read_installer_config(path: &Path) -> Result<String, GitAiError> {
+    Ok(crate::utils::read_text_file_with_limit(
+        path,
+        MAX_INSTALLER_CONFIG_BYTES,
+        "agent configuration",
+    )?)
+}
 
 /// Get version from a binary's --version output
 pub fn get_binary_version(binary: &str) -> Result<String, GitAiError> {
@@ -732,7 +741,7 @@ pub fn update_vscode_chat_hook_settings(
     dry_run: bool,
 ) -> Result<Option<String>, GitAiError> {
     let original = if settings_path.exists() {
-        fs::read_to_string(settings_path)?
+        read_installer_config(settings_path)?
     } else {
         String::new()
     };
@@ -801,6 +810,18 @@ mod tests {
     use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn oversized_vscode_settings_are_rejected_before_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(2 * 1024 * 1024 + 1).unwrap();
+
+        let error = update_vscode_chat_hook_settings(&path, true)
+            .expect_err("oversized settings must be rejected");
+        assert!(error.to_string().contains("byte limit"));
+    }
 
     #[test]
     fn test_parse_version() {

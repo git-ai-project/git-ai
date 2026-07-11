@@ -64,7 +64,8 @@ impl HookInstaller for AmpInstaller {
             });
         }
 
-        let current_content = fs::read_to_string(&plugin_path).unwrap_or_default();
+        let current_content =
+            crate::mdm::utils::read_installer_config(&plugin_path).unwrap_or_default();
         let expected_content = Self::generate_plugin_content(&params.binary_path);
         let is_up_to_date = current_content.trim() == expected_content.trim();
 
@@ -89,7 +90,7 @@ impl HookInstaller for AmpInstaller {
         }
 
         let existing_content = if plugin_path.exists() {
-            fs::read_to_string(&plugin_path)?
+            crate::mdm::utils::read_installer_config(&plugin_path)?
         } else {
             String::new()
         };
@@ -122,7 +123,7 @@ impl HookInstaller for AmpInstaller {
             return Ok(None);
         }
 
-        let existing_content = fs::read_to_string(&plugin_path)?;
+        let existing_content = crate::mdm::utils::read_installer_config(&plugin_path)?;
         let diff_output = generate_diff(&plugin_path, &existing_content, "");
 
         if !dry_run {

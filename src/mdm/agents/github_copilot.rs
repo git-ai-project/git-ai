@@ -104,7 +104,7 @@ impl HookInstaller for GitHubCopilotInstaller {
             });
         }
 
-        let content = fs::read_to_string(&hooks_path)?;
+        let content = crate::mdm::utils::read_installer_config(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
         let pre_desired = format!(
@@ -193,7 +193,7 @@ impl HookInstaller for GitHubCopilotInstaller {
         }
 
         let existing_content = if hooks_path.exists() {
-            fs::read_to_string(&hooks_path)?
+            crate::mdm::utils::read_installer_config(&hooks_path)?
         } else {
             String::new()
         };
@@ -353,7 +353,7 @@ impl HookInstaller for GitHubCopilotInstaller {
             return Ok(None);
         }
 
-        let existing_content = fs::read_to_string(&hooks_path)?;
+        let existing_content = crate::mdm::utils::read_installer_config(&hooks_path)?;
         let existing: Value = serde_json::from_str(&existing_content)?;
 
         let mut merged = existing.clone();

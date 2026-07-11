@@ -9,7 +9,7 @@ use crate::mdm::utils::{
 
 use serde_json::{Value, json};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const WINDSURF_CHECKPOINT_CMD: &str = "checkpoint windsurf --hook-input stdin";
 
@@ -39,7 +39,7 @@ impl WindsurfInstaller {
 
     /// Install hooks into a single hooks.json file, returning a diff if changes were made.
     fn install_hooks_at(
-        hooks_path: &PathBuf,
+        hooks_path: &Path,
         desired_cmd: &str,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
@@ -48,7 +48,7 @@ impl WindsurfInstaller {
         }
 
         let existing_content = if hooks_path.exists() {
-            fs::read_to_string(hooks_path)?
+            crate::mdm::utils::read_installer_config(hooks_path)?
         } else {
             String::new()
         };
@@ -142,15 +142,12 @@ impl WindsurfInstaller {
     }
 
     /// Remove hooks from a single hooks.json file, returning a diff if changes were made.
-    fn uninstall_hooks_at(
-        hooks_path: &PathBuf,
-        dry_run: bool,
-    ) -> Result<Option<String>, GitAiError> {
+    fn uninstall_hooks_at(hooks_path: &Path, dry_run: bool) -> Result<Option<String>, GitAiError> {
         if !hooks_path.exists() {
             return Ok(None);
         }
 
-        let existing_content = fs::read_to_string(hooks_path)?;
+        let existing_content = crate::mdm::utils::read_installer_config(hooks_path)?;
         let existing: Value = serde_json::from_str(&existing_content)?;
 
         let mut merged = existing.clone();
@@ -231,7 +228,7 @@ impl HookInstaller for WindsurfInstaller {
                 continue;
             }
 
-            let content = fs::read_to_string(&hooks_path)?;
+            let content = crate::mdm::utils::read_installer_config(&hooks_path)?;
             let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
             let has_hooks = HOOK_EVENTS.iter().all(|event| {
