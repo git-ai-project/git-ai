@@ -7,6 +7,18 @@ use std::collections::{HashMap, HashSet};
 
 const DEVIN_ID_PATH: &str = "/opt/.devin/devin_id";
 const DEVIN_DIR_PATH: &str = "/opt/.devin";
+const MAX_BACKGROUND_AGENT_ID_BYTES: usize = 4 * 1024;
+
+fn read_background_agent_id(path: &std::path::Path) -> Option<String> {
+    crate::utils::read_text_file_with_limit(
+        path,
+        MAX_BACKGROUND_AGENT_ID_BYTES as u64,
+        "background agent ID",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackgroundAgent {
@@ -53,7 +65,7 @@ pub fn detect() -> BackgroundAgent {
     {
         let id = std::env::var("CODEX_THREAD_ID")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|value| !value.is_empty() && value.len() <= MAX_BACKGROUND_AGENT_ID_BYTES)
             .unwrap_or_else(|| placeholder_id("CODEX_CLOUD"));
         return BackgroundAgent::NoHooks {
             tool: "codex-cloud".to_string(),
@@ -79,10 +91,7 @@ pub fn detect() -> BackgroundAgent {
         && std::env::var_os("GITAI_TEST_DB_PATH").is_none()
         && std::path::Path::new(DEVIN_DIR_PATH).is_dir()
     {
-        let id = std::fs::read_to_string(DEVIN_ID_PATH)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        let id = read_background_agent_id(std::path::Path::new(DEVIN_ID_PATH))
             .unwrap_or_else(|| placeholder_id("DEVIN"));
         return BackgroundAgent::NoHooks {
             tool: "devin".to_string(),
@@ -180,4 +189,18 @@ fn placeholder_id(name: &str) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{name}_SESSION{ts}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_background_agent_id;
+
+    #[test]
+    fn oversized_background_agent_id_is_rejected_before_loading() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("agent-id");
+        std::fs::write(&path, vec![b'x'; 8 * 1024]).unwrap();
+
+        assert_eq!(read_background_agent_id(&path), None);
+    }
 }

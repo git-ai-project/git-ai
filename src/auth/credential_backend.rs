@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+pub(crate) const MAX_STORED_CREDENTIAL_BYTES: usize = 64 * 1024;
+
 /// Trait for credential storage backends
 pub trait CredentialBackend: Send + Sync {
     /// Store a value
@@ -132,6 +134,13 @@ impl FileBackend {
 
 impl CredentialBackend for FileBackend {
     fn store(&self, value: &str) -> Result<(), String> {
+        if value.len() > MAX_STORED_CREDENTIAL_BYTES {
+            return Err(format!(
+                "Credential value exceeded the {} byte limit ({})",
+                MAX_STORED_CREDENTIAL_BYTES,
+                value.len()
+            ));
+        }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
@@ -168,7 +177,11 @@ impl CredentialBackend for FileBackend {
     }
 
     fn load(&self) -> Result<Option<String>, String> {
-        match fs::read_to_string(&self.path) {
+        match crate::utils::read_text_file_with_limit(
+            &self.path,
+            MAX_STORED_CREDENTIAL_BYTES as u64,
+            "credential file",
+        ) {
             Ok(content) => Ok(Some(content)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("Failed to read credentials file: {}", e)),
@@ -389,5 +402,36 @@ mod tests {
 
         // Should succeed even if file doesn't exist
         assert!(backend.clear().is_ok());
+    }
+
+    #[test]
+    fn test_file_backend_rejects_oversized_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("credentials");
+        fs::write(&path, vec![b'x'; 128 * 1024]).unwrap();
+        let backend = FileBackend::new(path);
+
+        let result = backend.load();
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("byte limit")),
+            "oversized credential file must fail at the byte limit"
+        );
+    }
+
+    #[test]
+    fn test_file_backend_rejects_oversized_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("credentials");
+        let backend = FileBackend::new(path);
+
+        let result = backend.store(&"x".repeat(128 * 1024));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("byte limit")),
+            "oversized credential value must fail at the byte limit"
+        );
     }
 }
