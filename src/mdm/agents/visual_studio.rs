@@ -320,7 +320,8 @@ fn extension_dir_contains_extension(dir: &std::path::Path, remaining_depth: usiz
 }
 
 fn manifest_contains_extension(manifest: &std::path::Path) -> bool {
-    std::fs::read_to_string(manifest).is_ok_and(|content| manifest_declares_vsix_identity(&content))
+    crate::mdm::utils::read_installer_config(manifest)
+        .is_ok_and(|content| manifest_declares_vsix_identity(&content))
 }
 
 fn manifest_declares_vsix_identity(content: &str) -> bool {

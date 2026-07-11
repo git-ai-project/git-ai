@@ -57,7 +57,8 @@ impl HookInstaller for PiInstaller {
             });
         }
 
-        let current_content = fs::read_to_string(&extension_path).unwrap_or_default();
+        let current_content =
+            crate::mdm::utils::read_installer_config(&extension_path).unwrap_or_default();
         let expected_content = Self::generate_extension_content(&params.binary_path);
 
         Ok(HookCheckResult {
@@ -81,7 +82,7 @@ impl HookInstaller for PiInstaller {
         }
 
         let existing_content = if extension_path.exists() {
-            fs::read_to_string(&extension_path)?
+            crate::mdm::utils::read_installer_config(&extension_path)?
         } else {
             String::new()
         };
@@ -114,7 +115,7 @@ impl HookInstaller for PiInstaller {
             return Ok(None);
         }
 
-        let existing_content = fs::read_to_string(&extension_path)?;
+        let existing_content = crate::mdm::utils::read_installer_config(&extension_path)?;
         let diff_output = generate_diff(&extension_path, &existing_content, "");
 
         if !dry_run {
