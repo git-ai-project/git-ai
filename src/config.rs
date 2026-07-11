@@ -334,6 +334,8 @@ pub struct ConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_flags: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_hooks_format: Option<String>,
@@ -1485,20 +1487,24 @@ fn bound_file_config_collections(config: &mut FileConfig) {
         bound_string_map(attributes);
     }
     if let Some(hooks) = &mut config.git_ai_hooks {
-        hooks.retain(|name, commands| {
-            if name.len() > MAX_CONFIG_MAP_VALUE_BYTES {
-                return false;
-            }
-            commands.retain(|command| command.len() <= MAX_CONFIG_MAP_VALUE_BYTES);
-            commands.truncate(MAX_CONFIG_COLLECTION_ITEMS);
-            !commands.is_empty()
-        });
-        if hooks.len() > MAX_CONFIG_COLLECTION_ITEMS {
-            *hooks = std::mem::take(hooks)
-                .into_iter()
-                .take(MAX_CONFIG_COLLECTION_ITEMS)
-                .collect();
+        bound_git_ai_hooks(hooks);
+    }
+}
+
+fn bound_git_ai_hooks(hooks: &mut HashMap<String, Vec<String>>) {
+    hooks.retain(|name, commands| {
+        if name.len() > MAX_CONFIG_MAP_VALUE_BYTES {
+            return false;
         }
+        commands.retain(|command| command.len() <= MAX_CONFIG_MAP_VALUE_BYTES);
+        commands.truncate(MAX_CONFIG_COLLECTION_ITEMS);
+        !commands.is_empty()
+    });
+    if hooks.len() > MAX_CONFIG_COLLECTION_ITEMS {
+        *hooks = std::mem::take(hooks)
+            .into_iter()
+            .take(MAX_CONFIG_COLLECTION_ITEMS)
+            .collect();
     }
 }
 
@@ -1737,6 +1743,11 @@ fn apply_test_config_patch(config: &mut Config) {
             let mut custom_attributes = custom_attributes;
             bound_string_map(&mut custom_attributes);
             config.custom_attributes = custom_attributes;
+        }
+        if let Some(git_ai_hooks) = patch.git_ai_hooks {
+            let mut git_ai_hooks = git_ai_hooks;
+            bound_git_ai_hooks(&mut git_ai_hooks);
+            config.git_ai_hooks = git_ai_hooks;
         }
         if let Some(author) = patch.author {
             config.author = author.normalized();

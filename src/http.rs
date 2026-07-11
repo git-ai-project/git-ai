@@ -84,7 +84,7 @@ impl Write for BoundedJsonWriter {
         let remaining = self.limit.saturating_sub(self.bytes.len());
         if buf.len() > remaining {
             return Err(std::io::Error::other(format!(
-                "HTTP JSON request body exceeded the {} byte limit",
+                "JSON serialization exceeded the {} byte limit",
                 self.limit
             )));
         }
@@ -103,7 +103,7 @@ pub(crate) fn serialize_json_body<T: serde::Serialize + ?Sized>(
     serialize_json_with_limit(body, MAX_HTTP_REQUEST_BODY_BYTES)
 }
 
-fn serialize_json_with_limit<T: serde::Serialize + ?Sized>(
+pub(crate) fn serialize_json_with_limit<T: serde::Serialize + ?Sized>(
     body: &T,
     limit: usize,
 ) -> Result<String, serde_json::Error> {
