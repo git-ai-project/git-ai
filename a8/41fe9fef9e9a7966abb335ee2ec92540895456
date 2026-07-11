@@ -33,6 +33,8 @@ src/observability/mod.rs
   s_59382cac373d67::t_92e20c77d6f1a4 109,112-154
   s_59382cac373d67::t_d54427389f2bf7 4-6,26-35,40,68
   816419a490cc9680 155
+tests/integration/repos/test_repo.rs
+  s_59382cac373d67::t_cfef508de7297b 1750-1753
 ---
 {
   "schema_version": "authorship/3.0.0",
