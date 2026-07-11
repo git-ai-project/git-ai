@@ -22,6 +22,7 @@ mod bash_tool_conformance;
 mod bash_tool_provenance;
 mod bash_tool_timeouts;
 mod blame_comprehensive;
+mod blame_contents_memory;
 mod blame_flags;
 mod blame_subdirectory;
 mod checkout_switch;
