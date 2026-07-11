@@ -16,6 +16,12 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::{ffi::OsStr, path::Path};
 
+// CPU-count defaults and the 512-thread blocking default reserve large per-thread
+// allocator arenas in this long-lived process. Daemon work already has narrower
+// queues and semaphores, so fixed pools preserve concurrency without arena growth.
+const DAEMON_RUNTIME_WORKER_THREADS: usize = 4;
+const DAEMON_RUNTIME_MAX_BLOCKING_THREADS: usize = 16;
+
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
         print_help();
@@ -186,10 +192,8 @@ fn handle_run(args: &[String]) -> Result<(), String> {
             e
         )
     })?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let runtime = build_daemon_runtime()?;
+    crate::tokio_runtime::initialize();
     let exit_action = runtime
         .block_on(async move { crate::daemon::run_daemon(config).await })
         .map_err(|e| e.to_string())?;
@@ -219,6 +223,15 @@ fn handle_run(args: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn build_daemon_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(DAEMON_RUNTIME_WORKER_THREADS)
+        .max_blocking_threads(DAEMON_RUNTIME_MAX_BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn ensure_daemon_running(
@@ -785,4 +798,46 @@ fn print_help() {
     eprintln!("  git-ai bg shutdown [--hard]");
     eprintln!("  git-ai bg restart [--hard]");
     eprintln!("  git-ai bg tail [-n <lines>] [--full] [-f | --follow]");
+}
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_runtime_worker_pool_is_bounded() {
+        let runtime = build_daemon_runtime().unwrap();
+
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            DAEMON_RUNTIME_WORKER_THREADS
+        );
+    }
+
+    #[test]
+    fn daemon_runtime_blocking_pool_is_bounded() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runtime = build_daemon_runtime().unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        runtime.block_on(async {
+            let mut tasks = Vec::new();
+            for _ in 0..=DAEMON_RUNTIME_MAX_BLOCKING_THREADS {
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                tasks.push(tokio::task::spawn_blocking(move || {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(current, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(100));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }));
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+        });
+
+        assert!(peak.load(Ordering::SeqCst) <= DAEMON_RUNTIME_MAX_BLOCKING_THREADS);
+    }
 }

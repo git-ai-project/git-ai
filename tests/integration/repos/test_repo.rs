@@ -52,14 +52,8 @@ const DAEMON_TEST_READY_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(not(windows))]
 const DAEMON_TEST_READY_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 const DAEMON_TEST_READY_CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
-#[cfg(windows)]
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
-#[cfg(not(windows))]
-const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
-#[cfg(windows)]
 const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-#[cfg(not(windows))]
-const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(windows)]
 const TEST_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1751,6 +1745,10 @@ impl TestRepo {
             .as_ref()
             .map(|daemon| daemon.daemon_home.clone())
             .unwrap_or_else(|| self.test_home.clone())
+    }
+
+    pub(crate) fn daemon_pid(&self) -> Option<u32> {
+        self.daemon_process.as_ref().map(|daemon| daemon.pid)
     }
 
     pub(crate) fn daemon_trace_socket_path(&self) -> PathBuf {

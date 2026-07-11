@@ -2483,6 +2483,7 @@ enum RecentReplayPrerequisite {
 struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
     root_families: HashMap<String, String>,
+    root_saw_def_repo: HashSet<String>,
     root_argv: HashMap<String, Vec<String>>,
     root_started_at_ns: HashMap<String, u128>,
     root_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
@@ -3398,6 +3399,7 @@ impl ActorDaemonCoordinator {
     fn clear_trace_ingress_root_locked(ingress: &mut TraceIngressState, root_sid: &str) {
         ingress.root_worktrees.remove(root_sid);
         ingress.root_families.remove(root_sid);
+        ingress.root_saw_def_repo.remove(root_sid);
         ingress.root_argv.remove(root_sid);
         ingress.root_started_at_ns.remove(root_sid);
         ingress.root_reflog_start_offsets.remove(root_sid);
@@ -3890,7 +3892,15 @@ impl ActorDaemonCoordinator {
                 .or_insert(started_at_ns);
         }
 
-        if let Some(worktree) = worktree_hint.clone() {
+        let root_def_repo = event == "def_repo" && sid == root;
+        let may_update_root_location = if root_def_repo {
+            ingress.root_saw_def_repo.insert(root.clone())
+        } else if event == "start" && sid == root {
+            true
+        } else {
+            !ingress.root_worktrees.contains_key(&root)
+        };
+        if may_update_root_location && let Some(worktree) = worktree_hint.clone() {
             if let Some(common_dir) = common_dir_for_worktree(&worktree) {
                 let family = common_dir.canonicalize().unwrap_or(common_dir);
                 ingress
@@ -3954,6 +3964,7 @@ impl ActorDaemonCoordinator {
         if terminal {
             ingress.root_worktrees.remove(&root);
             ingress.root_families.remove(&root);
+            ingress.root_saw_def_repo.remove(&root);
             ingress.root_argv.remove(&root);
             ingress.root_started_at_ns.remove(&root);
             ingress.root_reflog_start_offsets.remove(&root);
@@ -8421,6 +8432,55 @@ mod tests {
             "enqueue must allocate an ingest sequence number"
         );
         coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn later_def_repo_does_not_overwrite_root_ingress_worktree() {
+        let coord = ActorDaemonCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        let nested = parent.join("nested");
+        std::fs::create_dir_all(parent.join(".git")).unwrap();
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+
+        let root_sid = "commit-with-nested-repo";
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": root_sid,
+            "argv": ["git", "commit", "-m", "parent commit"],
+            "worktree": parent,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+
+        let mut root_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": root_sid,
+            "worktree": parent,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut root_def_repo));
+
+        let mut second_root_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": root_sid,
+            "worktree": nested,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut second_root_def_repo));
+
+        let mut nested_child_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": format!("{root_sid}/child-status"),
+            "worktree": nested,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut nested_child_def_repo));
+
+        let mut atexit = make_atexit_payload(root_sid);
+        assert!(coord.prepare_trace_payload_for_ingest(&mut atexit));
+        assert_eq!(
+            atexit
+                .get(TRACE_ROOT_WORKTREE_FIELD)
+                .and_then(Value::as_str),
+            Some(parent.to_string_lossy().as_ref())
+        );
     }
 
     #[tokio::test]

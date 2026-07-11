@@ -910,12 +910,14 @@ fn test_nested_subrepo_mixed_edits_mock_ai() {
     let mut parent_readme = parent.filename("README.md");
     parent_readme.set_contents(crate::lines!["# Parent"]);
     parent.stage_all_and_commit("initial parent").unwrap();
+    parent_readme.assert_committed_lines(crate::lines!["# Parent".human()]);
 
     let subrepo_path = parent_path.join("subrepo");
     let subrepo = TestRepo::new_at_path(&subrepo_path);
     let mut subrepo_readme = subrepo.filename("README.md");
     subrepo_readme.set_contents(crate::lines!["# Subrepo"]);
     subrepo.stage_all_and_commit("initial subrepo").unwrap();
+    subrepo_readme.assert_committed_lines(crate::lines!["# Subrepo".human()]);
 
     // Write AI content in both repos
     fs::write(parent_path.join("parent_feature.txt"), "Parent AI\n").unwrap();
@@ -948,6 +950,9 @@ fn test_nested_subrepo_mixed_edits_mock_ai() {
         !parent_commit.authorship_log.attestations.is_empty(),
         "Scenario 7 (mixed): Parent repo should have AI attestations for its own files."
     );
+    parent
+        .filename("parent_feature.txt")
+        .assert_committed_lines(crate::lines!["Parent AI".ai()]);
 
     // Verify subrepo has attestation
     let subrepo_commit = subrepo.stage_all_and_commit("AI edits in subrepo").unwrap();
@@ -955,6 +960,9 @@ fn test_nested_subrepo_mixed_edits_mock_ai() {
         !subrepo_commit.authorship_log.attestations.is_empty(),
         "Scenario 7 (mixed): Nested subrepo should have AI attestations for its own files."
     );
+    subrepo
+        .filename("subrepo_feature.txt")
+        .assert_committed_lines(crate::lines!["Subrepo AI".ai()]);
 
     let _ = fs::remove_dir_all(&workspace);
 }

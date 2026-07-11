@@ -1,9 +1,24 @@
+use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::git::repository::find_repository_in_path;
 use rand::{RngExt, distr::Alphanumeric};
 use serde_json::json;
 use std::{fs, time::Instant};
+
+#[cfg(target_os = "linux")]
+fn daemon_vm_size_kib(repo: &TestRepo) -> u64 {
+    let pid = repo.daemon_pid().expect("test repo should own a daemon");
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmSize:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+        })
+        .expect("daemon status should include VmSize")
+}
 
 #[test]
 fn test_checkpoint_size_logging_large_ai_rewrites() {
@@ -268,6 +283,52 @@ fn test_checkpoint_total_size_budget_applies_to_bash_checkpoints() {
         "expected aggregate budget to apply to bash checkpoint payload"
     );
     assert_eq!(latest_ai.entries[0].file, "a_kept.txt");
+}
+
+#[test]
+fn test_repeated_checkpoints_plateau_after_runtime_warmup() {
+    let repo = TestRepo::new_dedicated_daemon();
+
+    let file_path = repo.path().join("runtime.txt");
+    let mut content = "base\n".to_string();
+    fs::write(&file_path, &content).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("runtime.txt");
+    let mut expected = vec!["base".unattributed_human()];
+    file.assert_committed_lines(expected.clone());
+
+    let mut checkpoint_and_commit = |iteration| {
+        repo.git_ai(&["checkpoint", "human", "runtime.txt"])
+            .unwrap();
+        content.push_str(&format!("AI line {iteration}\n"));
+        fs::write(&file_path, &content).unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", "runtime.txt"])
+            .unwrap();
+        repo.stage_all_and_commit(&format!("AI checkpoint {iteration}"))
+            .unwrap();
+        expected.push(format!("AI line {iteration}").ai());
+        file.assert_committed_lines(expected.clone());
+    };
+
+    for iteration in 1..=12 {
+        checkpoint_and_commit(iteration);
+    }
+    #[cfg(target_os = "linux")]
+    let warmed_vm_size_kib = daemon_vm_size_kib(&repo);
+
+    for iteration in 13..=32 {
+        checkpoint_and_commit(iteration);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let growth_kib = daemon_vm_size_kib(&repo).saturating_sub(warmed_vm_size_kib);
+        eprintln!("post-warmup checkpoint daemon VmSize growth: {growth_kib} KiB");
+        assert!(
+            growth_kib < 256 * 1024,
+            "post-warmup checkpoints grew daemon VmSize by {growth_kib} KiB"
+        );
+    }
 }
 
 crate::reuse_tests_in_worktree!(test_checkpoint_size_logging_large_ai_rewrites,);

@@ -348,7 +348,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
     fn handle_def_repo(
         &mut self,
         payload: &Value,
-        _sid: &str,
+        sid: &str,
         root_sid: &str,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
         let payload_worktree = payload_worktree(payload);
@@ -371,21 +371,17 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .and_then(|pending| argv_primary_command(&pending.raw_argv))
             .is_some_and(|command| matches!(command.as_str(), "clone" | "init"));
 
-        // For clone/init the root process's def_repo carries the newly created
-        // repo path.  Child processes (remote-https, index-pack, rev-list, …)
-        // inherit the parent CWD and their def_repo reports that CWD — not the
-        // clone destination.  Once we've captured the root def_repo (first
-        // arrival), skip subsequent child def_repo events entirely to prevent
-        // overwriting the correct worktree, family, and sid lookup maps.
-        if prefer_def_repo_target {
-            let already_saw_def_repo = self
-                .state
-                .pending
-                .get(root_sid)
-                .is_some_and(|pending| pending.saw_def_repo);
-            if already_saw_def_repo {
-                return Ok(None);
-            }
+        let already_saw_root_def_repo = self
+            .state
+            .pending
+            .get(root_sid)
+            .is_some_and(|pending| pending.saw_def_repo);
+
+        // Git can report nested repositories under both the root SID and child
+        // SIDs. The first root def_repo identifies the invoked command; later
+        // discoveries must not retarget its worktree or family.
+        if sid != root_sid || already_saw_root_def_repo {
+            return Ok(None);
         }
 
         // Trace2 `def_repo.repo` may point at a common-dir `.git` path for worktrees.
@@ -1950,6 +1946,79 @@ mod tests {
             cmd.worktree.as_ref(),
             Some(&clone_dest),
             "clone worktree should be the destination, not the parent CWD"
+        );
+    }
+
+    #[test]
+    fn commit_later_def_repo_does_not_overwrite_root_worktree() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let parent = temp.path().join("parent");
+        let nested = parent.join("nested");
+        fs::create_dir_all(parent.join(".git")).expect("create parent git dir");
+        fs::create_dir_all(nested.join(".git")).expect("create nested git dir");
+
+        let root_sid = "commit-with-nested-repo";
+        let child_sid = format!("{root_sid}/child-status");
+        let start = serde_json::json!({
+            "event": "start",
+            "sid": root_sid,
+            "ts": 1,
+            "argv": ["git", "commit", "-m", "parent commit"],
+            "worktree": parent,
+        });
+        let root_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": root_sid,
+            "ts": 2,
+            "worktree": parent,
+        });
+        let second_root_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": root_sid,
+            "ts": 3,
+            "worktree": nested,
+        });
+        let nested_child_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": child_sid,
+            "ts": 4,
+            "worktree": nested,
+        });
+        let exit = serde_json::json!({
+            "event": "exit",
+            "sid": root_sid,
+            "ts": 5,
+            "code": 0,
+        });
+        let atexit = atexit_payload(root_sid, 6);
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&root_def_repo).unwrap().is_none());
+        assert!(
+            normalizer
+                .ingest_payload(&second_root_def_repo)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            normalizer
+                .ingest_payload(&nested_child_def_repo)
+                .unwrap()
+                .is_none()
+        );
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let command = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+
+        assert_eq!(command.worktree.as_deref(), Some(parent.as_path()));
+        let expected_family = parent
+            .join(".git")
+            .canonicalize()
+            .unwrap_or_else(|_| parent.join(".git"));
+        assert_eq!(
+            command.family_key.as_ref().map(|family| family.0.as_str()),
+            Some(expected_family.to_string_lossy().as_ref())
         );
     }
 
