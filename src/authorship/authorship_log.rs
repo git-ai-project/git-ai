@@ -16,7 +16,143 @@ pub enum LineRange {
     Range(u32, u32), // start, end (inclusive)
 }
 
+pub const MAX_MATERIALIZED_LINE_COUNT: u64 = 1_000_000;
+
 impl LineRange {
+    pub fn inclusive_bounds(&self) -> (u32, u32) {
+        match self {
+            LineRange::Single(line) => (*line, *line),
+            LineRange::Range(start, end) => (*start, *end),
+        }
+    }
+
+    pub fn covered_line_count(&self) -> u64 {
+        let (start, end) = self.inclusive_bounds();
+        if start == 0 || start > end {
+            0
+        } else {
+            u64::from(end) - u64::from(start) + 1
+        }
+    }
+
+    pub fn normalize(ranges: &[LineRange]) -> Vec<LineRange> {
+        let mut intervals = ranges
+            .iter()
+            .map(LineRange::inclusive_bounds)
+            .filter(|(start, end)| *start > 0 && start <= end)
+            .collect::<Vec<_>>();
+        intervals.sort_unstable();
+
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for (start, end) in intervals {
+            if let Some((_, current_end)) = merged.last_mut()
+                && start <= current_end.saturating_add(1)
+            {
+                *current_end = (*current_end).max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+
+        merged
+            .into_iter()
+            .map(|(start, end)| {
+                if start == end {
+                    LineRange::Single(start)
+                } else {
+                    LineRange::Range(start, end)
+                }
+            })
+            .collect()
+    }
+
+    pub fn subtract_all(ranges: &[LineRange], covered: &[LineRange]) -> Vec<LineRange> {
+        let ranges = LineRange::normalize(ranges);
+        let covered = LineRange::normalize(covered);
+        let mut remaining = Vec::new();
+        let mut covered_index = 0usize;
+
+        for range in ranges {
+            let (start, end) = range.inclusive_bounds();
+            while covered_index < covered.len()
+                && covered[covered_index].inclusive_bounds().1 < start
+            {
+                covered_index += 1;
+            }
+
+            let mut cursor = Some(start);
+            let mut scan_index = covered_index;
+            while let Some(current) = cursor
+                && scan_index < covered.len()
+            {
+                let (covered_start, covered_end) = covered[scan_index].inclusive_bounds();
+                if covered_start > end {
+                    break;
+                }
+                if covered_start > current {
+                    let remaining_end = end.min(covered_start - 1);
+                    remaining.push(if current == remaining_end {
+                        LineRange::Single(current)
+                    } else {
+                        LineRange::Range(current, remaining_end)
+                    });
+                }
+                cursor = if covered_end >= end || covered_end == u32::MAX {
+                    None
+                } else {
+                    Some(current.max(covered_end + 1))
+                };
+                scan_index += 1;
+            }
+
+            if let Some(current) = cursor
+                && current <= end
+            {
+                remaining.push(if current == end {
+                    LineRange::Single(current)
+                } else {
+                    LineRange::Range(current, end)
+                });
+            }
+        }
+        remaining
+    }
+
+    pub fn intersect_all(left: &[LineRange], right: &[LineRange]) -> Vec<LineRange> {
+        let left = LineRange::normalize(left);
+        let right = LineRange::normalize(right);
+        let mut intersections = Vec::new();
+        let (mut left_index, mut right_index) = (0usize, 0usize);
+        while left_index < left.len() && right_index < right.len() {
+            let (left_start, left_end) = left[left_index].inclusive_bounds();
+            let (right_start, right_end) = right[right_index].inclusive_bounds();
+            let start = left_start.max(right_start);
+            let end = left_end.min(right_end);
+            if start <= end {
+                intersections.push(if start == end {
+                    LineRange::Single(start)
+                } else {
+                    LineRange::Range(start, end)
+                });
+            }
+            if left_end <= right_end {
+                left_index += 1;
+            } else {
+                right_index += 1;
+            }
+        }
+        intersections
+    }
+
+    pub fn covered_lines_before(&self, line: u32) -> u64 {
+        let (start, end) = self.inclusive_bounds();
+        if start == 0 || start > end || line <= start {
+            0
+        } else {
+            u64::from(end.min(line.saturating_sub(1))) - u64::from(start) + 1
+        }
+    }
+
     pub fn contains(&self, line: u32) -> bool {
         match self {
             LineRange::Single(l) => *l == line,
@@ -101,7 +237,7 @@ impl LineRange {
         let mut current_end = lines[0];
 
         for &line in &lines[1..] {
-            if line == current_end + 1 {
+            if line == current_end.saturating_add(1) {
                 current_end = line;
             } else {
                 // End current range and start new one
@@ -127,6 +263,10 @@ impl LineRange {
 
     #[allow(dead_code)]
     pub fn expand(&self) -> Vec<u32> {
+        let covered_lines = self.covered_line_count();
+        if covered_lines == 0 || covered_lines > MAX_MATERIALIZED_LINE_COUNT {
+            return Vec::new();
+        }
         match self {
             LineRange::Single(l) => vec![*l],
             LineRange::Range(start, end) => (*start..=*end).collect(),
@@ -292,6 +432,39 @@ mod tests {
         assert_eq!(
             result, None,
             "u32::MAX + 1 should overflow u32 and return None"
+        );
+    }
+
+    #[test]
+    fn oversized_line_range_expansion_fails_closed() {
+        assert!(LineRange::Range(1, 1_000_001).expand().is_empty());
+    }
+
+    #[test]
+    fn line_range_set_operations_stay_compact_at_u32_boundary() {
+        let normalized = LineRange::normalize(&[
+            LineRange::Range(10, 20),
+            LineRange::Range(1, 12),
+            LineRange::Single(u32::MAX),
+        ]);
+        assert_eq!(
+            normalized,
+            vec![LineRange::Range(1, 20), LineRange::Single(u32::MAX)]
+        );
+
+        assert_eq!(
+            LineRange::subtract_all(
+                &[LineRange::Range(1, u32::MAX)],
+                &[LineRange::Range(2, u32::MAX - 1)],
+            ),
+            vec![LineRange::Single(1), LineRange::Single(u32::MAX)]
+        );
+        assert_eq!(
+            LineRange::intersect_all(
+                &[LineRange::Range(1, 10), LineRange::Range(20, 30)],
+                &[LineRange::Range(5, 25)],
+            ),
+            vec![LineRange::Range(5, 10), LineRange::Range(20, 25)]
         );
     }
 }

@@ -945,8 +945,10 @@ fn attested_line_count_for_session(authorship_log: &AuthorshipLog, session_id: &
         .iter()
         .flat_map(|attestation| &attestation.entries)
         .filter(|entry| ai_session_key(&entry.hash) == session_id)
-        .flat_map(|entry| entry.line_ranges.iter().flat_map(LineRange::expand))
-        .count()
+        .flat_map(|entry| &entry.line_ranges)
+        .fold(0usize, |total, range| {
+            total.saturating_add(usize::try_from(range.covered_line_count()).unwrap_or(usize::MAX))
+        })
 }
 
 fn select_nearest_commit_metadata_metric_session(
@@ -1510,16 +1512,17 @@ fn unknown_lines_by_file(
     authorship_log: &AuthorshipLog,
     committed_hunks: &HashMap<String, Vec<LineRange>>,
 ) -> UnknownLinesByFile {
-    let covered = covered_lines_by_file(authorship_log);
+    let covered = covered_ranges_by_file(authorship_log);
     let mut result = BTreeMap::new();
     for (file_path, ranges) in committed_hunks {
-        let covered_lines = covered.get(file_path);
-        let mut unknown = Vec::new();
-        for line in ranges.iter().flat_map(LineRange::expand) {
-            if !covered_lines.is_some_and(|lines| lines.contains(&line)) {
-                unknown.push(line);
-            }
-        }
+        let covered_ranges = covered
+            .get(file_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut unknown = LineRange::subtract_all(ranges, covered_ranges)
+            .iter()
+            .flat_map(LineRange::expand)
+            .collect::<Vec<_>>();
         unknown.sort_unstable();
         unknown.dedup();
         if !unknown.is_empty() {
@@ -1529,17 +1532,18 @@ fn unknown_lines_by_file(
     result
 }
 
-fn covered_lines_by_file(authorship_log: &AuthorshipLog) -> HashMap<String, HashSet<u32>> {
+fn covered_ranges_by_file(authorship_log: &AuthorshipLog) -> HashMap<String, Vec<LineRange>> {
     let mut covered = HashMap::new();
     for file_attestation in &authorship_log.attestations {
-        let lines = covered
+        let ranges = covered
             .entry(file_attestation.file_path.clone())
-            .or_insert_with(HashSet::new);
+            .or_insert_with(Vec::new);
         for entry in &file_attestation.entries {
-            for line in entry.line_ranges.iter().flat_map(LineRange::expand) {
-                lines.insert(line);
-            }
+            ranges.extend(entry.line_ranges.iter().cloned());
         }
+    }
+    for ranges in covered.values_mut() {
+        *ranges = LineRange::normalize(ranges);
     }
     covered
 }

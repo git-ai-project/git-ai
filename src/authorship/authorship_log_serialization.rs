@@ -1,5 +1,5 @@
 use crate::authorship::authorship_log::{
-    Author, HumanRecord, LineRange, PromptRecord, SessionRecord,
+    Author, HumanRecord, LineRange, MAX_MATERIALIZED_LINE_COUNT, PromptRecord, SessionRecord,
 };
 use crate::git::repository::Repository;
 use rand::RngExt;
@@ -10,6 +10,11 @@ use std::fmt;
 
 /// Authorship log format version identifier
 pub const AUTHORSHIP_LOG_VERSION: &str = "authorship/3.0.0";
+const MAX_AUTHORSHIP_FILES: usize = 4_096;
+const MAX_AUTHORSHIP_ENTRIES: usize = 16_384;
+const MAX_AUTHORSHIP_RANGES: usize = 65_536;
+const MAX_AUTHORSHIP_FILE_PATH_BYTES: usize = 16 * 1024;
+const MAX_AUTHORSHIP_HASH_BYTES: usize = 256;
 
 #[cfg(all(debug_assertions, test))]
 pub const GIT_AI_VERSION: &str = "development";
@@ -162,6 +167,9 @@ impl AuthorshipLog {
 
     /// Serialize to the new text format
     pub fn serialize_to_string(&self) -> Result<String, fmt::Error> {
+        if !authorship_line_ranges_are_bounded(&self.attestations) {
+            return Err(fmt::Error);
+        }
         let mut output = String::new();
 
         // Write attestation section
@@ -207,6 +215,9 @@ impl AuthorshipLog {
         // Parse attestation section (before divider)
         let attestation_lines = &lines[..divider_pos];
         let attestations = parse_attestation_section(attestation_lines)?;
+        if !authorship_line_ranges_are_bounded(&attestations) {
+            return Err("authorship line ranges exceeded the materialization limit".into());
+        }
 
         // Parse JSON metadata section (after divider)
         let json_lines = &lines[divider_pos + 1..];
@@ -335,6 +346,44 @@ impl AuthorshipLog {
         }
         None
     }
+}
+
+fn authorship_line_ranges_are_bounded(attestations: &[FileAttestation]) -> bool {
+    if attestations.len() > MAX_AUTHORSHIP_FILES {
+        return false;
+    }
+    let mut covered_lines = 0u64;
+    let mut entry_count = 0usize;
+    let mut range_count = 0usize;
+    for file in attestations {
+        if file.file_path.len() > MAX_AUTHORSHIP_FILE_PATH_BYTES {
+            return false;
+        }
+        entry_count = entry_count.saturating_add(file.entries.len());
+        if entry_count > MAX_AUTHORSHIP_ENTRIES {
+            return false;
+        }
+        for entry in &file.entries {
+            if entry.hash.len() > MAX_AUTHORSHIP_HASH_BYTES {
+                return false;
+            }
+            range_count = range_count.saturating_add(entry.line_ranges.len());
+            if range_count > MAX_AUTHORSHIP_RANGES {
+                return false;
+            }
+            for range in &entry.line_ranges {
+                let range_lines = range.covered_line_count();
+                if range_lines == 0 {
+                    return false;
+                }
+                covered_lines = covered_lines.saturating_add(range_lines);
+                if covered_lines > MAX_MATERIALIZED_LINE_COUNT {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 impl Default for AuthorshipLog {
@@ -531,6 +580,22 @@ mod tests {
     fn test_parse_line_ranges() {
         let ranges = parse_line_ranges("1,2,19-222").unwrap();
         assert_debug_snapshot!(ranges);
+    }
+
+    #[test]
+    fn oversized_line_range_is_rejected_during_deserialization() {
+        let metadata = serde_json::to_string(&AuthorshipMetadata::new()).unwrap();
+        let content = format!("large.txt\n  test-hash 1-1000001\n---\n{metadata}");
+
+        assert!(AuthorshipLog::deserialize_from_string(&content).is_err());
+    }
+
+    #[test]
+    fn oversized_attestation_hash_is_rejected_during_deserialization() {
+        let metadata = serde_json::to_string(&AuthorshipMetadata::new()).unwrap();
+        let content = format!("file.txt\n  {} 1\n---\n{metadata}", "x".repeat(257));
+
+        assert!(AuthorshipLog::deserialize_from_string(&content).is_err());
     }
 
     #[test]

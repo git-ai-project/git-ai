@@ -1,9 +1,9 @@
-use crate::authorship::authorship_log::{LineRange, SessionRecord};
+use crate::authorship::authorship_log::{LineRange, MAX_MATERIALIZED_LINE_COUNT, SessionRecord};
 use crate::authorship::authorship_log_serialization::{
     AttestationEntry, AuthorshipLog, generate_session_id, generate_trace_id,
 };
 use crate::authorship::working_log::AgentId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const DEVIN_ID_PATH: &str = "/opt/.devin/devin_id";
 const DEVIN_DIR_PATH: &str = "/opt/.devin";
@@ -119,36 +119,42 @@ pub fn fill_unattributed_lines(
         return false;
     }
 
-    // Collect already-attributed lines per file
-    let mut attributed_lines: HashMap<&str, HashSet<u32>> = HashMap::new();
-    for file_attestation in &authorship_log.attestations {
-        let lines = attributed_lines
-            .entry(&file_attestation.file_path)
-            .or_default();
-        for entry in &file_attestation.entries {
-            for range in &entry.line_ranges {
-                for line in range.expand() {
-                    lines.insert(line);
-                }
-            }
+    let mut committed_line_count = 0u64;
+    for range in committed_hunks.values().flatten() {
+        let range_line_count = range.covered_line_count();
+        if range_line_count == 0 {
+            return false;
+        }
+        committed_line_count = committed_line_count.saturating_add(range_line_count);
+        if committed_line_count > MAX_MATERIALIZED_LINE_COUNT {
+            return false;
         }
     }
 
-    // Find unattributed lines per file
+    // Collect already-attributed ranges per file.
+    let mut attributed_ranges: HashMap<&str, Vec<LineRange>> = HashMap::new();
+    for file_attestation in &authorship_log.attestations {
+        let ranges = attributed_ranges
+            .entry(&file_attestation.file_path)
+            .or_default();
+        for entry in &file_attestation.entries {
+            ranges.extend(entry.line_ranges.iter().cloned());
+        }
+    }
+    for ranges in attributed_ranges.values_mut() {
+        *ranges = LineRange::normalize(ranges);
+    }
+
+    // Find unattributed ranges per file without expanding them per line.
     let mut unattributed_hunks: HashMap<String, Vec<LineRange>> = HashMap::new();
     for (file_path, line_ranges) in committed_hunks {
-        let existing = attributed_lines.get(file_path.as_str());
-        let mut unattributed: Vec<u32> = Vec::new();
-        for range in line_ranges {
-            for line in range.expand() {
-                if existing.is_none_or(|set| !set.contains(&line)) {
-                    unattributed.push(line);
-                }
-            }
-        }
+        let existing = attributed_ranges
+            .get(file_path.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let unattributed = LineRange::subtract_all(line_ranges, existing);
         if !unattributed.is_empty() {
-            unattributed.sort();
-            unattributed_hunks.insert(file_path.clone(), LineRange::compress_lines(&unattributed));
+            unattributed_hunks.insert(file_path.clone(), unattributed);
         }
     }
 

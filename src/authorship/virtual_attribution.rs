@@ -2260,35 +2260,11 @@ impl VirtualAttributions {
         // We should NOT filter out pure insertions even if they overlap with committed line numbers.
         for (file_path, committed_ranges) in &committed_hunks {
             if let Some(unstaged_ranges) = unstaged_hunks.get_mut(file_path) {
-                // Expand both to line numbers for comparison
-                let committed_lines: std::collections::HashSet<u32> =
-                    committed_ranges.iter().flat_map(|r| r.expand()).collect();
-
-                // Get pure insertion lines for this file (these should NOT be filtered out)
-                let pure_insertion_lines: std::collections::HashSet<u32> = pure_insertion_hunks
-                    .get(file_path)
-                    .map(|ranges| ranges.iter().flat_map(|r| r.expand()).collect())
-                    .unwrap_or_default();
-
-                // Filter out any unstaged lines that were also committed
-                // (these are lines that were committed, then modified again in workdir)
-                // BUT keep pure insertions even if they overlap with committed line numbers
-                let mut filtered_unstaged_lines: Vec<u32> = unstaged_ranges
-                    .iter()
-                    .flat_map(|r| r.expand())
-                    .filter(|line| {
-                        // Keep the line if it's NOT in committed, OR if it's a pure insertion
-                        !committed_lines.contains(line) || pure_insertion_lines.contains(line)
-                    })
-                    .collect();
-
-                if filtered_unstaged_lines.is_empty() {
-                    unstaged_ranges.clear();
-                } else {
-                    filtered_unstaged_lines.sort_unstable();
-                    filtered_unstaged_lines.dedup();
-                    *unstaged_ranges = LineRange::compress_lines(&filtered_unstaged_lines);
+                let mut filtered = LineRange::subtract_all(unstaged_ranges, committed_ranges);
+                if let Some(pure_insertions) = pure_insertion_hunks.get(file_path) {
+                    filtered.extend(LineRange::intersect_all(unstaged_ranges, pure_insertions));
                 }
+                *unstaged_ranges = LineRange::normalize(&filtered);
             }
         }
 
@@ -2334,19 +2310,13 @@ impl VirtualAttributions {
                 line_attrs
             };
 
-            // Get unstaged lines for this file (in working directory coordinates).
-            let mut unstaged_lines: Vec<u32> = Vec::new();
+            // Get unstaged ranges for this file (in working directory coordinates).
             let unstaged_lookup = unstaged_hunks.get(&nfc_file_path).or_else(|| {
                 rename_map
                     .get(&nfc_file_path)
                     .and_then(|np| unstaged_hunks.get(np))
             });
-            if let Some(unstaged_ranges) = unstaged_lookup {
-                for range in unstaged_ranges {
-                    unstaged_lines.extend(range.expand());
-                }
-                unstaged_lines.sort_unstable();
-            }
+            let unstaged_ranges = unstaged_lookup.map(Vec::as_slice).unwrap_or_default();
 
             // Split line attributions into committed and uncommitted
             // VirtualAttributions has line numbers in working directory coordinates,
@@ -2366,7 +2336,9 @@ impl VirtualAttributions {
                 // Check each line individually
                 for workdir_line_num in line_attr.start_line..=line_attr.end_line {
                     // Check if this line is unstaged (in working directory but not in commit)
-                    let is_unstaged = unstaged_lines.binary_search(&workdir_line_num).is_ok();
+                    let is_unstaged = unstaged_ranges
+                        .iter()
+                        .any(|range| range.contains(workdir_line_num));
 
                     if is_unstaged {
                         // Line is unstaged, mark as uncommitted
@@ -2378,11 +2350,13 @@ impl VirtualAttributions {
                     } else {
                         // Convert working directory line number to commit line number
                         // by subtracting the count of unstaged lines before this line
-                        let adjustment = unstaged_lines
+                        let adjustment = unstaged_ranges
                             .iter()
-                            .filter(|&&l| l < workdir_line_num)
-                            .count() as u32;
-                        let commit_line_num = workdir_line_num - adjustment;
+                            .map(|range| range.covered_lines_before(workdir_line_num))
+                            .sum::<u64>()
+                            .min(u64::from(u32::MAX))
+                            as u32;
+                        let commit_line_num = workdir_line_num.saturating_sub(adjustment);
 
                         // Check if this commit line number is in any committed hunk
                         let is_committed = if let Some(hunks) = file_committed_hunks {
@@ -3002,8 +2976,6 @@ impl VirtualAttributions {
         session_additions: &HashMap<String, u32>,
         session_deletions: &HashMap<String, u32>,
     ) {
-        use std::collections::HashSet;
-
         // Collect all line attributions
         let all_line_attributions: Vec<&LineAttribution> = attributions
             .values()
@@ -3019,10 +2991,11 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                let line_count = line_attr.end_line - line_attr.start_line + 1;
-                *session_accepted_lines
+                let line_count = line_attr.line_count();
+                let total = session_accepted_lines
                     .entry(line_attr.author_id.clone())
-                    .or_insert(0) += line_count;
+                    .or_insert(0);
+                *total = total.saturating_add(line_count);
             }
         }
 
@@ -3032,13 +3005,10 @@ impl VirtualAttributions {
         let mut session_overridden_lines: HashMap<String, u32> = HashMap::new();
         for line_attr in &all_line_attributions {
             if let Some(overrode_id) = &line_attr.overrode {
-                let mut overridden_lines: HashSet<u32> = HashSet::new();
-                for line in line_attr.start_line..=line_attr.end_line {
-                    overridden_lines.insert(line);
-                }
-                *session_overridden_lines
+                let total = session_overridden_lines
                     .entry(overrode_id.clone())
-                    .or_insert(0) += overridden_lines.len() as u32;
+                    .or_insert(0);
+                *total = total.saturating_add(line_attr.line_count());
             }
         }
 

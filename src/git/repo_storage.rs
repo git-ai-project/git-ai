@@ -1,5 +1,7 @@
 use crate::authorship::attribution_tracker::LineAttribution;
-use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
+use crate::authorship::authorship_log::{
+    HumanRecord, MAX_MATERIALIZED_LINE_COUNT, PromptRecord, SessionRecord,
+};
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
@@ -971,6 +973,35 @@ fn validate_initial_files(files: &HashMap<String, Vec<LineAttribution>>) -> Resu
     for line_attributions in files.values() {
         ensure_batch_git_item_limit("INITIAL line attribution", line_attributions.len())?;
     }
+    validate_line_attribution_ranges(
+        files.values().flat_map(|attributions| attributions.iter()),
+        "INITIAL line attribution",
+    )?;
+    Ok(())
+}
+
+fn validate_line_attribution_ranges<'a>(
+    attributions: impl Iterator<Item = &'a LineAttribution>,
+    kind: &str,
+) -> Result<(), GitAiError> {
+    let mut covered_lines = 0u64;
+    for attribution in attributions {
+        if attribution.start_line == 0 || attribution.start_line > attribution.end_line {
+            return Err(GitAiError::Generic(format!(
+                "{kind} contains an invalid line range {}-{}",
+                attribution.start_line, attribution.end_line
+            )));
+        }
+        let range_lines = u64::from(attribution.end_line)
+            .saturating_sub(u64::from(attribution.start_line))
+            .saturating_add(1);
+        covered_lines = covered_lines.saturating_add(range_lines);
+        if covered_lines > MAX_MATERIALIZED_LINE_COUNT {
+            return Err(GitAiError::Generic(format!(
+                "{kind} exceeded the {MAX_MATERIALIZED_LINE_COUNT} line materialization limit"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -996,6 +1027,13 @@ fn validate_checkpoint_collections(checkpoint: &Checkpoint) -> Result<(), GitAiE
             entry.line_attributions.len(),
         )?;
     }
+    validate_line_attribution_ranges(
+        checkpoint
+            .entries
+            .iter()
+            .flat_map(|entry| entry.line_attributions.iter()),
+        "working-log line attribution",
+    )?;
     Ok(())
 }
 
@@ -1076,6 +1114,16 @@ mod tests {
 
     fn attr(author: &str) -> Vec<LineAttribution> {
         vec![LineAttribution::new(1, 1, author.to_string(), None)]
+    }
+
+    #[test]
+    fn initial_validation_rejects_oversized_line_attribution_span() {
+        let files = HashMap::from([(
+            "large.txt".to_string(),
+            vec![LineAttribution::new(1, 1_000_001, "test".to_string(), None)],
+        )]);
+
+        assert!(validate_initial_files(&files).is_err());
     }
 
     /// Regression (#9): merge_working_log_dirs (via rename_working_log when the

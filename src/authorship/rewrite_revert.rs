@@ -331,11 +331,10 @@ fn clip_file_attestation_to_lines(
     let mut entries = Vec::new();
 
     for entry in &file.entries {
-        let mut lines = entry
-            .line_ranges
+        let mut lines = target_lines
             .iter()
-            .flat_map(LineRange::expand)
-            .filter(|line| target_lines.contains(line))
+            .copied()
+            .filter(|line| entry.line_ranges.iter().any(|range| range.contains(*line)))
             .collect::<Vec<_>>();
         if lines.is_empty() {
             continue;

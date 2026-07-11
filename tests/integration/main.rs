@@ -59,6 +59,7 @@ mod daemon_git_output_memory;
 mod daemon_http_memory;
 mod daemon_ignore_memory;
 mod daemon_ipc_memory;
+mod daemon_line_range_memory;
 mod daemon_log_memory;
 mod daemon_note_materialization_memory;
 mod daemon_reflog_memory;

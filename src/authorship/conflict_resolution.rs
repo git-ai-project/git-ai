@@ -4,24 +4,11 @@ use crate::authorship::authorship_log::LineRange;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 
 fn normalize_line_ranges(ranges: &[LineRange]) -> Vec<LineRange> {
-    let mut lines: Vec<u32> = ranges.iter().flat_map(LineRange::expand).collect();
-    lines.sort_unstable();
-    lines.dedup();
-    LineRange::compress_lines(&lines)
+    LineRange::normalize(ranges)
 }
 
 fn subtract_line_ranges(ranges: &[LineRange], covered: &[LineRange]) -> Vec<LineRange> {
-    let mut remaining = ranges.to_vec();
-    for covered_range in covered {
-        remaining = remaining
-            .iter()
-            .flat_map(|range| range.remove(covered_range))
-            .collect();
-        if remaining.is_empty() {
-            break;
-        }
-    }
-    normalize_line_ranges(&remaining)
+    LineRange::subtract_all(ranges, covered)
 }
 
 fn line_coverage_by_file(log: &AuthorshipLog) -> HashMap<String, Vec<LineRange>> {
