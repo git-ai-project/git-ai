@@ -662,6 +662,7 @@ src/commands/install_hooks.rs
 src/commands/daemon.rs
   s_59382cac373d67::t_b501535f67edcd 872
   s_59382cac373d67::t_1367555991e1ca 9-10,105-122,154-158,822-825,864-871
+  s_59382cac373d67::t_a00019f774cbb0 863
 tests/integration/auxiliary_input_memory.rs
   s_59382cac373d67::t_29b0ffa95cd599 1-39
 src/diagnostics.rs
