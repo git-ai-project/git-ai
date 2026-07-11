@@ -170,8 +170,9 @@ Cursors come into existence at trusted observation points:
    non-terminal trace2 frame for a mutating command, it captures current
    reflog ends and attaches them to the root as claimed start offsets. This
    latency-sensitive capture never inventories the ref tree: it performs
-   constant work for the worktree `HEAD`, its current symbolic ref, and
-   `refs/stash` only, with the symbolic `HEAD` read capped at 4 KiB. Because
+   constant work for the worktree `HEAD`, its current symbolic ref, and one
+   auxiliary ref: `refs/stash` normally, or the explicit local source ref for
+   `merge --squash`. The symbolic `HEAD` read is capped at 4 KiB. Because
    delivery is asynchronous, these claims may already be post-append;
    `command_start_offset_is_authoritative` only accepts a claimed offset if
    records exist after it and it does not move an existing cursor backward.

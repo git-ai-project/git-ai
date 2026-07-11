@@ -2196,7 +2196,11 @@ impl RefCursor {
     }
 }
 
-pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> HashMap<String, u64> {
+pub(crate) fn capture_reflog_start_offsets_for_worktree(
+    worktree: &Path,
+    primary_command: Option<&str>,
+    command_args: &[String],
+) -> HashMap<String, u64> {
     let mut offsets = HashMap::new();
 
     let Some(git_dir) = git_dir_for_worktree(worktree) else {
@@ -2211,10 +2215,11 @@ pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> Hash
         return offsets;
     };
     let common_logs = common_dir.join("logs");
-    let stash_reference = "refs/stash";
-    let stash_log = common_logs.join(stash_reference);
-    if let Ok(metadata) = fs::metadata(&stash_log) {
-        offsets.insert(common_key(stash_reference), metadata.len());
+    let auxiliary_reference = squash_merge_source_reference(primary_command, command_args)
+        .unwrap_or_else(|| "refs/stash".to_string());
+    let auxiliary_log = common_logs.join(&auxiliary_reference);
+    if let Ok(metadata) = fs::metadata(&auxiliary_log) {
+        offsets.insert(common_key(&auxiliary_reference), metadata.len());
     }
     if let Some(reference) = read_symbolic_head_reference(&git_dir) {
         let branch_log = common_logs.join(&reference);
@@ -2223,6 +2228,27 @@ pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> Hash
         }
     }
     offsets
+}
+
+fn squash_merge_source_reference(
+    primary_command: Option<&str>,
+    command_args: &[String],
+) -> Option<String> {
+    if primary_command != Some("merge") || !command_args.iter().any(|arg| arg == "--squash") {
+        return None;
+    }
+    let source = crate::daemon::analyzers::history::merge_source_args(command_args)
+        .into_iter()
+        .next()?;
+    if source == "HEAD" || is_valid_git_oid(source) {
+        return None;
+    }
+    let reference = if source.starts_with("refs/") {
+        source.to_string()
+    } else {
+        format!("refs/heads/{source}")
+    };
+    safe_reflog_reference(&reference).then_some(reference)
 }
 
 fn read_symbolic_head_reference(git_dir: &Path) -> Option<String> {
@@ -4834,12 +4860,41 @@ mod tests {
             );
         }
 
-        let offsets = capture_reflog_start_offsets_for_worktree(&worktree);
+        let offsets = capture_reflog_start_offsets_for_worktree(
+            &worktree,
+            Some("reset"),
+            &["--hard".to_string(), "HEAD~1".to_string()],
+        );
 
         assert_eq!(offsets.len(), 3);
         assert!(offsets.contains_key(&head_key(&git_dir)));
         assert!(offsets.contains_key(&common_key("refs/heads/main")));
         assert!(offsets.contains_key(&common_key("refs/stash")));
+    }
+
+    #[test]
+    fn squash_merge_start_capture_substitutes_explicit_source_for_stash() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        append_reflog(&git_dir, "HEAD", &[(A, B, "commit: current")]);
+        append_reflog(&git_dir, "refs/heads/main", &[(A, B, "commit: current")]);
+        append_reflog(&git_dir, "refs/heads/feature", &[(A, C, "commit: source")]);
+        append_reflog(&git_dir, "refs/stash", &[(A, B, "stash: current")]);
+
+        let offsets = capture_reflog_start_offsets_for_worktree(
+            &worktree,
+            Some("merge"),
+            &["--squash".to_string(), "feature".to_string()],
+        );
+
+        assert_eq!(offsets.len(), 3);
+        assert!(offsets.contains_key(&head_key(&git_dir)));
+        assert!(offsets.contains_key(&common_key("refs/heads/main")));
+        assert!(offsets.contains_key(&common_key("refs/heads/feature")));
+        assert!(!offsets.contains_key(&common_key("refs/stash")));
     }
 
     #[test]

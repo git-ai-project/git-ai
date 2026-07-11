@@ -636,12 +636,12 @@ fn trace_invocation_is_definitely_read_only(
     }
 }
 
-fn trace_invocation_may_mutate_refs(primary_command: Option<&str>, argv: &[String]) -> bool {
+fn trace_invocation_may_mutate_refs(
+    primary_command: Option<&str>,
+    command_args: &[String],
+) -> bool {
     primary_command.is_some_and(|cmd| {
-        crate::git::command_classification::git_invocation_may_mutate_repo_state(
-            cmd,
-            &trace_invocation_command_args(Some(cmd), argv),
-        )
+        crate::git::command_classification::git_invocation_may_mutate_repo_state(cmd, command_args)
     })
 }
 
@@ -4253,8 +4253,12 @@ impl ActorDaemonCoordinator {
         };
         let effective_primary =
             early_primary.or_else(|| trace_argv_primary_command(&effective_argv));
+        let effective_command_args = effective_primary
+            .as_deref()
+            .map(|primary| trace_invocation_command_args(Some(primary), &effective_argv))
+            .unwrap_or_default();
         let command_mutates_refs =
-            trace_invocation_may_mutate_refs(effective_primary.as_deref(), &effective_argv);
+            trace_invocation_may_mutate_refs(effective_primary.as_deref(), &effective_command_args);
         if let Some(primary) = effective_primary.as_deref() {
             ingress
                 .root_mutating
@@ -4275,8 +4279,11 @@ impl ActorDaemonCoordinator {
                 .clone()
                 .or_else(|| ingress.root_worktrees.get(&root).cloned())
         {
-            let offsets =
-                crate::daemon::ref_cursor::capture_reflog_start_offsets_for_worktree(&worktree);
+            let offsets = crate::daemon::ref_cursor::capture_reflog_start_offsets_for_worktree(
+                &worktree,
+                effective_primary.as_deref(),
+                &effective_command_args,
+            );
             ingress
                 .root_reflog_start_offsets
                 .insert(root.clone(), offsets);
