@@ -171,6 +171,7 @@ mod transcript_discovery_memory;
 mod transcript_memory;
 mod transcript_monolithic_memory;
 mod transcript_queue_memory;
+mod transcript_sqlite_memory;
 mod utf8_filenames;
 mod virtual_attribution_unit;
 mod windsurf;
