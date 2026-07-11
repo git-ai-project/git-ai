@@ -2,6 +2,7 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,6 +22,10 @@ pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
 pub const DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 3 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_CONFIG_COLLECTION_ITEMS: usize = 4_096;
+const MAX_CONFIG_PATTERN_BYTES: usize = 4 * 1024;
+const MAX_CONFIG_MAP_VALUE_BYTES: usize = 64 * 1024;
 
 /// Which backend to use for storing authorship notes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -937,7 +942,7 @@ fn author_config_cache_key() -> AuthorConfigCacheKey {
 }
 
 fn author_config_file_fingerprint(path: &Path) -> Option<AuthorConfigFileFingerprint> {
-    let data = fs::read(path).ok()?;
+    let data = read_file_with_limit(path, MAX_CONFIG_FILE_BYTES, "config.json").ok()?;
     let mut hasher = DefaultHasher::new();
     data.hash(&mut hasher);
     Some(AuthorConfigFileFingerprint {
@@ -948,70 +953,28 @@ fn author_config_file_fingerprint(path: &Path) -> Option<AuthorConfigFileFingerp
 
 fn build_config() -> Config {
     let file_cfg = load_file_config();
-    let exclude_prompts_in_repositories = file_cfg
-        .as_ref()
-        .and_then(|c| c.exclude_prompts_in_repositories.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|pattern_str| {
-            Pattern::new(&pattern_str)
-                .map_err(|e| {
-                    eprintln!(
-                        "Warning: Invalid glob pattern in exclude_prompts_in_repositories '{}': {}",
-                        pattern_str, e
-                    );
-                })
-                .ok()
-        })
-        .collect();
-    let include_prompts_in_repositories = file_cfg
-        .as_ref()
-        .and_then(|c| c.include_prompts_in_repositories.clone())
-        .unwrap_or(vec![])
-        .into_iter()
-        .filter_map(|pattern_str| {
-            Pattern::new(&pattern_str)
-                .map_err(|e| {
-                    eprintln!(
-                        "Warning: Invalid glob pattern in include_prompts_in_repositories '{}': {}",
-                        pattern_str, e
-                    );
-                })
-                .ok()
-        })
-        .collect();
-    let allow_repositories = file_cfg
-        .as_ref()
-        .and_then(|c| c.allow_repositories.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|pattern_str| {
-            Pattern::new(&pattern_str)
-                .map_err(|e| {
-                    eprintln!(
-                        "Warning: Invalid glob pattern in allow_repositories '{}': {}",
-                        pattern_str, e
-                    );
-                })
-                .ok()
-        })
-        .collect();
-    let exclude_repositories = file_cfg
-        .as_ref()
-        .and_then(|c| c.exclude_repositories.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|pattern_str| {
-            Pattern::new(&pattern_str)
-                .map_err(|e| {
-                    eprintln!(
-                        "Warning: Invalid glob pattern in exclude_repositories '{}': {}",
-                        pattern_str, e
-                    );
-                })
-                .ok()
-        })
-        .collect();
+    let exclude_prompts_in_repositories = compile_repository_patterns(
+        file_cfg
+            .as_ref()
+            .and_then(|c| c.exclude_prompts_in_repositories.clone()),
+        "exclude_prompts_in_repositories",
+    );
+    let include_prompts_in_repositories = compile_repository_patterns(
+        file_cfg
+            .as_ref()
+            .and_then(|c| c.include_prompts_in_repositories.clone()),
+        "include_prompts_in_repositories",
+    );
+    let allow_repositories = compile_repository_patterns(
+        file_cfg.as_ref().and_then(|c| c.allow_repositories.clone()),
+        "allow_repositories",
+    );
+    let exclude_repositories = compile_repository_patterns(
+        file_cfg
+            .as_ref()
+            .and_then(|c| c.exclude_repositories.clone()),
+        "exclude_repositories",
+    );
     let telemetry_oss_disabled = file_cfg
         .as_ref()
         .and_then(|c| c.telemetry_oss.clone())
@@ -1308,7 +1271,36 @@ fn build_custom_attributes(file_cfg: &Option<FileConfig>) -> HashMap<String, Str
         }
     }
 
+    bound_string_map(&mut attrs);
     attrs
+}
+
+fn compile_repository_patterns(patterns: Option<Vec<String>>, field: &str) -> Vec<Pattern> {
+    patterns
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pattern| pattern.len() <= MAX_CONFIG_PATTERN_BYTES)
+        .take(MAX_CONFIG_COLLECTION_ITEMS)
+        .filter_map(|pattern_str| {
+            Pattern::new(&pattern_str)
+                .map_err(|error| {
+                    eprintln!("Warning: Invalid glob pattern in {field} '{pattern_str}': {error}");
+                })
+                .ok()
+        })
+        .collect()
+}
+
+fn bound_string_map(map: &mut HashMap<String, String>) {
+    map.retain(|key, value| {
+        key.len() <= MAX_CONFIG_MAP_VALUE_BYTES && value.len() <= MAX_CONFIG_MAP_VALUE_BYTES
+    });
+    if map.len() > MAX_CONFIG_COLLECTION_ITEMS {
+        *map = std::mem::take(map)
+            .into_iter()
+            .take(MAX_CONFIG_COLLECTION_ITEMS)
+            .collect();
+    }
 }
 
 fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
@@ -1444,15 +1436,78 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
 
 fn load_file_config() -> Option<FileConfig> {
     let path = config_file_path()?;
-    let data = fs::read(&path).ok()?;
+    let data = read_file_with_limit(&path, MAX_CONFIG_FILE_BYTES, "config.json").ok()?;
     parse_file_config_bytes(&data).ok()
 }
 
 fn parse_file_config_bytes(data: &[u8]) -> Result<FileConfig, serde_json::Error> {
+    if data.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "config.json exceeded the {MAX_CONFIG_FILE_BYTES} byte limit ({})",
+                data.len()
+            ),
+        )));
+    }
     // Windows PowerShell 5.1 writes UTF-8 with BOM by default for `Out-File -Encoding UTF8`.
     // Tolerate BOM-prefixed config files so upgrades/installers don't brick config parsing.
     let data = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data);
-    serde_json::from_slice::<FileConfig>(data)
+    let mut config = serde_json::from_slice::<FileConfig>(data)?;
+    bound_file_config_collections(&mut config);
+    Ok(config)
+}
+
+fn read_file_with_limit(path: &Path, max_bytes: u64, kind: &str) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{kind} exceeded the {max_bytes} byte limit ({})",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn bound_file_config_collections(config: &mut FileConfig) {
+    for patterns in [
+        &mut config.exclude_prompts_in_repositories,
+        &mut config.include_prompts_in_repositories,
+        &mut config.allow_repositories,
+        &mut config.exclude_repositories,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        patterns.retain(|pattern| pattern.len() <= MAX_CONFIG_PATTERN_BYTES);
+        patterns.truncate(MAX_CONFIG_COLLECTION_ITEMS);
+    }
+
+    if let Some(attributes) = &mut config.custom_attributes {
+        bound_string_map(attributes);
+    }
+    if let Some(hooks) = &mut config.git_ai_hooks {
+        hooks.retain(|name, commands| {
+            if name.len() > MAX_CONFIG_MAP_VALUE_BYTES {
+                return false;
+            }
+            commands.retain(|command| command.len() <= MAX_CONFIG_MAP_VALUE_BYTES);
+            commands.truncate(MAX_CONFIG_COLLECTION_ITEMS);
+            !commands.is_empty()
+        });
+        if hooks.len() > MAX_CONFIG_COLLECTION_ITEMS {
+            *hooks = std::mem::take(hooks)
+                .into_iter()
+                .take(MAX_CONFIG_COLLECTION_ITEMS)
+                .collect();
+        }
+    }
 }
 
 fn config_file_path() -> Option<PathBuf> {
@@ -1502,7 +1557,9 @@ pub fn get_or_create_distinct_id() -> String {
             };
 
             // Try to read existing ID
-            if let Ok(existing_id) = fs::read_to_string(&id_path) {
+            if let Ok(existing_id) = read_file_with_limit(&id_path, 1024, "distinct_id")
+                && let Ok(existing_id) = String::from_utf8(existing_id)
+            {
                 let trimmed = existing_id.trim();
                 if !trimmed.is_empty() {
                     return trimmed.to_string();
@@ -1542,7 +1599,8 @@ pub fn load_file_config_public() -> Result<FileConfig, String> {
         return Ok(FileConfig::default());
     }
 
-    let data = fs::read(&path).map_err(|e| format!("Failed to read config file: {}", e))?;
+    let data = read_file_with_limit(&path, MAX_CONFIG_FILE_BYTES, "config.json")
+        .map_err(|e| format!("Failed to read config file: {}", e))?;
 
     parse_file_config_bytes(&data).map_err(|e| format!("Failed to parse config file: {}", e))
 }
@@ -1558,8 +1616,15 @@ pub fn save_file_config(config: &FileConfig) -> Result<(), String> {
             .map_err(|e| format!("Failed to create config directory: {}", e))?;
     }
 
-    let json = serde_json::to_string_pretty(config)
+    let json = serde_json::to_vec_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
+
+    if json.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(format!(
+            "Failed to write config file: config.json exceeded the {MAX_CONFIG_FILE_BYTES} byte limit ({})",
+            json.len()
+        ));
+    }
 
     fs::write(&path, json).map_err(|e| format!("Failed to write config file: {}", e))
 }
@@ -1649,22 +1714,12 @@ pub fn is_real_git_candidate(p: &Path) -> bool {
 #[cfg(any(test, feature = "test-support"))]
 fn apply_test_config_patch(config: &mut Config) {
     if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH")
+        && patch_json.len() as u64 <= MAX_CONFIG_FILE_BYTES
         && let Ok(patch) = serde_json::from_str::<ConfigPatch>(&patch_json)
     {
         if let Some(patterns) = patch.exclude_prompts_in_repositories {
-            config.exclude_prompts_in_repositories = patterns
-                    .into_iter()
-                    .filter_map(|pattern_str| {
-                        Pattern::new(&pattern_str)
-                            .map_err(|e| {
-                                eprintln!(
-                                    "Warning: Invalid test pattern in exclude_prompts_in_repositories '{}': {}",
-                                    pattern_str, e
-                                );
-                            })
-                            .ok()
-                    })
-                    .collect();
+            config.exclude_prompts_in_repositories =
+                compile_repository_patterns(Some(patterns), "test exclude_prompts_in_repositories");
         }
         if let Some(telemetry_oss_disabled) = patch.telemetry_oss_disabled {
             config.telemetry_oss_disabled = telemetry_oss_disabled;
@@ -1687,6 +1742,8 @@ fn apply_test_config_patch(config: &mut Config) {
             }
         }
         if let Some(custom_attributes) = patch.custom_attributes {
+            let mut custom_attributes = custom_attributes;
+            bound_string_map(&mut custom_attributes);
             config.custom_attributes = custom_attributes;
         }
         if let Some(author) = patch.author {
@@ -2506,6 +2563,40 @@ mod tests {
 
         let parsed = parse_file_config_bytes(data).expect("regular config should parse");
         assert_eq!(parsed.git_path.as_deref(), Some("/usr/bin/git"));
+    }
+
+    #[test]
+    fn test_parse_file_config_bytes_rejects_oversized_input() {
+        let oversized = format!("{{\"api_base_url\":\"{}\"}}", "x".repeat(1024 * 1024));
+
+        let error = match parse_file_config_bytes(oversized.as_bytes()) {
+            Ok(_) => panic!("oversized config input must be rejected before parsing"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("config.json"));
+        assert!(error.to_string().contains("1048576 byte limit"));
+    }
+
+    #[test]
+    fn test_parse_file_config_bytes_bounds_pattern_collections() {
+        let patterns = (0..5_000)
+            .map(|index| format!("repository-{index}/**"))
+            .collect::<Vec<_>>();
+        let data = serde_json::to_vec(&serde_json::json!({
+            "exclude_prompts_in_repositories": patterns,
+        }))
+        .unwrap();
+
+        let config = parse_file_config_bytes(&data).unwrap();
+
+        assert_eq!(
+            config
+                .exclude_prompts_in_repositories
+                .as_ref()
+                .map(Vec::len),
+            Some(4_096)
+        );
     }
 
     #[test]

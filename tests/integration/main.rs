@@ -52,6 +52,7 @@ mod cross_repo_cwd_attribution;
 mod cursor;
 mod daemon_batch_materialization_memory;
 mod daemon_commit_carryover;
+mod daemon_config_memory;
 mod daemon_git_output_memory;
 mod daemon_http_memory;
 mod daemon_ignore_memory;
