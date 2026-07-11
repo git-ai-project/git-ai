@@ -937,7 +937,7 @@ fn run_command_capture_with_timeout_and_env(
 }
 
 fn command_output_to_result(output: TimedCommandOutput) -> Result<String, String> {
-    if output.status != Some(0) {
+    if !output.completed_successfully() {
         let mut stderr = output.stderr.trim().to_string();
         append_debug_diagnostics(&mut stderr, &output.diagnostics);
         let code = output

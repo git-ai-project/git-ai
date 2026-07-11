@@ -3,10 +3,10 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::utils::{
-    MIN_CODE_VERSION, get_editor_version, home_dir, install_vsc_editor_extension,
-    is_github_codespaces, is_vsc_editor_extension_installed, parse_version, resolve_editor_cli,
-    settings_paths_for_products, should_process_settings_target, update_vscode_chat_hook_settings,
-    version_meets_requirement,
+    MIN_CODE_VERSION, detected_version_below_requirement, get_editor_version, home_dir,
+    install_vsc_editor_extension, is_github_codespaces, is_vsc_editor_extension_installed,
+    resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
+    update_vscode_chat_hook_settings,
 };
 use std::path::PathBuf;
 
@@ -45,9 +45,8 @@ impl HookInstaller for VSCodeInstaller {
 
         // If we have a CLI, check version
         if let Some(cli) = &resolved_cli
-            && let Ok(version_str) = get_editor_version(cli)
-            && let Some(version) = parse_version(&version_str)
-            && !version_meets_requirement(version, MIN_CODE_VERSION)
+            && let Some(version) =
+                detected_version_below_requirement(get_editor_version(cli), MIN_CODE_VERSION)
         {
             return Err(GitAiError::Generic(format!(
                 "VS Code version {}.{} detected, but minimum version {}.{} is required",

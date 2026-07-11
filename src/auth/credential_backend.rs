@@ -99,8 +99,6 @@ impl FileBackend {
 
     #[cfg(windows)]
     fn set_file_protection(path: &std::path::Path) -> Result<(), String> {
-        use std::process::Command;
-
         let path_str = path
             .to_str()
             .ok_or_else(|| "Invalid path encoding".to_string())?;
@@ -108,25 +106,33 @@ impl FileBackend {
         let username = std::env::var("USERNAME")
             .map_err(|_| "Could not determine current user".to_string())?;
 
-        let output = Command::new("icacls")
-            .args([
-                path_str,
-                "/inheritance:r",
-                "/grant:r",
-                &format!("{}:F", username),
-            ])
-            .output()
-            .map_err(|e| format!("Failed to run icacls: {}", e))?;
+        let grant = format!("{}:F", username);
+        let output = crate::process_timeout::run_command_with_timeout(
+            "icacls",
+            &[path_str, "/inheritance:r", "/grant:r", &grant],
+            None,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(10),
+            &[],
+        )
+        .map_err(|e| format!("Failed to run icacls: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.completed_successfully() {
             eprintln!(
-                "Warning: Could not set restrictive permissions on credentials file: {}",
-                stderr
+                "Warning: Could not set restrictive permissions on credentials file: {} {}",
+                output.stderr,
+                output.diagnostics.join("; ")
             );
         }
 
-        let _ = Command::new("attrib").args(["+H", path_str]).output();
+        let _ = crate::process_timeout::run_command_with_timeout(
+            "attrib",
+            &["+H", path_str],
+            None,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(10),
+            &[],
+        );
 
         Ok(())
     }

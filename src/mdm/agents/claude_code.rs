@@ -1,9 +1,9 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    MIN_CLAUDE_VERSION, binary_exists, claude_config_dir, generate_diff, get_binary_version,
-    is_git_ai_checkpoint_command, normalize_windows_path_for_shell, parse_version,
-    version_meets_requirement, write_atomic,
+    MIN_CLAUDE_VERSION, binary_exists, claude_config_dir, detected_version_below_requirement,
+    generate_diff, get_binary_version, is_git_ai_checkpoint_command,
+    normalize_windows_path_for_shell, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -322,9 +322,8 @@ impl HookInstaller for ClaudeCodeInstaller {
         }
 
         if has_binary
-            && let Ok(version_str) = get_binary_version("claude")
-            && let Some(version) = parse_version(&version_str)
-            && !version_meets_requirement(version, MIN_CLAUDE_VERSION)
+            && let Some(version) =
+                detected_version_below_requirement(get_binary_version("claude"), MIN_CLAUDE_VERSION)
         {
             return Err(GitAiError::Generic(format!(
                 "Claude Code version {}.{} detected, but minimum version {}.{} is required",

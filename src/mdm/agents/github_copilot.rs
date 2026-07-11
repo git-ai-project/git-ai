@@ -1,9 +1,9 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    MIN_CODE_VERSION, generate_diff, get_editor_version, home_dir, parse_version,
-    resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
-    version_meets_requirement, write_atomic,
+    MIN_CODE_VERSION, detected_version_below_requirement, generate_diff, get_editor_version,
+    home_dir, resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
+    write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -76,9 +76,8 @@ impl HookInstaller for GitHubCopilotInstaller {
 
         // If we have a CLI, check version.
         if let Some(cli) = &resolved_cli
-            && let Ok(version_str) = get_editor_version(cli)
-            && let Some(version) = parse_version(&version_str)
-            && !version_meets_requirement(version, MIN_CODE_VERSION)
+            && let Some(version) =
+                detected_version_below_requirement(get_editor_version(cli), MIN_CODE_VERSION)
         {
             return Err(GitAiError::Generic(format!(
                 "VS Code version {}.{} detected, but minimum version {}.{} is required",

@@ -1413,13 +1413,16 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
     // 3) Windows-only: try `where.exe git.exe` as a PATH-based fallback
     #[cfg(windows)]
     {
-        if let Ok(output) = std::process::Command::new("where.exe")
-            .arg("git.exe")
-            .output()
-            && output.status.success()
+        if let Ok(output) = crate::process_timeout::run_command_with_timeout(
+            "where.exe",
+            &["git.exe"],
+            None,
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            &[],
+        ) && output.completed_successfully()
         {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
+            for line in output.stdout.lines() {
                 let trimmed = line.trim();
                 let p = Path::new(trimmed);
                 if is_executable(p) && !path_is_git_ai_binary(p) {

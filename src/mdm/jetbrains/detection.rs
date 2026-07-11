@@ -1,5 +1,7 @@
 use super::ide_types::{DetectedIde, JETBRAINS_IDES, JetBrainsIde};
 use crate::mdm::utils::home_dir;
+#[cfg(target_os = "macos")]
+use crate::mdm::utils::run_installer_command;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -84,17 +86,15 @@ fn find_macos_installations() -> Vec<DetectedIde> {
 
 #[cfg(target_os = "macos")]
 fn find_app_by_bundle_id(bundle_id: &str) -> Option<PathBuf> {
-    let output = Command::new("mdfind")
-        .args([&format!("kMDItemCFBundleIdentifier == '{}'", bundle_id)])
-        .output()
-        .ok()?;
+    let mut command = Command::new("mdfind");
+    command.args([&format!("kMDItemCFBundleIdentifier == '{}'", bundle_id)]);
+    let output = run_installer_command(command, "mdfind").ok()?;
 
-    if !output.status.success() {
+    if output.status != Some(0) {
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().next().map(PathBuf::from)
+    output.stdout.lines().next().map(PathBuf::from)
 }
 
 #[cfg(target_os = "macos")]
@@ -173,19 +173,18 @@ fn get_macos_build_metadata(app_path: &Path) -> (Option<String>, Option<u32>, Op
     }
 
     // Fall back to Info.plist
-    let output = Command::new("defaults")
-        .args([
-            "read",
-            &app_path.join("Contents/Info.plist").to_string_lossy(),
-            "CFBundleVersion",
-        ])
-        .output()
-        .ok();
+    let mut command = Command::new("defaults");
+    command.args([
+        "read",
+        &app_path.join("Contents/Info.plist").to_string_lossy(),
+        "CFBundleVersion",
+    ]);
+    let output = run_installer_command(command, "defaults read CFBundleVersion").ok();
 
     if let Some(output) = output
-        && output.status.success()
+        && output.status == Some(0)
     {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let version = output.stdout;
         let major = parse_major_build(&version);
         return (Some(version), major, None);
     }

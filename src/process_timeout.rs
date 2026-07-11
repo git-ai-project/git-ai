@@ -33,6 +33,12 @@ pub(crate) struct TimedCommandOutput {
     pub wait_error: Option<String>,
 }
 
+impl TimedCommandOutput {
+    pub(crate) fn completed_successfully(&self) -> bool {
+        self.status == Some(0) && !self.timed_out && self.wait_error.is_none()
+    }
+}
+
 enum OutputEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
@@ -132,10 +138,7 @@ pub(crate) fn run_command_with_timeout_and_env(
     env_set: &[(&str, &str)],
 ) -> Result<TimedCommandOutput, String> {
     let mut command = Command::new(program);
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(args);
     for key in env_remove {
         command.env_remove(key);
     }
@@ -145,6 +148,15 @@ pub(crate) fn run_command_with_timeout_and_env(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    run_prepared_command_with_timeout(command, timeout, poll_interval)
+}
+
+pub(crate) fn run_prepared_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<TimedCommandOutput, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_timed_command(&mut command);
 
     let mut child = command
@@ -347,6 +359,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn successful_timed_command_allows_informational_diagnostics() {
+        let output = TimedCommandOutput {
+            status: Some(0),
+            stdout: "result".to_string(),
+            stderr: String::new(),
+            timed_out: false,
+            diagnostics: vec!["output collection did not finish".to_string()],
+            wait_error: None,
+        };
+
+        assert!(output.completed_successfully());
+    }
+
+    #[test]
+    fn timed_command_success_rejects_process_failures() {
+        let mut output = TimedCommandOutput {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            diagnostics: Vec::new(),
+            wait_error: None,
+        };
+        assert!(!output.completed_successfully());
+
+        output.status = Some(0);
+        output.timed_out = true;
+        assert!(!output.completed_successfully());
+
+        output.timed_out = false;
+        output.wait_error = Some("wait failed".to_string());
+        assert!(!output.completed_successfully());
+    }
+
+    #[test]
     fn output_state_rejects_subprocess_output_beyond_limit() {
         let (tx, rx) = mpsc::channel();
         tx.send(OutputEvent::Stdout(vec![b'x'; 1024 * 1024 + 1]))
@@ -392,6 +439,28 @@ mod tests {
         assert_eq!(
             timed_command_creation_flags(),
             crate::utils::CREATE_NO_WINDOW
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_command_output_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes x | head -c 2097152"]);
+
+        let output = run_prepared_command_with_timeout(
+            command,
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+
+        assert!(output.stdout.len() <= MAX_TIMED_COMMAND_OUTPUT_BYTES);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("stdout exceeded"))
         );
     }
 }

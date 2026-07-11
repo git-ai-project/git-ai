@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 // Minimum version requirements
 pub const MIN_CURSOR_VERSION: (u32, u32) = (1, 7);
@@ -13,6 +14,8 @@ pub const MIN_CODE_VERSION: (u32, u32) = (1, 99);
 pub const MIN_CLAUDE_VERSION: (u32, u32) = (2, 0);
 pub const MIN_CODEX_VERSION: (u32, u32) = (0, 124);
 pub const MAX_INSTALLER_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+const INSTALLER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTALLER_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub fn read_installer_config(path: &Path) -> Result<String, GitAiError> {
     Ok(crate::utils::read_text_file_with_limit(
@@ -22,39 +25,74 @@ pub fn read_installer_config(path: &Path) -> Result<String, GitAiError> {
     )?)
 }
 
+pub(crate) fn run_installer_command(
+    command: Command,
+    description: &str,
+) -> Result<crate::process_timeout::TimedCommandOutput, GitAiError> {
+    let output = crate::process_timeout::run_prepared_command_with_timeout(
+        command,
+        INSTALLER_COMMAND_TIMEOUT,
+        INSTALLER_COMMAND_POLL_INTERVAL,
+    )
+    .map_err(|error| GitAiError::Generic(format!("Failed to run {description}: {error}")))?;
+
+    if output.timed_out {
+        return Err(GitAiError::Generic(format!(
+            "{description} timed out after {} seconds",
+            INSTALLER_COMMAND_TIMEOUT.as_secs()
+        )));
+    }
+    if let Some(error) = &output.wait_error {
+        return Err(GitAiError::Generic(format!(
+            "Failed to wait for {description}: {error}"
+        )));
+    }
+    let read_errors: Vec<&str> = output
+        .diagnostics
+        .iter()
+        .map(String::as_str)
+        .filter(|message| message.starts_with("failed to read "))
+        .collect();
+    if !read_errors.is_empty() {
+        return Err(GitAiError::Generic(format!(
+            "{description}: {}",
+            read_errors.join("; ")
+        )));
+    }
+    Ok(output)
+}
+
 /// Get version from a binary's --version output
 pub fn get_binary_version(binary: &str) -> Result<String, GitAiError> {
-    let output = Command::new(binary)
-        .arg("--version")
-        .output()
-        .map_err(|e| GitAiError::Generic(format!("Failed to run {} --version: {}", binary, e)))?;
+    let mut command = Command::new(binary);
+    command.arg("--version");
+    let output = run_installer_command(command, &format!("{binary} --version"))?;
 
-    if !output.status.success() {
+    if output.status != Some(0) {
         return Err(GitAiError::Generic(format!(
-            "{} --version failed with status: {}",
+            "{} --version failed with status: {:?}",
             binary, output.status
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.trim().to_string())
+    Ok(output.stdout)
 }
 
 /// Get version from an editor CLI command's --version output
 pub fn get_editor_version(cli: &EditorCliCommand) -> Result<String, GitAiError> {
-    let output = cli.command(&["--version"]).output().map_err(|e| {
-        GitAiError::Generic(format!("Failed to run {} --version: {}", cli.program, e))
-    })?;
+    let output = run_installer_command(
+        cli.command(&["--version"]),
+        &format!("{} --version", cli.program),
+    )?;
 
-    if !output.status.success() {
+    if output.status != Some(0) {
         return Err(GitAiError::Generic(format!(
-            "{} --version failed with status: {}",
+            "{} --version failed with status: {:?}",
             cli.program, output.status
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.trim().to_string())
+    Ok(output.stdout)
 }
 
 /// Parse version string to extract major.minor version
@@ -92,6 +130,16 @@ pub fn version_meets_requirement(version: (u32, u32), min_version: (u32, u32)) -
         return true;
     }
     false
+}
+
+/// Return a successfully detected version only when it is below the minimum.
+/// A failed probe is inconclusive and must not prevent hook installation.
+pub fn detected_version_below_requirement(
+    probe: Result<String, GitAiError>,
+    min_version: (u32, u32),
+) -> Option<(u32, u32)> {
+    let version = parse_version(&probe.ok()?)?;
+    (!version_meets_requirement(version, min_version)).then_some(version)
 }
 
 /// Check if a binary with the given name exists in the system PATH
@@ -626,15 +674,17 @@ pub fn is_vsc_editor_extension_installed(
     // NOTE: We try up to 3 times, because the editor CLI can be flaky (throws intermittent JS errors)
     let mut last_error_message: Option<String> = None;
     for attempt in 1..=3 {
-        let cmd_result = cli.command(&["--list-extensions"]).output();
+        let cmd_result = run_installer_command(
+            cli.command(&["--list-extensions"]),
+            &format!("{} --list-extensions", cli.program),
+        );
 
         match cmd_result {
             Ok(output) => {
-                if !output.status.success() {
-                    last_error_message = Some(String::from_utf8_lossy(&output.stderr).to_string());
+                if output.status != Some(0) {
+                    last_error_message = Some(output.stderr);
                 } else {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    return Ok(stdout.contains(id_or_vsix));
+                    return Ok(output.stdout.contains(id_or_vsix));
                 }
             }
             Err(e) => {
@@ -811,6 +861,24 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    #[test]
+    fn successful_installer_command_accepts_bounded_truncated_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes x | head -c 2097152"]);
+
+        let output = run_installer_command(command, "large successful output").unwrap();
+
+        assert_eq!(output.status, Some(0));
+        assert!(output.stdout.len() <= 1024 * 1024);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("stdout exceeded"))
+        );
+    }
+
     #[test]
     fn oversized_vscode_settings_are_rejected_before_parsing() {
         let temp = tempfile::tempdir().unwrap();
@@ -863,6 +931,25 @@ mod tests {
         // Test large numbers
         assert!(version_meets_requirement((1, 104), (1, 99)));
         assert!(!version_meets_requirement((1, 98), (1, 99)));
+    }
+
+    #[test]
+    fn failed_version_probe_does_not_report_an_unsupported_version() {
+        let probe = Err(GitAiError::Generic("probe failed".to_string()));
+
+        assert_eq!(detected_version_below_requirement(probe, (2, 0)), None);
+    }
+
+    #[test]
+    fn successful_version_probe_reports_only_unsupported_versions() {
+        assert_eq!(
+            detected_version_below_requirement(Ok("1.9.9".to_string()), (2, 0)),
+            Some((1, 9))
+        );
+        assert_eq!(
+            detected_version_below_requirement(Ok("2.0.0".to_string()), (2, 0)),
+            None
+        );
     }
 
     #[test]

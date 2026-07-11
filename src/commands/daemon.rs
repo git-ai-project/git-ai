@@ -679,18 +679,24 @@ fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
 #[cfg(windows)]
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
-    let output = Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .output()
-        .map_err(|e| format!("failed to run taskkill: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let pid_string = pid.to_string();
+    let output = crate::process_timeout::run_command_with_timeout(
+        "taskkill",
+        &["/F", "/T", "/PID", &pid_string],
+        None,
+        Duration::from_secs(30),
+        Duration::from_millis(10),
+        &[],
+    )
+    .map_err(|e| format!("failed to run taskkill: {}", e))?;
+    if !output.completed_successfully() {
         // Process already dead is not an error.
-        if !stderr.contains("not found") {
+        if !output.stderr.contains("not found") {
             return Err(format!(
-                "taskkill /F /T /PID {} failed: {}",
+                "taskkill /F /T /PID {} failed: {} {}",
                 pid,
-                stderr.trim()
+                output.stderr,
+                output.diagnostics.join("; ")
             ));
         }
     }
