@@ -11,9 +11,59 @@ use crate::utils::normalize_to_posix;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::sync::LazyLock;
+
+const MAX_BLAME_CONTENT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BLAME_CONTENT_LINES: usize = 1_000_000;
+
+fn validate_blame_content(data: &[u8], kind: &str) -> Result<(), GitAiError> {
+    if data.len() > MAX_BLAME_CONTENT_BYTES {
+        return Err(GitAiError::Generic(format!(
+            "{kind} exceeded the {MAX_BLAME_CONTENT_BYTES} byte limit ({})",
+            data.len()
+        )));
+    }
+    let line_count = data
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        .saturating_add(usize::from(!data.is_empty() && !data.ends_with(b"\n")));
+    if line_count > MAX_BLAME_CONTENT_LINES {
+        return Err(GitAiError::Generic(format!(
+            "{kind} exceeded the {MAX_BLAME_CONTENT_LINES} line limit ({line_count})"
+        )));
+    }
+    Ok(())
+}
+
+fn read_blame_input_with_limit(
+    reader: impl Read,
+    max_bytes: usize,
+    kind: &str,
+) -> Result<Vec<u8>, GitAiError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(GitAiError::IoError)?;
+    if bytes.len() > max_bytes {
+        return Err(GitAiError::Generic(format!(
+            "{kind} exceeded the {max_bytes} byte limit ({})",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn read_blame_input(reader: impl Read, kind: &str) -> Result<Vec<u8>, GitAiError> {
+    read_blame_input_with_limit(reader, MAX_BLAME_CONTENT_BYTES, kind)
+}
+
+fn decode_blame_content(data: &[u8], kind: &str) -> Result<String, GitAiError> {
+    validate_blame_content(data, kind)?;
+    Ok(String::from_utf8_lossy(data).into_owned())
+}
 
 //🐰🥚 @todo use actual date Git AI was installed in each repo
 pub static OLDEST_AI_BLAME_DATE: LazyLock<DateTime<FixedOffset>> = LazyLock::new(|| {
@@ -314,7 +364,7 @@ impl Repository {
         // 3. The working directory
         if let Some(ref data) = options.contents_data {
             // Use pre-read contents data (from --contents stdin or file)
-            Ok(String::from_utf8_lossy(data).to_string())
+            decode_blame_content(data, "blame contents")
         } else if let Some(ref commit) = options.newest_commit {
             // Read file content from the specified commit.
             // This ensures blame is independent of which branch is checked out.
@@ -324,8 +374,8 @@ impl Repository {
             match tree.get_path(std::path::Path::new(relative_file_path)) {
                 Ok(entry) => {
                     if let Ok(blob) = self.find_blob(entry.id()) {
-                        let blob_content = blob.content().unwrap_or_default();
-                        Ok(String::from_utf8_lossy(&blob_content).to_string())
+                        let blob_content = blob.content()?;
+                        decode_blame_content(&blob_content, "blame commit blob")
                     } else {
                         Err(GitAiError::Generic(format!(
                             "File '{}' is not a blob in commit {}",
@@ -352,8 +402,12 @@ impl Repository {
                 )));
             }
 
-            let raw_bytes = fs::read(&abs_file_path)?;
-            Ok(String::from_utf8_lossy(&raw_bytes).into_owned())
+            let raw_bytes = crate::utils::read_file_with_limit(
+                &abs_file_path,
+                MAX_BLAME_CONTENT_BYTES as u64,
+                "blame working file",
+            )?;
+            decode_blame_content(&raw_bytes, "blame working file")
         }
     }
 
@@ -362,6 +416,9 @@ impl Repository {
         file_path: &str,
         options: &GitAiBlameOptions,
     ) -> Result<PreparedBlameRequest, GitAiError> {
+        if let Some(data) = &options.contents_data {
+            validate_blame_content(data, "blame contents")?;
+        }
         let relative_file_path = self.normalize_blame_file_path(file_path)?;
         let options = Self::effective_blame_options(options);
         let file_content = self.read_blame_file_content(&relative_file_path, &options)?;
@@ -2121,21 +2178,21 @@ pub fn parse_blame_args(args: &[String]) -> Result<(String, GitAiBlameOptions), 
                 // Read the contents now - either from stdin or from a file
                 let data = if contents_arg == "-" {
                     // Read from stdin
-                    use std::io::Read;
-                    let mut buffer = Vec::new();
-                    io::stdin().read_to_end(&mut buffer).map_err(|e| {
-                        GitAiError::Generic(format!("Failed to read from stdin: {}", e))
-                    })?;
-                    buffer
+                    read_blame_input(io::stdin(), "blame contents stdin")?
                 } else {
                     // Read from file
-                    fs::read(contents_arg).map_err(|e| {
+                    crate::utils::read_file_with_limit(
+                        std::path::Path::new(contents_arg),
+                        MAX_BLAME_CONTENT_BYTES as u64,
+                        "blame contents file",
+                    )
+                    .map_err(|error| {
                         GitAiError::Generic(format!(
-                            "Failed to read contents file '{}': {}",
-                            contents_arg, e
+                            "Failed to read contents file '{contents_arg}': {error}"
                         ))
                     })?
                 };
+                validate_blame_content(&data, "blame contents")?;
                 options.contents_data = Some(data);
                 i += 2;
             }
@@ -2235,4 +2292,26 @@ fn parse_line_range(range_str: &str) -> Option<(u32, u32)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn blame_input_reader_stops_after_limit() {
+        let error = read_blame_input_with_limit(std::io::repeat(b'x'), 1024, "test input")
+            .expect_err("unbounded reader must be capped");
+
+        assert!(error.to_string().contains("1024 byte limit"));
+    }
+
+    #[test]
+    fn blame_content_rejects_excessive_line_count() {
+        let contents = vec![b'\n'; MAX_BLAME_CONTENT_LINES + 1];
+        let error = validate_blame_content(&contents, "test input")
+            .expect_err("excessive line index must be rejected");
+
+        assert!(error.to_string().contains("1000000 line limit"));
+    }
 }
