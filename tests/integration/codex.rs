@@ -1197,6 +1197,243 @@ fn test_codex_e2e_apply_patch_preserves_human_lines() {
     ]);
 }
 
+#[test]
+fn test_codex_e2e_namespaced_apply_patch_file_edit_full_cycle() {
+    use crate::repos::test_repo::TestRepo;
+
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("lib.rs");
+    fs::write(&file_path, "fn old() {}\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-apply-patch-namespaced.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "codex-apply-patch-namespaced-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "functions.apply_patch",
+        "tool_use_id": "patch-namespaced-1",
+        "tool_input": {
+            "command": format!("*** Update File: {}\n@@ fn old() {{}}\n+fn new_func() {{}}\n", file_path.to_string_lossy())
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("namespaced apply_patch pre-hook should succeed");
+
+    fs::write(&file_path, "fn new_func() {}\nfn helper() {}\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-apply-patch-namespaced-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "functions.apply_patch",
+        "tool_use_id": "patch-namespaced-1",
+        "tool_input": {
+            "command": format!("*** Update File: {}\n@@ fn old() {{}}\n+fn new_func() {{}}\n+fn helper() {{}}\n", file_path.to_string_lossy())
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("namespaced apply_patch post-hook should succeed");
+
+    let commit = repo
+        .stage_all_and_commit("Codex namespaced apply_patch edit")
+        .expect("commit should succeed");
+
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .values()
+        .next()
+        .expect("session record should exist");
+
+    assert_eq!(session.agent_id.tool, "codex");
+    assert_eq!(session.agent_id.id, "codex-apply-patch-namespaced-session");
+
+    let mut tracked_file = repo.filename("lib.rs");
+    tracked_file.assert_lines_and_blame(crate::lines![
+        "fn new_func() {}".ai(),
+        "fn helper() {}".ai(),
+    ]);
+}
+
+#[test]
+fn test_codex_e2e_namespaced_exec_command_bash_full_cycle() {
+    use crate::repos::test_repo::TestRepo;
+
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("app.py");
+    fs::write(&file_path, "print('hello')\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-exec-command-namespaced.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "codex-exec-command-namespaced-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "functions.exec_command",
+        "tool_use_id": "exec-namespaced-1",
+        "tool_input": {
+            "command": "sed -i '' 's/hello/world/' app.py"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("namespaced exec_command pre-hook should succeed");
+
+    fs::write(&file_path, "print('world')\nprint('from codex')\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-exec-command-namespaced-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "functions.exec_command",
+        "tool_use_id": "exec-namespaced-1",
+        "tool_input": {
+            "command": "sed -i '' 's/hello/world/' app.py"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("namespaced exec_command post-hook should succeed");
+
+    let commit = repo
+        .stage_all_and_commit("Codex namespaced exec_command edit")
+        .expect("commit should succeed");
+
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .values()
+        .next()
+        .expect("session record should exist");
+
+    assert_eq!(session.agent_id.tool, "codex");
+    assert_eq!(session.agent_id.id, "codex-exec-command-namespaced-session");
+
+    let mut tracked_file = repo.filename("app.py");
+    tracked_file.assert_lines_and_blame(crate::lines![
+        "print('world')".ai(),
+        "print('from codex')".ai(),
+    ]);
+}
+
+#[test]
+fn test_codex_e2e_multi_tool_use_parallel_wrapper() {
+    use crate::repos::test_repo::TestRepo;
+
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("main.rs");
+    fs::write(&file_path, "fn old() {}\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-parallel-wrapper.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "codex-parallel-wrapper-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "multi_tool_use.parallel",
+        "tool_use_id": "parallel-1",
+        "tool_input": {
+            "tool_uses": [
+                {
+                    "name": "functions.apply_patch",
+                    "arguments": {"command": format!("*** Update File: {}\n@@ fn old() {{}}\n+fn new_func() {{}}\n", file_path.to_string_lossy())}
+                },
+                {
+                    "name": "functions.exec_command",
+                    "arguments": {"command": "echo 'parallel'"}
+                }
+            ]
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("multi_tool_use.parallel pre-hook should succeed");
+
+    fs::write(&file_path, "fn new_func() {}\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-parallel-wrapper-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "multi_tool_use.parallel",
+        "tool_use_id": "parallel-1",
+        "tool_input": {
+            "tool_uses": [
+                {
+                    "name": "functions.apply_patch",
+                    "arguments": {"command": format!("*** Update File: {}\n@@ fn old() {{}}\n+fn new_func() {{}}\n", file_path.to_string_lossy())}
+                },
+                {
+                    "name": "functions.exec_command",
+                    "arguments": {"command": "echo 'parallel'"}
+                }
+            ]
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("multi_tool_use.parallel post-hook should succeed");
+
+    let commit = repo
+        .stage_all_and_commit("Codex multi_tool_use.parallel edit")
+        .expect("commit should succeed");
+
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .values()
+        .next()
+        .expect("session record should exist");
+
+    assert_eq!(session.agent_id.tool, "codex");
+    assert_eq!(session.agent_id.id, "codex-parallel-wrapper-session");
+
+    let mut tracked_file = repo.filename("main.rs");
+    tracked_file.assert_lines_and_blame(crate::lines!["fn new_func() {}".ai(),]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_codex_raw_event_fidelity,
     test_codex_preset_structured_hook_input,
@@ -1216,4 +1453,7 @@ crate::reuse_tests_in_worktree!(
     test_codex_e2e_bash_then_apply_patch_in_same_session,
     test_codex_e2e_bash_modifies_multiple_files_all_attributed,
     test_codex_e2e_apply_patch_preserves_human_lines,
+    test_codex_e2e_namespaced_apply_patch_file_edit_full_cycle,
+    test_codex_e2e_namespaced_exec_command_bash_full_cycle,
+    test_codex_e2e_multi_tool_use_parallel_wrapper,
 );

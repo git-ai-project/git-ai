@@ -278,9 +278,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         let family_key = if let Some(worktree) = worktree.as_deref() {
             if let Some(common_dir) = common_dir_for_worktree(worktree) {
-                let resolved = common_dir.canonicalize().unwrap_or(common_dir);
-                crate::daemon::storage_sampler::register_ai_dir(resolved.join("ai"));
-                let family = FamilyKey::new(resolved.to_string_lossy().to_string());
+                let family = FamilyKey::new(
+                    common_dir
+                        .canonicalize()
+                        .unwrap_or(common_dir)
+                        .to_string_lossy()
+                        .to_string(),
+                );
                 self.state
                     .sid_to_family
                     .insert(root_sid.to_string(), family.clone());
@@ -1476,6 +1480,54 @@ mod tests {
                 "main".to_string()
             ],
             "alias-expanded invocation must carry the --rebase flag and trailing args"
+        );
+    }
+
+    #[test]
+    fn alias_pull_rebase_expands_invoked_args_without_child_cmd_name() {
+        // If a trace stream omits child cmd_name events, alias resolution must
+        // still use the backend fallback instead of leaving the literal alias
+        // token as the normalized command.
+        let backend = Arc::new(MockBackend::default());
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(worktree.join(".git")).expect("create git dir");
+        backend.set_alias(
+            worktree.to_str().expect("utf8 worktree"),
+            "up",
+            "pull --rebase",
+        );
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"alias-pull-no-child",
+            "ts":1,
+            "argv":["git","up","origin","main"],
+            "worktree":worktree
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"alias-pull-no-child",
+            "ts":2,
+            "code":0
+        });
+        let atexit = atexit_payload("alias-pull-no-child", 3);
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+
+        assert_eq!(cmd.primary_command.as_deref(), Some("pull"));
+        assert_eq!(cmd.invoked_command.as_deref(), Some("pull"));
+        assert_eq!(
+            cmd.invoked_args,
+            vec![
+                "--rebase".to_string(),
+                "origin".to_string(),
+                "main".to_string()
+            ],
+            "backend fallback must preserve alias-expanded flags without child events"
         );
     }
 

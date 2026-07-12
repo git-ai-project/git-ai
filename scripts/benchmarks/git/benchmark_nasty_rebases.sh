@@ -114,7 +114,7 @@ if [[ "$HOOK_MODE" == "daemon" ]]; then
     export GIT_TRACE2_EVENT="af_unix:stream:$HOME/.git-ai/internal/daemon/trace2.sock"
   fi
   if [[ -z "${GIT_TRACE2_EVENT_NESTING:-}" ]]; then
-    export GIT_TRACE2_EVENT_NESTING="10"
+    export GIT_TRACE2_EVENT_NESTING="0"
   fi
   export GIT_AI_DAEMON_CHECKPOINT_DELEGATE="true"
 

@@ -1355,6 +1355,74 @@ fn test_repeated_stash_pop_does_not_duplicate_checkpoints() {
 }
 
 #[test]
+fn test_partial_stash_truncates_oversized_live_checkpoints_before_filtering() {
+    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_CHECKPOINTS_JSONL_MAX_BYTES", "64")]);
+    fs::write(repo.path().join("a.txt"), "base a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "base b\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(repo.path().join("a.txt"), "base a\nai a\n").unwrap();
+    fs::write(repo.path().join("b.txt"), "base b\nai b\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    let working_log = repo.current_working_logs();
+    let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
+    let checkpoint_line = fs::read_to_string(&checkpoints_file)
+        .expect("checkpoint file exists")
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("checkpoint fixture should contain one line")
+        .to_string();
+    fs::write(
+        &checkpoints_file,
+        (0..8)
+            .map(|_| checkpoint_line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .expect("inflate checkpoint file above test limit");
+    assert!(
+        fs::metadata(&checkpoints_file).unwrap().len() > 64,
+        "test setup should exceed the daemon's test checkpoint size limit"
+    );
+
+    repo.git(&["stash", "push", "--", "a.txt"])
+        .expect("partial stash should survive oversized checkpoints.jsonl");
+    repo.sync_daemon_force();
+
+    let reset_size = fs::metadata(&checkpoints_file)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    assert_eq!(
+        reset_size, 0,
+        "oversized live checkpoints file should be reset before path filtering"
+    );
+    assert!(
+        repo.current_working_logs()
+            .read_all_checkpoints()
+            .expect("read reset checkpoints")
+            .is_empty(),
+        "oversized checkpoint history should be discarded"
+    );
+
+    repo.git(&["stash", "pop"])
+        .expect("stash pop after oversized checkpoint recovery should succeed");
+    repo.stage_all_and_commit("commit recovered stash").unwrap();
+
+    let mut a = repo.filename("a.txt");
+    a.assert_committed_lines(crate::lines![
+        "base a".unattributed_human(),
+        "ai a".unattributed_human(),
+    ]);
+    let mut b = repo.filename("b.txt");
+    b.assert_committed_lines(crate::lines![
+        "base b".unattributed_human(),
+        "ai b".unattributed_human(),
+    ]);
+}
+
+#[test]
 fn test_stash_operation_deletes_legacy_stashes_dir() {
     let repo = TestRepo::new();
     fs::write(repo.path().join("example.txt"), "base\n").unwrap();

@@ -82,6 +82,7 @@ define_feature_flags!(
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = true,
     checkpoint_debug_log: checkpoint_debug_log, debug = false, release = false,
+    bash_checkpoints_v2: bash_checkpoints_v2, debug = false, release = false,
     daemon_log_upload: daemon_log_upload, debug = true, release = true,
     rewrite_metrics_events: rewrite_metrics_events, debug = true, release = false,
 );
@@ -137,6 +138,7 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(!flags.bash_checkpoints_v2);
             assert!(flags.daemon_log_upload);
             assert!(flags.rewrite_metrics_events);
         }
@@ -146,6 +148,7 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(!flags.bash_checkpoints_v2);
             assert!(flags.daemon_log_upload);
             assert!(!flags.rewrite_metrics_events);
         }
@@ -234,6 +237,7 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: false,
+            bash_checkpoints_v2: true,
             daemon_log_upload: true,
             rewrite_metrics_events: true,
         };
@@ -243,6 +247,7 @@ mod tests {
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
         assert!(serialized.contains("checkpoint_debug_log"));
+        assert!(serialized.contains("bash_checkpoints_v2"));
         assert!(serialized.contains("daemon_log_upload"));
         assert!(serialized.contains("rewrite_metrics_events"));
     }
@@ -254,6 +259,7 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: true,
+            bash_checkpoints_v2: true,
             daemon_log_upload: true,
             rewrite_metrics_events: true,
         };
@@ -262,6 +268,7 @@ mod tests {
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
         assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
         assert_eq!(cloned.checkpoint_debug_log, flags.checkpoint_debug_log);
+        assert_eq!(cloned.bash_checkpoints_v2, flags.bash_checkpoints_v2);
         assert_eq!(cloned.daemon_log_upload, flags.daemon_log_upload);
         assert_eq!(cloned.rewrite_metrics_events, flags.rewrite_metrics_events);
     }

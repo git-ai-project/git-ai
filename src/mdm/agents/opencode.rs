@@ -39,11 +39,11 @@ impl HookInstaller for OpenCodeInstaller {
     }
 
     fn process_names(&self) -> Vec<&str> {
-        vec!["opencode"]
+        vec!["opencode", "opencode2"]
     }
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("opencode");
+        let has_binary = binary_exists("opencode") || binary_exists("opencode2");
         let has_global_config = home_dir().join(".config").join("opencode").exists();
         let has_local_config = Path::new(".opencode").exists();
 
@@ -165,6 +165,7 @@ impl HookInstaller for OpenCodeInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -181,6 +182,92 @@ mod tests {
 
     fn create_test_binary_path() -> PathBuf {
         PathBuf::from("/usr/local/bin/git-ai")
+    }
+
+    fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().to_path_buf();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+        }
+
+        f(&home);
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    fn with_fake_binary_on_path<F: FnOnce(&Path)>(binary_name: &str, f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let bin_dir = temp_dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_bin = bin_dir.join(binary_name);
+        fs::write(&fake_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var_os("PATH");
+        let new_path = match &prev_path {
+            Some(p) => {
+                let mut paths = vec![bin_dir.clone()];
+                paths.extend(std::env::split_paths(p));
+                std::env::join_paths(paths).unwrap()
+            }
+            None => bin_dir.clone().into(),
+        };
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        f(temp_dir.path());
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn with_empty_path<F: FnOnce()>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let prev_path = std::env::var_os("PATH");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", temp_dir.path());
+        }
+
+        f();
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
     }
 
     #[test]
@@ -321,5 +408,85 @@ mod tests {
         let content = fs::read_to_string(&plugin_path).unwrap();
         assert!(content.contains("GitAiPlugin"));
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
+    }
+
+    // ---- Detection / process_names / check_hooks ----
+
+    #[test]
+    fn test_opencode_process_names_includes_opencode2() {
+        let installer = OpenCodeInstaller;
+        let names = installer.process_names();
+        assert!(
+            names.contains(&"opencode"),
+            "process_names should include 'opencode'"
+        );
+        assert!(
+            names.contains(&"opencode2"),
+            "process_names should include 'opencode2' for @next pre-release support"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode2_binary_detected_as_tool_installed() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("opencode2", |_| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.check_hooks(&params).unwrap();
+                assert!(
+                    result.tool_installed,
+                    "opencode2 binary on PATH should be detected as tool_installed"
+                );
+                assert!(!result.hooks_installed);
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode_no_binary_no_config_not_detected() {
+        with_temp_home(|_home| {
+            with_empty_path(|| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.check_hooks(&params).unwrap();
+                assert!(
+                    !result.tool_installed,
+                    "no binary and no config should mean tool_installed=false"
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode2_binary_install_creates_plugin() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("opencode2", |_| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.install_hooks(&params, false).unwrap();
+                assert!(result.is_some(), "install_hooks should produce a diff");
+
+                let plugin_path = OpenCodeInstaller::plugin_path();
+                assert!(
+                    plugin_path.exists(),
+                    "install_hooks should create the plugin file"
+                );
+
+                let content = fs::read_to_string(&plugin_path).unwrap();
+                assert!(
+                    content.contains("GitAiPlugin"),
+                    "plugin should contain GitAiPlugin"
+                );
+            });
+        });
     }
 }

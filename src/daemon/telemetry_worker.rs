@@ -22,15 +22,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, sleep_until};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 const DAEMON_LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MAX_DAEMON_LOG_EVENTS_PER_UPLOAD: usize = 1000;
 const MAX_DAEMON_LOG_BUFFER_EVENTS: usize = 5000;
 
-/// How often to sample CPU/memory (in flush ticks). 10 ticks × 3s = 30s.
-const RESOURCE_SAMPLE_TICK_INTERVAL: u32 = 10;
+const RESOURCE_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 static METRICS_UPLOAD_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static METRICS_METADATA_BACKFILL_STARTED: AtomicBool = AtomicBool::new(false);
@@ -451,25 +450,21 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
 }
 
 async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: String) {
-    let mut ticker = interval(FLUSH_INTERVAL);
     let started_at = std::time::Instant::now();
     let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
+    let mut next_resource_sample_at = started_at + RESOURCE_SAMPLE_INTERVAL;
     let mut resource_sampler = crate::daemon::resource_sampler::ResourceSampler::new();
-    let mut sample_tick_counter: u32 = 0;
-    // The first tick completes immediately; skip it.
-    ticker.tick().await;
 
     loop {
-        ticker.tick().await;
-
-        // Sample CPU/memory at a lower cadence than the flush interval.
-        sample_tick_counter += 1;
-        if sample_tick_counter >= RESOURCE_SAMPLE_TICK_INTERVAL {
-            sample_tick_counter = 0;
-            resource_sampler.sample();
-        }
+        sleep_until(next_telemetry_flush_at(Instant::now())).await;
 
         let now = std::time::Instant::now();
+        if now >= next_resource_sample_at {
+            while next_resource_sample_at <= now {
+                next_resource_sample_at += RESOURCE_SAMPLE_INTERVAL;
+            }
+            resource_sampler.sample();
+        }
         let heartbeat = if now >= next_heartbeat_at && daemon_log_upload_enabled() {
             while next_heartbeat_at <= now {
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
@@ -502,6 +497,7 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
 
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
         let daemon_id_for_flush = daemon_id.clone();
+        let flush_started_at = std::time::Instant::now();
         let requeue_daemon_logs = tokio::task::spawn_blocking(move || {
             if let Some(snapshot) = snapshot {
                 flush_telemetry_batch(snapshot, &daemon_id_for_flush)
@@ -515,6 +511,14 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
             tracing::error!(%e, "telemetry flush task panicked");
             Vec::new()
         });
+        let flush_elapsed = flush_started_at.elapsed();
+        if flush_elapsed > FLUSH_INTERVAL {
+            tracing::warn!(
+                elapsed_ms = flush_elapsed.as_millis(),
+                interval_ms = FLUSH_INTERVAL.as_millis(),
+                "telemetry flush exceeded its scheduling interval"
+            );
+        }
 
         if !requeue_daemon_logs.is_empty() {
             buffer
@@ -523,6 +527,10 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
                 .requeue_failed_daemon_logs(requeue_daemon_logs);
         }
     }
+}
+
+fn next_telemetry_flush_at(completed_at: Instant) -> Instant {
+    completed_at + FLUSH_INTERVAL
 }
 
 fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
@@ -1464,6 +1472,16 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
+    }
+
+    #[test]
+    fn telemetry_flush_schedule_is_measured_from_completion() {
+        let completed_at = tokio::time::Instant::now();
+
+        assert_eq!(
+            next_telemetry_flush_at(completed_at),
+            completed_at + FLUSH_INTERVAL
+        );
     }
 
     fn now_ts() -> u32 {

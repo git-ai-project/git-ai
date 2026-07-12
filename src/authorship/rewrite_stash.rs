@@ -303,6 +303,7 @@ fn write_path_filtered_checkpoints(
 ) -> Result<(), GitAiError> {
     let source_checkpoints = source_log.dir.join("checkpoints.jsonl");
     let filtered_checkpoints = filtered_log.dir.join("checkpoints.jsonl");
+    source_log.ensure_checkpoints_file_size_limit()?;
     if !source_checkpoints.exists() {
         return filtered_log.write_all_checkpoints(&[]);
     }

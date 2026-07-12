@@ -1344,8 +1344,8 @@ impl Repository {
     /// This starts from Git's effective committer identity, then overlays any
     /// configured `author.name` and/or `author.email` from git-ai config.
     pub fn effective_author_identity(&self) -> GitAuthorIdentity {
-        self.git_author_identity()
-            .with_author_config(&config::Config::fresh_author_cached())
+        let git_id = self.git_author_identity();
+        git_id.with_author_config(&config::Config::fresh_author_cached())
     }
 
     /// Get the effective git commit author identity for this repository.
@@ -2741,8 +2741,7 @@ pub fn spawn_git_stdout(args: &[String]) -> Result<Child, GitAiError> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -2768,8 +2767,7 @@ pub fn spawn_git_passthrough(args: &[String]) -> Result<Child, GitAiError> {
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -2781,14 +2779,31 @@ pub fn spawn_git_passthrough(args: &[String]) -> Result<Child, GitAiError> {
     cmd.spawn().map_err(GitAiError::IoError)
 }
 
-fn apply_internal_git_env(cmd: &mut Command) {
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
-    cmd.env_remove("GIT_TRACE");
-    cmd.env_remove("GIT_TRACE2");
-    cmd.env_remove("GIT_TRACE2_BRIEF");
-    cmd.env_remove("GIT_TRACE2_PERF");
-    cmd.env("GIT_TRACE2_EVENT", "0");
+pub(crate) const INTERNAL_GIT_ENV_REMOVE: &[&str] = &[
+    "GIT_EXTERNAL_DIFF",
+    "GIT_DIFF_OPTS",
+    "GIT_TRACE",
+    "GIT_TRACE2_BRIEF",
+    "GIT_TRACE2_CONFIG_PARAMS",
+    "GIT_TRACE2_ENV_VARS",
+    "GIT_TRACE2_EVENT_NESTING",
+    "GIT_TRACE2_PARENT_NAME",
+    "GIT_TRACE2_PARENT_SID",
+];
+
+pub(crate) const INTERNAL_GIT_ENV_SET: &[(&str, &str)] = &[
+    ("GIT_TRACE2", "0"),
+    ("GIT_TRACE2_EVENT", "0"),
+    ("GIT_TRACE2_PERF", "0"),
+];
+
+pub(crate) fn apply_internal_git_env(cmd: &mut Command) {
+    for key in INTERNAL_GIT_ENV_REMOVE {
+        cmd.env_remove(key);
+    }
+    for (key, value) in INTERNAL_GIT_ENV_SET {
+        cmd.env(key, value);
+    }
 }
 
 /// Helper to execute a git command with an explicit internal profile.
@@ -3148,6 +3163,35 @@ fn parse_hunk_header_counts(line: &str) -> Option<(u32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn explicit_command_env(cmd: &Command, key: &str) -> Option<Option<String>> {
+        cmd.get_envs()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.map(|v| v.to_string_lossy().to_string()))
+    }
+
+    #[test]
+    fn internal_git_env_disables_trace2_targets() {
+        let mut cmd = Command::new("git");
+        for key in INTERNAL_GIT_ENV_REMOVE {
+            cmd.env(key, "inherited");
+        }
+        for (key, _) in INTERNAL_GIT_ENV_SET {
+            cmd.env(key, "inherited");
+        }
+
+        apply_internal_git_env(&mut cmd);
+
+        for key in INTERNAL_GIT_ENV_REMOVE {
+            assert_eq!(explicit_command_env(&cmd, key), Some(None));
+        }
+        for (key, value) in INTERNAL_GIT_ENV_SET {
+            assert_eq!(
+                explicit_command_env(&cmd, key),
+                Some(Some((*value).to_string()))
+            );
+        }
+    }
 
     #[test]
     fn author_config_overlays_full_identity() {

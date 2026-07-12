@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod authorship;
+pub(crate) mod checkpoint_content_budget;
 pub mod ci;
 pub mod commands;
 pub mod config;
