@@ -398,11 +398,18 @@ fn handle_checkpoint(args: &[String]) {
                     hook_input = Some(strip_utf8_bom(args[i + 1].clone()));
                     if hook_input.as_ref().unwrap() == "stdin" {
                         let mut stdin = std::io::stdin();
-                        let mut buffer = String::new();
-                        if let Err(e) = stdin.read_to_string(&mut buffer) {
+                        let mut buffer = Vec::new();
+                        if let Err(e) = stdin.read_to_end(&mut buffer) {
                             eprintln!("Failed to read stdin for hook input: {}", e);
                             std::process::exit(0);
                         }
+                        let buffer = match decode_hook_input_bytes(buffer) {
+                            Ok(buffer) => buffer,
+                            Err(e) => {
+                                eprintln!("Failed to decode stdin for hook input: {}", e);
+                                std::process::exit(0);
+                            }
+                        };
                         if buffer.trim().is_empty() {
                             eprintln!("No hook input provided (via --hook-input or stdin).");
                             std::process::exit(0);
@@ -579,6 +586,65 @@ fn strip_utf8_bom(input: String) -> String {
     } else {
         input
     }
+}
+
+fn decode_hook_input_bytes(bytes: Vec<u8>) -> Result<String, String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return decode_utf16_hook_input(&bytes[2..], Utf16Endian::Little);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return decode_utf16_hook_input(&bytes[2..], Utf16Endian::Big);
+    }
+
+    match likely_utf16_endian(&bytes) {
+        Some(endian) => decode_utf16_hook_input(&bytes, endian),
+        None => String::from_utf8(bytes).map_err(|e| e.to_string()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Utf16Endian {
+    Little,
+    Big,
+}
+
+fn likely_utf16_endian(bytes: &[u8]) -> Option<Utf16Endian> {
+    let sample_len = bytes.len().min(512);
+    if sample_len < 8 {
+        return None;
+    }
+
+    let sample = &bytes[..sample_len];
+    let even_nuls = sample.iter().step_by(2).filter(|&&b| b == 0).count();
+    let odd_nuls = sample
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter(|&&b| b == 0)
+        .count();
+    let min_nuls = sample_len / 8;
+
+    if odd_nuls > min_nuls && odd_nuls > even_nuls.saturating_mul(4) {
+        Some(Utf16Endian::Little)
+    } else if even_nuls > min_nuls && even_nuls > odd_nuls.saturating_mul(4) {
+        Some(Utf16Endian::Big)
+    } else {
+        None
+    }
+}
+
+fn decode_utf16_hook_input(bytes: &[u8], endian: Utf16Endian) -> Result<String, String> {
+    let chunks = bytes.chunks_exact(2);
+    if !chunks.remainder().is_empty() {
+        return Err("UTF-16 hook input has an odd byte length".to_string());
+    }
+
+    let code_units = chunks.map(|chunk| match endian {
+        Utf16Endian::Little => u16::from_le_bytes([chunk[0], chunk[1]]),
+        Utf16Endian::Big => u16::from_be_bytes([chunk[0], chunk[1]]),
+    });
+
+    String::from_utf16(&code_units.collect::<Vec<u16>>()).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1143,11 +1209,14 @@ fn discover_dirty_files_from_status(cwd: &std::path::Path) -> Vec<String> {
         .and_then(|r| r.workdir().ok())
         .unwrap_or_else(|| cwd.to_path_buf());
 
-    let output = std::process::Command::new(crate::config::Config::get().git_cmd())
-        .args(["status", "--porcelain", "-uall"])
-        .current_dir(cwd)
-        .output()
-        .ok();
+    let args = vec![
+        "-C".to_string(),
+        cwd.to_string_lossy().to_string(),
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "-uall".to_string(),
+    ];
+    let output = crate::git::repository::exec_git(&args).ok();
     let Some(output) = output else {
         return vec![];
     };

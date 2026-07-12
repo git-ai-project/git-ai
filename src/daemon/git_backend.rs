@@ -1,8 +1,7 @@
 use crate::daemon::domain::FamilyKey;
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
-use crate::git::find_repository_in_path;
-use crate::git::repo_state::common_dir_for_worktree;
+use crate::git::repo_state::{common_dir_for_repo_path, common_dir_for_worktree};
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -327,12 +326,13 @@ fn is_builtin_primary_command(command: &str) -> bool {
 
 impl GitBackend for SystemGitBackend {
     fn resolve_family(&self, worktree: &Path) -> Result<FamilyKey, GitAiError> {
-        let worktree_str = worktree.to_string_lossy().to_string();
-        let repo = find_repository_in_path(&worktree_str)?;
-        let common = repo
-            .common_dir()
-            .canonicalize()
-            .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+        let common = common_dir_for_repo_path(worktree).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Failed to resolve git common dir for repo path {}",
+                worktree.display()
+            ))
+        })?;
+        let common = common.canonicalize().unwrap_or(common);
         Ok(FamilyKey::new(common.to_string_lossy().to_string()))
     }
 
@@ -564,6 +564,7 @@ mod tests {
     use super::{
         GitBackend, SystemGitBackend, clone_init_positionals, default_clone_target_from_source,
     };
+    use std::fs;
     use std::path::PathBuf;
 
     fn argv(args: &[&str]) -> Vec<String> {
@@ -724,6 +725,44 @@ mod tests {
             .expect("builtin commands should not require repository discovery");
 
         assert_eq!(resolved.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn resolve_family_uses_worktree_filesystem_without_git_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let git_dir = temp.path().join(".git");
+        fs::create_dir_all(&git_dir).expect("create git dir");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let family = SystemGitBackend::new()
+            .resolve_family(temp.path())
+            .expect("resolve family");
+
+        assert_eq!(
+            family.0,
+            git_dir
+                .canonicalize()
+                .expect("canonical git dir")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn resolve_family_accepts_bare_repo_path_without_git_spawn() {
+        let bare = tempfile::tempdir().expect("bare tempdir");
+        fs::write(bare.path().join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+
+        let family = SystemGitBackend::new()
+            .resolve_family(bare.path())
+            .expect("resolve family");
+
+        assert_eq!(
+            family.0,
+            bare.path()
+                .canonicalize()
+                .expect("canonical bare dir")
+                .to_string_lossy()
+        );
     }
 
     #[test]

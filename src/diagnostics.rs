@@ -18,7 +18,7 @@ const SELF_CHECK_CONTENT_KNOWN_HUMAN: &str = "Untracked line\nKnown human line\n
 const SELF_CHECK_CONTENT_AI: &str = "Untracked line\nKnown human line\nAI line\n";
 const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
 const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
-const TRACE2_EVENT_NESTING_VALUE: &str = "10";
+const TRACE2_EVENT_NESTING_VALUE: &str = "0";
 const SELF_CHECK_TRACE_ENV_REMOVE: &[&str] = &[
     "GIT_TRACE2_PARENT_SID",
     "GIT_TRACE2_PARENT_NAME",

@@ -62,12 +62,23 @@ jobs:
               allowed = {a.strip() for a in agents_filter.split(",")}
               agents = {k: v for k, v in agents.items() if k in allowed}
 
-          headless_cmds = {
-              "claude":   "claude -p --dangerously-skip-permissions --max-turns 3",
-              "codex":    "codex exec --full-auto",
-              "gemini":   "gemini --approval-mode=yolo",
-              "opencode": "opencode run --command",
-          }
+          def resolve_binary_name(pkg_spec, default_name):
+              """Resolve the primary binary name from an npm package spec."""
+              try:
+                  out = subprocess.check_output(
+                      ["npm", "view", pkg_spec, "bin", "--json"],
+                      text=True, stderr=subprocess.DEVNULL
+                  ).strip()
+                  if out:
+                      bins = json.loads(out)
+                      if isinstance(bins, dict) and bins:
+                          # Return first binary name; prefer the default if present
+                          if default_name in bins:
+                              return default_name
+                          return next(iter(bins))
+              except (subprocess.CalledProcessError, json.JSONDecodeError):
+                  pass
+              return default_name
 
           matrix = {"include": []}
           for agent, info in agents.items():
@@ -101,13 +112,14 @@ jobs:
                   if channel == "latest" and latest_ver == stable_ver:
                       continue
                   npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@next"
+                  bin_name = resolve_binary_name(npm_pkg, agent)
                   matrix["include"].append({
                       "agent":       agent,
                       "channel":     channel,
                       "npm_pkg":     npm_pkg,
                       "version":     ver,
                       "api_key_var": info["key"],
-                      "headless_cmd": headless_cmds[agent],
+                      "binary_name": bin_name,
                   })
 
           # Droid uses curl installer (latest only, no npm version pinning)
@@ -119,7 +131,7 @@ jobs:
                   "npm_pkg":     "",
                   "version":     "latest",
                   "api_key_var": "FACTORY_API_KEY",
-                  "headless_cmd": "droid exec --auto high",
+                  "binary_name": "droid",
               })
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -142,7 +154,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: "1.93.0"
 
@@ -175,12 +187,10 @@ jobs:
 
       - name: Verify agent binary is present
         run: |
+          BIN="${{ matrix.binary_name }}"
           case "${{ matrix.agent }}" in
-            claude)   claude --version ;;
-            codex)    codex --version ;;
-            gemini)   gemini --help 2>&1 | head -3 || true ;;
-            droid)    droid --version ;;
-            opencode) opencode --version ;;
+            gemini)   "$BIN" --help 2>&1 | head -3 || true ;;
+            *)        "$BIN" --version ;;
           esac
 
       - name: Create test repository
@@ -210,7 +220,7 @@ jobs:
       - name: Verify hook wiring
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
-          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-hook-wiring.sh" "${{ matrix.agent }}"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-hook-wiring.sh" "${{ matrix.agent }}" "${{ matrix.binary_name }}"
 
       - name: Synthetic checkpoint test
         run: |
@@ -250,7 +260,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: "1.93.0"
 
@@ -313,7 +323,7 @@ jobs:
           command: |
             export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
             export ${{ matrix.api_key_var }}="${{ secrets[matrix.api_key_var] }}"
-            bash "$GITHUB_WORKSPACE/scripts/nightly/test-live-agent.sh" "${{ matrix.agent }}"
+            bash "$GITHUB_WORKSPACE/scripts/nightly/test-live-agent.sh" "${{ matrix.agent }}" "${{ matrix.binary_name }}"
         continue-on-error: ${{ matrix.channel == 'latest' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

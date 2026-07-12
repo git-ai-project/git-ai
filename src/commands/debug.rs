@@ -6,7 +6,7 @@ use crate::git::repository::{
     GitAuthorIdentity, GitConfigIdentityResolution, GitIdentityResolution,
     global_git_config_identity_resolution,
 };
-use crate::process_timeout::{TimedCommandOutput, run_command_with_timeout};
+use crate::process_timeout::{TimedCommandOutput, run_command_with_timeout_and_env};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -100,8 +100,8 @@ fn build_debug_report(options: DebugOptions) -> String {
     let git_diagnostics = collect_git_diagnostics(&git_cmd, options);
     debug_progress("collecting system and configuration details");
     debug_progress("checking git versions");
-    let git_version = run_command_capture(&git_cmd, &["--version"]);
-    let shell_git_version = run_command_capture("git", &["--version"]);
+    let git_version = run_git_command_capture(&git_cmd, &["--version"]);
+    let shell_git_version = run_git_command_capture("git", &["--version"]);
     debug_progress("collecting git config");
     let git_config = collect_git_config_dump(&git_cmd);
     debug_progress("collecting git-ai config and login state");
@@ -875,19 +875,48 @@ fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
     run_command_capture_with_timeout(program, args, DEBUG_COMMAND_TIMEOUT)
 }
 
+fn run_git_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
+    run_git_command_capture_with_timeout(program, args, DEBUG_COMMAND_TIMEOUT)
+}
+
 fn run_command_capture_with_timeout(
     program: &str,
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
+    run_command_capture_with_timeout_and_env(program, args, timeout, &[], &[])
+}
+
+fn run_git_command_capture_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    run_command_capture_with_timeout_and_env(
+        program,
+        args,
+        timeout,
+        crate::git::repository::INTERNAL_GIT_ENV_REMOVE,
+        crate::git::repository::INTERNAL_GIT_ENV_SET,
+    )
+}
+
+fn run_command_capture_with_timeout_and_env(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    env_remove: &[&str],
+    env_set: &[(&str, &str)],
+) -> Result<String, String> {
     let command = format_command_for_error(program, args);
-    let output = run_command_with_timeout(
+    let output = run_command_with_timeout_and_env(
         program,
         args,
         None,
         timeout,
         DEBUG_COMMAND_POLL_INTERVAL,
-        &[],
+        env_remove,
+        env_set,
     )
     .map_err(|e| {
         format!(
@@ -1226,7 +1255,7 @@ fn collect_git_config_dump(git_cmd: &str) -> GitConfigDump {
 
     let mut last_error = String::new();
     for args in attempts {
-        match run_command_capture(git_cmd, args) {
+        match run_git_command_capture(git_cmd, args) {
             Ok(output) => {
                 let redacted = output
                     .lines()

@@ -10,6 +10,7 @@ use git_ai::daemon::checkpoint::{
 use git_ai::git::repository::find_repository_in_path;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Helper function equivalent to TmpRepo::new_with_base_commit()
 fn setup_repo_with_base_commit() -> (TestRepo, String, String) {
@@ -245,7 +246,7 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     let mut dirty_files = HashMap::new();
-    dirty_files.insert(lines_file.clone(), "line from commit B\n".to_string());
+    dirty_files.insert(lines_file.clone(), Arc::from("line from commit B\n"));
 
     let resolved = ResolvedCheckpointExecution {
         base_commit,
@@ -303,7 +304,7 @@ fn test_ai_checkpoint_without_agent_id_is_rejected() {
             .unwrap()
             .as_millis(),
         files: vec![lines_file.clone()],
-        dirty_files: HashMap::from([(lines_file, content.to_string())]),
+        dirty_files: HashMap::from([(lines_file, Arc::from(content))]),
     };
 
     let error = execute_resolved_checkpoint_from_daemon(
@@ -411,7 +412,7 @@ fn test_checkpoint_with_paths_outside_repo() {
             .unwrap()
             .as_millis(),
         files: vec![lines_file.clone()],
-        dirty_files: HashMap::from([(lines_file.clone(), content.clone())]),
+        dirty_files: HashMap::from([(lines_file.clone(), Arc::from(content.clone()))]),
     };
 
     let checkpoint_request = CheckpointRequest {
@@ -1321,7 +1322,7 @@ fn test_checkpoint_fails_with_initial_missing_blobs() {
     let mut dirty_files = HashMap::new();
     dirty_files.insert(
         "file_b.txt".to_string(),
-        "hello\nai added\nnew line\n".to_string(),
+        Arc::from("hello\nai added\nnew line\n"),
     );
 
     let resolved = ResolvedCheckpointExecution {

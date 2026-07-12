@@ -8,10 +8,10 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.17.7"
+    "@opencode-ai/plugin": "1.17.14"
   },
   "devDependencies": {
-    "@types/node": "^25.x",
+    "@types/node": "^26.x",
     "typescript": "^5.8.3"
   }
 }

@@ -290,3 +290,50 @@ fn test_agent_v1_relative_dirty_files_e2e_attribution() {
         "AI added line".ai(),
     ]);
 }
+
+#[test]
+fn test_agent_v1_shell_command_e2e_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("script-output.txt");
+
+    fs::write(&file_path, "base line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("script-output.txt");
+    file.assert_committed_lines(crate::lines!["base line".unattributed_human(),]);
+
+    let repo_dir = repo.canonical_path().to_string_lossy().to_string();
+
+    let pre_payload = json!({
+        "type": "pre_shell_command",
+        "repo_working_dir": repo_dir,
+        "agent_name": "agent-v1-test",
+        "model": "test-model",
+        "conversation_id": "shell-session-123",
+        "tool_use_id": "shell-tool-1",
+        "command": "printf 'created by shell\\n' >> script-output.txt"
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &pre_payload])
+        .unwrap();
+
+    fs::write(&file_path, "base line\ncreated by shell\n").unwrap();
+
+    let post_payload = json!({
+        "type": "post_shell_command",
+        "repo_working_dir": repo_dir,
+        "agent_name": "agent-v1-test",
+        "model": "test-model",
+        "conversation_id": "shell-session-123",
+        "tool_use_id": "shell-tool-1",
+        "command": "printf 'created by shell\\n' >> script-output.txt"
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &post_payload])
+        .unwrap();
+
+    repo.stage_all_and_commit("Agent v1 shell edit").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "base line".unattributed_human(),
+        "created by shell".ai(),
+    ]);
+}

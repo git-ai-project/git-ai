@@ -18,6 +18,9 @@ use std::sync::RwLock;
 
 /// Default API base URL for comparison
 pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
+pub const DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 3 * 1024 * 1024;
+pub const DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
 
 /// Which backend to use for storing authorship notes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -189,6 +192,9 @@ pub struct Config {
     #[serde(serialize_with = "serialize_notes_backend_masked")]
     notes_backend: NotesBackendConfig,
     transcript_streaming_lookback_days: Option<u32>,
+    max_checkpoint_file_size_bytes: usize,
+    max_checkpoint_total_size_bytes: usize,
+    max_checkpoint_total_lines: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -270,6 +276,12 @@ pub struct FileConfig {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_file_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_total_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_total_lines: Option<usize>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -329,6 +341,12 @@ pub struct ConfigPatch {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_file_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_total_size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_total_lines: Option<usize>,
 }
 
 impl Config {
@@ -641,6 +659,21 @@ impl Config {
 
     pub fn transcript_streaming_lookback_days(&self) -> Option<u32> {
         self.transcript_streaming_lookback_days
+    }
+
+    /// Returns the per-file size limit for checkpoint content reads.
+    pub fn max_checkpoint_file_size_bytes(&self) -> usize {
+        self.max_checkpoint_file_size_bytes
+    }
+
+    /// Returns the total byte budget for content in one checkpoint request.
+    pub fn max_checkpoint_total_size_bytes(&self) -> usize {
+        self.max_checkpoint_total_size_bytes
+    }
+
+    /// Returns the total line budget for content in one checkpoint request.
+    pub fn max_checkpoint_total_lines(&self) -> usize {
+        self.max_checkpoint_total_lines
     }
 
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
@@ -1197,6 +1230,33 @@ fn build_config() -> Config {
         .or(Some(7))
         .and_then(|v| if v == 0 { None } else { Some(v) });
 
+    // Checkpoint content limits: env > file > defaults.
+    let max_checkpoint_file_size_bytes = env::var("GIT_AI_MAX_CHECKPOINT_FILE_SIZE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.max_checkpoint_file_size_bytes)
+        })
+        .unwrap_or(DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES);
+
+    let max_checkpoint_total_size_bytes = env::var("GIT_AI_MAX_CHECKPOINT_TOTAL_SIZE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.max_checkpoint_total_size_bytes)
+        })
+        .unwrap_or(DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES);
+
+    let max_checkpoint_total_lines = env::var("GIT_AI_MAX_CHECKPOINT_TOTAL_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.max_checkpoint_total_lines))
+        .unwrap_or(DEFAULT_MAX_CHECKPOINT_TOTAL_LINES);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -1223,6 +1283,9 @@ fn build_config() -> Config {
             codex_hooks_format,
             notes_backend,
             transcript_streaming_lookback_days,
+            max_checkpoint_file_size_bytes,
+            max_checkpoint_total_size_bytes,
+            max_checkpoint_total_lines,
         };
         apply_test_config_patch(&mut config);
         config
@@ -1253,6 +1316,9 @@ fn build_config() -> Config {
         codex_hooks_format,
         notes_backend,
         transcript_streaming_lookback_days,
+        max_checkpoint_file_size_bytes,
+        max_checkpoint_total_size_bytes,
+        max_checkpoint_total_lines,
     }
 }
 
@@ -1702,6 +1768,15 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(days) = patch.transcript_streaming_lookback_days {
             config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };
         }
+        if let Some(max_bytes) = patch.max_checkpoint_file_size_bytes {
+            config.max_checkpoint_file_size_bytes = max_bytes;
+        }
+        if let Some(max_bytes) = patch.max_checkpoint_total_size_bytes {
+            config.max_checkpoint_total_size_bytes = max_bytes;
+        }
+        if let Some(max_lines) = patch.max_checkpoint_total_lines {
+            config.max_checkpoint_total_lines = max_lines;
+        }
     }
 }
 
@@ -1743,6 +1818,9 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
+            max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
+            max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
         }
     }
 
@@ -1985,6 +2063,9 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
+            max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
+            max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
         }
     }
 
@@ -2130,6 +2211,9 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
+            max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
+            max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
         }
     }
 

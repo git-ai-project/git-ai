@@ -9,7 +9,8 @@
 # Expects: relevant API key env var to be set by caller
 set -euo pipefail
 
-AGENT="${1:?Usage: $0 <agent>}"
+AGENT="${1:?Usage: $0 <agent> [binary_name]}"
+BINARY_NAME="${2:-$AGENT}"
 REPO_DIR="${TEST_REPO_DIR:-/tmp/test-repo}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/test-results}"
 mkdir -p "$RESULTS_DIR"
@@ -68,31 +69,31 @@ echo "" | tee -a "$LOG"
 
 case "$AGENT" in
   claude)
-    timeout 300 claude -p \
+    timeout 300 "$BINARY_NAME" -p \
       --dangerously-skip-permissions \
       --max-turns 5 \
       "$PROMPT" 2>&1 | tee -a "$LOG" || warn "claude exited with non-zero status"
     ;;
 
   codex)
-    timeout 300 codex exec --full-auto "$PROMPT" 2>&1 | tee -a "$LOG" \
+    timeout 300 "$BINARY_NAME" exec --full-auto "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "codex exited with non-zero status"
     ;;
 
   gemini)
     # Pre-install ripgrep to avoid Gemini CLI initialization hang on headless Linux
     which rg 2>/dev/null || sudo apt-get install -y ripgrep 2>/dev/null || true
-    timeout 300 gemini --approval-mode=yolo "$PROMPT" 2>&1 | tee -a "$LOG" \
+    timeout 300 "$BINARY_NAME" --approval-mode=yolo "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "gemini exited with non-zero status"
     ;;
 
   droid)
-    timeout 300 droid exec --auto high "$PROMPT" 2>&1 | tee -a "$LOG" \
+    timeout 300 "$BINARY_NAME" exec --auto high "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "droid exited with non-zero status"
     ;;
 
   opencode)
-    timeout 240 opencode run --command "$PROMPT" 2>&1 | tee -a "$LOG" \
+    timeout 240 "$BINARY_NAME" run --command "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "opencode exited with non-zero status"
     ;;
 

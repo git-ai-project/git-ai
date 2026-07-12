@@ -92,7 +92,7 @@ macro_rules! subdir_test_variants {
                         command.env("GIT_CONFIG_NOSYSTEM", "1");
                         let trace_socket = self.inner.daemon_trace_socket_path();
                         let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
-                            .unwrap_or_else(|_| "10".to_string());
+                            .unwrap_or_else(|_| "0".to_string());
                         command.env(
                             "GIT_TRACE2_EVENT",
                             git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
@@ -203,7 +203,7 @@ macro_rules! subdir_test_variants {
                             command.env("GIT_CONFIG_NOSYSTEM", "1");
                             let trace_socket = self.inner.daemon_trace_socket_path();
                             let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
-                                .unwrap_or_else(|_| "10".to_string());
+                                .unwrap_or_else(|_| "0".to_string());
                             command.env(
                                 "GIT_TRACE2_EVENT",
                                 git_ai::daemon::DaemonConfig::trace2_event_target_for_path(

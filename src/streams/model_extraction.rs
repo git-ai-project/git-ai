@@ -2,7 +2,7 @@ use crate::streams::sweep::StreamFormat;
 use crate::streams::types::StreamError;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn extract_model(
     path: &Path,
@@ -16,6 +16,7 @@ pub fn extract_model(
         StreamFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
         StreamFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
         StreamFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
+        StreamFormat::CopilotOtelSqlite => extract_model_from_copilot_otel_sqlite(path, session_id),
         // Droid uses extract_model_from_droid_settings() with the settings path instead
         _ => Ok(None),
     }
@@ -175,6 +176,94 @@ pub fn extract_model_from_copilot_models_json(
     Ok(model)
 }
 
+pub fn extract_model_from_copilot_vscode_transcript(
+    stream_path: &Path,
+    format: StreamFormat,
+    chat_session_id: &str,
+) -> Result<Option<String>, StreamError> {
+    if let Some(model) = extract_model(stream_path, format, None)? {
+        return Ok(Some(model));
+    }
+
+    if let Some(model) =
+        extract_model_from_copilot_otel_for_transcript(stream_path, chat_session_id)?
+    {
+        return Ok(Some(model));
+    }
+
+    extract_model_from_copilot_models_json(stream_path)
+}
+
+pub fn extract_model_from_copilot_otel_for_transcript(
+    stream_path: &Path,
+    chat_session_id: &str,
+) -> Result<Option<String>, StreamError> {
+    let Some(db_path) = resolve_copilot_otel_db_path(stream_path) else {
+        return Ok(None);
+    };
+    extract_model_from_copilot_otel_sqlite(&db_path, Some(chat_session_id))
+}
+
+fn resolve_copilot_otel_db_path(stream_path: &Path) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("GIT_AI_COPILOT_OTEL_DB_PATH") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // transcript: .../User/workspaceStorage/{hash}/GitHub.copilot-chat/transcripts/{id}.jsonl
+    // OTEL DB:    .../User/globalStorage/github.copilot-chat/agent-traces.db
+    let workspace_storage_root = stream_path.parent()?.parent()?.parent()?.parent()?;
+    let user_dir = workspace_storage_root.parent()?;
+    let otel_db = user_dir
+        .join("globalStorage")
+        .join("github.copilot-chat")
+        .join("agent-traces.db");
+
+    otel_db.exists().then_some(otel_db)
+}
+
+fn extract_model_from_copilot_otel_sqlite(
+    path: &Path,
+    chat_session_id: Option<&str>,
+) -> Result<Option<String>, StreamError> {
+    let Some(chat_session_id) = chat_session_id.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+
+    let conn = match crate::streams::agents::opencode::open_sqlite_readonly(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+
+    let newest_request_model: Option<String> = conn
+        .query_row(
+            "SELECT request_model FROM spans \
+             WHERE chat_session_id = ?1 AND request_model IS NOT NULL AND request_model != '' \
+             ORDER BY end_time_ms DESC, span_id DESC LIMIT 1",
+            rusqlite::params![chat_session_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if newest_request_model.is_some() {
+        return Ok(newest_request_model);
+    }
+
+    let newest_response_model: Option<String> = conn
+        .query_row(
+            "SELECT response_model FROM spans \
+             WHERE chat_session_id = ?1 AND response_model IS NOT NULL AND response_model != '' \
+             ORDER BY end_time_ms DESC, span_id DESC LIMIT 1",
+            rusqlite::params![chat_session_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    Ok(newest_response_model)
+}
+
 fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>, StreamError> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -276,13 +365,94 @@ fn extract_model_from_opencode_sqlite(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    fn create_copilot_otel_db(path: &Path) -> rusqlite::Connection {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let conn = crate::sqlite::open_with_memory_limits(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spans (
+                span_id TEXT PRIMARY KEY,
+                chat_session_id TEXT,
+                request_model TEXT,
+                response_model TEXT,
+                end_time_ms REAL NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_copilot_otel_model(
+        conn: &rusqlite::Connection,
+        span_id: &str,
+        chat_session_id: &str,
+        request_model: Option<&str>,
+        response_model: Option<&str>,
+        end_time_ms: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO spans (span_id, chat_session_id, request_model, response_model, end_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                span_id,
+                chat_session_id,
+                request_model,
+                response_model,
+                end_time_ms
+            ],
+        )
+        .unwrap();
+    }
+
+    fn create_copilot_vscode_workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let user_dir = dir.path().join("User");
+        let transcript_path = user_dir
+            .join("workspaceStorage")
+            .join("workspace-1")
+            .join("GitHub.copilot-chat")
+            .join("transcripts")
+            .join("session-abc.jsonl");
+        std::fs::create_dir_all(transcript_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"session.start","data":{"sessionId":"session-abc"}}"#,
+        )
+        .unwrap();
+
+        let models_path = user_dir
+            .join("workspaceStorage")
+            .join("workspace-1")
+            .join("GitHub.copilot-chat")
+            .join("debug-logs")
+            .join("session-abc")
+            .join("models.json");
+        std::fs::create_dir_all(models_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &models_path,
+            r#"[
+                {"id":"claude-sonnet-4","is_chat_default":false},
+                {"id":"gpt-4.1","is_chat_default":true}
+            ]"#,
+        )
+        .unwrap();
+
+        let otel_db_path = user_dir
+            .join("globalStorage")
+            .join("github.copilot-chat")
+            .join("agent-traces.db");
+
+        (dir, transcript_path, otel_db_path)
     }
 
     #[test]
@@ -431,6 +601,122 @@ mod tests {
         let path = PathBuf::from("/nonexistent/transcripts/fake-session.jsonl");
         let result = extract_model_from_copilot_models_json(&path).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_model_copilot_otel_newest_request_model_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("agent-traces.db");
+        let conn = create_copilot_otel_db(&db_path);
+        insert_copilot_otel_model(
+            &conn,
+            "span-1",
+            "session-abc",
+            Some("gpt-4.1"),
+            Some("gpt-4.1-2025-04-14"),
+            1000.0,
+        );
+        insert_copilot_otel_model(
+            &conn,
+            "span-2",
+            "session-abc",
+            Some("claude-sonnet-4"),
+            Some("claude-sonnet-4-20250514"),
+            2000.0,
+        );
+        insert_copilot_otel_model(
+            &conn,
+            "span-3",
+            "session-abc",
+            None,
+            Some("response-only-newer"),
+            3000.0,
+        );
+        insert_copilot_otel_model(
+            &conn,
+            "span-4",
+            "other-session",
+            Some("gpt-5"),
+            Some("gpt-5-2026-01-01"),
+            4000.0,
+        );
+        drop(conn);
+
+        let result = extract_model(
+            &db_path,
+            StreamFormat::CopilotOtelSqlite,
+            Some("session-abc"),
+        )
+        .unwrap();
+        assert_eq!(result, Some("claude-sonnet-4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_otel_falls_back_to_response_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("agent-traces.db");
+        let conn = create_copilot_otel_db(&db_path);
+        insert_copilot_otel_model(
+            &conn,
+            "span-1",
+            "session-abc",
+            None,
+            Some("gpt-4.1-2025-04-14"),
+            1000.0,
+        );
+        insert_copilot_otel_model(
+            &conn,
+            "span-2",
+            "session-abc",
+            None,
+            Some("gpt-5-2026-01-01"),
+            2000.0,
+        );
+        drop(conn);
+
+        let result = extract_model(
+            &db_path,
+            StreamFormat::CopilotOtelSqlite,
+            Some("session-abc"),
+        )
+        .unwrap();
+        assert_eq!(result, Some("gpt-5-2026-01-01".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_vscode_transcript_prefers_otel_over_models_json() {
+        let (_dir, transcript_path, otel_db_path) = create_copilot_vscode_workspace();
+        let conn = create_copilot_otel_db(&otel_db_path);
+        insert_copilot_otel_model(
+            &conn,
+            "span-1",
+            "session-abc",
+            Some("claude-sonnet-4"),
+            Some("claude-sonnet-4-20250514"),
+            1000.0,
+        );
+        drop(conn);
+
+        let result = extract_model_from_copilot_vscode_transcript(
+            &transcript_path,
+            StreamFormat::CopilotEventStreamJsonl,
+            "session-abc",
+        )
+        .unwrap();
+        assert_eq!(result, Some("claude-sonnet-4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_vscode_transcript_falls_back_to_models_json() {
+        let (_dir, transcript_path, _otel_db_path) = create_copilot_vscode_workspace();
+
+        let result = extract_model_from_copilot_vscode_transcript(
+            &transcript_path,
+            StreamFormat::CopilotEventStreamJsonl,
+            "session-abc",
+        )
+        .unwrap();
+        assert_eq!(result, Some("gpt-4.1".to_string()));
     }
 
     #[test]

@@ -230,14 +230,13 @@ pub(super) fn parse_vscode_native_hooks(
                         }
                         _ => crate::streams::sweep::StreamFormat::CopilotSessionJson,
                     };
-                    model_extraction::extract_model(path, sweep_format, None)
-                        .ok()
-                        .flatten()
-                        .or_else(|| {
-                            model_extraction::extract_model_from_copilot_models_json(path)
-                                .ok()
-                                .flatten()
-                        })
+                    model_extraction::extract_model_from_copilot_vscode_transcript(
+                        path,
+                        sweep_format,
+                        &session_id,
+                    )
+                    .ok()
+                    .flatten()
                 })
                 .unwrap_or_else(|| "unknown".to_string()),
         },
@@ -601,6 +600,79 @@ mod tests {
                         ..
                     })
                 ));
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_copilot_native_model_prefers_otel_selected_model_over_models_json_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_dir = dir.path().join("User");
+        let transcript_path = user_dir
+            .join("workspaceStorage")
+            .join("workspace-1")
+            .join("GitHub.copilot-chat")
+            .join("transcripts")
+            .join("session-abc.jsonl");
+        std::fs::create_dir_all(transcript_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"session.start","data":{"sessionId":"session-abc"}}"#,
+        )
+        .unwrap();
+
+        let models_path = user_dir
+            .join("workspaceStorage")
+            .join("workspace-1")
+            .join("GitHub.copilot-chat")
+            .join("debug-logs")
+            .join("session-abc")
+            .join("models.json");
+        std::fs::create_dir_all(models_path.parent().unwrap()).unwrap();
+        std::fs::write(&models_path, r#"[{"id":"gpt-4.1","is_chat_default":true}]"#).unwrap();
+
+        let otel_db_path = user_dir
+            .join("globalStorage")
+            .join("github.copilot-chat")
+            .join("agent-traces.db");
+        std::fs::create_dir_all(otel_db_path.parent().unwrap()).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&otel_db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spans (
+                span_id TEXT PRIMARY KEY,
+                chat_session_id TEXT,
+                request_model TEXT,
+                response_model TEXT,
+                end_time_ms REAL NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spans (span_id, chat_session_id, request_model, response_model, end_time_ms)
+             VALUES ('span-1', 'session-abc', 'claude-sonnet-4', 'claude-sonnet-4-20250514', 1000)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "create_file",
+            "session_id": "session-abc",
+            "tool_use_id": "tu-2",
+            "tool_input": {"file_path": "/home/user/project/src/new.rs"},
+            "transcript_path": transcript_path
+        })
+        .to_string();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.model, "claude-sonnet-4");
             }
             _ => panic!("Expected PostFileEdit"),
         }

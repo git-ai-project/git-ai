@@ -75,6 +75,44 @@ fn test_config_transcript_streaming_lookback_days_set_get_unset() {
 }
 
 #[test]
+fn test_config_checkpoint_budget_set_get_unset() {
+    let repo = TestRepo::new();
+
+    repo.git_ai(&[
+        "config",
+        "set",
+        "max_checkpoint_total_size_bytes",
+        "1048576",
+    ])
+    .expect("set max_checkpoint_total_size_bytes");
+    assert_eq!(
+        get_json(&repo, "max_checkpoint_total_size_bytes"),
+        Value::Number(1_048_576.into())
+    );
+
+    repo.git_ai(&["config", "set", "max_checkpoint_total_lines", "4096"])
+        .expect("set max_checkpoint_total_lines");
+    assert_eq!(
+        get_json(&repo, "max_checkpoint_total_lines"),
+        Value::Number(4096.into())
+    );
+
+    repo.git_ai(&["config", "unset", "max_checkpoint_total_size_bytes"])
+        .expect("unset max_checkpoint_total_size_bytes");
+    assert_eq!(
+        get_json(&repo, "max_checkpoint_total_size_bytes"),
+        Value::Number((32 * 1024 * 1024).into())
+    );
+
+    repo.git_ai(&["config", "unset", "max_checkpoint_total_lines"])
+        .expect("unset max_checkpoint_total_lines");
+    assert_eq!(
+        get_json(&repo, "max_checkpoint_total_lines"),
+        Value::Number(500_000.into())
+    );
+}
+
+#[test]
 fn test_config_custom_attributes_object_set_get_unset() {
     let repo = TestRepo::new();
 
@@ -242,6 +280,8 @@ fn test_config_show_all_includes_new_keys() {
 
     assert!(value.get("allow_superuser").is_some());
     assert!(value.get("transcript_streaming_lookback_days").is_some());
+    assert!(value.get("max_checkpoint_total_size_bytes").is_some());
+    assert!(value.get("max_checkpoint_total_lines").is_some());
     assert!(value.get("custom_attributes").is_some());
 }
 
@@ -305,6 +345,9 @@ fn fully_populated_file_config() -> FileConfig {
         codex_hooks_format: Some("config_toml".to_string()),
         notes_backend: Some(NotesBackendConfig::default()),
         transcript_streaming_lookback_days: Some(7),
+        max_checkpoint_file_size_bytes: Some(3 * 1024 * 1024),
+        max_checkpoint_total_size_bytes: Some(32 * 1024 * 1024),
+        max_checkpoint_total_lines: Some(500_000),
     }
 }
 
