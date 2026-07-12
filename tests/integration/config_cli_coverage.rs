@@ -105,6 +105,51 @@ fn test_config_custom_attributes_object_set_get_unset() {
 }
 
 #[test]
+fn test_config_notes_backend_api_key_set_get_unset() {
+    let repo = TestRepo::new();
+
+    // Default: notes_backend has no api_key.
+    assert_eq!(get_json(&repo, "notes_backend.api_key"), Value::Null);
+
+    // Setting it persists the key; reads always come back masked, never raw.
+    repo.git_ai(&[
+        "config",
+        "set",
+        "notes_backend.api_key",
+        "notes-secret-key-1234",
+    ])
+    .expect("set notes_backend.api_key");
+    assert_eq!(
+        get_json(&repo, "notes_backend.api_key"),
+        Value::String("note...1234".to_string())
+    );
+
+    // The object view also carries the masked key.
+    let obj = get_json(&repo, "notes_backend");
+    assert_eq!(obj["api_key"], Value::String("note...1234".to_string()));
+
+    // The raw key is persisted to the config file (like the top-level api_key),
+    // but the top-level api_key stays untouched.
+    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
+    let contents = std::fs::read_to_string(&config_path).expect("read config file");
+    let parsed: Value = serde_json::from_str(&contents).expect("config file is JSON");
+    assert_eq!(
+        parsed["notes_backend"]["api_key"],
+        Value::String("notes-secret-key-1234".to_string())
+    );
+    assert!(
+        parsed.get("api_key").is_none(),
+        "top-level api_key must not be set by notes_backend.api_key, got: {contents}"
+    );
+
+    // Unset removes it; with no other notes_backend fields set, the object
+    // returns to defaults.
+    repo.git_ai(&["config", "unset", "notes_backend.api_key"])
+        .expect("unset notes_backend.api_key");
+    assert_eq!(get_json(&repo, "notes_backend.api_key"), Value::Null);
+}
+
+#[test]
 fn test_config_custom_attributes_nested_set_get_unset() {
     let repo = TestRepo::new();
 

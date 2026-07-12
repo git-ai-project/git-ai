@@ -459,7 +459,7 @@ pub fn warm_cache_for_remote(repo: &Repository, remote: &str) -> Result<(), GitA
             return Ok(());
         }
     };
-    let ctx = ApiContext::new(Some(backend_url));
+    let ctx = ApiContext::for_notes_backend(Some(backend_url));
     let client = ApiClient::new(ctx);
 
     // Skip when not authenticated (matches daemon flush_notes pattern).
@@ -562,7 +562,7 @@ fn http_fetch_and_cache_notes(commit_shas: &[String]) -> HashMap<String, String>
         return HashMap::new();
     };
 
-    let ctx = crate::api::client::ApiContext::new(Some(backend_url));
+    let ctx = crate::api::client::ApiContext::for_notes_backend(Some(backend_url));
     let client = crate::api::client::ApiClient::new(ctx);
     if !client.is_logged_in() && !client.has_api_key() {
         return HashMap::new();

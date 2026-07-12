@@ -130,6 +130,7 @@ fn log_plain_rejects_http_backend() {
         patch.notes_backend = Some(NotesBackendConfig {
             kind: NotesBackendKind::Http,
             backend_url: None,
+            api_key: None,
         });
     });
 
@@ -176,6 +177,7 @@ fn log_http_backend_reads_notes_db_without_git_notes_ref() {
         patch.notes_backend = Some(NotesBackendConfig {
             kind: NotesBackendKind::Http,
             backend_url: None,
+            api_key: None,
         });
     });
 

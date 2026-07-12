@@ -76,7 +76,7 @@ pub fn handle_notes_migrate(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let ctx = ApiContext::new(Some(backend_url));
+    let ctx = ApiContext::for_notes_backend(Some(backend_url));
     let client = ApiClient::new(ctx);
 
     // Skip if not authenticated.
@@ -484,7 +484,7 @@ mod tests {
         let server_url = server.url();
         unsafe {
             std::env::set_var("GIT_AI_NOTES_BACKEND_URL", &server_url);
-            std::env::set_var("GIT_AI_API_KEY", "migrate-test-key");
+            std::env::set_var("GIT_AI_NOTES_BACKEND_API_KEY", "migrate-test-key");
         }
 
         // --- Run the migration core logic ---
@@ -514,7 +514,7 @@ mod tests {
             .notes_backend_url()
             .expect("test should configure notes_backend.backend_url")
             .to_string();
-        let ctx = ApiContext::new(Some(backend_url));
+        let ctx = ApiContext::for_notes_backend(Some(backend_url));
         let client = ApiClient::new(ctx);
 
         let note_entries: Vec<NoteEntry> = entries
@@ -570,7 +570,7 @@ mod tests {
         // Cleanup.
         unsafe {
             std::env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
-            std::env::remove_var("GIT_AI_API_KEY");
+            std::env::remove_var("GIT_AI_NOTES_BACKEND_API_KEY");
             std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
         }
     }
@@ -687,12 +687,12 @@ mod tests {
             let server_url = server.url();
             unsafe {
                 std::env::set_var("GIT_AI_NOTES_BACKEND_URL", &server_url);
-                std::env::set_var("GIT_AI_API_KEY", "force-test-key");
+                std::env::set_var("GIT_AI_NOTES_BACKEND_API_KEY", "force-test-key");
             }
 
             let cfg = crate::config::Config::fresh();
             let backend_url = cfg.notes_backend_url().unwrap().to_string();
-            let ctx = ApiContext::new(Some(backend_url));
+            let ctx = ApiContext::for_notes_backend(Some(backend_url));
             let client = ApiClient::new(ctx);
 
             let note_entries: Vec<NoteEntry> = forced_entries
@@ -724,7 +724,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
-            std::env::remove_var("GIT_AI_API_KEY");
+            std::env::remove_var("GIT_AI_NOTES_BACKEND_API_KEY");
             std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
         }
     }
