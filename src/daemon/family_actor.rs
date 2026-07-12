@@ -95,10 +95,9 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
     };
 
     tokio::spawn(async move {
-        let ai_dir = std::path::PathBuf::from(&family_key.0).join("ai");
-        std::mem::drop(tokio::task::spawn_blocking(move || {
-            crate::daemon::storage_sampler::register_ai_dir(ai_dir);
-        }));
+        crate::daemon::storage_sampler::register_ai_dir(
+            std::path::PathBuf::from(&family_key.0).join("ai"),
+        );
 
         let analyzers = AnalyzerRegistry::new();
         let mut state = FamilyState {

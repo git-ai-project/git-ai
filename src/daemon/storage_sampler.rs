@@ -8,10 +8,33 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Instant;
 
-static KNOWN_AI_DIRS: RwLock<Option<HashSet<PathBuf>>> = RwLock::new(None);
+struct StorageRegistry {
+    sender: mpsc::Sender<PathBuf>,
+    state: Mutex<StorageRegistryState>,
+}
+
+struct StorageRegistryState {
+    receiver: mpsc::Receiver<PathBuf>,
+    dirs: HashSet<PathBuf>,
+}
+
+static STORAGE_REGISTRY: OnceLock<StorageRegistry> = OnceLock::new();
+
+fn storage_registry() -> &'static StorageRegistry {
+    STORAGE_REGISTRY.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel();
+        StorageRegistry {
+            sender,
+            state: Mutex::new(StorageRegistryState {
+                receiver,
+                dirs: HashSet::new(),
+            }),
+        }
+    })
+}
 
 /// Maximum number of directory entries to visit per ai_dir traversal.
 const MAX_ENTRIES_PER_DIR: usize = 10_000;
@@ -30,34 +53,29 @@ pub struct StorageStats {
 
 /// Register a .git/ai directory path for storage tracking.
 pub fn register_ai_dir(ai_dir: PathBuf) {
-    let Ok(mut guard) = KNOWN_AI_DIRS.write() else {
-        return;
-    };
-    let set = guard.get_or_insert_with(HashSet::new);
-    set.insert(ai_dir);
+    let _ = storage_registry().sender.send(ai_dir);
+}
+
+fn known_ai_dirs() -> Option<Vec<PathBuf>> {
+    let mut state = storage_registry().state.lock().ok()?;
+    while let Ok(ai_dir) = state.receiver.try_recv() {
+        state.dirs.insert(ai_dir);
+    }
+    if state.dirs.is_empty() {
+        return None;
+    }
+    Some(state.dirs.iter().cloned().collect())
 }
 
 #[cfg(test)]
 pub(crate) fn is_ai_dir_registered(ai_dir: &Path) -> bool {
-    KNOWN_AI_DIRS
-        .read()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|dirs| dirs.contains(ai_dir)))
-        .unwrap_or(false)
+    known_ai_dirs().is_some_and(|dirs| dirs.iter().any(|dir| dir == ai_dir))
 }
 
 /// Compute aggregate storage statistics across all known repo ai_dirs.
-/// Returns `None` if no repos are registered or on lock failure.
+/// Returns `None` if no repos are registered or on registry failure.
 pub fn scan_storage() -> Option<StorageStats> {
-    let dirs: Vec<PathBuf> = {
-        let guard = KNOWN_AI_DIRS.read().ok()?;
-        let set = guard.as_ref()?;
-        if set.is_empty() {
-            return None;
-        }
-        set.iter().cloned().collect()
-    };
-
+    let dirs = known_ai_dirs()?;
     Some(scan_storage_dirs(&dirs))
 }
 
