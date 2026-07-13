@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub const MAX_CHECKPOINTS_JSONL_BYTES: u64 = 1024 * 1024 * 1024;
@@ -290,7 +291,7 @@ pub struct PersistedWorkingLog {
     /// On Windows, this uses the \\?\ UNC prefix format
     #[allow(dead_code)]
     pub canonical_workdir: PathBuf,
-    pub dirty_files: Option<HashMap<String, String>>,
+    pub dirty_files: Option<HashMap<String, Arc<str>>>,
     pub initial_file: PathBuf,
 }
 
@@ -300,7 +301,7 @@ impl PersistedWorkingLog {
         base_commit: &str,
         repo_root: PathBuf,
         canonical_workdir: PathBuf,
-        dirty_files: Option<HashMap<String, String>>,
+        dirty_files: Option<HashMap<String, Arc<str>>>,
     ) -> Self {
         let initial_file = dir.join("INITIAL");
         Self {
@@ -313,7 +314,7 @@ impl PersistedWorkingLog {
         }
     }
 
-    pub fn set_dirty_files(&mut self, dirty_files: Option<HashMap<String, String>>) {
+    pub fn set_dirty_files(&mut self, dirty_files: Option<HashMap<String, Arc<str>>>) {
         let normalized_dirty_files = dirty_files.map(|map| {
             map.into_iter()
                 .map(|(file_path, content)| {
@@ -437,7 +438,7 @@ impl PersistedWorkingLog {
         file_path.to_string()
     }
 
-    pub fn read_current_file_content(&self, file_path: &str) -> Result<String, GitAiError> {
+    pub fn read_current_file_content(&self, file_path: &str) -> Result<Arc<str>, GitAiError> {
         if let Some(ref dirty_files) = self.dirty_files
             && let Some(content) = dirty_files.get(&file_path.to_string())
         {

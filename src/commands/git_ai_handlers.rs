@@ -1214,11 +1214,14 @@ fn discover_dirty_files_from_status(cwd: &std::path::Path) -> Vec<String> {
         .and_then(|r| r.workdir().ok())
         .unwrap_or_else(|| cwd.to_path_buf());
 
-    let output = std::process::Command::new(crate::config::Config::get().git_cmd())
-        .args(["status", "--porcelain", "-uall"])
-        .current_dir(cwd)
-        .output()
-        .ok();
+    let args = vec![
+        "-C".to_string(),
+        cwd.to_string_lossy().to_string(),
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "-uall".to_string(),
+    ];
+    let output = crate::git::repository::exec_git(&args).ok();
     let Some(output) = output else {
         return vec![];
     };
