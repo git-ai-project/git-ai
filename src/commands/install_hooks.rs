@@ -14,7 +14,7 @@ use std::time::Duration;
 
 const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
 const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
-const TRACE2_EVENT_NESTING_VALUE: &str = "10";
+const TRACE2_EVENT_NESTING_VALUE: &str = "0";
 const VISUAL_STUDIO_INSTALLER_ID: &str = "visual-studio";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -199,11 +199,14 @@ fn find_running_pids(process_names: &[&str]) -> Vec<(u32, String)> {
 }
 
 fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<(), GitAiError> {
-    let status = Command::new(git_cmd)
+    let mut command = Command::new(git_cmd);
+    command
         .args(["config", "--global", key, value])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+        .stderr(Stdio::null());
+    crate::git::repository::apply_internal_git_env(&mut command);
+
+    let status = command.status()?;
     if status.success() {
         Ok(())
     } else {
@@ -230,11 +233,14 @@ fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
 }
 
 fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), GitAiError> {
-    let status = Command::new(git_cmd)
+    let mut command = Command::new(git_cmd);
+    command
         .args(["config", "--global", "--remove-section", section])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+        .stderr(Stdio::null());
+    crate::git::repository::apply_internal_git_env(&mut command);
+
+    let status = command.status()?;
     // Exit code 128 means the section doesn't exist, which is fine.
     if status.success() || status.code() == Some(128) {
         Ok(())
@@ -747,11 +753,14 @@ fn parse_git_version(output: &str) -> Option<(u32, u32, u32)> {
 
 /// Print a loud warning if the installed git version is older than MIN_GIT_VERSION.
 fn warn_if_git_version_too_old() {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["--version"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
+        .stderr(Stdio::null());
+    crate::git::repository::apply_internal_git_env(&mut command);
+
+    let output = command.output();
 
     let version = match output {
         Ok(o) => {
