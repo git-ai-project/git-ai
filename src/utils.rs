@@ -107,7 +107,7 @@ fn is_package_bootstrap_exe(path: &std::path::Path) -> bool {
         .to_string_lossy()
         .replace('\\', "/")
         .to_ascii_lowercase();
-    path.ends_with("/opt/git-ai/bin/git-ai") || path.ends_with("/program files/git ai/git-ai.exe")
+    path.ends_with("/opt/git-ai/bin/git-ai") || path.ends_with("/appdata/local/git ai/git-ai.exe")
 }
 
 fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
@@ -1232,6 +1232,9 @@ mod tests {
             "/opt/git-ai/bin/git-ai"
         )));
         assert!(is_package_bootstrap_exe(std::path::Path::new(
+            r"C:\Users\alice\AppData\Local\Git AI\git-ai.exe"
+        )));
+        assert!(!is_package_bootstrap_exe(std::path::Path::new(
             r"C:\Program Files\Git AI\git-ai.exe"
         )));
         assert!(!is_package_bootstrap_exe(std::path::Path::new(
