@@ -16,3 +16,14 @@ data directory and changes only that user's `PATH`. It has no all-users or
 Administrator install mode. The macOS PKG installs an immutable bootstrap
 binary, then runs any per-user setup as the active console user rather than
 root.
+
+For an enterprise endpoint, pass configuration to the MSI when installing:
+
+```powershell
+msiexec /i git-ai-windows-x64.msi API_BASE=https://git-ai.example API_KEY=your-api-key
+```
+
+These values configure only the installing user's Git AI config. They are
+hidden from MSI logs, but command-line arguments can still be visible to local
+process inspection and shell history. Use your endpoint-management secret
+mechanism when available.

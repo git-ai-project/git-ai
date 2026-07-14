@@ -32,6 +32,8 @@ struct PackageSetupOptions {
     manager: PackageManager,
     dry_run: bool,
     target_user: Option<String>,
+    api_base: Option<String>,
+    api_key: Option<String>,
 }
 
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
@@ -49,13 +51,15 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     if options.dry_run {
         install_args[0] = "--dry-run=true".to_string();
     }
-    install_hooks::run(&install_args)
+    install_hooks::run_with_package_config(&install_args, options.api_base, options.api_key)
 }
 
 fn parse_options(args: &[String]) -> Result<PackageSetupOptions, GitAiError> {
     let mut manager = None;
     let mut dry_run = false;
     let mut target_user = None;
+    let mut api_base = None;
+    let mut api_key = None;
     let mut iter = args.iter();
 
     while let Some(arg) = iter.next() {
@@ -73,6 +77,20 @@ fn parse_options(args: &[String]) -> Result<PackageSetupOptions, GitAiError> {
                 GitAiError::Generic("missing value for --target-user".to_string())
             })?;
             target_user = non_empty_value(value);
+        } else if let Some(value) = arg.strip_prefix("--api-base=") {
+            api_base = non_empty_value(value);
+        } else if arg == "--api-base" {
+            let value = iter
+                .next()
+                .ok_or_else(|| GitAiError::Generic("missing value for --api-base".to_string()))?;
+            api_base = non_empty_value(value);
+        } else if let Some(value) = arg.strip_prefix("--api-key=") {
+            api_key = non_empty_value(value);
+        } else if arg == "--api-key" {
+            let value = iter
+                .next()
+                .ok_or_else(|| GitAiError::Generic("missing value for --api-key".to_string()))?;
+            api_key = non_empty_value(value);
         } else if arg == "--dry-run" || arg == "--dry-run=true" {
             dry_run = true;
         } else if arg == "--dry-run=false" {
@@ -90,6 +108,8 @@ fn parse_options(args: &[String]) -> Result<PackageSetupOptions, GitAiError> {
         manager,
         dry_run,
         target_user,
+        api_base,
+        api_key,
     })
 }
 
@@ -146,6 +166,23 @@ mod tests {
         assert_eq!(options.manager, PackageManager::Pkg);
         assert!(options.dry_run);
         assert_eq!(options.target_user.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_options_accepts_msi_api_configuration() {
+        let options = parse_options(&strings(&[
+            "--manager=msi",
+            "--api-base=https://enterprise.example",
+            "--api-key",
+            "sk-enterprise-key",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            options.api_base.as_deref(),
+            Some("https://enterprise.example")
+        );
+        assert_eq!(options.api_key.as_deref(), Some("sk-enterprise-key"));
     }
 
     #[test]

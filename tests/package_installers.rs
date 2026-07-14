@@ -19,6 +19,23 @@ fn msi_is_per_user_and_updates_only_the_user_path() {
 }
 
 #[test]
+fn msi_accepts_hidden_api_properties_and_configures_the_installing_user() {
+    let wix = std::fs::read_to_string(packaging_path("windows/git-ai.wxs")).unwrap();
+    let readme = std::fs::read_to_string(packaging_path("README.md")).unwrap();
+
+    assert!(wix.contains("Property Id=\"API_BASE\" Hidden=\"yes\""));
+    assert!(wix.contains("Property Id=\"API_KEY\" Hidden=\"yes\""));
+    assert!(wix.contains("FileRef=\"GitAiExe\""));
+    assert!(wix.contains("Execute=\"deferred\""));
+    assert!(wix.contains("Impersonate=\"yes\""));
+    assert!(wix.contains("HideTarget=\"yes\""));
+    assert!(wix.contains("setup-package --manager msi"));
+    assert!(readme.contains("msiexec /i"));
+    assert!(readme.contains("API_BASE="));
+    assert!(readme.contains("API_KEY="));
+}
+
+#[test]
 fn packaging_supports_only_msi_and_pkg() {
     assert!(packaging_path("windows").is_dir());
     assert!(packaging_path("macos").is_dir());

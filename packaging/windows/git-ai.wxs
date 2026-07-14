@@ -8,6 +8,8 @@
     Scope="perUser">
     <MajorUpgrade DowngradeErrorMessage="A newer version of Git AI is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <Property Id="API_BASE" Hidden="yes" Secure="yes" />
+    <Property Id="API_KEY" Hidden="yes" Secure="yes" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="Git AI" />
@@ -30,5 +32,23 @@
     <Feature Id="DefaultFeature" Title="Git AI" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
     </Feature>
+
+    <SetProperty
+      Id="ConfigureGitAi"
+      Value="setup-package --manager msi --api-base &quot;[API_BASE]&quot; --api-key &quot;[API_KEY]&quot;"
+      Before="ConfigureGitAi"
+      Sequence="execute"
+      Condition="NOT Installed" />
+    <CustomAction
+      Id="ConfigureGitAi"
+      FileRef="GitAiExe"
+      ExeCommand="[ConfigureGitAi]"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check"
+      HideTarget="yes" />
+    <InstallExecuteSequence>
+      <Custom Action="ConfigureGitAi" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>

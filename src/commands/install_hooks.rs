@@ -309,6 +309,21 @@ fn ensure_daemon(dry_run: bool) {
 
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
+    run_with_config(args, install_config_from_environment())
+}
+
+pub(crate) fn run_with_package_config(
+    args: &[String],
+    api_base: Option<String>,
+    api_key: Option<String>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    run_with_config(args, InstallConfig { api_base, api_key })
+}
+
+fn run_with_config(
+    args: &[String],
+    install_config: InstallConfig,
+) -> Result<HashMap<String, String>, GitAiError> {
     let options = parse_install_options(args);
 
     // Daemon trace2 config must be in place before any install work starts.
@@ -326,7 +341,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
-    persist_install_config(&binary_path, options.dry_run)?;
+    persist_install_config_with_values(&binary_path, options.dry_run, &install_config)?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations and convert result.
@@ -361,13 +376,35 @@ fn should_include_installer(id: &str, options: &InstallOptions) -> bool {
     options.include_visual_studio_extension || id != VISUAL_STUDIO_INSTALLER_ID
 }
 
+#[derive(Default)]
+struct InstallConfig {
+    api_base: Option<String>,
+    api_key: Option<String>,
+}
+
+#[cfg(test)]
 fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
+    persist_install_config_with_values(binary_path, dry_run, &install_config_from_environment())
+}
+
+fn install_config_from_environment() -> InstallConfig {
+    InstallConfig {
+        api_base: std::env::var("API_BASE").ok().filter(|s| !s.is_empty()),
+        api_key: std::env::var("API_KEY").ok().filter(|s| !s.is_empty()),
+    }
+}
+
+fn persist_install_config_with_values(
+    binary_path: &Path,
+    dry_run: bool,
+    install_config: &InstallConfig,
+) -> Result<bool, GitAiError> {
     if dry_run {
         return Ok(false);
     }
 
-    let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
-    let api_key = std::env::var("API_KEY").ok().filter(|s| !s.is_empty());
+    let api_base = &install_config.api_base;
+    let api_key = &install_config.api_key;
 
     if api_base.is_none() && api_key.is_none() {
         return Ok(false);
@@ -376,14 +413,14 @@ fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, Git
     let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let mut changed = false;
 
-    if let Some(ref api_base) = api_base
+    if let Some(api_base) = api_base
         && file_config.api_base_url.as_deref() != Some(api_base.as_str())
     {
         file_config.api_base_url = Some(api_base.clone());
         changed = true;
     }
 
-    if let Some(ref api_key) = api_key
+    if let Some(api_key) = api_key
         && file_config.api_key.as_deref() != Some(api_key.as_str())
     {
         file_config.api_key = Some(api_key.clone());
