@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Git AI"
+    Manufacturer="Git AI"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="$(var.UpgradeCode)"
+    Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Git AI is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="Git AI" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="GitAiExeComponent" Guid="{95D3C11E-6881-43AB-9E5B-4462AA59E0E2}">
+        <File Id="GitAiExe" Source="$(var.GitAiExe)" Name="git-ai.exe" KeyPath="yes" />
+        <Environment
+          Id="GitAiPath"
+          Name="PATH"
+          Value="[INSTALLFOLDER]"
+          Permanent="no"
+          Part="last"
+          System="no"
+          Action="set" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="DefaultFeature" Title="Git AI" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+</Wix>
