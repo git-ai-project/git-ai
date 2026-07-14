@@ -46,6 +46,24 @@ curl -sSL https://usegitai.com/install.sh | bash
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
 
+### Windows MSI beta
+
+Download the [Windows x64 MSI](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-windows-x64.msi) or [Windows ARM64 MSI](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-windows-arm64.msi), then open it. The MSI installs only for the current user, under local app data, and changes only that user's `PATH`; it does not require an Administrator install.
+
+For managed installations, pass the Git AI endpoint when invoking the MSI:
+
+```powershell
+msiexec /i git-ai-windows-x64.msi API_BASE=https://git-ai.example API_KEY=your-api-key
+```
+
+The values configure the installing user's Git AI config. Use your endpoint-management secret mechanism when possible, because command-line values can be visible in shell history and local process inspection.
+
+### macOS PKG beta
+
+Download the [Apple Silicon PKG](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-macos-arm64.pkg) or [Intel PKG](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-macos-x64.pkg), then open it. macOS asks for permission to install the bootstrap binary; Git AI configures the active logged-in user rather than root.
+
+The MSI and PKG are first-install options. Existing Git AI auto-updates continue through the current user-level update flow, and the script installs above remain available.
+
 **No per-repo setup or git hooks required.** Commit with the Agent, git, or your favorite git client. Attribution will be linked to commits automatically.
 
 **The [Git AI standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) is supported by:**

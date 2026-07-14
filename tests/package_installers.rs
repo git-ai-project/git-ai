@@ -42,3 +42,20 @@ fn packaging_supports_only_msi_and_pkg() {
     assert!(!packaging_path("debian/build-deb.sh").exists());
     assert!(!packaging_path("homebrew/update-formula.sh").exists());
 }
+
+#[test]
+fn installer_docs_cover_customer_setup_and_internal_release_policy() {
+    let customer_readme = std::fs::read_to_string("README.md").unwrap();
+    let release_runbook = std::fs::read_to_string("docs/installer-release-runbook.md").unwrap();
+
+    assert!(customer_readme.contains("git-ai-windows-x64.msi"));
+    assert!(customer_readme.contains("git-ai-macos-arm64.pkg"));
+    assert!(customer_readme.contains("API_BASE="));
+    assert!(customer_readme.contains("API_KEY="));
+    assert!(release_runbook.contains("release-prod"));
+    assert!(release_runbook.contains("release_production"));
+    assert!(release_runbook.contains("PKG-SHA256SUMS"));
+    assert!(release_runbook.contains("UTM"));
+    assert!(!release_runbook.contains("Homebrew"));
+    assert!(!release_runbook.contains("apt"));
+}
