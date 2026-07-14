@@ -309,17 +309,35 @@ fn ensure_daemon(dry_run: bool) {
 
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
+    run_inner(args, true)
+}
+
+/// Reconcile hook configuration without restarting the daemon.
+///
+/// The daemon's periodic hooks worker uses this entry point so it shares the
+/// exact install-hooks behavior while leaving the running daemon untouched.
+pub(crate) fn run_without_daemon_restart(
+    args: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    run_inner(args, false)
+}
+
+fn run_inner(args: &[String], restart_daemon: bool) -> Result<HashMap<String, String>, GitAiError> {
     let options = parse_install_options(args);
 
-    // Daemon trace2 config must be in place before any install work starts.
-    // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
-    if let Err(e) = configure_daemon_trace2(options.dry_run) {
-        eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
+    if restart_daemon {
+        // Daemon trace2 config must be in place before user-initiated install
+        // work starts. The daemon's periodic hook sync skips this non-atomic
+        // rewrite so concurrent Git commands never lose trace2 routing.
+        // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
+        if let Err(e) = configure_daemon_trace2(options.dry_run) {
+            eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
+        }
+        ensure_daemon(options.dry_run);
     }
-    ensure_daemon(options.dry_run);
 
-    // Now that the daemon is (re)started, initialize the telemetry handle so
-    // that install-hooks metrics and observability events route through it.
+    // Initialize the telemetry handle so install-hooks metrics and
+    // observability events route through the daemon.
     if !options.dry_run {
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
     }
@@ -330,7 +348,15 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let params = HookInstallerParams { binary_path };
 
     // Run async operations and convert result.
-    let statuses = crate::tokio_runtime::block_on(async_run_install(&params, &options))?;
+    // Only an explicit user invocation treats the absence of `--skills` as a
+    // request to uninstall skills. Periodic daemon reconciliation must leave
+    // the user's existing skills preference untouched.
+    let remove_unrequested_skills = restart_daemon;
+    let statuses = crate::tokio_runtime::block_on(async_run_install(
+        &params,
+        &options,
+        remove_unrequested_skills,
+    ))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
@@ -466,6 +492,7 @@ pub fn run_uninstall(args: &[String]) -> Result<HashMap<String, String>, GitAiEr
 async fn async_run_install(
     params: &HookInstallerParams,
     options: &InstallOptions,
+    remove_unrequested_skills: bool,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
     let mut any_checked = false;
     let mut has_changes = false;
@@ -646,7 +673,8 @@ async fn async_run_install(
         {
             has_changes = true;
         }
-    } else if let Ok(result) = skills_installer::uninstall_skills(options.dry_run, options.verbose)
+    } else if remove_unrequested_skills
+        && let Ok(result) = skills_installer::uninstall_skills(options.dry_run, options.verbose)
         && result.changed
     {
         has_changes = true;
