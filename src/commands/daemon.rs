@@ -348,11 +348,10 @@ fn powershell_single_quote_literal(value: &OsStr) -> String {
 
 #[cfg(any(windows, not(any(test, feature = "test-support"))))]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
-    // Use current_git_ai_exe() instead of current_exe() to resolve through
-    // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
-    // current_exe() would spawn `git daemon run` which re-enters handle_git()
-    // instead of handle_git_ai(), causing a fork bomb in async mode.
-    let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
+    // Resolve through git shims and, for a package bootstrap, prefer the
+    // current user's verified update. This avoids re-entering handle_git()
+    // through a `git` shim and keeps package startup on the updated runtime.
+    let exe = crate::utils::daemon_git_ai_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
 
     #[cfg(windows)]
@@ -428,7 +427,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 fn spawn_daemon_run_with_piped_stderr(
     config: &DaemonConfig,
 ) -> Result<std::process::Child, String> {
-    let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
+    let exe = crate::utils::daemon_git_ai_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
     let mut child = Command::new(exe);
     child
