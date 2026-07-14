@@ -179,6 +179,8 @@ fn alias_with_double_quotes() {
 fn aliased_commit_triggers_authorship_hooks() {
     let repo = TestRepo::new();
 
+    // TestRepo routes real Git trace2 events through the daemon with the
+    // default nesting value, so this covers aliases under nesting=0.
     // Configure alias: ci = commit
     repo.git(&["config", "alias.ci", "commit"]).unwrap();
 

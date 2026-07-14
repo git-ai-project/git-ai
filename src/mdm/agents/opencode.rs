@@ -250,6 +250,26 @@ mod tests {
         }
     }
 
+    fn with_empty_path<F: FnOnce()>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let prev_path = std::env::var_os("PATH");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", temp_dir.path());
+        }
+
+        f();
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
     #[test]
     fn test_opencode_install_plugin_creates_file_from_scratch() {
         let (_temp_dir, plugin_path) = setup_test_env();
@@ -429,15 +449,17 @@ mod tests {
     #[serial]
     fn test_opencode_no_binary_no_config_not_detected() {
         with_temp_home(|_home| {
-            let installer = OpenCodeInstaller;
-            let params = HookInstallerParams {
-                binary_path: create_test_binary_path(),
-            };
-            let result = installer.check_hooks(&params).unwrap();
-            assert!(
-                !result.tool_installed,
-                "no binary and no config should mean tool_installed=false"
-            );
+            with_empty_path(|| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.check_hooks(&params).unwrap();
+                assert!(
+                    !result.tool_installed,
+                    "no binary and no config should mean tool_installed=false"
+                );
+            });
         });
     }
 

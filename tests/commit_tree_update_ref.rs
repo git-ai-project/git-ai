@@ -110,7 +110,7 @@ fn raw_traced_git(repo: &TestRepo, args: &[&str]) -> String {
     );
     command.env(
         "GIT_TRACE2_EVENT_NESTING",
-        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "0".to_string()),
     );
 
     let output = command
@@ -152,7 +152,7 @@ fn raw_traced_git_stdin(repo: &TestRepo, args: &[&str], stdin: &str) -> String {
     );
     command.env(
         "GIT_TRACE2_EVENT_NESTING",
-        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "0".to_string()),
     );
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -206,7 +206,7 @@ fn raw_traced_git_with_session(repo: &TestRepo, args: &[&str], session: &str) ->
     );
     command.env(
         "GIT_TRACE2_EVENT_NESTING",
-        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "0".to_string()),
     );
 
     let output = command
@@ -257,7 +257,7 @@ fn raw_git_trace_to_file_output(repo: &TestRepo, args: &[&str], trace_path: &Pat
     command.env("GIT_TRACE2_EVENT", trace_path);
     command.env(
         "GIT_TRACE2_EVENT_NESTING",
-        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "0".to_string()),
     );
 
     command

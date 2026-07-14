@@ -16,6 +16,8 @@ pub enum BackgroundAgent {
 }
 
 pub fn detect() -> BackgroundAgent {
+    // With-hooks agents are explicitly declared and take precedence over
+    // directory-based no-hooks detection.
     if std::env::var("CLAUDE_CODE_REMOTE")
         .map(|v| v == "true")
         .unwrap_or(false)
@@ -37,22 +39,11 @@ pub fn detect() -> BackgroundAgent {
         };
     }
 
+    // No-hooks background agents declared via environment variables.
     if std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_")) {
         return BackgroundAgent::NoHooks {
             tool: "cloud-agent".to_string(),
             id: placeholder_id("CLOUD_AGENT"),
-        };
-    }
-
-    if std::path::Path::new(DEVIN_DIR_PATH).is_dir() {
-        let id = std::fs::read_to_string(DEVIN_ID_PATH)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| placeholder_id("DEVIN"));
-        return BackgroundAgent::NoHooks {
-            tool: "devin".to_string(),
-            id,
         };
     }
 
@@ -77,6 +68,25 @@ pub fn detect() -> BackgroundAgent {
         return BackgroundAgent::NoHooks {
             tool: "git-ai-cloud-agent".to_string(),
             id: placeholder_id("GIT_AI_CLOUD_AGENT"),
+        };
+    }
+
+    // Directory-based Devin detection can only be active when the git-ai daemon
+    // is running a real user session (not a test suite). Test suites set
+    // GIT_AI_TEST_DB_PATH for spawned commands/daemons, so skip /opt/.devin
+    // when that marker is present.
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_none()
+        && std::env::var_os("GITAI_TEST_DB_PATH").is_none()
+        && std::path::Path::new(DEVIN_DIR_PATH).is_dir()
+    {
+        let id = std::fs::read_to_string(DEVIN_ID_PATH)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| placeholder_id("DEVIN"));
+        return BackgroundAgent::NoHooks {
+            tool: "devin".to_string(),
+            id,
         };
     }
 

@@ -637,7 +637,7 @@ mod tests {
             .join("github.copilot-chat")
             .join("agent-traces.db");
         std::fs::create_dir_all(otel_db_path.parent().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open(&otel_db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&otel_db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE spans (
                 span_id TEXT PRIMARY KEY,

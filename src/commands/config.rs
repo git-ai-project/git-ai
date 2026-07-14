@@ -119,6 +119,9 @@ fn print_config_help() {
     println!(
         "  transcript_streaming_lookback_days  Days to look back when sweeping transcripts (0 = unlimited)"
     );
+    println!("  max_checkpoint_file_size_bytes      Per-file checkpoint content limit in bytes");
+    println!("  max_checkpoint_total_size_bytes     Per-checkpoint content limit in bytes");
+    println!("  max_checkpoint_total_lines          Per-checkpoint content limit in lines");
     println!("  custom_attributes            Custom telemetry attributes, string->string (object)");
     println!("  git_ai_hooks                 Hook name -> shell commands map (object)");
     println!("  codex_hooks_format           Codex hook install format (config_toml/hooks_json)");
@@ -375,6 +378,19 @@ fn show_all_config() -> Result<(), String> {
     );
 
     effective_config.insert(
+        "max_checkpoint_file_size_bytes".to_string(),
+        Value::Number(runtime_config.max_checkpoint_file_size_bytes().into()),
+    );
+    effective_config.insert(
+        "max_checkpoint_total_size_bytes".to_string(),
+        Value::Number(runtime_config.max_checkpoint_total_size_bytes().into()),
+    );
+    effective_config.insert(
+        "max_checkpoint_total_lines".to_string(),
+        Value::Number(runtime_config.max_checkpoint_total_lines().into()),
+    );
+
+    effective_config.insert(
         "custom_attributes".to_string(),
         serde_json::to_value(runtime_config.custom_attributes())
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
@@ -503,6 +519,15 @@ fn get_config_value(key: &str) -> Result<(), String> {
                     .unwrap_or(0)
                     .into(),
             ),
+            "max_checkpoint_file_size_bytes" => {
+                Value::Number(runtime_config.max_checkpoint_file_size_bytes().into())
+            }
+            "max_checkpoint_total_size_bytes" => {
+                Value::Number(runtime_config.max_checkpoint_total_size_bytes().into())
+            }
+            "max_checkpoint_total_lines" => {
+                Value::Number(runtime_config.max_checkpoint_total_lines().into())
+            }
             "custom_attributes" => serde_json::to_value(runtime_config.custom_attributes())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "notes_backend" => {
@@ -806,6 +831,39 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.transcript_streaming_lookback_days = Some(days);
                 crate::config::save_file_config(&file_config)?;
                 println!("[transcript_streaming_lookback_days]: {}", days);
+            }
+            "max_checkpoint_file_size_bytes" => {
+                let bytes = value.trim().parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid max_checkpoint_file_size_bytes value '{}'. Expected a non-negative integer in bytes",
+                        value
+                    )
+                })?;
+                file_config.max_checkpoint_file_size_bytes = Some(bytes);
+                crate::config::save_file_config(&file_config)?;
+                println!("[max_checkpoint_file_size_bytes]: {}", bytes);
+            }
+            "max_checkpoint_total_size_bytes" => {
+                let bytes = value.trim().parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid max_checkpoint_total_size_bytes value '{}'. Expected a non-negative integer in bytes",
+                        value
+                    )
+                })?;
+                file_config.max_checkpoint_total_size_bytes = Some(bytes);
+                crate::config::save_file_config(&file_config)?;
+                println!("[max_checkpoint_total_size_bytes]: {}", bytes);
+            }
+            "max_checkpoint_total_lines" => {
+                let lines = value.trim().parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid max_checkpoint_total_lines value '{}'. Expected a non-negative integer in lines",
+                        value
+                    )
+                })?;
+                file_config.max_checkpoint_total_lines = Some(lines);
+                crate::config::save_file_config(&file_config)?;
+                println!("[max_checkpoint_total_lines]: {}", lines);
             }
             "custom_attributes" => {
                 if add_mode {
@@ -1144,6 +1202,27 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [transcript_streaming_lookback_days]: {}", v);
+                }
+            }
+            "max_checkpoint_file_size_bytes" => {
+                let old_value = file_config.max_checkpoint_file_size_bytes.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [max_checkpoint_file_size_bytes]: {}", v);
+                }
+            }
+            "max_checkpoint_total_size_bytes" => {
+                let old_value = file_config.max_checkpoint_total_size_bytes.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [max_checkpoint_total_size_bytes]: {}", v);
+                }
+            }
+            "max_checkpoint_total_lines" => {
+                let old_value = file_config.max_checkpoint_total_lines.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [max_checkpoint_total_lines]: {}", v);
                 }
             }
             "custom_attributes" => {

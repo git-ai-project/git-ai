@@ -229,6 +229,12 @@ Uses `insta` crate. Snapshots live in `tests/integration/snapshots/` and `tests/
 - **`GIT_AI_VERSION` constant** changes between debug/release/test modes via `cfg` attributes in `authorship_log_serialization.rs`.
 - **Cross-platform**: `#[cfg(unix)]` / `#[cfg(windows)]` conditional compilation is used extensively (well over a hundred `#[cfg(windows)]` annotations across ~two dozen files) for signal handling, process creation flags (`CREATE_NO_WINDOW`), path handling, terminal detection, and named-pipe vs unix-socket transport (e.g. the daemon control/trace sockets are named pipes on Windows, so `Path::exists()` checks are gated to non-Windows).
 
+## Optimize for Human Review
+
+- Always write code optimized for human review. No code can be merged without a greenlight from a human, so make it easy for humans to review your code. This means clear naming, clear refactors as needed, and, most importantly, minimal and simple code. Clean, DRY, simple, maintainable code is your true north star.
+- Always submit work with Graphite (if `gt` CLI is available) as a stack of pull requests, with each pull request representing a logical, self-contained chunk of the problem. This is how you present your work for human review.
+- Before stopping, ensure every submitted pull request passes all CI checks and all Devin review feedback has been addressed and resolved.
+
 ## Gotchas
 
 - **Test binary auto-compilation**: Integration tests trigger `cargo build --bin git-ai` on first test run via `OnceLock`. If you change code and run tests, the test harness recompiles. This can cause confusion if you're debugging -- the test binary is always a debug build at `target/debug/git-ai`.

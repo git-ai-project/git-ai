@@ -310,6 +310,10 @@ mod tests {
                     e.context.metadata.get("command").map(String::as_str),
                     Some("printf 'generated\\n' > output.txt")
                 );
+                assert_eq!(
+                    e.command.as_deref(),
+                    Some("printf 'generated\\n' > output.txt")
+                );
             }
             _ => panic!("Expected PreBashCall"),
         }
@@ -341,6 +345,10 @@ mod tests {
                     e.context.metadata.get("command").map(String::as_str),
                     Some("printf 'generated\\n' > output.txt")
                 );
+                assert_eq!(
+                    e.command.as_deref(),
+                    Some("printf 'generated\\n' > output.txt")
+                );
                 assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostBashCall"),
@@ -362,6 +370,7 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.tool_use_id, "shell");
                 assert!(e.context.metadata.is_empty());
+                assert!(e.command.is_none());
             }
             _ => panic!("Expected PreBashCall"),
         }
