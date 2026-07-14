@@ -1,6 +1,6 @@
 use crate::git::refs::{
-    AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref, fallback_merge_notes_ours, merge_notes_from_ref,
-    ref_exists, tracking_ref_for_remote,
+    AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref_if_missing, fallback_merge_notes_ours,
+    merge_notes_from_ref, ref_exists, tracking_ref_for_remote,
 };
 use crate::{
     error::GitAiError,
@@ -188,6 +188,52 @@ pub fn fetch_missing_notes_for_commits(
     Ok(())
 }
 
+fn merge_tracking_ref_into_local_notes(
+    repository: &Repository,
+    tracking_ref: &str,
+    local_notes_ref: &str,
+) -> Result<(), GitAiError> {
+    tracing::debug!(
+        "merging authorship notes from {} into {}",
+        tracking_ref,
+        local_notes_ref
+    );
+    if let Err(e) = merge_notes_from_ref(repository, tracking_ref) {
+        tracing::debug!("notes merge failed: {}", e);
+        // Fallback: manually merge notes when git notes merge crashes
+        // (e.g., due to corrupted/mixed-fanout notes trees, or git bugs
+        // with fanout-level mismatches on older git versions like macOS)
+        fallback_merge_notes_ours(repository, tracking_ref)?;
+    }
+    Ok(())
+}
+
+fn initialize_or_merge_tracking_notes(
+    repository: &Repository,
+    tracking_ref: &str,
+    local_notes_ref: &str,
+) -> Result<(), GitAiError> {
+    if ref_exists(repository, local_notes_ref) {
+        return merge_tracking_ref_into_local_notes(repository, tracking_ref, local_notes_ref);
+    }
+
+    tracing::debug!(
+        "initializing {} from tracking ref {}",
+        local_notes_ref,
+        tracking_ref
+    );
+    if copy_ref_if_missing(repository, tracking_ref, local_notes_ref)? {
+        return Ok(());
+    }
+
+    tracing::debug!(
+        "{} was created before notes initialization completed; merging {}",
+        local_notes_ref,
+        tracking_ref
+    );
+    merge_tracking_ref_into_local_notes(repository, tracking_ref, local_notes_ref)
+}
+
 // for use with post-fetch and post-pull and post-clone hooks
 // Returns Ok(NotesExistence::Found) if notes were found and fetched,
 // Ok(NotesExistence::NotFound) if confirmed no notes exist on remote,
@@ -253,32 +299,11 @@ pub fn fetch_authorship_notes(
     let local_notes_ref = "refs/notes/ai";
 
     if crate::git::refs::ref_exists(repository, &tracking_ref) {
-        if crate::git::refs::ref_exists(repository, local_notes_ref) {
-            // Both exist - merge them
-            tracing::debug!(
-                "merging authorship notes from {} into {}",
-                tracking_ref,
-                local_notes_ref
-            );
-            if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-                tracing::debug!("notes merge failed: {}", e);
-                // Fallback: manually merge notes when git notes merge crashes
-                if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
-                    tracing::debug!("fallback merge also failed: {}", e2);
-                    return Err(e2);
-                }
-            }
-        } else {
-            // Only tracking ref exists - copy it to local
-            tracing::debug!(
-                "initializing {} from tracking ref {}",
-                local_notes_ref,
-                tracking_ref
-            );
-            if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
-                tracing::debug!("notes copy failed: {}", e);
-                return Err(e);
-            }
+        if let Err(e) =
+            initialize_or_merge_tracking_notes(repository, &tracking_ref, local_notes_ref)
+        {
+            tracing::debug!("notes initialization/merge failed: {}", e);
+            return Err(e);
         }
     } else {
         tracing::debug!("tracking ref {} was not created after fetch", tracking_ref);
@@ -374,33 +399,8 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
         return;
     }
 
-    if !ref_exists(repository, local_notes_ref) {
-        // Only tracking ref exists - copy it to local
-        tracing::debug!(
-            "pre-push: initializing {} from {}",
-            local_notes_ref,
-            tracking_ref
-        );
-        if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
-            tracing::debug!("pre-push notes copy failed: {}", e);
-        }
-        return;
-    }
-
-    // Both exist - merge them
-    tracing::debug!(
-        "pre-push: merging {} into {}",
-        tracking_ref,
-        local_notes_ref
-    );
-    if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-        tracing::debug!("pre-push notes merge failed: {}", e);
-        // Fallback: manually merge notes when git notes merge crashes
-        // (e.g., due to corrupted/mixed-fanout notes trees, or git bugs
-        // with fanout-level mismatches on older git versions like macOS)
-        if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
-            tracing::debug!("pre-push fallback merge also failed: {}", e2);
-        }
+    if let Err(e) = initialize_or_merge_tracking_notes(repository, &tracking_ref, local_notes_ref) {
+        tracing::debug!("pre-push notes initialization/merge failed: {}", e);
     }
 }
 

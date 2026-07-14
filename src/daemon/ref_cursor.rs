@@ -5,7 +5,9 @@ use crate::git::cli_parser::{
     explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
-use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
+use crate::git::repo_state::{
+    common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid, read_head_state_for_worktree,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -2130,7 +2132,80 @@ impl RefCursor {
     }
 }
 
-pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> HashMap<String, u64> {
+pub(crate) fn capture_reflog_start_offsets_for_command(
+    worktree: &Path,
+    primary: Option<&str>,
+    args: &[String],
+) -> HashMap<String, u64> {
+    let mut common_refs = HashSet::from(["refs/stash".to_string()]);
+
+    if let Some(branch) = read_head_state_for_worktree(worktree).and_then(|state| state.branch) {
+        common_refs.insert(format!("refs/heads/{branch}"));
+    }
+
+    let mut include_all_common_refs = false;
+    match primary {
+        Some("branch") => match parse_branch_command_spec(args) {
+            BranchCommandSpec::CreateOrReset { reference } => {
+                common_refs.insert(reference);
+            }
+            BranchCommandSpec::Delete { references } => {
+                common_refs.extend(references);
+            }
+            BranchCommandSpec::Rename {
+                old_reference,
+                new_reference,
+            }
+            | BranchCommandSpec::Copy {
+                old_reference,
+                new_reference,
+            } => {
+                if let Some(old_reference) = old_reference {
+                    common_refs.insert(old_reference);
+                }
+                common_refs.insert(new_reference);
+            }
+            BranchCommandSpec::None => {}
+        },
+        Some("checkout") => {
+            common_refs.extend(checkout_created_branch_refs(args));
+        }
+        Some("switch") => {
+            common_refs.extend(switch_created_branch_refs(args));
+        }
+        Some("rebase") => {
+            if let Some(branch) =
+                explicit_rebase_branch_arg(args).and_then(|branch| capture_branch_ref(&branch))
+            {
+                common_refs.insert(branch);
+            }
+        }
+        Some("merge") => {
+            for source in merge_source_args(args) {
+                common_refs.extend(capture_revision_ref_candidates(source));
+            }
+        }
+        Some("update-ref") => match parse_update_ref_spec(args) {
+            Ok(Some(spec)) => {
+                if let Some(reference) = capture_ref_name(&spec.reference) {
+                    common_refs.insert(reference);
+                }
+            }
+            Ok(None) | Err(_) => {
+                include_all_common_refs = true;
+            }
+        },
+        _ => {}
+    }
+
+    capture_reflog_start_offsets(worktree, common_refs, include_all_common_refs)
+}
+
+fn capture_reflog_start_offsets(
+    worktree: &Path,
+    mut common_refs: HashSet<String>,
+    include_all_common_refs: bool,
+) -> HashMap<String, u64> {
     let mut offsets = HashMap::new();
 
     if let Some(git_dir) = git_dir_for_worktree(worktree) {
@@ -2144,19 +2219,188 @@ pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> Hash
         return offsets;
     };
     let logs = common_dir.join("logs");
-    let mut refs = Vec::new();
-    if discover_reflog_refs(&logs, &logs, &mut refs).is_ok() {
-        for reference in refs {
-            if reference == "HEAD" {
-                continue;
-            }
-            let path = logs.join(&reference);
-            if let Ok(metadata) = fs::metadata(&path) {
-                offsets.insert(common_key(&reference), metadata.len());
-            }
+    if include_all_common_refs {
+        let mut refs = Vec::new();
+        if discover_reflog_refs(&logs, &logs, &mut refs).is_ok() {
+            common_refs.extend(refs);
+        }
+    }
+
+    for reference in common_refs {
+        if reference == "HEAD" {
+            continue;
+        }
+        let path = logs.join(&reference);
+        if let Ok(metadata) = fs::metadata(&path) {
+            offsets.insert(common_key(&reference), metadata.len());
         }
     }
     offsets
+}
+
+fn capture_ref_name(reference: &str) -> Option<String> {
+    let trimmed = reference.trim();
+    if trimmed == "HEAD" || trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .starts_with("refs/")
+        .then(|| trimmed.to_string())
+        .or_else(|| (trimmed == "ORIG_HEAD").then(|| trimmed.to_string()))
+}
+
+fn capture_branch_ref(branch: &str) -> Option<String> {
+    let trimmed = branch.trim();
+    if trimmed.is_empty()
+        || trimmed == "HEAD"
+        || trimmed == "@"
+        || trimmed.starts_with("@{")
+        || is_valid_git_oid(trimmed)
+    {
+        return None;
+    }
+    Some(branch_arg_to_ref(trimmed))
+}
+
+fn capture_revision_ref_candidates(revision: &str) -> Vec<String> {
+    let trimmed = revision.trim();
+    if trimmed.is_empty()
+        || trimmed == "HEAD"
+        || trimmed == "@"
+        || trimmed.starts_with("@{")
+        || is_valid_git_oid(trimmed)
+    {
+        return Vec::new();
+    }
+    if let Some(reference) = capture_ref_name(trimmed) {
+        return vec![reference];
+    }
+    vec![
+        format!("refs/heads/{trimmed}"),
+        format!("refs/remotes/{trimmed}"),
+        format!("refs/tags/{trimmed}"),
+    ]
+}
+
+fn merge_source_args(args: &[String]) -> Vec<&str> {
+    let args = if args.first().is_some_and(|arg| arg == "merge") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut sources = Vec::new();
+    let mut iter = args.iter().map(String::as_str).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            sources.extend(iter.filter(|value| !value.is_empty()));
+            break;
+        }
+        if matches!(
+            arg,
+            "-m" | "--message" | "-s" | "--strategy" | "-X" | "--strategy-option"
+        ) {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--message=")
+            || arg.starts_with("--strategy=")
+            || arg.starts_with("--strategy-option=")
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-m")
+            || arg.starts_with("-s")
+            || arg.starts_with("-X")
+            || arg.starts_with("-S")
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        sources.push(arg);
+    }
+    sources
+}
+
+fn checkout_created_branch_refs(args: &[String]) -> Vec<String> {
+    let args = if args.first().is_some_and(|arg| arg == "checkout") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut refs = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-b" | "-B" => {
+                if let Some(branch) = args.get(idx + 1).and_then(|arg| capture_branch_ref(arg)) {
+                    refs.push(branch);
+                }
+                idx += 2;
+            }
+            value if value.starts_with("-b") && value.len() > 2 => {
+                if let Some(branch) = capture_branch_ref(&value[2..]) {
+                    refs.push(branch);
+                }
+                idx += 1;
+            }
+            value if value.starts_with("-B") && value.len() > 2 => {
+                if let Some(branch) = capture_branch_ref(&value[2..]) {
+                    refs.push(branch);
+                }
+                idx += 1;
+            }
+            "--" => break,
+            _ => idx += 1,
+        }
+    }
+    refs
+}
+
+fn switch_created_branch_refs(args: &[String]) -> Vec<String> {
+    let args = if args.first().is_some_and(|arg| arg == "switch") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut refs = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-c" | "-C" | "--create" | "--force-create" => {
+                if let Some(branch) = args.get(idx + 1).and_then(|arg| capture_branch_ref(arg)) {
+                    refs.push(branch);
+                }
+                idx += 2;
+            }
+            value if value.starts_with("--create=") => {
+                if let Some(branch) = capture_branch_ref(&value["--create=".len()..]) {
+                    refs.push(branch);
+                }
+                idx += 1;
+            }
+            value if value.starts_with("--force-create=") => {
+                if let Some(branch) = capture_branch_ref(&value["--force-create=".len()..]) {
+                    refs.push(branch);
+                }
+                idx += 1;
+            }
+            value if value.starts_with("-c") && value.len() > 2 => {
+                if let Some(branch) = capture_branch_ref(&value[2..]) {
+                    refs.push(branch);
+                }
+                idx += 1;
+            }
+            value if value.starts_with("-C") && value.len() > 2 => {
+                if let Some(branch) = capture_branch_ref(&value[2..]) {
+                    refs.push(branch);
+                }
+                idx += 1;
+            }
+            "--" => break,
+            _ => idx += 1,
+        }
+    }
+    refs
 }
 
 pub(crate) fn refs_at_reflog_start_offsets(

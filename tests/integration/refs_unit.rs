@@ -4,10 +4,11 @@ use git_ai::error::GitAiError;
 use git_ai::git::notes_api;
 use git_ai::git::refs::{
     AI_AUTHORSHIP_FORK_TRACKING_REF, CommitAuthorship, commits_with_authorship_notes,
-    copy_missing_notes_for_commits_from_ref, copy_ref, get_commits_with_notes_from_list,
-    get_reference_as_authorship_log_v3, get_reference_as_working_log, grep_ai_notes,
-    merge_notes_from_ref, note_blob_oids_for_commits, note_blob_oids_for_commits_from_ref,
-    notes_add, notes_add_batch, notes_add_blob_batch, ref_exists, show_authorship_note,
+    copy_missing_notes_for_commits_from_ref, copy_ref, copy_ref_if_missing,
+    get_commits_with_notes_from_list, get_reference_as_authorship_log_v3,
+    get_reference_as_working_log, grep_ai_notes, merge_notes_from_ref, note_blob_oids_for_commits,
+    note_blob_oids_for_commits_from_ref, notes_add, notes_add_batch, notes_add_blob_batch,
+    ref_exists, show_authorship_note,
 };
 use git_ai::git::repository::{exec_git, exec_git_stdin, find_repository_in_path};
 use std::fs;
@@ -343,6 +344,39 @@ fn test_copy_ref() {
         .to_string();
 
     assert_eq!(note_from_ai, note_from_backup);
+}
+
+#[test]
+fn test_copy_ref_if_missing_does_not_overwrite_existing_notes_ref() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("first.txt"), "first\n").unwrap();
+    repo.stage_all_and_commit("First").expect("first commit");
+    let first_commit = head_sha(&repo);
+    notes_add(&gitai_repo, &first_commit, "{\"note\":\"first\"}").expect("add first note");
+
+    copy_ref(&gitai_repo, "refs/notes/ai", "refs/notes/source").expect("copy source ref");
+    assert!(
+        copy_ref_if_missing(&gitai_repo, "refs/notes/source", "refs/notes/copied")
+            .expect("copy missing ref")
+    );
+    assert!(ref_exists(&gitai_repo, "refs/notes/copied"));
+
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    repo.stage_all_and_commit("Second").expect("second commit");
+    let second_commit = head_sha(&repo);
+    notes_add(&gitai_repo, &second_commit, "{\"note\":\"second\"}").expect("add second note");
+    let second_note_before =
+        show_authorship_note(&gitai_repo, &second_commit).expect("second note before");
+
+    assert!(
+        !copy_ref_if_missing(&gitai_repo, "refs/notes/source", "refs/notes/ai")
+            .expect("existing destination is not overwritten")
+    );
+    let second_note_after =
+        show_authorship_note(&gitai_repo, &second_commit).expect("second note after");
+
+    assert_eq!(second_note_before, second_note_after);
 }
 
 #[test]
