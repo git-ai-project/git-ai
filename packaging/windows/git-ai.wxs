@@ -18,6 +18,7 @@
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="GitAiExeComponent" Guid="{95D3C11E-6881-43AB-9E5B-4462AA59E0E2}">
         <File Id="GitAiExe" Source="$(var.GitAiExe)" Name="git-ai.exe" KeyPath="yes" />
+        <File Id="GitAiLoginLauncher" Source="$(var.GitAiLoginLauncher)" Name="git-ai-login.cmd" />
         <Environment
           Id="GitAiPath"
           Name="PATH"
@@ -26,6 +27,13 @@
           Part="last"
           System="no"
           Action="set" />
+        <RegistryValue
+          Id="GitAiRunAtLogin"
+          Root="HKCU"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="Git AI"
+          Value="&quot;[INSTALLFOLDER]git-ai-login.cmd&quot;"
+          Type="string" />
       </Component>
     </ComponentGroup>
 

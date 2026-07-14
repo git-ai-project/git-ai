@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${HOME:-}" ] && [ -x "$HOME/.git-ai/bin/git-ai" ]; then
+  exec "$HOME/.git-ai/bin/git-ai" bg run
+fi
+
+exec /opt/git-ai/bin/git-ai bg run

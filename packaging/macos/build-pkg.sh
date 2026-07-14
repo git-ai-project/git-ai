@@ -38,10 +38,12 @@ COMPONENT_PKG="$WORK_DIR/git-ai-component.pkg"
 OUTPUT_ABS="$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$OUTPUT")"
 
 rm -rf "$WORK_DIR"
-mkdir -p "$PAYLOAD/opt/git-ai/bin" "$PAYLOAD/usr/local/bin" "$(dirname "$OUTPUT_ABS")"
-cp "$BINARY" "$PAYLOAD/opt/git-ai/bin/git-ai"
-chmod 0755 "$PAYLOAD/opt/git-ai/bin/git-ai"
+mkdir -p "$PAYLOAD/opt/git-ai/bin" "$PAYLOAD/usr/local/bin" "$PAYLOAD/Library/LaunchAgents" "$(dirname "$OUTPUT_ABS")"
+install -m 0755 "$BINARY" "$PAYLOAD/opt/git-ai/bin/git-ai"
+install -m 0755 "$ROOT/packaging/macos/launchagents/git-ai-daemon-launcher" "$PAYLOAD/opt/git-ai/bin/git-ai-daemon-launcher"
 ln -s /opt/git-ai/bin/git-ai "$PAYLOAD/usr/local/bin/git-ai"
+install -m 0644 "$ROOT/packaging/macos/launchagents/com.git-ai.daemon.plist" "$PAYLOAD/Library/LaunchAgents/com.git-ai.daemon.plist"
+xattr -cr "$PAYLOAD" 2>/dev/null || true
 
 pkgbuild \
   --root "$PAYLOAD" \
