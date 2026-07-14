@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
 const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
@@ -307,9 +308,33 @@ fn ensure_daemon(dry_run: bool) {
     }
 }
 
+fn bootstrap_enterprise_config(dry_run: bool) -> Result<(), GitAiError> {
+    if dry_run {
+        return Ok(());
+    }
+
+    match crate::enterprise_config::bootstrap_enterprise_config(
+        "install-hooks",
+        Duration::from_secs(5),
+    ) {
+        Ok(outcome) => {
+            tracing::info!(?outcome, "enterprise config bootstrap completed");
+            Ok(())
+        }
+        Err(e) => Err(GitAiError::Generic(e)),
+    }
+}
+
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let options = parse_install_options(args);
+
+    // Get absolute path to the current binary and persist API_BASE/API_KEY
+    // before touching daemon state. Enterprise bootstrap and trace2 setup must
+    // see the newly installed API configuration.
+    let binary_path = get_current_binary_path()?;
+    persist_install_config(&binary_path, options.dry_run)?;
+    bootstrap_enterprise_config(options.dry_run)?;
 
     // Daemon trace2 config must be in place before any install work starts.
     // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
@@ -324,9 +349,6 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
     }
 
-    // Get absolute path to the current binary
-    let binary_path = get_current_binary_path()?;
-    persist_install_config(&binary_path, options.dry_run)?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations and convert result.
@@ -1193,6 +1215,158 @@ mod tests {
             Some("https://enterprise.example")
         );
         assert_eq!(config.api_key.as_deref(), Some("sk-enterprise-key-12345"));
+    }
+
+    #[test]
+    #[serial]
+    fn enterprise_bootstrap_succeeds_when_server_disables_config() {
+        let temp = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
+        let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/worker/config/enterprise")
+            .match_header("x-api-key", "sk-enterprise-key")
+            .with_status(200)
+            .with_body(r#"{"enabled":false}"#)
+            .create();
+
+        crate::config::save_file_config(&crate::config::FileConfig {
+            api_base_url: Some(server.url()),
+            api_key: Some("sk-enterprise-key".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        bootstrap_enterprise_config(false).expect("bootstrap should succeed");
+        assert!(
+            crate::enterprise_config::effective_cached_config(Some("sk-enterprise-key")).is_none()
+        );
+        mock.assert();
+    }
+
+    #[test]
+    #[serial]
+    fn enterprise_bootstrap_fetches_and_caches_config() {
+        let temp = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
+        let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+        let _git_committer_name = EnvVarGuard::set("GIT_COMMITTER_NAME", "Enterprise User");
+        let _git_committer_email =
+            EnvVarGuard::set("GIT_COMMITTER_EMAIL", "enterprise@example.com");
+
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/worker/config/enterprise")
+            .match_header("x-api-key", "sk-enterprise-key")
+            .match_header("x-git-ai-version", env!("CARGO_PKG_VERSION"))
+            .match_header("x-distinct-id", mockito::Matcher::Regex(".+".to_string()))
+            .match_header(
+                "x-author-identity",
+                "Enterprise User <enterprise@example.com>",
+            )
+            .with_status(200)
+            .with_body(r#"{"enabled":true,"config":{"prompt_storage":"local"}}"#)
+            .create();
+
+        crate::config::save_file_config(&crate::config::FileConfig {
+            api_base_url: Some(server.url()),
+            api_key: Some("sk-enterprise-key".to_string()),
+            prompt_storage: Some("default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        bootstrap_enterprise_config(false).expect("bootstrap should succeed");
+        assert_eq!(crate::config::Config::fresh().prompt_storage(), "local");
+        mock.assert();
+    }
+
+    #[test]
+    #[serial]
+    fn enterprise_bootstrap_errors_without_cache_on_fetch_failure() {
+        let temp = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
+        let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+
+        let server = mockito::Server::new();
+        crate::config::save_file_config(&crate::config::FileConfig {
+            api_base_url: Some(server.url()),
+            api_key: Some("sk-enterprise-key".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let err = bootstrap_enterprise_config(false).unwrap_err().to_string();
+        assert!(err.contains("enterprise config bootstrap failed"));
+    }
+
+    #[test]
+    #[serial]
+    fn enterprise_bootstrap_preserves_fetch_error_when_cache_is_invalid() {
+        let temp = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
+        let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+
+        let server = mockito::Server::new();
+        crate::config::save_file_config(&crate::config::FileConfig {
+            api_base_url: Some(server.url()),
+            api_key: Some("sk-enterprise-key".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let cache_path = crate::enterprise_config::enterprise_config_cache_path().unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(cache_path, b"not-json").unwrap();
+
+        let err = bootstrap_enterprise_config(false).unwrap_err().to_string();
+        assert!(err.contains("enterprise config bootstrap failed"));
+        assert!(err.contains("enterprise config fetch failed"));
+        assert!(!err.contains("invalid enterprise cache"));
+    }
+
+    #[test]
+    #[serial]
+    fn enterprise_bootstrap_uses_valid_cache_on_fetch_failure() {
+        let temp = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_key_env = EnvVarGuard::remove("GIT_AI_API_KEY");
+        let _api_base_env = EnvVarGuard::remove("GIT_AI_API_BASE_URL");
+
+        let server = mockito::Server::new();
+        crate::config::save_file_config(&crate::config::FileConfig {
+            api_base_url: Some(server.url()),
+            api_key: Some("sk-enterprise-key".to_string()),
+            prompt_storage: Some("default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        crate::enterprise_config::save_cache_for_api_key(
+            "sk-enterprise-key",
+            &crate::enterprise_config::EnterpriseConfig {
+                prompt_storage: Some("local".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        bootstrap_enterprise_config(false).expect("bootstrap should use cache");
+        assert_eq!(crate::config::Config::fresh().prompt_storage(), "local");
     }
 
     #[cfg(windows)]

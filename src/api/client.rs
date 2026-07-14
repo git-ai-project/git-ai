@@ -196,6 +196,7 @@ impl ApiContext {
                 "User-Agent",
                 &format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
             )
+            .set("X-Git-AI-Version", env!("CARGO_PKG_VERSION"))
             .set("X-Distinct-ID", &config::get_or_create_distinct_id());
         (agent, request)
     }
@@ -211,6 +212,7 @@ impl ApiContext {
                 "User-Agent",
                 &format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
             )
+            .set("X-Git-AI-Version", env!("CARGO_PKG_VERSION"))
             .set("X-Distinct-ID", &config::get_or_create_distinct_id());
         (agent, request)
     }

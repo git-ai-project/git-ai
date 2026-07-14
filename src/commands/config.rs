@@ -262,36 +262,19 @@ fn show_all_config() -> Result<(), String> {
         Value::String(runtime_config.git_cmd().to_string()),
     );
 
-    // Arrays
-    if let Some(ref repos) = file_config.exclude_prompts_in_repositories {
-        effective_config.insert(
-            "exclude_prompts_in_repositories".to_string(),
-            serde_json::to_value(repos).unwrap(),
-        );
-    } else {
-        effective_config.insert(
-            "exclude_prompts_in_repositories".to_string(),
-            Value::Array(vec![]),
-        );
-    }
-
-    if let Some(ref repos) = file_config.allow_repositories {
-        effective_config.insert(
-            "allow_repositories".to_string(),
-            serde_json::to_value(repos).unwrap(),
-        );
-    } else {
-        effective_config.insert("allow_repositories".to_string(), Value::Array(vec![]));
-    }
-
-    if let Some(ref repos) = file_config.exclude_repositories {
-        effective_config.insert(
-            "exclude_repositories".to_string(),
-            serde_json::to_value(repos).unwrap(),
-        );
-    } else {
-        effective_config.insert("exclude_repositories".to_string(), Value::Array(vec![]));
-    }
+    // Arrays with runtime values, including enterprise overrides.
+    effective_config.insert(
+        "exclude_prompts_in_repositories".to_string(),
+        serde_json::to_value(runtime_config.exclude_prompts_in_repositories()).unwrap(),
+    );
+    effective_config.insert(
+        "allow_repositories".to_string(),
+        serde_json::to_value(runtime_config.allow_repositories()).unwrap(),
+    );
+    effective_config.insert(
+        "exclude_repositories".to_string(),
+        serde_json::to_value(runtime_config.exclude_repositories()).unwrap(),
+    );
 
     // Booleans with runtime values
     effective_config.insert(
@@ -308,10 +291,10 @@ fn show_all_config() -> Result<(), String> {
     );
 
     // Optional strings
-    if let Some(ref dsn) = file_config.telemetry_enterprise_dsn {
+    if let Some(dsn) = runtime_config.telemetry_enterprise_dsn() {
         effective_config.insert(
             "telemetry_enterprise_dsn".to_string(),
-            Value::String(dsn.clone()),
+            Value::String(dsn.to_string()),
         );
     }
 
@@ -325,19 +308,16 @@ fn show_all_config() -> Result<(), String> {
         Value::String(runtime_config.prompt_storage().to_string()),
     );
 
-    // include_prompts_in_repositories
-    if let Some(ref repos) = file_config.include_prompts_in_repositories {
-        effective_config.insert(
-            "include_prompts_in_repositories".to_string(),
-            serde_json::to_value(repos).unwrap_or(Value::Array(vec![])),
-        );
-    }
+    effective_config.insert(
+        "include_prompts_in_repositories".to_string(),
+        serde_json::to_value(runtime_config.include_prompts_in_repositories())
+            .unwrap_or(Value::Array(vec![])),
+    );
 
-    // default_prompt_storage
-    if let Some(ref storage) = file_config.default_prompt_storage {
+    if let Some(storage) = runtime_config.default_prompt_storage() {
         effective_config.insert(
             "default_prompt_storage".to_string(),
-            Value::String(storage.clone()),
+            Value::String(storage.to_string()),
         );
     }
 
@@ -445,30 +425,18 @@ fn get_config_value(key: &str) -> Result<(), String> {
         let value = match key_path[0].as_str() {
             "git_path" => Value::String(runtime_config.git_cmd().to_string()),
             "exclude_prompts_in_repositories" => {
-                if let Some(ref repos) = file_config.exclude_prompts_in_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
+                serde_json::to_value(runtime_config.exclude_prompts_in_repositories()).unwrap()
             }
             "allow_repositories" => {
-                if let Some(ref repos) = file_config.allow_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
+                serde_json::to_value(runtime_config.allow_repositories()).unwrap()
             }
             "exclude_repositories" => {
-                if let Some(ref repos) = file_config.exclude_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
+                serde_json::to_value(runtime_config.exclude_repositories()).unwrap()
             }
             "telemetry_oss_disabled" => Value::Bool(runtime_config.is_telemetry_oss_disabled()),
             "telemetry_enterprise_dsn" => {
-                if let Some(ref dsn) = file_config.telemetry_enterprise_dsn {
-                    Value::String(dsn.clone())
+                if let Some(dsn) = runtime_config.telemetry_enterprise_dsn() {
+                    Value::String(dsn.to_string())
                 } else {
                     Value::Null
                 }
@@ -491,15 +459,11 @@ fn get_config_value(key: &str) -> Result<(), String> {
             }
             "prompt_storage" => Value::String(runtime_config.prompt_storage().to_string()),
             "include_prompts_in_repositories" => {
-                if let Some(ref repos) = file_config.include_prompts_in_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
+                serde_json::to_value(runtime_config.include_prompts_in_repositories()).unwrap()
             }
             "default_prompt_storage" => {
-                if let Some(ref storage) = file_config.default_prompt_storage {
-                    Value::String(storage.clone())
+                if let Some(storage) = runtime_config.default_prompt_storage() {
+                    Value::String(storage.to_string())
                 } else {
                     Value::Null
                 }

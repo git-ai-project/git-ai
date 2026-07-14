@@ -552,6 +552,38 @@ impl Config {
         &self.prompt_storage
     }
 
+    pub fn exclude_prompts_in_repositories(&self) -> Vec<String> {
+        self.exclude_prompts_in_repositories
+            .iter()
+            .map(|pattern| pattern.as_str().to_string())
+            .collect()
+    }
+
+    pub fn include_prompts_in_repositories(&self) -> Vec<String> {
+        self.include_prompts_in_repositories
+            .iter()
+            .map(|pattern| pattern.as_str().to_string())
+            .collect()
+    }
+
+    pub fn allow_repositories(&self) -> Vec<String> {
+        self.allow_repositories
+            .iter()
+            .map(|pattern| pattern.as_str().to_string())
+            .collect()
+    }
+
+    pub fn exclude_repositories(&self) -> Vec<String> {
+        self.exclude_repositories
+            .iter()
+            .map(|pattern| pattern.as_str().to_string())
+            .collect()
+    }
+
+    pub fn default_prompt_storage(&self) -> Option<&str> {
+        self.default_prompt_storage.as_deref()
+    }
+
     /// Returns the effective prompt storage mode for a given repository.
     ///
     /// The resolution order is:
@@ -948,9 +980,29 @@ fn author_config_file_fingerprint(path: &Path) -> Option<AuthorConfigFileFingerp
 
 fn build_config() -> Config {
     let file_cfg = load_file_config();
-    let exclude_prompts_in_repositories = file_cfg
-        .as_ref()
+
+    // Get API key from env var or config file (env var takes precedence). This
+    // is intentionally resolved before enterprise overrides because the
+    // enterprise cache is scoped to the configured API key.
+    let api_key = env::var("GIT_AI_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.api_key.clone())
+                .filter(|s| !s.is_empty())
+        });
+    let enterprise_cfg = crate::enterprise_config::effective_cached_config(api_key.as_deref());
+    let enterprise_cfg = enterprise_cfg.as_ref();
+
+    let exclude_prompts_in_repositories = enterprise_cfg
         .and_then(|c| c.exclude_prompts_in_repositories.clone())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.exclude_prompts_in_repositories.clone())
+        })
         .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
@@ -964,10 +1016,14 @@ fn build_config() -> Config {
                 .ok()
         })
         .collect();
-    let include_prompts_in_repositories = file_cfg
-        .as_ref()
+    let include_prompts_in_repositories = enterprise_cfg
         .and_then(|c| c.include_prompts_in_repositories.clone())
-        .unwrap_or(vec![])
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.include_prompts_in_repositories.clone())
+        })
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
             Pattern::new(&pattern_str)
@@ -980,9 +1036,9 @@ fn build_config() -> Config {
                 .ok()
         })
         .collect();
-    let allow_repositories = file_cfg
-        .as_ref()
+    let allow_repositories = enterprise_cfg
         .and_then(|c| c.allow_repositories.clone())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.allow_repositories.clone()))
         .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
@@ -996,9 +1052,13 @@ fn build_config() -> Config {
                 .ok()
         })
         .collect();
-    let exclude_repositories = file_cfg
-        .as_ref()
+    let exclude_repositories = enterprise_cfg
         .and_then(|c| c.exclude_repositories.clone())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.exclude_repositories.clone())
+        })
         .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
@@ -1012,31 +1072,35 @@ fn build_config() -> Config {
                 .ok()
         })
         .collect();
-    let telemetry_oss_disabled = file_cfg
-        .as_ref()
+    let telemetry_oss_disabled = enterprise_cfg
         .and_then(|c| c.telemetry_oss.clone())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.telemetry_oss.clone()))
         .filter(|s| s == "off")
         .is_some();
-    let telemetry_enterprise_dsn = file_cfg
-        .as_ref()
+    let telemetry_enterprise_dsn = enterprise_cfg
         .and_then(|c| c.telemetry_enterprise_dsn.clone())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.telemetry_enterprise_dsn.clone())
+        })
         .filter(|s| !s.is_empty());
 
     // Default to disabled (true) unless this is an OSS build
     // OSS builds set OSS_BUILD env var at compile time to "1", which enables auto-updates by default
     let auto_update_flags_default_disabled = option_env!("OSS_BUILD") != Some("1");
 
-    let disable_version_checks = file_cfg
-        .as_ref()
+    let disable_version_checks = enterprise_cfg
         .and_then(|c| c.disable_version_checks)
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.disable_version_checks))
         .unwrap_or(auto_update_flags_default_disabled);
-    let disable_auto_updates = file_cfg
-        .as_ref()
+    let disable_auto_updates = enterprise_cfg
         .and_then(|c| c.disable_auto_updates)
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.disable_auto_updates))
         .unwrap_or(auto_update_flags_default_disabled);
-    let update_channel = file_cfg
-        .as_ref()
+    let update_channel = enterprise_cfg
         .and_then(|c| c.update_channel.as_deref())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.update_channel.as_deref()))
         .and_then(UpdateChannel::from_str)
         .unwrap_or_default();
 
@@ -1054,9 +1118,9 @@ fn build_config() -> Config {
 
     // Get prompt_storage setting (defaults to "default")
     // Valid values: "default", "notes", "local"
-    let prompt_storage = file_cfg
-        .as_ref()
+    let prompt_storage = enterprise_cfg
         .and_then(|c| c.prompt_storage.clone())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.prompt_storage.clone()))
         .unwrap_or_else(|| "default".to_string());
     let prompt_storage = match prompt_storage.as_str() {
         "default" | "notes" | "local" => prompt_storage,
@@ -1071,9 +1135,13 @@ fn build_config() -> Config {
 
     // Get default_prompt_storage setting (fallback for repos not in include list)
     // Valid values: "default", "notes", "local", or None (defaults to "local")
-    let default_prompt_storage = file_cfg
-        .as_ref()
+    let default_prompt_storage = enterprise_cfg
         .and_then(|c| c.default_prompt_storage.clone())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.default_prompt_storage.clone())
+        })
         .and_then(|s| {
             if matches!(s.as_str(), "default" | "notes" | "local") {
                 Some(s)
@@ -1084,17 +1152,6 @@ fn build_config() -> Config {
                 );
                 None
             }
-        });
-
-    // Get API key from env var or config file (env var takes precedence)
-    let api_key = env::var("GIT_AI_API_KEY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            file_cfg
-                .as_ref()
-                .and_then(|c| c.api_key.clone())
-                .filter(|s| !s.is_empty())
         });
 
     // Get quiet setting (defaults to false)
@@ -1153,8 +1210,11 @@ fn build_config() -> Config {
         })
         .unwrap_or_default();
 
-    // Resolve notes_backend config: env vars override file config, which overrides defaults.
+    // Resolve notes_backend config: env vars override enterprise config, which
+    // overrides file config and defaults.
     let file_backend = file_cfg.as_ref().and_then(|c| c.notes_backend.clone());
+    let enterprise_backend = enterprise_cfg.and_then(|c| c.notes_backend.clone());
+    let base_backend = enterprise_backend.or(file_backend).unwrap_or_default();
     let kind_from_env = env::var("GIT_AI_NOTES_BACKEND_KIND")
         .ok()
         .and_then(|s| match s.as_str() {
@@ -1165,17 +1225,15 @@ fn build_config() -> Config {
     let url_from_env = env::var("GIT_AI_NOTES_BACKEND_URL").ok();
 
     let notes_backend = NotesBackendConfig {
-        kind: kind_from_env
-            .or_else(|| file_backend.as_ref().map(|b| b.kind))
-            .unwrap_or(NotesBackendKind::GitNotes),
-        backend_url: url_from_env
-            .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone())),
+        kind: kind_from_env.unwrap_or(base_backend.kind),
+        backend_url: url_from_env.or(base_backend.backend_url),
     };
 
-    // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
+    // Transcript streaming lookback: env > enterprise > file > default (7 days). 0 means unlimited (None).
     let transcript_streaming_lookback_days = env::var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| enterprise_cfg.and_then(|c| c.transcript_streaming_lookback_days))
         .or_else(|| {
             file_cfg
                 .as_ref()

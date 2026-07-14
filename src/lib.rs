@@ -8,6 +8,7 @@ pub mod config;
 pub mod daemon;
 pub mod diagnostic_sentinels;
 pub mod diagnostics;
+pub mod enterprise_config;
 pub mod error;
 pub mod feature_flags;
 pub mod git;
