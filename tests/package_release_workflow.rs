@@ -62,3 +62,19 @@ fn apple_signing_identities_are_derived_from_the_imported_certificates() {
     assert!(!workflow.contains("secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY"));
     assert!(!workflow.contains("secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY"));
 }
+
+#[test]
+fn prerelease_packages_continue_after_the_skipped_production_approval() {
+    let workflow = release_workflow();
+
+    assert!(job(&workflow, "package-msi").contains("always() && needs.build.result == 'success'"));
+    assert!(job(&workflow, "package-pkg").contains(
+        "always() &&\n      needs.build.result == 'success' &&\n      needs.build-macos-intel.result == 'success'"
+    ));
+    assert!(
+        job(&workflow, "test-msi").contains("always() && needs.package-msi.result == 'success'")
+    );
+    assert!(
+        job(&workflow, "test-pkg").contains("always() && needs.package-pkg.result == 'success'")
+    );
+}

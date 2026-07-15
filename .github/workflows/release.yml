@@ -351,6 +351,7 @@ jobs:
   package-msi:
     name: Build Windows MSI installers
     needs: build
+    if: always() && needs.build.result == 'success'
     runs-on: windows-latest
     environment: release
     steps:
@@ -406,6 +407,10 @@ jobs:
   package-pkg:
     name: Build macOS PKG installers
     needs: [build, build-macos-intel]
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      needs.build-macos-intel.result == 'success'
     runs-on: macos-latest
     environment: release
     steps:
@@ -507,6 +512,7 @@ jobs:
   test-msi:
     name: Test Windows MSI installer
     needs: package-msi
+    if: always() && needs.package-msi.result == 'success'
     runs-on: windows-latest
     steps:
       - name: Download MSI artifacts
@@ -530,6 +536,7 @@ jobs:
   test-pkg:
     name: Test macOS PKG installer
     needs: package-pkg
+    if: always() && needs.package-pkg.result == 'success'
     runs-on: macos-latest
     steps:
       - name: Download PKG artifacts
