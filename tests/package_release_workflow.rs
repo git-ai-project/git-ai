@@ -52,3 +52,13 @@ fn release_credentials_stay_in_the_release_environment() {
         assert!(job(&workflow, job_name).contains("environment: release"));
     }
 }
+
+#[test]
+fn apple_signing_identities_are_derived_from_the_imported_certificates() {
+    let workflow = release_workflow();
+
+    assert!(workflow.contains("security find-identity -v -p codesigning build.keychain"));
+    assert!(workflow.contains("security find-identity -v -p basic build.keychain"));
+    assert!(!workflow.contains("secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY"));
+    assert!(!workflow.contains("secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY"));
+}

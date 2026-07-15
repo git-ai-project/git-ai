@@ -197,10 +197,9 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
           APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
-          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
         run: |
           set -euo pipefail
-          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_IDENTITY}" ]]; then
+          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
               echo "Skipping macOS binary signing for dry run because signing secrets are not configured."
               exit 0
@@ -217,6 +216,11 @@ jobs:
           echo "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > app-signing.p12
           security import app-signing.p12 -k build.keychain -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY="$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Developer ID Application:/ { print $2; exit }')"
+          if [[ -z "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" ]]; then
+            echo "::error::Imported P12 does not contain a Developer ID Application signing identity."
+            exit 1
+          fi
 
           codesign --force --timestamp --options runtime --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" "release/${{ matrix.artifact_name }}"
           codesign --verify --strict --verbose=2 "release/${{ matrix.artifact_name }}"
@@ -309,10 +313,9 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
           APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
-          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
         run: |
           set -euo pipefail
-          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_IDENTITY}" ]]; then
+          if [[ -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
               echo "Skipping macOS binary signing for dry run because signing secrets are not configured."
               exit 0
@@ -329,6 +332,11 @@ jobs:
           echo "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > app-signing.p12
           security import app-signing.p12 -k build.keychain -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY="$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Developer ID Application:/ { print $2; exit }')"
+          if [[ -z "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" ]]; then
+            echo "::error::Imported P12 does not contain a Developer ID Application signing identity."
+            exit 1
+          fi
 
           codesign --force --timestamp --options runtime --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" release/git-ai-macos-x64
           codesign --verify --strict --verbose=2 release/git-ai-macos-x64
@@ -422,10 +430,9 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
           APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
-          APPLE_DEVELOPER_ID_INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
         run: |
           set -euo pipefail
-          if [[ -z "${APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_INSTALLER_IDENTITY}" ]]; then
+          if [[ -z "${APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64}" || -z "${APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD}" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
               echo "Skipping PKG signing for dry run because signing secrets are not configured."
               exit 0
@@ -442,11 +449,15 @@ jobs:
           echo "$APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64" | base64 --decode > installer-signing.p12
           security import installer-signing.p12 -k build.keychain -P "$APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD" -T /usr/bin/productsign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          APPLE_DEVELOPER_ID_INSTALLER_IDENTITY="$(security find-identity -v -p basic build.keychain | awk -F'"' '/Developer ID Installer:/ { print $2; exit }')"
+          if [[ -z "$APPLE_DEVELOPER_ID_INSTALLER_IDENTITY" ]]; then
+            echo "::error::Imported P12 does not contain a Developer ID Installer signing identity."
+            exit 1
+          fi
+          echo "APPLE_DEVELOPER_ID_INSTALLER_IDENTITY=$APPLE_DEVELOPER_ID_INSTALLER_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build PKG installers
         shell: bash
-        env:
-          APPLE_DEVELOPER_ID_INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
         run: |
           set -euo pipefail
           VERSION="${{ needs.build.outputs.version }}"
