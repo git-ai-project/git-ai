@@ -258,6 +258,47 @@ fn test_ai_accepted_respects_ignore_patterns() {
     );
 }
 
+#[test]
+fn test_status_ignores_initial_entries_without_snapshot_blobs() {
+    let repo = TestRepo::new();
+
+    write_file(&repo, "example.txt", "Base line\n");
+    repo.stage_all_and_commit("initial").unwrap();
+
+    repo.git_ai(&["checkpoint", "human", "example.txt"])
+        .unwrap();
+    write_file(&repo, "example.txt", "Base line\nAI line 1\nAI line 2\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
+
+    // Commit only the first AI line. Post-commit carryover writes the second AI
+    // line to INITIAL with a persisted snapshot blob.
+    write_file(&repo, "example.txt", "Base line\nAI line 1\n");
+    repo.git(&["add", "example.txt"]).unwrap();
+    write_file(&repo, "example.txt", "Base line\nAI line 1\nAI line 2\n");
+    repo.commit("commit first AI line").unwrap();
+
+    let working_log = repo.current_working_logs();
+    let mut initial = working_log.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("example.txt"),
+        "test setup should leave the remaining AI line in INITIAL"
+    );
+
+    initial.file_blobs.clear();
+    fs::write(
+        &working_log.initial_file,
+        serde_json::to_string_pretty(&initial).unwrap(),
+    )
+    .unwrap();
+
+    let status = status_json(&repo);
+    assert_eq!(
+        status.stats.ai_accepted, 0,
+        "status must not claim AI attribution from INITIAL entries that lack snapshot blobs"
+    );
+}
+
 /// `--diff-only` must keep the same diff-scoped `stats` as a plain `--json`
 /// run, while omitting the per-checkpoint breakdown.
 #[test]

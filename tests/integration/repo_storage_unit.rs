@@ -419,6 +419,153 @@ fn test_write_initial_with_contents_rejects_missing_snapshot() {
     );
 }
 
+#[test]
+fn test_read_initial_drops_entries_without_snapshot_blob_mappings() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+
+    let valid_blob = working_log
+        .persist_file_version("valid content\n")
+        .expect("persist valid snapshot");
+
+    let initial = InitialAttributions {
+        files: HashMap::from([
+            (
+                "valid.txt".to_string(),
+                vec![LineAttribution {
+                    start_line: 1,
+                    end_line: 1,
+                    author_id: "ai-valid".to_string(),
+                    overrode: None,
+                }],
+            ),
+            (
+                "missing_mapping.txt".to_string(),
+                vec![LineAttribution {
+                    start_line: 1,
+                    end_line: 1,
+                    author_id: "ai-missing-mapping".to_string(),
+                    overrode: None,
+                }],
+            ),
+            (
+                "missing_blob.txt".to_string(),
+                vec![LineAttribution {
+                    start_line: 1,
+                    end_line: 1,
+                    author_id: "ai-missing-blob".to_string(),
+                    overrode: None,
+                }],
+            ),
+        ]),
+        prompts: HashMap::new(),
+        file_blobs: HashMap::from([
+            ("valid.txt".to_string(), valid_blob),
+            (
+                "missing_blob.txt".to_string(),
+                "missing-snapshot-blob".to_string(),
+            ),
+        ]),
+        humans: std::collections::BTreeMap::new(),
+        sessions: std::collections::BTreeMap::new(),
+    };
+
+    let json = serde_json::to_string_pretty(&initial).unwrap();
+    fs::write(&working_log.initial_file, json).unwrap();
+
+    let sanitized = working_log.read_initial_attributions();
+    assert!(
+        sanitized.files.contains_key("valid.txt"),
+        "valid INITIAL entry should be preserved"
+    );
+    assert!(
+        !sanitized.files.contains_key("missing_mapping.txt"),
+        "INITIAL entry without file_blobs mapping must be dropped"
+    );
+    assert!(
+        !sanitized.files.contains_key("missing_blob.txt"),
+        "INITIAL entry with a missing snapshot blob file must be dropped"
+    );
+    assert_eq!(
+        sanitized.file_blobs.keys().cloned().collect::<Vec<_>>(),
+        vec!["valid.txt".to_string()]
+    );
+}
+
+#[test]
+fn test_write_initial_drops_entries_without_snapshot_blob_mappings() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+
+    let valid_blob = working_log
+        .persist_file_version("valid content\n")
+        .expect("persist valid snapshot");
+
+    working_log
+        .write_initial(InitialAttributions {
+            files: HashMap::from([
+                (
+                    "valid.txt".to_string(),
+                    vec![LineAttribution {
+                        start_line: 1,
+                        end_line: 1,
+                        author_id: "ai-valid".to_string(),
+                        overrode: None,
+                    }],
+                ),
+                (
+                    "missing.txt".to_string(),
+                    vec![LineAttribution {
+                        start_line: 1,
+                        end_line: 1,
+                        author_id: "ai-missing".to_string(),
+                        overrode: None,
+                    }],
+                ),
+                (
+                    "missing_blob.txt".to_string(),
+                    vec![LineAttribution {
+                        start_line: 1,
+                        end_line: 1,
+                        author_id: "ai-missing-blob".to_string(),
+                        overrode: None,
+                    }],
+                ),
+            ]),
+            prompts: HashMap::new(),
+            file_blobs: HashMap::from([
+                ("valid.txt".to_string(), valid_blob),
+                (
+                    "missing_blob.txt".to_string(),
+                    "missing-snapshot-blob".to_string(),
+                ),
+            ]),
+            humans: std::collections::BTreeMap::new(),
+            sessions: std::collections::BTreeMap::new(),
+        })
+        .expect("write INITIAL");
+
+    let initial = working_log.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("valid.txt"),
+        "valid INITIAL entry should be preserved"
+    );
+    assert!(
+        !initial.files.contains_key("missing.txt"),
+        "writer must not persist INITIAL attribution without a snapshot blob"
+    );
+    assert!(
+        !initial.files.contains_key("missing_blob.txt"),
+        "writer must not persist INITIAL attribution with a missing snapshot blob file"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 9. test_write_initial_empty_removes_existing_file
 // ---------------------------------------------------------------------------
