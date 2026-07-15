@@ -1020,6 +1020,7 @@ fn handle_stats(args: &[String]) {
     }
 
     let effective_patterns = effective_ignore_patterns(&repo, &ignore_patterns, &[]);
+    sync_daemon_family_before_stats_read(&repo);
 
     // Handle commit range if detected
     if let Some(range) = commit_range {
@@ -1055,6 +1056,29 @@ fn handle_stats(args: &[String]) {
             }
         }
         std::process::exit(1);
+    }
+}
+
+fn sync_daemon_family_before_stats_read(repo: &Repository) {
+    let Ok(workdir) = repo.workdir() else {
+        return;
+    };
+
+    let request = ControlRequest::SyncFamily {
+        repo_working_dir: workdir.to_string_lossy().to_string(),
+    };
+
+    match crate::daemon::telemetry_handle::send_via_daemon(&request) {
+        Ok(response) if response.ok => {}
+        Ok(response) => {
+            tracing::debug!(
+                error = response.error.as_deref().unwrap_or("unknown daemon error"),
+                "stats daemon sync failed"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(%error, "stats daemon sync unavailable");
+        }
     }
 }
 
