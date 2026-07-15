@@ -164,6 +164,25 @@ fn test_cold_repo_first_traced_commit_is_processed() {
     assert_no_ai_authorship_for_commit(&repo, &head);
 }
 
+#[test]
+fn test_cold_repo_commit_message_trailing_whitespace_preserves_ai_authorship() {
+    let mut repo = cold_repo();
+    raw_commit_file(&repo, "tracked.txt", "base\n", "raw base");
+
+    start_cold_daemon(&mut repo);
+    write_file(&repo, "tracked.txt", "base\nAI line\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "tracked.txt"])
+        .expect("mock_ai checkpoint should succeed");
+    repo.git(&["add", "tracked.txt"])
+        .expect("staging AI change should succeed");
+    run_traced_git(&repo, &["commit", "-m", "AI change "]);
+
+    assert_ai_authorship_note(&repo, &raw_head(&repo));
+    let stats = repo.stats().expect("commit stats should be available");
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
+}
+
 fn run_cold_repo_first_traced_pull_rebase_preserves_rebased_ai_authorship() {
     let upstream = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
     raw_git(&upstream, &["symbolic-ref", "HEAD", "refs/heads/main"]);
@@ -678,6 +697,7 @@ fn test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attr
 
 crate::reuse_tests_in_worktree!(
     test_cold_repo_first_traced_commit_is_processed,
+    test_cold_repo_commit_message_trailing_whitespace_preserves_ai_authorship,
     test_traced_commit_after_untraced_head_move_creates_authorship_note,
     test_traced_commit_after_untraced_duplicate_message_head_move_notes_traced_commit,
     test_cold_repo_first_traced_amend_is_processed,

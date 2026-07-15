@@ -1,4 +1,5 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::checkpoint_content_budget::CheckpointContentBudget;
 use crate::config;
 use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
@@ -851,7 +852,7 @@ fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
         .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
 }
 
-fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiError> {
+fn apply_checkpoint_side_effect(mut request: CheckpointRequest) -> Result<(), GitAiError> {
     if request.files.is_empty() {
         return Ok(());
     }
@@ -882,7 +883,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
         crate::metrics::record(values, attrs);
     }
 
-    let resolved = resolve_checkpoint_request(&repo, &request)?;
+    let resolved = resolve_checkpoint_request(&repo, &mut request)?;
     let Some(resolved) = resolved else {
         return Ok(());
     };
@@ -898,7 +899,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
 
 fn resolve_checkpoint_request(
     repo: &crate::git::repository::Repository,
-    request: &CheckpointRequest,
+    request: &mut CheckpointRequest,
 ) -> Result<Option<crate::daemon::checkpoint::ResolvedCheckpointExecution>, GitAiError> {
     use crate::authorship::ignore::{
         build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
@@ -920,10 +921,12 @@ fn resolve_checkpoint_request(
     let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
     let mut files = Vec::new();
-    let mut dirty_files = HashMap::new();
+    let mut dirty_files: HashMap<String, Arc<str>> = HashMap::new();
     let mut seen = std::collections::HashSet::new();
+    let config = config::Config::fresh();
+    let mut content_budget = CheckpointContentBudget::from_config(&config);
 
-    for file in &request.files {
+    for file in &mut request.files {
         let path_str = file.path.to_string_lossy();
         let path_str = path_str.trim();
         if path_str.is_empty() {
@@ -958,10 +961,14 @@ fn resolve_checkpoint_request(
             continue;
         }
 
-        if let Some(content) = &file.content
-            && !content.chars().any(|c| c == '\0')
-        {
-            dirty_files.insert(relative_path.clone(), content.clone());
+        if let Some(content) = std::mem::take(&mut file.content) {
+            if content.as_bytes().contains(&0) {
+                continue;
+            }
+            if !content_budget.reserve(&relative_path, &content) {
+                continue;
+            }
+            dirty_files.insert(relative_path.clone(), Arc::from(content));
             files.push(relative_path);
         }
     }
@@ -5645,33 +5652,31 @@ impl ActorDaemonCoordinator {
                         kind,
                         old_head,
                         new_head,
-                    } => {
-                        if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                            let repo = find_repository_in_path(&worktree)?;
-                            match kind {
-                                crate::daemon::domain::ResetKind::Hard => {
-                                    repo.storage.delete_working_log_for_base_commit(old_head)?;
-                                }
-                                _ => {
-                                    if is_ancestor_commit(&repo, new_head, old_head) {
-                                        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
-                                            &repo, old_head, new_head,
-                                        )?;
-                                    } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                        let outcome =
-                                            crate::authorship::rewrite::handle_rewrite_event_with_metrics(
-                                            &repo,
-                                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                                old_tip: old_head.to_string(),
-                                                new_tip: new_head.to_string(),
-                                                onto: None,
-                                            },
-                                        )?;
-                                        crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
-                                            &repo,
-                                            outcome.metric_commits,
-                                        );
-                                    }
+                    } if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head => {
+                        let repo = find_repository_in_path(&worktree)?;
+                        match kind {
+                            crate::daemon::domain::ResetKind::Hard => {
+                                repo.storage.delete_working_log_for_base_commit(old_head)?;
+                            }
+                            _ => {
+                                if is_ancestor_commit(&repo, new_head, old_head) {
+                                    crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+                                        &repo, old_head, new_head,
+                                    )?;
+                                } else if !is_ancestor_commit(&repo, old_head, new_head) {
+                                    let outcome =
+                                        crate::authorship::rewrite::handle_rewrite_event_with_metrics(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                            old_tip: old_head.to_string(),
+                                            new_tip: new_head.to_string(),
+                                            onto: None,
+                                        },
+                                    )?;
+                                    crate::daemon::rewrite_metrics::spawn_rewrite_commit_metrics(
+                                        &repo,
+                                        outcome.metric_commits,
+                                    );
                                 }
                             }
                         }

@@ -15,12 +15,24 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 4;
+const SCHEMA_VERSION: usize = 5;
 
+// This value is part of the metrics retry index schema. Changing it requires a
+// migration that rebuilds `metrics_retryable` with the same literal used by
+// the retry queries below; SQLite cannot prove a parameterized predicate
+// implies a partial-index predicate.
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
 const NS_PER_SECOND: u128 = 1_000_000_000;
+
+const RETRYABLE_METRIC_IDS_SQL: &str = "SELECT id FROM metrics \
+     WHERE delivered_ts IS NULL \
+       AND processing_started_at IS NULL \
+       AND next_retry_at <= ?1 \
+       AND attempts < 6 \
+     ORDER BY next_retry_at ASC, id DESC \
+     LIMIT ?2";
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -65,6 +77,17 @@ const MIGRATIONS: &[&str] = &[
         WHERE parent_session_id IS NOT NULL
             AND event_kind IS NOT NULL
             AND event_ts IS NOT NULL;
+    "#,
+    // Migration 4 -> 5: Keep terminal history out of retry lookups. The
+    // predicate and ordering intentionally match dequeue/count queries.
+    r#"
+    CREATE INDEX IF NOT EXISTS metrics_retryable
+        ON metrics (next_retry_at ASC, id DESC)
+        WHERE delivered_ts IS NULL
+            AND processing_started_at IS NULL
+            AND attempts < 6;
+
+    DROP INDEX IF EXISTS metrics_pending_retry;
     "#,
 ];
 
@@ -564,19 +587,10 @@ impl MetricsDatabase {
 
         let tx = self.conn.transaction()?;
         let ids = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM metrics \
-                 WHERE delivered_ts IS NULL \
-                   AND processing_started_at IS NULL \
-                   AND next_retry_at <= ?1 \
-                   AND attempts < ?2 \
-                 ORDER BY next_retry_at ASC, id DESC \
-                 LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(
-                params![now as i64, MAX_METRIC_UPLOAD_ATTEMPTS as i64, limit as i64],
-                |row| row.get::<_, i64>(0),
-            )?;
+            let mut stmt = tx.prepare(RETRYABLE_METRIC_IDS_SQL)?;
+            let rows = stmt.query_map(params![now as i64, limit as i64], |row| {
+                row.get::<_, i64>(0)
+            })?;
             let mut ids = Vec::new();
             for row in rows {
                 ids.push(row?);
@@ -738,8 +752,8 @@ impl MetricsDatabase {
              WHERE delivered_ts IS NULL \
                AND processing_started_at IS NULL \
                AND next_retry_at <= ?1 \
-               AND attempts < ?2",
-            params![now as i64, MAX_METRIC_UPLOAD_ATTEMPTS as i64],
+               AND attempts < 6",
+            params![now as i64],
             |row| row.get(0),
         )?;
         Ok(count as usize)
@@ -1492,6 +1506,7 @@ fn event_specific_external_tool_use_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::StatementStatus;
     use tempfile::TempDir;
 
     fn create_test_db() -> (MetricsDatabase, TempDir) {
@@ -1549,6 +1564,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "missing index {index}");
+    }
+
+    fn assert_metric_index_missing(db: &MetricsDatabase, index: &str) {
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                params![index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "unexpected index {index}");
     }
 
     fn metric_metadata_rows(db: &MetricsDatabase) -> Vec<(Option<i64>, Option<i64>)> {
@@ -1645,7 +1672,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
 
         for column in [
             "delivered_ts",
@@ -1678,6 +1705,7 @@ mod tests {
         }
 
         for index in [
+            "metrics_retryable",
             "metrics_event_ts_kind",
             "metrics_session_kind_ts",
             "metrics_parent_session_kind_ts",
@@ -1740,7 +1768,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
     }
 
     #[test]
@@ -1779,7 +1807,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         assert_eq!(db.count().unwrap(), 1);
         assert_eq!(db.count_retryable().unwrap(), 1);
     }
@@ -1822,7 +1850,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
 
         for column in [
             "delivered_ts",
@@ -1891,7 +1919,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         assert!(db.column_exists("metrics", "event_ts").unwrap());
         assert!(db.column_exists("metrics", "event_kind").unwrap());
         for index in [
@@ -1916,6 +1944,45 @@ mod tests {
                 external_tool_use_id: None,
             }]
         );
+    }
+
+    #[test]
+    fn test_migrates_version_4_to_retryable_only_index() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ids = db.insert_events(&[event_json(days_ago(1))]).unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET attempts = 6 WHERE id = ?1",
+                params![ids[0]],
+            )
+            .unwrap();
+        db.conn
+            .execute_batch(
+                r#"
+                DROP INDEX metrics_retryable;
+                CREATE INDEX metrics_pending_retry
+                    ON metrics (delivered_ts, next_retry_at, id)
+                    WHERE delivered_ts IS NULL;
+                UPDATE schema_metadata SET value = '4' WHERE key = 'version';
+                "#,
+            )
+            .unwrap();
+
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "5");
+        assert_metric_index_exists(&db, "metrics_retryable");
+        assert_metric_index_missing(&db, "metrics_pending_retry");
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(db.status().unwrap().stopped_after_errors, 1);
     }
 
     #[test]
@@ -2436,6 +2503,48 @@ mod tests {
         assert!(batch[0].id > batch[1].id);
         assert!(batch[0].event_json.contains(&format!("\"t\":{newest_ts}")));
         assert!(batch[1].event_json.contains(&format!("\"t\":{middle_ts}")));
+    }
+
+    #[test]
+    fn test_retryable_query_work_is_independent_of_exhausted_history() {
+        let (db, _temp_dir) = create_test_db();
+        let now = unix_now() as i64;
+
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json, next_retry_at) VALUES (?1, 0)",
+                params![event_json(days_ago(1))],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                r#"
+                WITH RECURSIVE exhausted(n) AS (
+                    VALUES(1)
+                    UNION ALL
+                    SELECT n + 1 FROM exhausted WHERE n < 20000
+                )
+                INSERT INTO metrics (event_json, attempts, next_retry_at)
+                SELECT '{"t":1,"e":1,"v":{},"a":{}}', 6, 0 FROM exhausted
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let mut stmt = db.conn.prepare(RETRYABLE_METRIC_IDS_SQL).unwrap();
+        let ids = stmt
+            .query_map(params![now, 100], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(ids, vec![1]);
+        assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+        assert_eq!(stmt.get_status(StatementStatus::Sort), 0);
+        assert!(
+            stmt.get_status(StatementStatus::VmStep) < 1_000,
+            "retryable lookup must not scale with exhausted history"
+        );
     }
 
     #[test]

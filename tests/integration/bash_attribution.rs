@@ -178,6 +178,82 @@ fn test_codex_preset_bash_recovery_minimizes_dirty_untracked_attribution() {
 }
 
 #[test]
+fn test_bash_checkpoints_v2_records_for_recovery_without_working_log_checkpoints() {
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let mut repo = TestRepo::new_with_daemon_env(&env);
+    repo.patch_git_ai_config(|patch| {
+        patch.feature_flags = Some(json!({"bash_checkpoints_v2": true}));
+    });
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("example.txt");
+
+    fs::write(&file_path, "original line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(lines!["original line".unattributed_human()]);
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-transcript.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "bash-v2-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-v2-tool",
+        "tool_input": { "command": "printf 'written by bash\\n' >> example.txt" },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("codex pre-hook checkpoint should succeed");
+
+    fs::write(&file_path, "original line\nwritten by bash\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "bash-v2-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-v2-tool",
+        "tool_input": { "command": "printf 'written by bash\\n' >> example.txt" },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("codex post-hook checkpoint should succeed");
+
+    let checkpoints = repo.current_working_logs().read_all_checkpoints().unwrap();
+    assert!(
+        checkpoints.is_empty(),
+        "bash checkpoints v2 should only record recovery metadata, not normal checkpoints"
+    );
+
+    repo.stage_all_and_commit("After bash v2").unwrap();
+    file.assert_committed_lines(lines![
+        "original line".unattributed_human(),
+        "written by bash".ai(),
+    ]);
+
+    let db = BashHistoryDatabase::open_at_path(std::path::Path::new(&bash_db_path)).unwrap();
+    let calls = db.all_calls_for_test().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].session_id, "bash-v2-session");
+    assert_eq!(calls[0].tool_use_id, "bash-v2-tool");
+    assert_eq!(
+        calls[0].repo_work_dir.as_deref(),
+        Some(repo_root.to_string_lossy().as_ref())
+    );
+    assert!(calls[0].start_trace_id.is_some());
+    assert!(calls[0].end_trace_id.is_some());
+}
+
+#[test]
 fn test_bash_recovery_uses_commit_time_file_timestamps_when_processing_is_delayed() {
     let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
     let env = [

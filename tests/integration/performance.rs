@@ -19,6 +19,7 @@ fn setup() {
         transcript_streaming: true,
         transcript_sweep: true,
         checkpoint_debug_log: false,
+        bash_checkpoints_v2: false,
         daemon_log_upload: true,
         rewrite_metrics_events: false,
     };

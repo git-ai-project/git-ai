@@ -1627,6 +1627,72 @@ fn daemon_stalled_unidentified_trace_connection_does_not_block_checkpoint_contro
 
 #[test]
 #[cfg(not(windows))]
+fn daemon_checkpoint_resolution_applies_total_content_budget() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    repo.patch_git_ai_config(|p| {
+        p.max_checkpoint_file_size_bytes = Some(1024);
+        p.max_checkpoint_total_size_bytes = Some(96);
+        p.max_checkpoint_total_lines = Some(1000);
+    });
+
+    let control_socket = daemon_control_socket_path(&repo);
+    fs::write(repo.path().join("a_kept.txt"), "a".repeat(48)).unwrap();
+    fs::write(repo.path().join("z_skipped.txt"), "z".repeat(64)).unwrap();
+
+    let request = CheckpointRequest {
+        trace_id: "daemon-checkpoint-budget".to_string(),
+        checkpoint_kind: CheckpointKind::Human,
+        agent_id: None,
+        files: vec![
+            CheckpointFile {
+                path: PathBuf::from("a_kept.txt"),
+                content: Some("a".repeat(48)),
+                repo_work_dir: repo.path().to_path_buf(),
+                base_commit: BaseCommit::Initial,
+            },
+            CheckpointFile {
+                path: PathBuf::from("z_skipped.txt"),
+                content: Some("z".repeat(64)),
+                repo_work_dir: repo.path().to_path_buf(),
+                base_commit: BaseCommit::Initial,
+            },
+        ],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: Default::default(),
+    };
+
+    let response = send_control_request_with_timeout(
+        &control_socket,
+        &ControlRequest::CheckpointRun {
+            request: Box::new(request),
+        },
+        Duration::from_secs(5),
+    )
+    .expect("checkpoint control request should succeed");
+
+    assert!(
+        response.ok,
+        "checkpoint control request should succeed: {:?}",
+        response
+    );
+
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    assert_eq!(checkpoints.len(), 1, "expected exactly one checkpoint");
+    let checkpoint = checkpoints.last().unwrap();
+    assert_eq!(
+        checkpoint.entries.len(),
+        1,
+        "expected daemon resolver to apply aggregate content budget"
+    );
+    assert_eq!(checkpoint.entries[0].file, "a_kept.txt");
+}
+
+#[test]
+#[cfg(not(windows))]
 fn daemon_stalled_unidentified_trace_connection_does_not_block_sync_control_request() {
     let repo = TestRepo::new_dedicated_daemon();
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2160,6 +2226,110 @@ fn daemon_failed_rebase_does_not_consume_later_continue_reflog_entry() {
         repo.read_authorship_note(&rebased_sha).is_some(),
         "rebased commit should get the remapped note even when failed rebase processing is delayed until after --continue"
     );
+}
+
+#[test]
+fn daemon_late_cherry_pick_trace_uses_actual_destination_not_stale_commit_entry() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let mut file = repo.filename("picked.txt");
+    file.set_contents(lines!["base".human()]);
+    let base_commit = repo
+        .stage_all_and_commit("base")
+        .expect("base commit should succeed");
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "source"])
+        .expect("checkout source should succeed");
+    file.insert_at(1, lines!["AI picked line".ai()]);
+    let source_commit = repo
+        .stage_all_and_commit("source change")
+        .expect("source commit should succeed");
+    repo.read_authorship_note(&source_commit.commit_sha)
+        .expect("source commit should have an authorship note");
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(lines!["main branch line".human()]);
+    let main_tip = repo
+        .stage_all_and_commit("main branch advance")
+        .expect("main branch advance should succeed");
+
+    fs::write(repo.path().join("stale.txt"), "stale\n").expect("write stale file");
+    repo.git_og(&["add", "stale.txt"])
+        .expect("raw stale add should succeed");
+    repo.git_og(&["commit", "-m", "stale plain commit"])
+        .expect("raw stale commit should succeed");
+    let stale_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse stale commit should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(stale_commit, base_commit.commit_sha);
+    assert!(
+        repo.read_authorship_note(&stale_commit).is_none(),
+        "raw stale commit should not have an authorship note"
+    );
+
+    repo.git_og(&["reset", "--hard", &main_tip.commit_sha])
+        .expect("raw reset should succeed");
+    repo.restart_dedicated_daemon_for_test();
+
+    repo.git_og(&["cherry-pick", &source_commit.commit_sha])
+        .expect("raw cherry-pick should succeed");
+    let picked_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse picked commit should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(picked_commit, source_commit.commit_sha);
+    assert_ne!(picked_commit, stale_commit);
+    assert!(
+        repo.read_authorship_note(&picked_commit).is_none(),
+        "raw cherry-pick should not write the note before synthetic trace processing"
+    );
+
+    let cherry_pick_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let cherry_pick_session_arg = format!("git-ai.testSyncSession={cherry_pick_session}");
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "late-cherry-pick",
+                "argv": ["git", "-c", cherry_pick_session_arg, "-C", worktree, "cherry-pick", source_commit.commit_sha],
+                "worktree": worktree,
+                "time_ns": 1_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "late-cherry-pick",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 1_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "late-cherry-pick",
+                "code": 0,
+                "time_ns": 1_100u64,
+            }),
+            trace_atexit_frame("late-cherry-pick", 0, 1_101u64),
+        ],
+    );
+    repo.sync_daemon_external_completion_sessions(&[cherry_pick_session]);
+
+    assert!(
+        repo.read_authorship_note(&stale_commit).is_none(),
+        "stale historical commit must not receive the cherry-pick note"
+    );
+    let mut file = repo.filename("picked.txt");
+    file.assert_lines_and_blame(lines!["base".ai(), "AI picked line".ai(),]);
 }
 
 #[test]
