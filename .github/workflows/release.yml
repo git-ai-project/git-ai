@@ -18,41 +18,34 @@ on:
         type: boolean
 
 jobs:
-  authorize-admin:
-    name: Authorize admin release
+  release-prod-approval:
+    name: Approve production release
+    if: inputs.release_production == true && inputs.dry_run != true
     runs-on: ubuntu-latest
+    environment: release-prod
     permissions:
       contents: read
     steps:
-      - name: Verify workflow actor is a repository admin
+      - name: Verify production release target
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          ACTOR: ${{ github.actor }}
-          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REF_NAME: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          RELEASE_PRODUCTION: ${{ inputs.release_production }}
         run: |
           set -euo pipefail
 
-          if [[ "$RELEASE_PRODUCTION" == "true" && "$DRY_RUN" != "true" && "$REF_NAME" != "$DEFAULT_BRANCH" ]]; then
-            echo "::error::Production releases must run from ${DEFAULT_BRANCH}, not ${REF_NAME}. Use dry_run=true or release_production=false for branch builds."
+          if [[ "$REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            echo "::error::Production releases must run from ${DEFAULT_BRANCH}, not ${REF_NAME}."
             exit 1
           fi
 
-          for user in "$ACTOR" "$TRIGGERING_ACTOR"; do
-            permission="$(gh api "repos/${REPOSITORY}/collaborators/${user}/permission" --jq '.permission')"
-            if [[ "$permission" != "admin" ]]; then
-              echo "::error::${user} has ${permission} access. Only repository admins can run or rerun the release workflow."
-              exit 1
-            fi
-          done
-
   build:
     name: Build for ${{ matrix.target }}
-    needs: authorize-admin
+    needs: release-prod-approval
+    if: >-
+      always() &&
+      (inputs.release_production != true ||
+      inputs.dry_run == true ||
+      needs.release-prod-approval.result == 'success')
     runs-on: ${{ matrix.os }}
     outputs:
       version: ${{ steps.get-version.outputs.version }}
@@ -213,7 +206,12 @@ jobs:
 
   build-macos-intel:
     name: Build for macOS Intel
-    needs: authorize-admin
+    needs: release-prod-approval
+    if: >-
+      always() &&
+      (inputs.release_production != true ||
+      inputs.dry_run == true ||
+      needs.release-prod-approval.result == 'success')
     runs-on: macos-15-intel
     outputs:
       version: ${{ steps.get-version.outputs.version }}
@@ -280,9 +278,15 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build, build-macos-intel]
+    needs: [build, build-macos-intel, release-prod-approval]
     runs-on: ubuntu-latest
-    if: success() && inputs.dry_run != true
+    if: >-
+      always() &&
+      inputs.dry_run != true &&
+      needs.build.result == 'success' &&
+      needs.build-macos-intel.result == 'success' &&
+      (inputs.release_production != true ||
+      needs.release-prod-approval.result == 'success')
     environment: release
     permissions:
       contents: write
