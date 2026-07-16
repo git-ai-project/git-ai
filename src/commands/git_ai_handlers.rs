@@ -1123,13 +1123,33 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let mut paths: Vec<String> = remaining_args
+            // Optional `--model <name>` lets the mock_ai preset attach a real model
+            // (e.g. for exercising blame's "<agent> <model>" display); ignored by the
+            // other presets in this branch.
+            let mut model: Option<String> = None;
+            let mut path_args: Vec<&String> = Vec::new();
+            let mut i = 0usize;
+            while i < remaining_args.len() {
+                match remaining_args[i].as_str() {
+                    "--model" if i + 1 < remaining_args.len() => {
+                        model = Some(remaining_args[i + 1].clone());
+                        i += 2;
+                    }
+                    arg if !arg.starts_with("--") => {
+                        path_args.push(&remaining_args[i]);
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let mut paths: Vec<String> = path_args
                 .iter()
-                .filter(|a| !a.starts_with("--"))
                 .map(|s| {
                     let p = std::path::Path::new(s.as_str());
                     if p.is_absolute() {
-                        s.clone()
+                        (*s).clone()
                     } else {
                         cwd.join(p).to_string_lossy().to_string()
                     }
@@ -1138,11 +1158,14 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
             if paths.is_empty() {
                 paths = discover_dirty_files_from_status(&cwd);
             }
-            serde_json::json!({
+            let mut payload = serde_json::json!({
                 "file_paths": paths,
                 "cwd": cwd.to_string_lossy(),
-            })
-            .to_string()
+            });
+            if let Some(model) = model {
+                payload["model"] = serde_json::Value::String(model);
+            }
+            payload.to_string()
         }
         "known_human" => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

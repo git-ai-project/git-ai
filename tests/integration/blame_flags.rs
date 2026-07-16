@@ -1472,6 +1472,72 @@ fn test_blame_ai_human_author() {
     );
 }
 
+#[test]
+fn test_blame_shows_agent_and_model() {
+    // Users repeatedly assumed git-ai wasn't capturing the model because blame only
+    // showed the agent name. Blame should now render AI lines as "<agent> <model>".
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
+
+    // Human baseline line, committed without AI involvement.
+    std::fs::write(&file_path, "Human line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Add an AI line via mock_ai with an explicit model.
+    std::fs::write(&file_path, "Human line\nAI line\n").unwrap();
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_ai",
+        "--model",
+        "claude-sonnet-4-6",
+        "test.txt",
+    ])
+    .unwrap();
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    let output = repo.git_ai(&["blame", "test.txt"]).unwrap();
+    println!("\n[DEBUG] git-ai blame:\n{}", output);
+    let lines: Vec<&str> = output.lines().collect();
+
+    // The "claude-" prefix is stripped, so "claude-sonnet-4-6" renders as "sonnet-4-6".
+    assert!(
+        lines[1].contains("mock_ai sonnet-4-6"),
+        "AI line should show agent and (claude-stripped) model: {}",
+        lines[1]
+    );
+    // The human line must not pick up a spurious model.
+    assert!(
+        !lines[0].contains("sonnet-4-6"),
+        "Human line should not show a model: {}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_blame_omits_unknown_model() {
+    // When the model wasn't captured (sentinel "unknown"), blame should fall back to
+    // just the agent name rather than printing "mock_ai unknown".
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
+
+    std::fs::write(&file_path, "Human line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    std::fs::write(&file_path, "Human line\nAI line\n").unwrap();
+    // No --model => mock_ai defaults to the "unknown" sentinel.
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    let output = repo.git_ai(&["blame", "test.txt"]).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+
+    assert!(
+        lines[1].contains("mock_ai") && !lines[1].contains("unknown"),
+        "AI line should show agent without an 'unknown' model: {}",
+        lines[1]
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_blame_basic_format,
     test_blame_line_range,
@@ -1501,4 +1567,6 @@ crate::reuse_tests_in_worktree!(
     test_blame_without_ignore_revs_file_works_normally,
     test_blame_ignore_revs_with_multiple_commits,
     test_blame_ai_human_author,
+    test_blame_shows_agent_and_model,
+    test_blame_omits_unknown_model,
 );

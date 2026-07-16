@@ -17,10 +17,11 @@ impl AgentPreset for MockAiPreset {
                 .unwrap_or(0)
         );
 
-        let (file_paths, cwd) = if hook_input.is_empty() {
+        let (file_paths, cwd, model) = if hook_input.is_empty() {
             (
                 vec![],
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                "unknown".to_string(),
             )
         } else {
             let data: serde_json::Value = serde_json::from_str(hook_input)
@@ -42,14 +43,22 @@ impl AgentPreset for MockAiPreset {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            (paths, cwd)
+            // Allow tests to specify a model so model-dependent behavior (e.g. blame
+            // displaying "<agent> <model>") can be exercised end-to-end.
+            let model = data
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            (paths, cwd, model)
         };
 
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "mock_ai".to_string(),
                 id: mock_agent_id,
-                model: "unknown".to_string(),
+                model,
             },
             external_session_id: "mock_ai_session".to_string(),
             trace_id: trace_id.to_string(),
