@@ -24,16 +24,14 @@ New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 Copy-Item -Force -LiteralPath $BinaryPath -Destination $stagedExe
 
-$wix = Get-Command wix -ErrorAction SilentlyContinue
-if (-not $wix) {
-    Write-Host 'Installing WiX .NET tool...'
-    dotnet tool update --global wix | Out-Host
-    $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
-    $wix = Get-Command wix -ErrorAction Stop
-}
+$wixVersion = '7.0.0'
+Write-Host "Installing WiX .NET tool v$wixVersion..."
+dotnet tool update --global wix --version $wixVersion | Out-Host
+$env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+$wix = Get-Command wix -ErrorAction Stop
 
 $platform = if ($Architecture -eq 'arm64') { 'arm64' } else { 'x64' }
-& $wix.Source build $wxsPath `
+& $wix.Source build -acceptEula wix7 $wxsPath `
     -arch $platform `
     -d "ProductVersion=$Version" `
     -d "GitAiExe=$stagedExe" `

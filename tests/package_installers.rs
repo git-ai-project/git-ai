@@ -42,3 +42,12 @@ fn packaging_supports_only_msi_and_pkg() {
     assert!(!packaging_path("debian/build-deb.sh").exists());
     assert!(!packaging_path("homebrew/update-formula.sh").exists());
 }
+
+#[test]
+fn msi_builder_uses_the_sponsored_wix_v7_toolchain() {
+    let builder = std::fs::read_to_string(packaging_path("windows/build-msi.ps1")).unwrap();
+
+    assert!(builder.contains("$wixVersion = '7.0.0'"));
+    assert!(builder.contains("dotnet tool update --global wix --version $wixVersion"));
+    assert!(builder.contains("-acceptEula wix7"));
+}
