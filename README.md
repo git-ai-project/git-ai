@@ -48,7 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 
 ### Windows MSI beta
 
-Download the [Windows x64 MSI](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-windows-x64.msi) or [Windows ARM64 MSI](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-windows-arm64.msi), then open it. The MSI installs only for the current user, under local app data, and changes only that user's `PATH`; it does not require an Administrator install.
+Download the [Windows x64 MSI](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-windows-x64.msi) or [Windows ARM64 MSI](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-windows-arm64.msi), then open it. These links always resolve to the newest stable release. The MSI installs only for the current user, under local app data, and changes only that user's `PATH`; it does not require an Administrator install.
 
 For managed installations, pass the Git AI endpoint when invoking the MSI:
 
@@ -60,7 +60,17 @@ The values configure the installing user's Git AI config. Use your endpoint-mana
 
 ### macOS PKG beta
 
-Download the [Apple Silicon PKG](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-macos-arm64.pkg) or [Intel PKG](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-macos-x64.pkg), then open it. macOS asks for permission to install the bootstrap binary; Git AI configures the active logged-in user rather than root.
+Download the [Apple Silicon PKG](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-macos-arm64.pkg) or [Intel PKG](https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-macos-x64.pkg), then open it. These links always resolve to the newest stable release. macOS asks for permission to install the bootstrap binary; Git AI configures the active logged-in user rather than root.
+
+For a managed macOS installation, run the following as the developer user after the PKG install. Do not use `sudo` for this step:
+
+```bash
+git-ai setup-package --manager pkg \
+  --api-base https://git-ai.example \
+  --api-key your-api-key
+```
+
+The PKG does not accept API settings as installer properties. This command configures only the current user's Git AI config. Use a device-management or secret-management mechanism for the API key rather than putting a long-lived key in shell history.
 
 The MSI and PKG are first-install options. Existing Git AI auto-updates continue through the current user-level update flow, and the script installs above remain available.
 

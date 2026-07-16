@@ -52,10 +52,15 @@ fn installer_docs_cover_customer_setup_and_internal_release_policy() {
     assert!(customer_readme.contains("git-ai-macos-arm64.pkg"));
     assert!(customer_readme.contains("API_BASE="));
     assert!(customer_readme.contains("API_KEY="));
-    assert!(release_runbook.contains("release-prod"));
+    assert!(customer_readme.contains("setup-package --manager pkg"));
+    assert!(customer_readme.contains("--api-base"));
+    assert!(customer_readme.contains("--api-key"));
+    assert!(release_runbook.contains("release-approval"));
     assert!(release_runbook.contains("release_production"));
     assert!(release_runbook.contains("PKG-SHA256SUMS"));
     assert!(release_runbook.contains("UTM"));
+    assert!(release_runbook.contains("pkgutil --check-signature"));
+    assert!(release_runbook.contains("Get-AuthenticodeSignature"));
     assert!(!release_runbook.contains("Homebrew"));
     assert!(!release_runbook.contains("apt"));
 }
