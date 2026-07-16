@@ -44,7 +44,7 @@
           "default": "line",
           "scope": "application",
           "enumDescriptions": [
-            "Disable gutter decorations (status bar still shows current line info)",
+            "Disable gutter decorations",
             "Show gutter decorations for the current line's prompt only",
             "Show gutter decorations for all AI-authored lines in the file"
           ],
