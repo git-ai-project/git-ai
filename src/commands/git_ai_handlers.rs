@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::time::Duration;
 
 pub fn handle_git_ai(args: &[String]) {
     let perf_entry =
@@ -1068,7 +1069,15 @@ fn sync_daemon_family_before_stats_read(repo: &Repository) {
         repo_working_dir: workdir.to_string_lossy().to_string(),
     };
 
-    match crate::daemon::telemetry_handle::send_via_daemon(&request) {
+    let config = match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(2)) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::debug!(%error, "stats daemon sync unavailable");
+            return;
+        }
+    };
+
+    match crate::daemon::send_control_request(&config.control_socket_path, &request) {
         Ok(response) if response.ok => {}
         Ok(response) => {
             tracing::debug!(
