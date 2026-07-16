@@ -61,6 +61,41 @@ fn test_stats_for_simple_ai_commit() {
 }
 
 #[test]
+fn test_stats_waits_for_pending_commit_authorship_note() {
+    let repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=1000",
+    )]);
+    let file_path = repo.path().join("stats_race.txt");
+
+    std::fs::write(&file_path, "Base line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "stats_race.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    std::fs::write(
+        &file_path,
+        "Base line\nAI line 1\nAI line 2\nAI line 3\nAI line 4\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "stats_race.txt"])
+        .unwrap();
+    repo.git_without_test_sync_for_test(&["add", "stats_race.txt"], &[])
+        .unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "Delayed AI commit"], &[])
+        .unwrap();
+
+    let output = repo
+        .git_ai_without_pre_sync_for_test(&["stats", "--json", "HEAD"])
+        .expect("stats should succeed after syncing pending commit side effects");
+    let stats: CommitStats =
+        serde_json::from_str(output.trim()).expect("stats should emit JSON only");
+
+    assert_eq!(stats.ai_additions, 4, "stats output: {output}");
+    assert_eq!(stats.unknown_additions, 0, "stats output: {output}");
+}
+
+#[test]
 fn test_stats_for_mixed_commit() {
     let repo = TestRepo::new();
 

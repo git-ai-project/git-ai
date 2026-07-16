@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::time::Duration;
 
 pub fn handle_git_ai(args: &[String]) {
     let perf_entry =
@@ -1020,6 +1021,7 @@ fn handle_stats(args: &[String]) {
     }
 
     let effective_patterns = effective_ignore_patterns(&repo, &ignore_patterns, &[]);
+    sync_daemon_family_before_stats_read(&repo);
 
     // Handle commit range if detected
     if let Some(range) = commit_range {
@@ -1055,6 +1057,37 @@ fn handle_stats(args: &[String]) {
             }
         }
         std::process::exit(1);
+    }
+}
+
+fn sync_daemon_family_before_stats_read(repo: &Repository) {
+    let Ok(workdir) = repo.workdir() else {
+        return;
+    };
+
+    let request = ControlRequest::SyncFamily {
+        repo_working_dir: workdir.to_string_lossy().to_string(),
+    };
+
+    let config = match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(2)) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::debug!(%error, "stats daemon sync unavailable");
+            return;
+        }
+    };
+
+    match crate::daemon::send_control_request(&config.control_socket_path, &request) {
+        Ok(response) if response.ok => {}
+        Ok(response) => {
+            tracing::debug!(
+                error = response.error.as_deref().unwrap_or("unknown daemon error"),
+                "stats daemon sync failed"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(%error, "stats daemon sync unavailable");
+        }
     }
 }
 
