@@ -90,6 +90,15 @@ impl TelemetryBuffer {
         }
     }
 
+    fn is_empty(&self) -> bool {
+        self.errors.is_empty()
+            && self.performances.is_empty()
+            && self.messages.is_empty()
+            && self.metrics.is_empty()
+            && self.cas_records.is_empty()
+            && self.daemon_logs.is_empty()
+    }
+
     fn ingest_envelopes(&mut self, envelopes: Vec<TelemetryEnvelope>) {
         for envelope in envelopes {
             match envelope {
@@ -496,20 +505,25 @@ async fn telemetry_flush_loop(
             None
         };
 
+        let flush_all = !flush_requests.is_empty();
         let snapshot = {
             let mut buf = buffer.lock().await;
             if let Some(event) = heartbeat {
                 buf.ingest_daemon_logs(vec![event]);
             }
-            buf.take()
+            take_telemetry_flush_snapshot(&mut buf, flush_all)
         };
 
-        let flush_all = !flush_requests.is_empty();
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
         let daemon_id_for_flush = daemon_id.clone();
         let flush_started_at = std::time::Instant::now();
         let flush_result = tokio::task::spawn_blocking(move || {
-            flush_telemetry_batch(snapshot, &daemon_id_for_flush, flush_all)
+            if let Some(snapshot) = snapshot {
+                flush_telemetry_batch(snapshot, &daemon_id_for_flush, flush_all)
+            } else {
+                flush_pending_metrics();
+                (Vec::new(), FlushStatus::default())
+            }
         })
         .await
         .unwrap_or_else(|e| {
@@ -537,6 +551,17 @@ async fn telemetry_flush_loop(
                 .await
                 .requeue_failed_daemon_logs(requeue_daemon_logs);
         }
+    }
+}
+
+fn take_telemetry_flush_snapshot(
+    buffer: &mut TelemetryBuffer,
+    flush_all: bool,
+) -> Option<TelemetryBuffer> {
+    if !flush_all && buffer.is_empty() {
+        None
+    } else {
+        Some(buffer.take())
     }
 }
 
@@ -1487,6 +1512,20 @@ mod tests {
             next_telemetry_flush_at(completed_at),
             completed_at + FLUSH_INTERVAL
         );
+    }
+
+    #[test]
+    fn empty_periodic_flush_preserves_pending_metrics_only_fast_path() {
+        let mut buffer = TelemetryBuffer::new();
+
+        assert!(take_telemetry_flush_snapshot(&mut buffer, false).is_none());
+    }
+
+    #[test]
+    fn explicit_flush_uses_full_metrics_notes_and_status_path() {
+        let mut buffer = TelemetryBuffer::new();
+
+        assert!(take_telemetry_flush_snapshot(&mut buffer, true).is_some());
     }
 
     fn now_ts() -> u32 {
