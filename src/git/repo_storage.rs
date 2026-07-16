@@ -907,39 +907,39 @@ impl PersistedWorkingLog {
     }
 }
 
-fn trim_initial_metadata_to_referenced_authors(initial: &mut InitialAttributions) {
-    let mut prompt_ids = HashSet::new();
-    let mut human_ids = HashSet::new();
-    let mut session_ids = HashSet::new();
+pub(crate) fn trim_initial_metadata_to_referenced_authors(initial: &mut InitialAttributions) {
+    let human_sentinel = CheckpointKind::Human.to_str();
+    let mut referenced_authors = HashSet::new();
+    let mut referenced_sessions = HashSet::new();
 
     for attrs in initial.files.values() {
         for attr in attrs {
-            let author_id = attr.author_id.as_str();
-            if author_id.starts_with("s_") {
-                session_ids.insert(
-                    author_id
-                        .split("::")
-                        .next()
-                        .unwrap_or(author_id)
-                        .to_string(),
-                );
-            } else if author_id.starts_with("h_") {
-                human_ids.insert(author_id.to_string());
-            } else {
-                prompt_ids.insert(author_id.to_string());
+            if attr.author_id == human_sentinel {
+                continue;
+            }
+
+            referenced_authors.insert(attr.author_id.clone());
+            if attr.author_id.starts_with("s_") {
+                let session_key = attr
+                    .author_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&attr.author_id)
+                    .to_string();
+                referenced_sessions.insert(session_key);
             }
         }
     }
 
     initial
         .prompts
-        .retain(|prompt_id, _| prompt_ids.contains(prompt_id));
+        .retain(|author_id, _| referenced_authors.contains(author_id));
     initial
         .humans
-        .retain(|human_id, _| human_ids.contains(human_id));
+        .retain(|author_id, _| referenced_authors.contains(author_id));
     initial
         .sessions
-        .retain(|session_id, _| session_ids.contains(session_id));
+        .retain(|session_id, _| referenced_sessions.contains(session_id));
 }
 
 #[cfg(test)]
