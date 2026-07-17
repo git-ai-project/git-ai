@@ -42,7 +42,7 @@ jobs:
     name: Build for ${{ matrix.target }}
     needs: release-prod-approval
     if: >-
-      always() &&
+      !cancelled() &&
       (inputs.release_production != true ||
       inputs.dry_run == true ||
       needs.release-prod-approval.result == 'success')
@@ -208,7 +208,7 @@ jobs:
     name: Build for macOS Intel
     needs: release-prod-approval
     if: >-
-      always() &&
+      !cancelled() &&
       (inputs.release_production != true ||
       inputs.dry_run == true ||
       needs.release-prod-approval.result == 'success')
@@ -281,7 +281,7 @@ jobs:
     needs: [build, build-macos-intel, release-prod-approval]
     runs-on: ubuntu-latest
     if: >-
-      always() &&
+      !cancelled() &&
       inputs.dry_run != true &&
       needs.build.result == 'success' &&
       needs.build-macos-intel.result == 'success' &&
