@@ -20,7 +20,7 @@ user. It fails if no valid console user is logged in or per-user setup fails.
 For an enterprise endpoint, pass configuration to the MSI when installing:
 
 ```powershell
-msiexec /i git-ai-windows-x64.msi API_BASE=https://git-ai.example API_KEY=your-api-key
+msiexec /i git-ai-windows-x64.msi API_BASE=https://usegitai.com API_KEY=your-api-key
 ```
 
 These values configure only the installing user's Git AI config. They are
