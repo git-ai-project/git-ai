@@ -6210,7 +6210,7 @@ impl ActorDaemonCoordinator {
                 // Trigger an immediate notes flush in a blocking task.
                 // Fire-and-forget: the periodic flush loop is the safety net.
                 tokio::task::spawn_blocking(|| {
-                    crate::daemon::telemetry_worker::flush_notes(false);
+                    crate::daemon::telemetry_worker::flush_notes();
                 });
                 Ok(ControlResponse::ok(None, None))
             }

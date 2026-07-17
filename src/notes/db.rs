@@ -462,11 +462,16 @@ impl NotesDatabase {
 
     // ----- Read operations -----
 
-    /// Count unsynced notes that have not exhausted their upload attempts.
-    pub fn count_pending_syncable(&self) -> Result<usize, GitAiError> {
+    /// Count unsynced notes that can be dequeued for upload right now.
+    pub fn count_pending_uploadable(&self) -> Result<usize, GitAiError> {
+        let now = unix_now();
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE synced = 0 AND attempts < 6",
-            [],
+            r#"SELECT COUNT(*) FROM notes
+               WHERE synced = 0
+                 AND processing_started_at IS NULL
+                 AND next_retry_at <= ?1
+                 AND attempts < 6"#,
+            params![now],
             |row| row.get(0),
         )?;
         Ok(count as usize)
@@ -780,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn test_count_pending_syncable_excludes_only_permanent_failures() {
+    fn test_count_pending_uploadable_excludes_deferred_and_processing_rows() {
         let (mut db, _tmp) = create_test_db();
 
         for sha in ["ready", "backoff", "processing", "permanent"] {
@@ -805,7 +810,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.count_pending_syncable().unwrap(), 3);
+        assert_eq!(db.count_pending_uploadable().unwrap(), 1);
     }
 
     // --- cache_synced_notes ---
