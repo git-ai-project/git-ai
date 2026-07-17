@@ -68,6 +68,15 @@ fn main() {
     }
 
     if binary_name == "git-ai" || binary_name == "git-ai.exe" {
+        if matches!(
+            cli.args.first().map(String::as_str),
+            Some("install-hooks" | "install")
+        ) && let Err(error) = commands::install_hooks::prepare_install_user_environment()
+        {
+            eprintln!("Install hooks failed: {error}");
+            std::process::exit(1);
+        }
+
         // Block elevated privileges to prevent creating root-owned files
         // that break normal-user daemon startup. Only applies to direct
         // `git-ai` commands (not the git proxy, which must stay transparent).
