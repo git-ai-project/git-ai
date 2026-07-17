@@ -244,8 +244,34 @@ pub fn filter_commits_with_notes(
 
 // --- Search ---
 
+/// Search authorship-note content for a literal substring and return matching
+/// commit SHAs, newest first.
+///
+/// On the HTTP backend this searches the notes-db cache and unions in any
+/// matches from local git notes (transition-period repos may have both); on
+/// the GitNotes backend it greps `refs/notes/ai` directly.
 pub fn search_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, GitAiError> {
-    crate::git::refs::grep_ai_notes(repo, pattern)
+    match Config::get().notes_backend_kind() {
+        NotesBackendKind::Http => http_search_notes(repo, pattern),
+        NotesBackendKind::GitNotes => crate::git::refs::grep_ai_notes(repo, pattern),
+    }
+}
+
+fn http_search_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, GitAiError> {
+    let mut shas: HashSet<String> = {
+        let db = crate::notes::db::NotesDatabase::global()?;
+        let db_lock = db
+            .lock()
+            .map_err(|e| GitAiError::Generic(format!("notes-db lock: {}", e)))?;
+        db_lock.search_notes_content(pattern)?.into_iter().collect()
+    };
+
+    // Union in matches from local git notes for transition-period repos.
+    if let Ok(git_shas) = crate::git::refs::grep_ai_notes(repo, pattern) {
+        shas.extend(git_shas);
+    }
+
+    crate::git::refs::sort_commit_shas_by_date_desc(repo, shas)
 }
 
 // --- Materialization (for git ai log) ---
@@ -668,6 +694,44 @@ mod tests {
         assert_eq!(result.get(&sha1), Some(&"content-a".to_string()));
         assert_eq!(result.get(&sha2), Some(&"content-b".to_string()));
         assert!(!result.contains_key(&sha3));
+
+        unsafe {
+            env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
+        }
+    }
+
+    /// Under the HTTP backend, note search must find notes that only exist in
+    /// the notes-db cache (refs/notes/ai is empty there). Regression: search was
+    /// a pure pass-through to `git grep refs/notes/ai`, so session/prompt history
+    /// lookups silently found nothing under the HTTP backend.
+    #[test]
+    #[serial_test::serial(notes_db_env)]
+    fn http_search_notes_finds_cached_note_content() {
+        use crate::git::test_utils::TmpRepo;
+        use std::env;
+
+        let tmp_db = tempfile::NamedTempFile::new().expect("tmp file");
+        let db_path = tmp_db.path().to_str().unwrap().to_string();
+        unsafe {
+            env::set_var("GIT_AI_TEST_NOTES_DB_PATH", &db_path);
+        }
+
+        let tmp = TmpRepo::new().expect("TmpRepo::new");
+        let sha = "dddddddddddddddddddddddddddddddddddddddd";
+        http_write_note(sha, r#"{"sessions": {"s_searchable123456": {}}}"#).expect("write");
+
+        let matches =
+            http_search_notes(tmp.gitai_repo(), "\"s_searchable123456\"").expect("search");
+        assert_eq!(
+            matches,
+            vec![sha.to_string()],
+            "search must find notes that only exist in the notes-db cache"
+        );
+
+        // A needle that appears nowhere must return no matches (LIKE wildcards in
+        // the needle must not be interpreted).
+        let no_matches = http_search_notes(tmp.gitai_repo(), "\"s_%_absent%\"").expect("search");
+        assert!(no_matches.is_empty(), "got: {:?}", no_matches);
 
         unsafe {
             env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");

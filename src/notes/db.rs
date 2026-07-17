@@ -539,6 +539,27 @@ impl NotesDatabase {
         Ok(result)
     }
 
+    /// Return the commit SHAs of notes whose content contains `needle` as a
+    /// literal substring (LIKE wildcards in the needle are escaped).
+    pub fn search_notes_content(&self, needle: &str) -> Result<Vec<String>, GitAiError> {
+        let escaped = needle
+            .replace('\\', r"\\")
+            .replace('%', r"\%")
+            .replace('_', r"\_");
+        let pattern = format!("%{}%", escaped);
+
+        let mut stmt = self
+            .conn
+            .prepare(r"SELECT commit_sha FROM notes WHERE content LIKE ?1 ESCAPE '\'")?;
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Evict synced cache entries older than `max_age_secs` when the total row
     /// count exceeds `max_rows`. Returns the number of rows deleted.
     pub fn evict_stale_cache(

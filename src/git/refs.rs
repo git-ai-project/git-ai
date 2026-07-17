@@ -1,7 +1,7 @@
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git, exec_git_stdin};
+use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +11,7 @@ pub const AI_AUTHORSHIP_FULL_REF: &str = "refs/notes/ai";
 pub const AI_AUTHORSHIP_FORK_TRACKING_REF: &str = "refs/notes/ai-remote/fork";
 pub const AI_AUTHORSHIP_PUSH_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
 
-pub fn notes_add(
+pub(in crate::git) fn notes_add(
     repo: &Repository,
     commit_sha: &str,
     note_content: &str,
@@ -151,7 +151,7 @@ fn batch_read_blob_contents(
 /// Resolve authorship note blob OIDs for a set of commits using one batched cat-file call.
 ///
 /// Returns a map of commit SHA -> note blob SHA for commits that currently have notes.
-pub fn note_blob_oids_for_commits(
+pub(in crate::git) fn note_blob_oids_for_commits(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashMap<String, String>, GitAiError> {
@@ -162,7 +162,7 @@ pub fn note_blob_oids_for_commits(
 ///
 /// Returns a map of commit SHA -> raw note content for commits that currently
 /// have notes in `refs/notes/ai`.
-pub fn notes_for_commits(
+pub(in crate::git) fn notes_for_commits(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashMap<String, String>, GitAiError> {
@@ -368,7 +368,10 @@ pub fn copy_missing_notes_for_commits_from_ref(
     Ok(copied)
 }
 
-pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Result<(), GitAiError> {
+pub(in crate::git) fn notes_add_batch(
+    repo: &Repository,
+    entries: &[(String, String)],
+) -> Result<(), GitAiError> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -441,7 +444,7 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
 ///
 /// Each entry is (commit_sha, existing_note_blob_oid).
 #[allow(dead_code)]
-pub fn notes_add_blob_batch(
+pub(in crate::git) fn notes_add_blob_batch(
     repo: &Repository,
     entries: &[(String, String)],
 ) -> Result<(), GitAiError> {
@@ -554,7 +557,7 @@ pub enum CommitAuthorship {
         authorship_log: AuthorshipLog,
     },
 }
-pub fn get_commits_with_notes_from_list(
+pub(in crate::git) fn get_commits_with_notes_from_list(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<Vec<CommitAuthorship>, GitAiError> {
@@ -639,7 +642,7 @@ pub fn get_commits_with_notes_from_list(
 }
 
 // Show an authorship note and return its JSON content if found, or None if it doesn't exist.
-pub fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<String> {
+pub(in crate::git) fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<String> {
     let mut args = repo.global_args_for_exec();
     args.push("notes".to_string());
     args.push("--ref=ai".to_string());
@@ -660,7 +663,7 @@ pub fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<Strin
 ///
 /// This uses a single `git notes --ref=ai list` invocation instead of one
 /// `git notes show` call per commit.
-pub fn commits_with_authorship_notes(
+pub(in crate::git) fn commits_with_authorship_notes(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashSet<String>, GitAiError> {
@@ -670,7 +673,7 @@ pub fn commits_with_authorship_notes(
 }
 
 // Show an authorship note and return its JSON content if found, or None if it doesn't exist.
-pub fn get_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipLog> {
+pub(in crate::git) fn get_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipLog> {
     let content = show_authorship_note(repo, commit_sha)?;
     let mut authorship_log = AuthorshipLog::deserialize_from_string(&content).ok()?;
     // Keep metadata aligned with the commit where this note is attached.
@@ -689,7 +692,7 @@ pub fn get_reference_as_working_log(
     Ok(working_log)
 }
 
-pub fn get_reference_as_authorship_log_v3(
+pub(in crate::git) fn get_reference_as_authorship_log_v3(
     repo: &Repository,
     commit_sha: &str,
 ) -> Result<AuthorshipLog, GitAiError> {
@@ -902,7 +905,10 @@ pub fn copy_ref(repo: &Repository, source_ref: &str, dest_ref: &str) -> Result<(
 
 /// Search AI notes for a pattern and return matching commit SHAs ordered by commit date (newest first)
 /// Uses git grep to search through refs/notes/ai
-pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, GitAiError> {
+pub(in crate::git) fn grep_ai_notes(
+    repo: &Repository,
+    pattern: &str,
+) -> Result<Vec<String>, GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.push("--no-pager".to_string());
     args.push("grep".to_string());
@@ -929,24 +935,107 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
     }
 
     // If we have multiple results, sort by commit date (newest first)
-    if shas.len() > 1 {
-        let sha_vec: Vec<String> = shas.into_iter().collect();
-        let mut args = repo.global_args_for_exec();
-        args.push("log".to_string());
-        args.push("--format=%H".to_string());
-        args.push("--date-order".to_string());
-        args.push("--no-walk".to_string());
-        for sha in &sha_vec {
-            args.push(sha.clone());
+    sort_commit_shas_by_date_desc(repo, shas)
+}
+
+/// Sort commit SHAs by commit date, newest first, using a single `git log
+/// --no-walk` call. Best-effort: if git cannot resolve every SHA (e.g. a
+/// cache-only note references a commit that was never fetched locally), the
+/// input is returned in lexicographic order instead so callers still get a
+/// deterministic result.
+pub(crate) fn sort_commit_shas_by_date_desc(
+    repo: &Repository,
+    shas: HashSet<String>,
+) -> Result<Vec<String>, GitAiError> {
+    if shas.len() <= 1 {
+        return Ok(shas.into_iter().collect());
+    }
+
+    let mut sha_vec: Vec<String> = shas.into_iter().collect();
+    let mut args = repo.global_args_for_exec();
+    args.push("log".to_string());
+    args.push("--format=%H".to_string());
+    args.push("--date-order".to_string());
+    args.push("--no-walk".to_string());
+    for sha in &sha_vec {
+        args.push(sha.clone());
+    }
+
+    if let Ok(output) = exec_git_allow_nonzero(&args)
+        && output.status.success()
+        && let Ok(stdout) = String::from_utf8(output.stdout)
+    {
+        let sorted: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
+        if sorted.len() == sha_vec.len() {
+            return Ok(sorted);
         }
+    }
 
-        let output = exec_git(&args)?;
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|_| GitAiError::Generic("Failed to parse git log output".to_string()))?;
+    sha_vec.sort();
+    Ok(sha_vec)
+}
 
-        Ok(stdout.lines().map(|s| s.to_string()).collect())
-    } else {
-        Ok(shas.into_iter().collect())
+/// Direct access to the raw git-notes backend, for TESTS ONLY.
+///
+/// Production code must go through `crate::git::notes_api`, which dispatches on
+/// the configured notes backend — calling these directly silently ignores the
+/// HTTP backend (notes live in the notes-db cache there, not refs/notes/ai).
+/// The underlying functions are `pub(in crate::git)` to enforce that; these
+/// wrappers exist so backend unit tests can exercise the raw git
+/// implementation regardless of backend configuration.
+#[cfg(feature = "test-support")]
+pub mod git_backend_for_tests {
+    use super::*;
+
+    pub fn notes_add(
+        repo: &Repository,
+        commit_sha: &str,
+        note_content: &str,
+    ) -> Result<(), GitAiError> {
+        super::notes_add(repo, commit_sha, note_content)
+    }
+
+    pub fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<String> {
+        super::show_authorship_note(repo, commit_sha)
+    }
+
+    pub fn commits_with_authorship_notes(
+        repo: &Repository,
+        commit_shas: &[String],
+    ) -> Result<HashSet<String>, GitAiError> {
+        super::commits_with_authorship_notes(repo, commit_shas)
+    }
+
+    pub fn get_commits_with_notes_from_list(
+        repo: &Repository,
+        commit_shas: &[String],
+    ) -> Result<Vec<CommitAuthorship>, GitAiError> {
+        super::get_commits_with_notes_from_list(repo, commit_shas)
+    }
+
+    pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, GitAiError> {
+        super::grep_ai_notes(repo, pattern)
+    }
+
+    pub fn note_blob_oids_for_commits(
+        repo: &Repository,
+        commit_shas: &[String],
+    ) -> Result<HashMap<String, String>, GitAiError> {
+        super::note_blob_oids_for_commits(repo, commit_shas)
+    }
+
+    pub fn notes_add_batch(
+        repo: &Repository,
+        entries: &[(String, String)],
+    ) -> Result<(), GitAiError> {
+        super::notes_add_batch(repo, entries)
+    }
+
+    pub fn notes_add_blob_batch(
+        repo: &Repository,
+        entries: &[(String, String)],
+    ) -> Result<(), GitAiError> {
+        super::notes_add_blob_batch(repo, entries)
     }
 }
 

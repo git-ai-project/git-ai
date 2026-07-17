@@ -118,28 +118,14 @@ pub fn fetch_missing_notes_for_commits(
 ) -> Result<(), GitAiError> {
     use std::collections::HashSet;
 
-    fn noted_commits(repository: &Repository) -> HashSet<String> {
-        // Fetch the full set of locally-noted commits in one subprocess call.
-        // `git notes --ref=refs/notes/ai list` outputs "<note-sha> <commit-sha>" per line.
-        let mut args = repository.global_args_for_exec();
-        args.extend(
-            ["notes", "--ref=refs/notes/ai", "list"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
-        exec_git(&args)
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn noted_commits(repository: &Repository, commit_shas: &[String]) -> HashSet<String> {
+        // Backend-aware presence check: on the HTTP backend notes live in the
+        // notes-db cache, not refs/notes/ai — without this, every rewrite of
+        // cached-note commits triggered pointless notes fetches from all remotes.
+        crate::git::notes_api::commits_with_notes(repository, commit_shas).unwrap_or_default()
     }
 
-    let noted_before_fetch = noted_commits(repository);
+    let noted_before_fetch = noted_commits(repository, source_commits);
 
     let missing: Vec<&String> = source_commits
         .iter()
@@ -172,7 +158,7 @@ pub fn fetch_missing_notes_for_commits(
     }
 
     if let Some(error) = first_fetch_error {
-        let noted_after_fetch = noted_commits(repository);
+        let noted_after_fetch = noted_commits(repository, source_commits);
         let still_missing: Vec<&String> = source_commits
             .iter()
             .filter(|sha| !noted_after_fetch.contains(sha.as_str()))
