@@ -256,7 +256,8 @@ function Get-Architecture {
     }
 }
 
-# Ensure $PathToAdd is first on the User PATH. No Machine PATH or admin required.
+# Ensure $PathToAdd is on the User PATH (appended if absent). No Machine PATH,
+# no admin required, no positioning logic.
 function Set-PathEnsureContains {
     param(
         [Parameter(Mandatory = $true)][string]$PathToAdd
@@ -275,13 +276,16 @@ function Set-PathEnsureContains {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $entries = @()
         if ($userPath) { $entries = ($userPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
-        $remainingEntries = @($entries | Where-Object { (NormalizePath $_) -ne $normalizedAdd })
-        $newUserPath = (@($PathToAdd) + $remainingEntries) -join $sep
-        if ($newUserPath -ne $userPath) {
+        $alreadyPresent = $false
+        foreach ($e in $entries) {
+            if ((NormalizePath $e) -eq $normalizedAdd) { $alreadyPresent = $true; break }
+        }
+        if ($alreadyPresent) {
+            $userStatus = 'AlreadyPresent'
+        } else {
+            $newUserPath = if ($userPath) { "$userPath$sep$PathToAdd" } else { $PathToAdd }
             [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
             $userStatus = 'Updated'
-        } else {
-            $userStatus = 'AlreadyPresent'
         }
     } catch {
         $userStatus = 'Error'
@@ -292,8 +296,13 @@ function Set-PathEnsureContains {
         $procPath = $env:PATH
         $procEntries = @()
         if ($procPath) { $procEntries = ($procPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
-        $remainingProcEntries = @($procEntries | Where-Object { (NormalizePath $_) -ne $normalizedAdd })
-        $env:PATH = (@($PathToAdd) + $remainingProcEntries) -join $sep
+        $procHas = $false
+        foreach ($e in $procEntries) {
+            if ((NormalizePath $e) -eq $normalizedAdd) { $procHas = $true; break }
+        }
+        if (-not $procHas) {
+            $env:PATH = if ($procPath) { "$procPath$sep$PathToAdd" } else { $PathToAdd }
+        }
     } catch { }
 
     return [PSCustomObject]@{

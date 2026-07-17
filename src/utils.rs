@@ -70,46 +70,6 @@ pub(crate) fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     Ok(resolve_git_ai_exe_from_invocation_path(path))
 }
 
-pub(crate) fn daemon_git_ai_exe() -> Result<PathBuf, GitAiError> {
-    let current_exe = current_git_ai_exe()?;
-    Ok(preferred_user_update_exe(
-        &current_exe,
-        dirs::home_dir().as_deref(),
-    ))
-}
-
-fn preferred_user_update_exe(
-    current_exe: &std::path::Path,
-    home: Option<&std::path::Path>,
-) -> PathBuf {
-    if !is_package_bootstrap_exe(current_exe) {
-        return current_exe.to_path_buf();
-    }
-
-    let Some(home) = home else {
-        return current_exe.to_path_buf();
-    };
-    let user_exe = home.join(".git-ai").join("bin").join(if cfg!(windows) {
-        "git-ai.exe"
-    } else {
-        "git-ai"
-    });
-
-    if user_exe.is_file() {
-        user_exe
-    } else {
-        current_exe.to_path_buf()
-    }
-}
-
-fn is_package_bootstrap_exe(path: &std::path::Path) -> bool {
-    let path = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
-    path.ends_with("/opt/git-ai/bin/git-ai") || path.ends_with("/appdata/local/git ai/git-ai.exe")
-}
-
 fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
     let mut cmd = Command::new(exe);
     cmd.arg(subcommand)
@@ -1197,49 +1157,6 @@ mod tests {
         assert!(result.is_ok(), "current_git_ai_exe should not fail");
         let path = result.unwrap();
         assert!(!path.as_os_str().is_empty(), "path should not be empty");
-    }
-
-    #[test]
-    fn package_bootstrap_daemon_prefers_an_existing_user_update_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let user_exe = temp.path().join(".git-ai/bin/git-ai");
-        std::fs::create_dir_all(user_exe.parent().unwrap()).unwrap();
-        std::fs::write(&user_exe, "").unwrap();
-
-        assert_eq!(
-            preferred_user_update_exe(
-                std::path::Path::new("/opt/git-ai/bin/git-ai"),
-                Some(temp.path())
-            ),
-            user_exe
-        );
-    }
-
-    #[test]
-    fn package_bootstrap_daemon_falls_back_when_no_user_update_exists() {
-        let temp = tempfile::tempdir().unwrap();
-        let bootstrap = std::path::Path::new("/opt/git-ai/bin/git-ai");
-
-        assert_eq!(
-            preferred_user_update_exe(bootstrap, Some(temp.path())),
-            bootstrap
-        );
-    }
-
-    #[test]
-    fn package_bootstrap_paths_are_recognized_on_both_desktop_platforms() {
-        assert!(is_package_bootstrap_exe(std::path::Path::new(
-            "/opt/git-ai/bin/git-ai"
-        )));
-        assert!(is_package_bootstrap_exe(std::path::Path::new(
-            r"C:\Users\alice\AppData\Local\Git AI\git-ai.exe"
-        )));
-        assert!(!is_package_bootstrap_exe(std::path::Path::new(
-            r"C:\Program Files\Git AI\git-ai.exe"
-        )));
-        assert!(!is_package_bootstrap_exe(std::path::Path::new(
-            "/Users/alice/.git-ai/bin/git-ai"
-        )));
     }
 
     // =========================================================================
