@@ -239,11 +239,12 @@ impl VirtualAttributions {
         repo: &Repository,
         session_id: &str,
     ) -> Result<SessionRecord, GitAiError> {
-        let shas = crate::git::refs::grep_ai_notes(repo, &format!("\"{}\"", session_id))
+        // Go through notes_api (not refs::) so the HTTP notes backend is honored.
+        let shas = crate::git::notes_api::search_notes(repo, &format!("\"{}\"", session_id))
             .unwrap_or_default();
 
         if let Some(latest_sha) = shas.first()
-            && let Ok(log) = crate::git::refs::get_reference_as_authorship_log_v3(repo, latest_sha)
+            && let Ok(log) = crate::git::notes_api::read_authorship_v3(repo, latest_sha)
             && let Some(session) = log.metadata.sessions.get(session_id)
         {
             return Ok(session.clone());
