@@ -16,6 +16,7 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $wxsPath = Join-Path $PSScriptRoot 'git-ai.wxs'
 $stageDir = Join-Path $repoRoot "target\package\msi-$Architecture"
 $stagedExe = Join-Path $stageDir 'git-ai.exe'
+$stagedLoginLauncher = Join-Path $stageDir 'git-ai-login.cmd'
 $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
 $outputDir = [System.IO.Path]::GetDirectoryName($outputFullPath)
 $upgradeCode = '4B6D731B-CB6B-48F2-8A0A-A4344C91E1E0'
@@ -23,6 +24,7 @@ $upgradeCode = '4B6D731B-CB6B-48F2-8A0A-A4344C91E1E0'
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 Copy-Item -Force -LiteralPath $BinaryPath -Destination $stagedExe
+Copy-Item -Force -LiteralPath (Join-Path $PSScriptRoot 'git-ai-login.cmd') -Destination $stagedLoginLauncher
 
 $wixVersion = '7.0.0'
 $wixUtilExtension = 'WixToolset.Util.wixext/7.0.0'
@@ -47,6 +49,7 @@ $platform = if ($Architecture -eq 'arm64') { 'arm64' } else { 'x64' }
     -arch $platform `
     -d "ProductVersion=$Version" `
     -d "GitAiExe=$stagedExe" `
+    -d "GitAiLoginLauncher=$stagedLoginLauncher" `
     -d "UpgradeCode={$upgradeCode}" `
     -o $outputFullPath
 

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+: "${HOME:?HOME is required}"
+exec "$HOME/.git-ai/bin/git-ai" bg run
