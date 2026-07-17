@@ -521,23 +521,45 @@ jobs:
           name: git-ai-windows-msi
           path: release
 
-      - name: Install and uninstall MSI
+      - name: Install and uninstall MSI as a standard user
         shell: pwsh
         run: |
           $msi = (Get-ChildItem release\git-ai-windows-x64.msi).FullName
           $apiBase = 'https://dev.usegitai.com'
           $apiKey = 'ci-package-test-key'
-          $install = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey" -Wait -PassThru
+          $testUser = 'git-ai-package-test'
+          $password = ConvertTo-SecureString "GitAi-Ci!$([guid]::NewGuid().ToString('N'))" -AsPlainText -Force
+          $credential = [pscredential]::new("$env:COMPUTERNAME\$testUser", $password)
+          New-LocalUser -Name $testUser -Password $password | Out-Null
+
+          $testHome = Join-Path $env:SystemDrive "Users\$testUser"
+          $gitAi = Join-Path $testHome '.git-ai\bin\git-ai.exe'
+          $configPath = Join-Path $testHome '.git-ai\config.json'
+          $publicMsi = Join-Path $env:PUBLIC 'Downloads\git-ai-windows-x64.msi'
+          Copy-Item $msi $publicMsi -Force
+
+          $installCommand = @"
+          `$process = Start-Process msiexec.exe -ArgumentList '/i `"$publicMsi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey' -Wait -PassThru
+          if (`$process.ExitCode -ne 0) { exit `$process.ExitCode }
+          & '$gitAi' --version
+          exit `$LASTEXITCODE
+          "@
+          $install = Start-Process pwsh.exe -Credential $credential -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $installCommand) -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "MSI install failed with exit code $($install.ExitCode)" }
-          $gitAi = Join-Path $env:USERPROFILE '.git-ai\bin\git-ai.exe'
-          & $gitAi --version
-          $config = Get-Content (Join-Path $env:USERPROFILE '.git-ai\config.json') -Raw | ConvertFrom-Json
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
           if ($config.api_base_url -ne $apiBase) { throw 'MSI did not persist API_BASE for the installing user' }
           if ([string]::IsNullOrWhiteSpace($config.api_key)) { throw 'MSI did not persist API_KEY for the installing user' }
-          if ((Get-Acl $gitAi).Owner -notlike "*\$env:USERNAME") { throw 'MSI binary is not owned by the installing user' }
-          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Git AI')) { throw 'MSI created the retired LocalAppData runtime' }
+          if ((Get-Acl $gitAi).Owner -notlike "*\$testUser") { throw 'MSI binary is not owned by the installing user' }
+          if ((Get-Acl $configPath).Owner -notlike "*\$testUser") { throw 'MSI config is not owned by the installing user' }
+          if (Test-Path (Join-Path $testHome 'AppData\Local\Git AI')) { throw 'MSI created the retired LocalAppData runtime' }
           if (Test-Path (Join-Path $env:ProgramFiles 'Git AI')) { throw 'MSI created a system-wide runtime' }
-          $uninstall = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn /norestart" -Wait -PassThru
+
+          $uninstallCommand = @"
+          `$process = Start-Process msiexec.exe -ArgumentList '/x `"$publicMsi`" /qn /norestart' -Wait -PassThru
+          exit `$process.ExitCode
+          "@
+          $uninstall = Start-Process pwsh.exe -Credential $credential -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $uninstallCommand) -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($uninstall.ExitCode)" }
 
   test-pkg:
@@ -554,17 +576,43 @@ jobs:
 
       - name: Install PKG
         run: |
+          console_user="$(/usr/bin/stat -f%Su /dev/console)"
+          case "$console_user" in
+            ''|root|loginwindow|_mbsetupuser)
+              echo "::error::No valid console user is logged in"
+              exit 1
+              ;;
+          esac
+          console_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk 'NR == 1 { print $2 }')"
+          git_ai="$console_home/.git-ai/bin/git-ai"
+
           if [ "$(uname -m)" = "arm64" ]; then
             PKG=release/git-ai-macos-arm64.pkg
           else
             PKG=release/git-ai-macos-x64.pkg
           fi
           sudo installer -pkg "$PKG" -target /
-          "$HOME/.git-ai/bin/git-ai" --version
-          test "$(stat -f%Su "$HOME/.git-ai/bin/git-ai")" = "$(id -un)"
-          test "$(stat -f%Su "$HOME/.git-ai")" = "$(id -un)"
-          test ! -e /opt/git-ai
-          test ! -e /usr/local/bin/git-ai
+          "$git_ai" --version
+
+          binary_owner="$(/usr/bin/stat -f%Su "$git_ai")"
+          state_owner="$(/usr/bin/stat -f%Su "$console_home/.git-ai")"
+          printf 'Console user: %s\nBinary owner: %s\nState owner: %s\n' "$console_user" "$binary_owner" "$state_owner"
+          if [ "$binary_owner" != "$console_user" ]; then
+            echo "::error::PKG binary is not owned by the console user"
+            exit 1
+          fi
+          if [ "$state_owner" != "$console_user" ]; then
+            echo "::error::PKG state directory is not owned by the console user"
+            exit 1
+          fi
+          if [ -e /opt/git-ai ]; then
+            echo '::error::PKG created the retired /opt runtime'
+            exit 1
+          fi
+          if [ -e /usr/local/bin/git-ai ]; then
+            echo '::error::PKG created a system-wide binary'
+            exit 1
+          fi
           pkgutil --pkg-info com.git-ai.git-ai
 
   create-release:
