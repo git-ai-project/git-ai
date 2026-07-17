@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct ClinePreset;
 
@@ -88,6 +88,55 @@ impl ClinePreset {
             }
         }
         Value::Object(out)
+    }
+
+    fn extract_paths_from_parameters(parameters: &Value, cwd: &str) -> Vec<PathBuf> {
+        let Some(paths) = parameters.get("paths") else {
+            return vec![];
+        };
+
+        let arr = if let Some(a) = paths.as_array() {
+            a
+        } else if let Some(s) = paths.as_str() {
+            if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(s) {
+                return Self::extract_paths_from_value_array(&a, cwd);
+            }
+            return vec![];
+        } else {
+            return vec![];
+        };
+
+        Self::extract_paths_from_value_array(arr, cwd)
+    }
+
+    fn extract_paths_from_value_array(arr: &[Value], cwd: &str) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    out.push(Self::resolve_hook_path(trimmed, cwd));
+                }
+            } else if let Some(obj) = item.as_object()
+                && let Some(s) = obj.get("path").and_then(|v| v.as_str())
+            {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    out.push(Self::resolve_hook_path(trimmed, cwd));
+                }
+            }
+        }
+        out
+    }
+
+    fn resolve_hook_path(raw: &str, cwd: &str) -> PathBuf {
+        let trimmed = raw.trim();
+        let path = Path::new(trimmed);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            Path::new(cwd).join(path)
+        }
     }
 
     fn extract_bash_command(parameters: &Value) -> Option<String> {
@@ -219,8 +268,13 @@ impl AgentPreset for ClinePreset {
 
         let parameters = Self::normalize_parameters(&tool.parameters);
         let filtered_for_paths = Self::filter_content_keys(&parameters);
-        let file_paths =
+        let mut file_paths =
             OpenCodePreset::extract_filepaths_from_tool_input(Some(&filtered_for_paths), &cwd);
+        for path in Self::extract_paths_from_parameters(&parameters, &cwd) {
+            if !file_paths.contains(&path) {
+                file_paths.push(path);
+            }
+        }
         let bash_command = Self::extract_bash_command(&parameters);
 
         let model = Self::resolve_model(input.model.as_ref());
@@ -477,6 +531,38 @@ mod tests {
                 "toolName": "editor",
                 "parameters": {
                     "files": "[\"src/a.rs\", \"src/b.rs\"]"
+                }
+            }
+        })
+        .to_string();
+        let events = ClinePreset.parse(&input, "t_test").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(e.file_paths.len(), 2);
+                assert!(
+                    e.file_paths
+                        .contains(&PathBuf::from("/home/user/project/src/a.rs"))
+                );
+                assert!(
+                    e.file_paths
+                        .contains(&PathBuf::from("/home/user/project/src/b.rs"))
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cline_extracts_paths_array() {
+        let input = json!({
+            "hookName": "PreToolUse",
+            "clineVersion": "3.0.0",
+            "taskId": "cline-task-123",
+            "workspaceRoots": ["/home/user/project"],
+            "preToolUse": {
+                "toolName": "editor",
+                "parameters": {
+                    "paths": ["src/a.rs", { "path": "src/b.rs" }]
                 }
             }
         })
