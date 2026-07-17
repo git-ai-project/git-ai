@@ -39,11 +39,12 @@
       <ComponentGroupRef Id="ProductComponents" />
     </Feature>
 
-    <CustomAction
-      Id="SetConfigureGitAiData"
-      Property="ConfigureGitAi"
+    <SetProperty
+      Id="ConfigureGitAi"
       Value="install-hooks --api-base &quot;[API_BASE]&quot; --api-key &quot;[API_KEY]&quot;"
-      Execute="immediate" />
+      Before="ConfigureGitAi"
+      Sequence="execute"
+      Condition="NOT Installed" />
     <CustomAction
       Id="ConfigureGitAi"
       FileRef="GitAiExe"
@@ -53,8 +54,7 @@
       Return="check"
       HideTarget="yes" />
     <InstallExecuteSequence>
-      <Custom Action="SetConfigureGitAiData" After="InstallFiles" Condition="NOT Installed" />
-      <Custom Action="ConfigureGitAi" After="SetConfigureGitAiData" Condition="NOT Installed" />
+      <Custom Action="ConfigureGitAi" After="InstallFiles" Condition="NOT Installed" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
