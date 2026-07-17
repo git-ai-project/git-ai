@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
     Name="Git AI"
     Manufacturer="Git AI"
@@ -11,11 +13,12 @@
     <Property Id="API_BASE" Hidden="yes" Secure="yes" />
     <Property Id="API_KEY" Hidden="yes" Secure="yes" />
 
-    <StandardDirectory Id="UserProfileFolder">
-      <Directory Id="GitAiHome" Name=".git-ai">
-        <Directory Id="INSTALLFOLDER" Name="bin" />
-      </Directory>
-    </StandardDirectory>
+    <util:QueryWindowsDirectories />
+    <SetProperty
+      Id="INSTALLFOLDER"
+      Value="[WIX_DIR_PROFILE]\.git-ai\bin"
+      Before="CostFinalize" />
+    <Directory Id="INSTALLFOLDER" Name="bin" />
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="GitAiExeComponent" Guid="{95D3C11E-6881-43AB-9E5B-4462AA59E0E2}">

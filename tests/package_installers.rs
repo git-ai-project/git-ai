@@ -11,14 +11,18 @@ fn msi_is_per_user_and_updates_only_the_user_path() {
     let wix = std::fs::read_to_string(packaging_path("windows/git-ai.wxs")).unwrap();
 
     assert!(wix.contains("Scope=\"perUser\""));
-    assert!(wix.contains("StandardDirectory Id=\"UserProfileFolder\""));
-    assert!(wix.contains("Directory Id=\"GitAiHome\" Name=\".git-ai\""));
+    assert!(wix.contains("xmlns:util=\"http://wixtoolset.org/schemas/v4/wxs/util\""));
+    assert!(wix.contains("<util:QueryWindowsDirectories />"));
+    assert!(wix.contains("Id=\"INSTALLFOLDER\""));
+    assert!(wix.contains("Value=\"[WIX_DIR_PROFILE]\\.git-ai\\bin\""));
+    assert!(wix.contains("Before=\"CostFinalize\""));
     assert!(wix.contains("Directory Id=\"INSTALLFOLDER\" Name=\"bin\""));
     assert!(wix.contains("Part=\"first\""));
     assert!(wix.contains("System=\"no\""));
     assert!(!wix.contains("perMachine"));
     assert!(!wix.contains("ProgramFiles"));
     assert!(!wix.contains("LocalAppDataFolder"));
+    assert!(!wix.contains("UserProfileFolder"));
     assert!(!wix.contains("System=\"yes\""));
 }
 
@@ -70,5 +74,8 @@ fn msi_builder_uses_the_sponsored_wix_v7_toolchain() {
 
     assert!(builder.contains("$wixVersion = '7.0.0'"));
     assert!(builder.contains("dotnet tool update --global wix --version $wixVersion"));
+    assert!(builder.contains("$wixUtilExtension = 'WixToolset.Util.wixext/7.0.0'"));
+    assert!(builder.contains("extension add --global $wixUtilExtension"));
+    assert!(builder.contains("-ext $wixUtilExtension"));
     assert!(builder.contains("-acceptEula wix7"));
 }
