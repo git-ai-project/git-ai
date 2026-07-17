@@ -75,7 +75,8 @@ fn msi_builder_uses_the_sponsored_wix_v7_toolchain() {
     assert!(builder.contains("$wixVersion = '7.0.0'"));
     assert!(builder.contains("dotnet tool update --global wix --version $wixVersion"));
     assert!(builder.contains("$wixUtilExtension = 'WixToolset.Util.wixext/7.0.0'"));
-    assert!(builder.contains("extension add --global $wixUtilExtension -acceptEula wix7"));
+    assert!(builder.contains("eula accept wix7"));
+    assert!(builder.contains("extension add --global $wixUtilExtension"));
     assert!(builder.contains("-ext $wixUtilExtension"));
     assert!(builder.contains("-acceptEula wix7"));
 }
