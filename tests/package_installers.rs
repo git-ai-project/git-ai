@@ -33,9 +33,12 @@ fn msi_accepts_hidden_api_properties_and_configures_the_installing_user() {
 
     assert!(wix.contains("Property Id=\"API_BASE\" Hidden=\"yes\""));
     assert!(wix.contains("Property Id=\"API_KEY\" Hidden=\"yes\""));
+    assert!(wix.contains("Property Id=\"ConfigureGitAi\" Hidden=\"yes\""));
     assert!(wix.contains("FileRef=\"GitAiExe\""));
     assert!(wix.contains("ExeCommand=\"[CustomActionData]\""));
-    assert!(!wix.contains("ExeCommand=\"[ConfigureGitAi]\""));
+    assert!(wix.contains("Id=\"SetConfigureGitAiData\""));
+    assert!(wix.contains("Property=\"ConfigureGitAi\""));
+    assert!(wix.contains("After=\"SetConfigureGitAiData\""));
     assert!(wix.contains("Execute=\"deferred\""));
     assert!(wix.contains("Impersonate=\"yes\""));
     assert!(wix.contains("HideTarget=\"yes\""));

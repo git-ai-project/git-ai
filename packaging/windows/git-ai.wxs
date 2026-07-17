@@ -12,6 +12,7 @@
     <MediaTemplate EmbedCab="yes" />
     <Property Id="API_BASE" Hidden="yes" Secure="yes" />
     <Property Id="API_KEY" Hidden="yes" Secure="yes" />
+    <Property Id="ConfigureGitAi" Hidden="yes" />
 
     <util:QueryWindowsDirectories />
     <SetProperty
@@ -38,12 +39,11 @@
       <ComponentGroupRef Id="ProductComponents" />
     </Feature>
 
-    <SetProperty
-      Id="ConfigureGitAi"
+    <CustomAction
+      Id="SetConfigureGitAiData"
+      Property="ConfigureGitAi"
       Value="install-hooks --api-base &quot;[API_BASE]&quot; --api-key &quot;[API_KEY]&quot;"
-      Before="ConfigureGitAi"
-      Sequence="execute"
-      Condition="NOT Installed" />
+      Execute="immediate" />
     <CustomAction
       Id="ConfigureGitAi"
       FileRef="GitAiExe"
@@ -53,7 +53,8 @@
       Return="check"
       HideTarget="yes" />
     <InstallExecuteSequence>
-      <Custom Action="ConfigureGitAi" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="SetConfigureGitAiData" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="ConfigureGitAi" After="SetConfigureGitAiData" Condition="NOT Installed" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
