@@ -525,11 +525,18 @@ jobs:
         shell: pwsh
         run: |
           $msi = (Get-ChildItem release\git-ai-windows-x64.msi).FullName
-          $install = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
+          $apiBase = 'https://dev.usegitai.com'
+          $apiKey = 'ci-package-test-key'
+          $install = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey" -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "MSI install failed with exit code $($install.ExitCode)" }
-          $gitAi = Join-Path $env:LOCALAPPDATA 'Git AI\git-ai.exe'
+          $gitAi = Join-Path $env:USERPROFILE '.git-ai\bin\git-ai.exe'
           & $gitAi --version
-          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Git AI\git.exe')) { throw "MSI installed a git.exe shim" }
+          $config = Get-Content (Join-Path $env:USERPROFILE '.git-ai\config.json') -Raw | ConvertFrom-Json
+          if ($config.api_base_url -ne $apiBase) { throw 'MSI did not persist API_BASE for the installing user' }
+          if ([string]::IsNullOrWhiteSpace($config.api_key)) { throw 'MSI did not persist API_KEY for the installing user' }
+          if ((Get-Acl $gitAi).Owner -notlike "*\$env:USERNAME") { throw 'MSI binary is not owned by the installing user' }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Git AI')) { throw 'MSI created the retired LocalAppData runtime' }
+          if (Test-Path (Join-Path $env:ProgramFiles 'Git AI')) { throw 'MSI created a system-wide runtime' }
           $uninstall = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn /norestart" -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($uninstall.ExitCode)" }
 
@@ -553,8 +560,11 @@ jobs:
             PKG=release/git-ai-macos-x64.pkg
           fi
           sudo installer -pkg "$PKG" -target /
-          /usr/local/bin/git-ai --version
-          test ! -e /usr/local/bin/git
+          "$HOME/.git-ai/bin/git-ai" --version
+          test "$(stat -f%Su "$HOME/.git-ai/bin/git-ai")" = "$(id -un)"
+          test "$(stat -f%Su "$HOME/.git-ai")" = "$(id -un)"
+          test ! -e /opt/git-ai
+          test ! -e /usr/local/bin/git-ai
           pkgutil --pkg-info com.git-ai.git-ai
 
   create-release:

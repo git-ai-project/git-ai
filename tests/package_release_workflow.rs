@@ -78,3 +78,18 @@ fn prerelease_packages_continue_after_the_skipped_production_approval() {
         job(&workflow, "test-pkg").contains("always() && needs.package-pkg.result == 'success'")
     );
 }
+
+#[test]
+fn package_tests_validate_the_canonical_user_runtime() {
+    let workflow = release_workflow();
+    let msi_test = job(&workflow, "test-msi");
+    let pkg_test = job(&workflow, "test-pkg");
+
+    assert!(msi_test.contains("$env:USERPROFILE '.git-ai\\bin\\git-ai.exe'"));
+    assert!(msi_test.contains("API_BASE=$apiBase API_KEY=$apiKey"));
+    assert!(msi_test.contains("MSI binary is not owned by the installing user"));
+    assert!(msi_test.contains("retired LocalAppData runtime"));
+    assert!(pkg_test.contains("$HOME/.git-ai/bin/git-ai"));
+    assert!(pkg_test.contains("test ! -e /opt/git-ai"));
+    assert!(pkg_test.contains("test ! -e /usr/local/bin/git-ai"));
+}
