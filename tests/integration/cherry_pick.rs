@@ -3,7 +3,7 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
-use git_ai::git::refs::notes_add;
+use git_ai::git::notes_api::write_note;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -49,7 +49,7 @@ fn test_single_commit_cherry_pick() {
 
     // Verify prompt records have correct stats
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let log = git_ai::git::refs::get_reference_as_authorship_log_v3(
+    let log = git_ai::git::notes_api::read_authorship_v3(
         &git_ai::git::find_repository_in_path(repo.path().to_str().unwrap()).unwrap(),
         &head_commit,
     )
@@ -169,7 +169,7 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
         .expect("serialize mutated source note");
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
-    notes_add(
+    write_note(
         &git_ai_repo,
         &source_commit.commit_sha,
         &mutated_source_note,
@@ -259,7 +259,7 @@ fn test_multiple_commits_cherry_pick() {
 
     // Verify session records exist
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let log = git_ai::git::refs::get_reference_as_authorship_log_v3(
+    let log = git_ai::git::notes_api::read_authorship_v3(
         &git_ai::git::find_repository_in_path(repo.path().to_str().unwrap()).unwrap(),
         &head_commit,
     )
@@ -461,7 +461,7 @@ fn test_cherry_pick_multiple_ai_sessions() {
 
     // Verify session records exist
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let log = git_ai::git::refs::get_reference_as_authorship_log_v3(
+    let log = git_ai::git::notes_api::read_authorship_v3(
         &git_ai::git::find_repository_in_path(repo.path().to_str().unwrap()).unwrap(),
         &head_commit,
     )
