@@ -48,7 +48,7 @@
     <CustomAction
       Id="ConfigureGitAi"
       FileRef="GitAiExe"
-      ExeCommand="[CustomActionData]"
+      ExeCommand="[ConfigureGitAi]"
       Execute="deferred"
       Impersonate="yes"
       Return="check"
