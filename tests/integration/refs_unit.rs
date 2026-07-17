@@ -2,12 +2,15 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::error::GitAiError;
 use git_ai::git::notes_api;
+use git_ai::git::notes_api::{read_authorship_v3, read_note, write_note};
+use git_ai::git::refs::git_backend_for_tests::{
+    commits_with_authorship_notes, get_commits_with_notes_from_list, grep_ai_notes,
+    note_blob_oids_for_commits, notes_add_batch, notes_add_blob_batch,
+};
 use git_ai::git::refs::{
-    AI_AUTHORSHIP_FORK_TRACKING_REF, CommitAuthorship, commits_with_authorship_notes,
-    copy_missing_notes_for_commits_from_ref, copy_ref, get_commits_with_notes_from_list,
-    get_reference_as_authorship_log_v3, get_reference_as_working_log, grep_ai_notes,
-    merge_notes_from_ref, note_blob_oids_for_commits, note_blob_oids_for_commits_from_ref,
-    notes_add, notes_add_batch, notes_add_blob_batch, ref_exists, show_authorship_note,
+    AI_AUTHORSHIP_FORK_TRACKING_REF, CommitAuthorship, copy_missing_notes_for_commits_from_ref,
+    copy_ref, get_reference_as_working_log, merge_notes_from_ref,
+    note_blob_oids_for_commits_from_ref, ref_exists,
 };
 use git_ai::git::repository::{exec_git, exec_git_stdin, find_repository_in_path};
 use std::fs;
@@ -61,18 +64,17 @@ fn test_notes_add_and_show_authorship_note() {
     let note_content = "This is a test authorship note with some random content!";
 
     // Add the authorship note (force overwrite since stage_all_and_commit may create one)
-    notes_add(&gitai_repo, &commit_sha, note_content).expect("Failed to add authorship note");
+    write_note(&gitai_repo, &commit_sha, note_content).expect("Failed to add authorship note");
 
     // Read the note back
     let retrieved_content =
-        show_authorship_note(&gitai_repo, &commit_sha).expect("Failed to retrieve authorship note");
+        read_note(&gitai_repo, &commit_sha).expect("Failed to retrieve authorship note");
 
     // Assert the content matches exactly
     assert_eq!(retrieved_content, note_content);
 
     // Test that non-existent commit returns None
-    let non_existent_content =
-        show_authorship_note(&gitai_repo, "0000000000000000000000000000000000000000");
+    let non_existent_content = read_note(&gitai_repo, "0000000000000000000000000000000000000000");
     assert!(non_existent_content.is_none());
 }
 
@@ -95,8 +97,8 @@ fn test_notes_add_batch_writes_multiple_notes() {
 
     notes_add_batch(&gitai_repo, &entries).expect("batch notes add");
 
-    let note_a = show_authorship_note(&gitai_repo, &commit_a).expect("note A");
-    let note_b = show_authorship_note(&gitai_repo, &commit_b).expect("note B");
+    let note_a = read_note(&gitai_repo, &commit_a).expect("note A");
+    let note_b = read_note(&gitai_repo, &commit_b).expect("note B");
     assert!(note_a.contains("\"note\":\"a\""));
     assert!(note_b.contains("\"note\":\"b\""));
 }
@@ -116,7 +118,7 @@ fn test_notes_add_blob_batch_reuses_existing_note_blob() {
     let mut log = AuthorshipLog::new();
     log.metadata.base_commit_sha = commit_a.clone();
     let note_content = log.serialize_to_string().expect("serialize authorship log");
-    notes_add(&gitai_repo, &commit_a, &note_content).expect("add note A");
+    write_note(&gitai_repo, &commit_a, &note_content).expect("add note A");
 
     let blob_oids = note_blob_oids_for_commits(&gitai_repo, std::slice::from_ref(&commit_a))
         .expect("resolve note blob oid");
@@ -129,11 +131,10 @@ fn test_notes_add_blob_batch_reuses_existing_note_blob() {
     notes_add_blob_batch(&gitai_repo, std::slice::from_ref(&blob_entry))
         .expect("batch add blob-backed note");
 
-    let raw_note_b = show_authorship_note(&gitai_repo, &commit_b).expect("note B");
+    let raw_note_b = read_note(&gitai_repo, &commit_b).expect("note B");
     assert_eq!(raw_note_b, note_content);
 
-    let parsed_note_b =
-        get_reference_as_authorship_log_v3(&gitai_repo, &commit_b).expect("parse B");
+    let parsed_note_b = read_authorship_v3(&gitai_repo, &commit_b).expect("parse B");
     assert_eq!(parsed_note_b.metadata.base_commit_sha, commit_b);
 }
 
@@ -184,11 +185,11 @@ fn test_copy_missing_notes_for_commits_from_ref_copies_only_requested_commits() 
 
     assert_eq!(copied, 1);
     assert_eq!(
-        show_authorship_note(&gitai_repo, &commit_a).as_deref(),
+        read_note(&gitai_repo, &commit_a).as_deref(),
         Some("fork-note-a")
     );
     assert!(
-        show_authorship_note(&gitai_repo, &commit_b).is_none(),
+        read_note(&gitai_repo, &commit_b).is_none(),
         "note for unrequested commit must not be copied"
     );
 }
@@ -215,7 +216,7 @@ fn test_copy_missing_notes_for_commits_from_ref_keeps_existing_local_note() {
     ]);
     exec_git(&args).expect("add source note");
 
-    notes_add(&gitai_repo, &commit_a, "local-note").expect("add local note");
+    write_note(&gitai_repo, &commit_a, "local-note").expect("add local note");
 
     let copied = copy_missing_notes_for_commits_from_ref(
         &gitai_repo,
@@ -226,7 +227,7 @@ fn test_copy_missing_notes_for_commits_from_ref_keeps_existing_local_note() {
 
     assert_eq!(copied, 0);
     assert_eq!(
-        show_authorship_note(&gitai_repo, &commit_a).as_deref(),
+        read_note(&gitai_repo, &commit_a).as_deref(),
         Some("local-note")
     );
 }
@@ -288,13 +289,13 @@ fn test_merge_notes_from_ref() {
     exec_git(&args).expect("add note C on test ref");
 
     // Verify initial state - commit C should not have note on refs/notes/ai
-    let initial_note_c = show_authorship_note(&gitai_repo, &commit_c);
+    let initial_note_c = read_note(&gitai_repo, &commit_c);
 
     // Merge notes from refs/notes/test into refs/notes/ai
     merge_notes_from_ref(&gitai_repo, "refs/notes/test").expect("merge notes");
 
     // After merge, commit C should have a note on refs/notes/ai
-    let final_note_c = show_authorship_note(&gitai_repo, &commit_c);
+    let final_note_c = read_note(&gitai_repo, &commit_c);
 
     // If initially had no note, should now have one. If it had one, should still have one.
     assert!(final_note_c.is_some() || initial_note_c.is_some());
@@ -310,7 +311,7 @@ fn test_copy_ref() {
     let commit_sha = head_sha(&repo);
 
     let note_content = "{\"test\":\"note\"}";
-    notes_add(&gitai_repo, &commit_sha, note_content).expect("add note");
+    write_note(&gitai_repo, &commit_sha, note_content).expect("add note");
 
     // refs/notes/ai should exist
     assert!(ref_exists(&gitai_repo, "refs/notes/ai"));
@@ -326,7 +327,7 @@ fn test_copy_ref() {
     assert!(ref_exists(&gitai_repo, "refs/notes/ai-backup"));
 
     // Verify content is accessible from both refs
-    let note_from_ai = show_authorship_note(&gitai_repo, &commit_sha).expect("note from ai");
+    let note_from_ai = read_note(&gitai_repo, &commit_sha).expect("note from ai");
 
     // Read from backup ref
     let mut args = gitai_repo.global_args_for_exec();
@@ -354,7 +355,7 @@ fn test_grep_ai_notes_single_match() {
     let commit_sha = head_sha(&repo);
 
     let note = "{\"tool\":\"cursor\",\"model\":\"claude-3-sonnet\"}";
-    notes_add(&gitai_repo, &commit_sha, note).expect("add note");
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
 
     // Search for "cursor" should find the commit
     let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
@@ -380,9 +381,9 @@ fn test_grep_ai_notes_multiple_matches() {
     let commit_c = head_sha(&repo);
 
     // Add notes with "cursor" to all three
-    notes_add(&gitai_repo, &commit_a, "{\"tool\":\"cursor\"}").expect("add note A");
-    notes_add(&gitai_repo, &commit_b, "{\"tool\":\"cursor\"}").expect("add note B");
-    notes_add(&gitai_repo, &commit_c, "{\"tool\":\"cursor\"}").expect("add note C");
+    write_note(&gitai_repo, &commit_a, "{\"tool\":\"cursor\"}").expect("add note A");
+    write_note(&gitai_repo, &commit_b, "{\"tool\":\"cursor\"}").expect("add note B");
+    write_note(&gitai_repo, &commit_c, "{\"tool\":\"cursor\"}").expect("add note C");
 
     // Search should find all three, sorted by commit date (newest first)
     let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
@@ -418,7 +419,7 @@ fn test_grep_ai_notes_no_match() {
     let commit_sha = head_sha(&repo);
 
     let note = "{\"tool\":\"cursor\"}";
-    notes_add(&gitai_repo, &commit_sha, note).expect("add note");
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
 
     // Search for non-existent pattern
     let results = grep_ai_notes(&gitai_repo, "vscode");
@@ -598,7 +599,7 @@ fn test_commits_with_authorship_notes() {
 
     // Both commits may already have notes from stage_all_and_commit
     // Add a custom note to A to ensure it has one
-    notes_add(&gitai_repo, &commit_a, "{\"test\":\"note\"}").expect("add note");
+    write_note(&gitai_repo, &commit_a, "{\"test\":\"note\"}").expect("add note");
 
     let commits = vec![commit_a.clone(), commit_b.clone()];
     let result = commits_with_authorship_notes(&gitai_repo, &commits).expect("check notes");
@@ -624,7 +625,7 @@ fn test_get_reference_as_working_log() {
 
     // Add a working log format note
     let working_log_json = "[]";
-    notes_add(&gitai_repo, &commit_sha, working_log_json).expect("add note");
+    write_note(&gitai_repo, &commit_sha, working_log_json).expect("add note");
 
     let result = get_reference_as_working_log(&gitai_repo, &commit_sha).expect("get working log");
     assert_eq!(result.len(), 0); // Empty array
@@ -644,10 +645,10 @@ fn test_get_reference_as_authorship_log_v3_version_mismatch() {
     log.metadata.base_commit_sha = commit_sha.clone();
 
     let note_content = log.serialize_to_string().expect("serialize");
-    notes_add(&gitai_repo, &commit_sha, &note_content).expect("add note");
+    write_note(&gitai_repo, &commit_sha, &note_content).expect("add note");
 
     // Should fail with version mismatch error
-    let result = get_reference_as_authorship_log_v3(&gitai_repo, &commit_sha);
+    let result = read_authorship_v3(&gitai_repo, &commit_sha);
     assert!(result.is_err());
 
     if let Err(GitAiError::Generic(msg)) = result {

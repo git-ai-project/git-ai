@@ -1,7 +1,7 @@
 use crate::authorship::authorship_log::LineRange;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::error::GitAiError;
-use crate::git::notes_api::read_authorship as get_authorship;
+use crate::git::notes_api::read_authorship;
 use crate::git::repository::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -379,7 +379,7 @@ pub fn stats_for_commit_stats(
     commit_sha: &str,
     ignore_patterns: &[String],
 ) -> Result<CommitStats, GitAiError> {
-    let authorship_log = get_authorship(repo, commit_sha);
+    let authorship_log = read_authorship(repo, commit_sha);
     stats_for_commit_stats_with_authorship(
         repo,
         commit_sha,

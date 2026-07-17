@@ -3143,11 +3143,11 @@ impl TestRepo {
                 // In daemon mode, the authorship note may not be immediately
                 // visible after the session completes due to filesystem flush
                 // timing. Retry briefly before failing.
-                let mut content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
+                let mut content = git_ai::git::notes_api::read_note(&repo, &head_commit);
                 if content.is_none() {
                     for _ in 0..10 {
                         thread::sleep(Duration::from_millis(50));
-                        content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
+                        content = git_ai::git::notes_api::read_note(&repo, &head_commit);
                         if content.is_some() {
                             break;
                         }
