@@ -54,7 +54,8 @@ fn pkg_installs_only_for_the_console_user_and_fails_without_one() {
     assert!(!builder.contains("/usr/local/bin"));
     assert!(postinstall.contains("/usr/bin/stat -f%Su /dev/console"));
     assert!(postinstall.contains("no valid console user is logged in"));
-    assert!(postinstall.contains("$USER_HOME/.git-ai/bin/git-ai"));
+    assert!(postinstall.contains("GIT_AI_HOME=\"$USER_HOME/.git-ai\""));
+    assert!(postinstall.contains("/usr/sbin/chown \"$CONSOLE_USER:$USER_GROUP\""));
     assert!(postinstall.contains("install-hooks"));
     assert!(!postinstall.contains("setup-package"));
     assert!(!postinstall.contains("|| true"));
