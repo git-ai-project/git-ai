@@ -40,6 +40,13 @@ pub(crate) struct AuthorshipLogDiffContext<'a> {
     pub fallback_committed_diff_base: Option<&'a str>,
 }
 
+pub(crate) type AuthorshipLogAndInitialWorkingLog = (
+    crate::authorship::authorship_log_serialization::AuthorshipLog,
+    crate::git::repo_storage::InitialAttributions,
+    HashMap<String, String>,
+    HashMap<String, Vec<u32>>,
+);
+
 impl VirtualAttributions {
     /// Create a new VirtualAttributions for the given base commit with initial pathspecs
     pub async fn new_for_base_commit(
@@ -2010,7 +2017,7 @@ fn build_carryover_snapshot(
     commit_sha: &str,
     pathspecs: Option<&HashSet<String>>,
     observed_snapshot: &HashMap<String, String>,
-) -> Result<HashMap<String, String>, GitAiError> {
+) -> Result<(HashMap<String, String>, HashSet<String>), GitAiError> {
     let file_paths: HashSet<String> = match pathspecs {
         Some(paths) => paths.iter().cloned().collect(),
         None => observed_snapshot.keys().cloned().collect(),
@@ -2029,6 +2036,7 @@ fn build_carryover_snapshot(
     let contents = batch_file_contents(repo, &requests)?;
 
     let mut carryover_snapshot = HashMap::new();
+    let mut new_files = HashSet::new();
     for file_path in file_paths {
         let committed_content = contents
             .get(&(commit_sha.to_string(), file_path.clone()))
@@ -2043,14 +2051,24 @@ fn build_carryover_snapshot(
                     .cloned()
                     .unwrap_or_default()
             };
-            merged_carryover_content_pure(&parent_content, &committed_content, observed_content)
+            // An empty parent has no lines to carry over. For a newly-created
+            // file, the committed content is authoritative: it may include
+            // out-of-hook human edits made after the AI checkpoint. Rebasing
+            // the checkpoint attributions directly onto it drops replaced and
+            // inserted lines instead of retaining their old AI line numbers.
+            if parent_content.is_empty() {
+                new_files.insert(file_path.clone());
+                committed_content
+            } else {
+                merged_carryover_content_pure(&parent_content, &committed_content, observed_content)
+            }
         } else {
             committed_content
         };
         carryover_snapshot.insert(file_path, content);
     }
 
-    Ok(carryover_snapshot)
+    Ok((carryover_snapshot, new_files))
 }
 
 impl VirtualAttributions {
@@ -2074,14 +2092,16 @@ impl VirtualAttributions {
         ),
         GitAiError,
     > {
-        self.to_authorship_log_and_initial_working_log_with_precomputed_diff(
-            repo,
-            parent_sha,
-            commit_sha,
-            pathspecs,
-            final_state_snapshot,
-            AuthorshipLogDiffContext::default(),
-        )
+        let (authorship_log, initial, contents, _) = self
+            .to_authorship_log_and_initial_working_log_with_precomputed_diff(
+                repo,
+                parent_sha,
+                commit_sha,
+                pathspecs,
+                final_state_snapshot,
+                AuthorshipLogDiffContext::default(),
+            )?;
+        Ok((authorship_log, initial, contents))
     }
 
     /// As [`Self::to_authorship_log_and_initial_working_log`], but accepts a
@@ -2101,14 +2121,7 @@ impl VirtualAttributions {
         pathspecs: Option<&HashSet<String>>,
         final_state_snapshot: Option<&HashMap<String, String>>,
         diff_context: AuthorshipLogDiffContext<'_>,
-    ) -> Result<
-        (
-            crate::authorship::authorship_log_serialization::AuthorshipLog,
-            crate::git::repo_storage::InitialAttributions,
-            HashMap<String, String>,
-        ),
-        GitAiError,
-    > {
+    ) -> Result<AuthorshipLogAndInitialWorkingLog, GitAiError> {
         use crate::authorship::authorship_log_serialization::AuthorshipLog;
         use crate::git::repo_storage::InitialAttributions;
         use std::collections::{HashMap as StdHashMap, HashSet};
@@ -2179,17 +2192,19 @@ impl VirtualAttributions {
         } else {
             collect_committed_hunks(repo, fallback_diff_base, commit_sha, effective_pathspecs)?
         };
-        let carryover_snapshot = if let Some(snapshot) = final_state_snapshot {
-            Some(build_carryover_snapshot(
+        let (carryover_snapshot, new_files) = if let Some(snapshot) = final_state_snapshot {
+            let (snapshot, new_files) = build_carryover_snapshot(
                 repo,
                 parent_sha,
                 commit_sha,
                 effective_pathspecs,
                 snapshot,
-            )?)
+            )?;
+            (Some(snapshot), new_files)
         } else {
-            None
+            (None, HashSet::new())
         };
+        let mut out_of_hook_human_lines: StdHashMap<String, Vec<u32>> = StdHashMap::new();
         let (mut unstaged_hunks, pure_insertion_hunks) = if let Some(snapshot) = &carryover_snapshot
         {
             collect_unstaged_hunks_from_snapshot(repo, commit_sha, effective_pathspecs, snapshot)?
@@ -2278,6 +2293,14 @@ impl VirtualAttributions {
                         ))
                     })?;
                 let shift_hunks = diff_hunks_between_contents(observed_content, carryover_content);
+                if new_files.contains(file_path) || new_files.contains(&nfc_file_path) {
+                    let lines = out_of_hook_human_lines
+                        .entry(nfc_file_path.clone())
+                        .or_default();
+                    for hunk in &shift_hunks {
+                        lines.extend(hunk.new_start..hunk.new_start + hunk.new_count);
+                    }
+                }
                 rebased_line_attrs =
                     apply_hunk_shifts_to_line_attributions(line_attrs, &shift_hunks);
                 &rebased_line_attrs
@@ -2398,6 +2421,15 @@ impl VirtualAttributions {
                 let gap_file_lines: Vec<&str> = gap_file_content
                     .map(|c| c.lines().collect())
                     .unwrap_or_default();
+                let committed_gap_file_lines: Vec<&str> = carryover_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        snapshot
+                            .get(&nfc_file_path)
+                            .or_else(|| snapshot.get(file_path))
+                    })
+                    .map(|content| content.lines().collect())
+                    .unwrap_or_default();
 
                 // Build content→author map from AI-attributed lines
                 let mut content_to_ai_author: StdHashMap<&str, &str> = StdHashMap::new();
@@ -2429,13 +2461,26 @@ impl VirtualAttributions {
                         // Find nearest attributed neighbor after this line
                         let next = line_to_author.iter().find(|(l, _)| *l > line);
 
+                        // Only fill an attribution gap when the committed line
+                        // still matches the checkpoint-observed content. This
+                        // prevents an out-of-hook edit in a new file from
+                        // inheriting AI attribution just because its neighbors
+                        // are AI-authored.
+                        let gap_matches_observed_content = gap_file_lines
+                            .get((line - 1) as usize)
+                            .zip(committed_gap_file_lines.get((line - 1) as usize))
+                            .is_none_or(|(observed, committed)| observed == committed);
+
                         // Fill if both neighbors exist and are the same AI author
                         if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
                             && prev_author == next_author
                             && !prev_author.starts_with("h_")
+                            && gap_matches_observed_content
                         {
                             gap_fills.push((prev_author.to_string(), line));
-                        } else if let Some(&content) = gap_file_lines.get((line - 1) as usize) {
+                        } else if gap_matches_observed_content
+                            && let Some(&content) = gap_file_lines.get((line - 1) as usize)
+                        {
                             // Content-based fallback: if the gap line has the same
                             // content as an AI-attributed line in this file, it's
                             // likely part of the same AI edit (imara_diff matched it
@@ -2672,7 +2717,17 @@ impl VirtualAttributions {
             sessions: initial_sessions,
         };
 
-        Ok((authorship_log, initial_attributions, initial_file_contents))
+        for lines in out_of_hook_human_lines.values_mut() {
+            lines.sort_unstable();
+            lines.dedup();
+        }
+
+        Ok((
+            authorship_log,
+            initial_attributions,
+            initial_file_contents,
+            out_of_hook_human_lines,
+        ))
     }
 
     /// Convert VirtualAttributions to AuthorshipLog only (index-only mode)

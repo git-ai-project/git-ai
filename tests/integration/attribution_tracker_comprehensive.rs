@@ -20,6 +20,7 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::{
     Attribution, AttributionConfig, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
+use std::fs;
 
 // =============================================================================
 // Basic Attribution Tests - Core functionality
@@ -1029,6 +1030,47 @@ fn test_attribution_through_commit() {
 
     let result = repo.stage_all_and_commit("Second commit");
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_new_file_out_of_hook_human_edits_are_not_counted_as_ai() {
+    let repo = TestRepo::new_with_daemon_env(&[("CLAUDE_CODE_REMOTE", "true")]);
+
+    let mut initial = repo.filename("initial.txt");
+    initial.set_contents(crate::lines!["Initial human line".human()]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let file_path = repo.path().join("new-file.txt");
+    fs::write(
+        &file_path,
+        "AI line 1\nAI line 2\nAI line 3\nAI line 4\nAI line 5\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "new-file.txt"])
+        .unwrap();
+
+    // Simulate an editor without the git-ai hook changing an AI line before commit.
+    fs::write(
+        &file_path,
+        "AI line 1\nAI line 2\nHuman replacement\nAI line 4\nAI line 5\n",
+    )
+    .unwrap();
+    repo.stage_all_and_commit("Add new file with an out-of-hook edit")
+        .unwrap();
+
+    let mut file = repo.filename("new-file.txt");
+    file.assert_committed_lines(crate::lines![
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+        "Human replacement".human(),
+        "AI line 4".ai(),
+        "AI line 5".ai(),
+    ]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(stats.ai_additions, 4);
+    assert_eq!(stats.human_additions, 1);
+    assert_eq!(stats.git_diff_added_lines, 5);
 }
 
 #[test]
