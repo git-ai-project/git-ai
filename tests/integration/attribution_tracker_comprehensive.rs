@@ -1074,6 +1074,33 @@ fn test_new_file_out_of_hook_human_edits_are_not_counted_as_ai() {
 }
 
 #[test]
+fn test_new_file_out_of_hook_duplicate_line_is_not_counted_as_ai() {
+    let repo = TestRepo::new_with_daemon_env(&[("CLAUDE_CODE_REMOTE", "true")]);
+
+    let mut initial = repo.filename("initial.txt");
+    initial.set_contents(crate::lines!["Initial human line".human()]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let file_path = repo.path().join("new-file.txt");
+    fs::write(&file_path, "A\nB\nC\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "new-file.txt"])
+        .unwrap();
+
+    // The unhooked insertion duplicates the following AI-checkpointed line.
+    fs::write(&file_path, "A\nB\nB\nC\n").unwrap();
+    repo.stage_all_and_commit("Add new file with duplicate out-of-hook edit")
+        .unwrap();
+
+    let mut file = repo.filename("new-file.txt");
+    file.assert_committed_lines(crate::lines!["A".ai(), "B".ai(), "B".human(), "C".ai(),]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(stats.ai_additions, 3);
+    assert_eq!(stats.human_additions, 1);
+    assert_eq!(stats.git_diff_added_lines, 4);
+}
+
+#[test]
 fn test_amend_new_file_out_of_hook_human_edits_are_not_counted_as_ai() {
     let repo = TestRepo::new_with_daemon_env(&[("CLAUDE_CODE_REMOTE", "true")]);
 

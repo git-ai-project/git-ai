@@ -2455,6 +2455,16 @@ impl VirtualAttributions {
                             continue;
                         }
 
+                        // Out-of-hook edits receive human attribution below. Do
+                        // not fill these gaps with AI attribution, even when the
+                        // inserted content duplicates a checkpointed AI line.
+                        if out_of_hook_human_lines
+                            .get(&nfc_file_path)
+                            .is_some_and(|lines| lines.contains(&line))
+                        {
+                            continue;
+                        }
+
                         // Find nearest attributed neighbor before this line
                         let prev = line_to_author.iter().rev().find(|(l, _)| *l < line);
 
