@@ -491,10 +491,15 @@ impl DaemonProcess {
 
 fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("HOME", test_home);
-    command.env(
-        "GIT_AI_TEST_NOTES_DB_PATH",
-        test_home.join(".git-ai").join("internal").join("notes-db"),
-    );
+    if !command
+        .get_envs()
+        .any(|(key, _)| key == std::ffi::OsStr::new("GIT_AI_TEST_NOTES_DB_PATH"))
+    {
+        command.env(
+            "GIT_AI_TEST_NOTES_DB_PATH",
+            test_home.join(".git-ai").join("internal").join("notes-db"),
+        );
+    }
     command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
     // Redirect XDG_CONFIG_HOME so git does not read the real user's
     // $XDG_CONFIG_HOME/git/config (which may contain filter drivers,
@@ -3655,6 +3660,23 @@ mod tests {
             notes_db_path,
             Some(test_home.join(".git-ai").join("internal").join("notes-db"))
         );
+    }
+
+    #[test]
+    fn test_configure_test_home_env_preserves_explicit_notes_database() {
+        let test_home = PathBuf::from("isolated-test-home");
+        let explicit_notes_db = PathBuf::from("explicit-notes-db");
+        let mut command = Command::new("git");
+        command.env("GIT_AI_TEST_NOTES_DB_PATH", &explicit_notes_db);
+
+        configure_test_home_env(&mut command, &test_home);
+
+        let notes_db_path = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("GIT_AI_TEST_NOTES_DB_PATH"))
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from);
+        assert_eq!(notes_db_path, Some(explicit_notes_db));
     }
 
     #[test]
