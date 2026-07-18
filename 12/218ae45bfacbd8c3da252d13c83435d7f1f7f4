@@ -1,0 +1,20 @@
+src/commands/checkpoint_agent/orchestrator.rs
+  s_48aaaaad03ca08::t_d28ea01baccf33 600-635
+  s_48aaaaad03ca08::t_5912eabf09ddcb 44-61,508,589,636
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.13",
+  "base_commit_sha": "12218ae45bfacbd8c3da252d13c83435d7f1f7f4",
+  "prompts": {},
+  "sessions": {
+    "s_48aaaaad03ca08": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4d7b-a01f-7771-85c5-12212e9825ce",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}
