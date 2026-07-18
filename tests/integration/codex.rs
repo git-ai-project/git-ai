@@ -1346,6 +1346,81 @@ fn test_codex_e2e_namespaced_exec_command_bash_full_cycle() {
 }
 
 #[test]
+fn test_codex_e2e_exec_bash_full_cycle() {
+    use crate::repos::test_repo::TestRepo;
+
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("app.py");
+    fs::write(&file_path, "print('hello')\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut tracked_file = repo.filename("app.py");
+    tracked_file.assert_committed_lines(crate::lines!["print('hello')".unattributed_human(),]);
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-exec.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "codex-exec-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "exec",
+        "tool_use_id": "exec-1",
+        "tool_input": {
+            "command": "sed -i '' 's/hello/world/' app.py"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("exec pre-hook should succeed");
+
+    fs::write(&file_path, "print('world')\nprint('from codex')\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-exec-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "exec",
+        "tool_use_id": "exec-1",
+        "tool_input": {
+            "command": "sed -i '' 's/hello/world/' app.py"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("exec post-hook should succeed");
+
+    let commit = repo
+        .stage_all_and_commit("Codex exec edit")
+        .expect("commit should succeed");
+
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .values()
+        .next()
+        .expect("session record should exist");
+
+    assert_eq!(session.agent_id.tool, "codex");
+    assert_eq!(session.agent_id.id, "codex-exec-session");
+
+    tracked_file.assert_lines_and_blame(crate::lines![
+        "print('world')".ai(),
+        "print('from codex')".ai(),
+    ]);
+}
+
+#[test]
 fn test_codex_e2e_multi_tool_use_parallel_wrapper() {
     use crate::repos::test_repo::TestRepo;
 
@@ -1455,5 +1530,6 @@ crate::reuse_tests_in_worktree!(
     test_codex_e2e_apply_patch_preserves_human_lines,
     test_codex_e2e_namespaced_apply_patch_file_edit_full_cycle,
     test_codex_e2e_namespaced_exec_command_bash_full_cycle,
+    test_codex_e2e_exec_bash_full_cycle,
     test_codex_e2e_multi_tool_use_parallel_wrapper,
 );

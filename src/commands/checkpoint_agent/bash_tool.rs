@@ -354,7 +354,7 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             let tool_name = normalize_tool_name(tool_name);
             match tool_name {
                 "apply_patch" => ToolClass::FileEdit,
-                "Bash" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
+                "Bash" | "exec" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
                 "multi_tool_use.parallel" => ToolClass::Bash,
                 _ => ToolClass::Skip,
             }
@@ -1550,6 +1550,7 @@ mod tests {
             ToolClass::FileEdit
         );
         assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Codex, "exec"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Codex, "exec_command"), ToolClass::Bash);
         // The parallel tool wrapper must be routed through the bash/stat-diff path.
         assert_eq!(

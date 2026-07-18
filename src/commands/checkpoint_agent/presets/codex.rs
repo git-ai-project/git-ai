@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_codex_shell_tool_variants_treated_as_bash() {
-        for tool_name in &["exec_command", "shell", "shell_command"] {
+        for tool_name in &["exec", "exec_command", "shell", "shell_command"] {
             let input = json!({
                 "cwd": "/home/user/project",
                 "hook_event_name": "PostToolUse",
