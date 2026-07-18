@@ -1074,6 +1074,41 @@ fn test_new_file_out_of_hook_human_edits_are_not_counted_as_ai() {
 }
 
 #[test]
+fn test_amend_new_file_out_of_hook_human_edits_are_not_counted_as_ai() {
+    let repo = TestRepo::new_with_daemon_env(&[("CLAUDE_CODE_REMOTE", "true")]);
+
+    let mut initial = repo.filename("initial.txt");
+    initial.set_contents(crate::lines!["Initial human line".human()]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let file_path = repo.path().join("new-file.txt");
+    fs::write(
+        &file_path,
+        "AI line 1\nAI line 2\nAI line 3\nAI line 4\nAI line 5\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "new-file.txt"])
+        .unwrap();
+
+    fs::write(
+        &file_path,
+        "AI line 1\nAI line 2\nHuman replacement\nAI line 4\nAI line 5\n",
+    )
+    .unwrap();
+    repo.git(&["add", "new-file.txt"]).unwrap();
+    repo.git(&["commit", "--amend", "--no-edit"]).unwrap();
+
+    let mut file = repo.filename("new-file.txt");
+    file.assert_committed_lines(crate::lines![
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+        "Human replacement".human(),
+        "AI line 4".ai(),
+        "AI line 5".ai(),
+    ]);
+}
+
+#[test]
 fn test_attribution_through_multiple_commits() {
     // Test attribution preservation through multiple commits
     let repo = TestRepo::new();

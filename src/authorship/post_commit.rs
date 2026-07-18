@@ -754,14 +754,44 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
         "initial".to_string()
     };
 
-    let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
-        .to_authorship_log_and_initial_working_log(
+    let (mut authorship_log, initial_attributions, initial_file_contents, out_of_hook_human_lines) =
+        working_va.to_authorship_log_and_initial_working_log_with_precomputed_diff(
             repo,
             &parent_sha,
             amended_commit,
             Some(&pathspecs),
             Some(&final_state_snapshot),
+            AuthorshipLogDiffContext::default(),
         )?;
+
+    // Reconciliation can prove that a line in a newly-created file diverged
+    // from the AI checkpoint before amend. Record those lines as human so
+    // later attribution recovery cannot infer AI ownership from neighboring
+    // AI lines.
+    if !out_of_hook_human_lines.is_empty() {
+        let human_hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+            &human_author,
+        );
+        authorship_log
+            .metadata
+            .humans
+            .entry(human_hash.clone())
+            .or_insert_with(|| crate::authorship::authorship_log::HumanRecord {
+                author: human_author.clone(),
+            });
+        for (file_path, lines) in out_of_hook_human_lines {
+            if lines.is_empty() {
+                continue;
+            }
+            let file = authorship_log.get_or_create_file(&file_path);
+            file.add_entry(
+                crate::authorship::authorship_log_serialization::AttestationEntry::new(
+                    human_hash.clone(),
+                    crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                ),
+            );
+        }
+    }
 
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
