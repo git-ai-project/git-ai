@@ -6,7 +6,9 @@ use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::notes_api;
 use crate::git::repo_state::is_valid_git_oid;
-use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
+use crate::git::repository::{
+    Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin_streaming,
+};
 
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -28,7 +30,7 @@ pub enum RewriteEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DiffTreeResult {
     pub hunks_by_file: HashMap<String, Vec<DiffHunk>>,
     pub added_lines_by_file: HashMap<String, Vec<u32>>,
@@ -325,9 +327,8 @@ fn tree_for_commit<'a>(
 fn build_diff_tree_stdin(
     pairs: &[(String, String)],
     sha_to_tree: &HashMap<String, String>,
-) -> Result<(String, Vec<(String, String)>), GitAiError> {
+) -> Result<String, GitAiError> {
     let mut stdin_data = String::new();
-    let mut tree_pair_keys: Vec<(String, String)> = Vec::with_capacity(pairs.len());
     for (src, dst) in pairs {
         let src_tree = tree_for_commit(sha_to_tree, src)?;
         let dst_tree = tree_for_commit(sha_to_tree, dst)?;
@@ -335,26 +336,14 @@ fn build_diff_tree_stdin(
         stdin_data.push(' ');
         stdin_data.push_str(dst_tree);
         stdin_data.push('\n');
-        tree_pair_keys.push((src_tree.to_string(), dst_tree.to_string()));
     }
-    Ok((stdin_data, tree_pair_keys))
-}
-
-fn parse_batched_diff_tree_output_for_owned_keys(
-    output: &str,
-    tree_pair_keys: &[(String, String)],
-) -> Result<Vec<DiffTreeResult>, GitAiError> {
-    let key_refs: Vec<(&str, &str)> = tree_pair_keys
-        .iter()
-        .map(|(src, dst)| (src.as_str(), dst.as_str()))
-        .collect();
-    parse_batched_diff_tree_output(output, &key_refs)
+    Ok(stdin_data)
 }
 
 fn compute_diff_tree_stdin(
     repo: &Repository,
     stdin_data: String,
-    tree_pair_keys: Vec<(String, String)>,
+    pair_count: usize,
 ) -> Result<Vec<DiffTreeResult>, GitAiError> {
     // Single git diff-tree --stdin call.
     //
@@ -377,11 +366,15 @@ fn compute_diff_tree_stdin(
         "-r".to_string(),
     ]);
 
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse output: each pair's result starts with a "tree1 tree2\n" separator line
-    parse_batched_diff_tree_output_for_owned_keys(&stdout, &tree_pair_keys)
+    // Stream the output line-by-line into the parser instead of buffering it:
+    // after a rebase across a large trunk delta, every pair's root-tree diff
+    // contains that whole delta, so the batched output is
+    // (trunk delta bytes) x (pair count) and buffering it has driven the
+    // daemon to multi-GB RSS. The parsed hunk/line structures are a small
+    // fraction of the raw patch text.
+    let mut parser = BatchedDiffTreeParser::new(pair_count);
+    exec_git_stdin_streaming(&args, stdin_data.as_bytes(), |line| parser.feed_line(line))?;
+    Ok(parser.finish())
 }
 
 pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError> {
@@ -1245,50 +1238,71 @@ pub(crate) fn compute_diff_trees_batch(
 
     let unique_shas = unique_pair_shas(pairs);
     let sha_to_tree = resolve_tree_shas(repo, &unique_shas)?;
-    let (stdin_data, tree_pair_keys) = build_diff_tree_stdin(pairs, &sha_to_tree)?;
-    compute_diff_tree_stdin(repo, stdin_data, tree_pair_keys)
+    let stdin_data = build_diff_tree_stdin(pairs, &sha_to_tree)?;
+    compute_diff_tree_stdin(repo, stdin_data, pairs.len())
 }
 
-/// Parse the output of `git diff-tree --stdin` which produces multiple results
-/// separated by "tree1 tree2" header lines.
-fn parse_batched_diff_tree_output(
-    output: &str,
-    tree_pair_keys: &[(&str, &str)],
-) -> Result<Vec<DiffTreeResult>, GitAiError> {
-    let mut results: Vec<DiffTreeResult> = Vec::with_capacity(tree_pair_keys.len());
-    let mut current_chunk = String::new();
-    let mut seen_first_header = false;
+/// Incremental parser for the output of `git diff-tree --stdin`, which
+/// produces one patch per tree pair, each preceded by a "tree1 tree2"
+/// separator line. Results are positional: the Nth separator starts the Nth
+/// pair's patch. Fed one line at a time so callers can stream arbitrarily
+/// large diff output without holding the raw patch text in memory.
+struct BatchedDiffTreeParser {
+    expected_pairs: usize,
+    results: Vec<DiffTreeResult>,
+    current: DiffTreeChunkParser,
+    seen_first_header: bool,
+}
 
-    for line in output.lines() {
-        // Separator lines are exactly "tree_sha1 tree_sha2" (two 40-char hex SHAs separated by space)
-        if is_tree_pair_separator(line) {
-            if seen_first_header {
-                results.push(parse_diff_tree_output(&current_chunk));
-                current_chunk.clear();
-            }
-            seen_first_header = true;
-        } else if seen_first_header {
-            current_chunk.push_str(line);
-            current_chunk.push('\n');
+impl BatchedDiffTreeParser {
+    fn new(expected_pairs: usize) -> Self {
+        Self {
+            expected_pairs,
+            results: Vec::with_capacity(expected_pairs),
+            current: DiffTreeChunkParser::default(),
+            seen_first_header: false,
         }
     }
 
-    // Push final chunk
-    if seen_first_header {
-        results.push(parse_diff_tree_output(&current_chunk));
+    fn feed_line(&mut self, line: &str) {
+        // Separator lines are exactly "tree_sha1 tree_sha2" (two OIDs separated by a space)
+        if is_tree_pair_separator(line) {
+            if self.seen_first_header {
+                let chunk = std::mem::take(&mut self.current);
+                self.results.push(chunk.finish());
+            }
+            self.seen_first_header = true;
+        } else if self.seen_first_header {
+            self.current.feed_line(line);
+        }
     }
 
-    // If git produced fewer results than pairs, pad with empty results
-    // (happens when trees are identical — no separator line emitted)
-    while results.len() < tree_pair_keys.len() {
-        results.push(DiffTreeResult {
-            hunks_by_file: HashMap::new(),
-            added_lines_by_file: HashMap::new(),
-            renames: Vec::new(),
-        });
-    }
+    fn finish(mut self) -> Vec<DiffTreeResult> {
+        // Push final chunk
+        if self.seen_first_header {
+            self.results.push(self.current.finish());
+        }
 
-    Ok(results)
+        // If git produced fewer results than pairs, pad with empty results
+        // (happens when trees are identical — no separator line emitted)
+        while self.results.len() < self.expected_pairs {
+            self.results.push(DiffTreeResult::default());
+        }
+
+        self.results
+    }
+}
+
+/// Parse the output of `git diff-tree --stdin` provided as a single string.
+/// Thin wrapper over `BatchedDiffTreeParser` (which the streaming path feeds
+/// directly).
+#[cfg(test)]
+fn parse_batched_diff_tree_output(output: &str, expected_pairs: usize) -> Vec<DiffTreeResult> {
+    let mut parser = BatchedDiffTreeParser::new(expected_pairs);
+    for line in output.lines() {
+        parser.feed_line(line);
+    }
+    parser.finish()
 }
 
 fn is_tree_pair_separator(line: &str) -> bool {
@@ -1302,37 +1316,44 @@ fn is_tree_pair_separator(line: &str) -> bool {
     is_valid_git_oid(old) && is_valid_git_oid(new)
 }
 
-fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
-    let mut hunks_by_file: HashMap<String, Vec<DiffHunk>> = HashMap::new();
-    let mut added_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut renames: Vec<(String, String)> = Vec::new();
-    let mut current_file: Option<String> = None;
-    let mut current_rename_from: Option<String> = None;
-    let mut active_hunk_new_line: Option<u32> = None;
+/// Incremental parser for a single tree pair's diff-tree patch.
+#[derive(Default)]
+struct DiffTreeChunkParser {
+    hunks_by_file: HashMap<String, Vec<DiffHunk>>,
+    added_lines_by_file: HashMap<String, Vec<u32>>,
+    renames: Vec<(String, String)>,
+    current_file: Option<String>,
+    current_rename_from: Option<String>,
+    active_hunk_new_line: Option<u32>,
+}
 
-    for line in output.lines() {
+impl DiffTreeChunkParser {
+    fn feed_line(&mut self, line: &str) {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             // Extract the b/ path from "a/old b/new"
-            current_file = extract_b_path(rest);
-            current_rename_from = None;
-            active_hunk_new_line = None;
+            self.current_file = extract_b_path(rest);
+            self.current_rename_from = None;
+            self.active_hunk_new_line = None;
         } else if let Some(from_path) = line.strip_prefix("rename from ") {
-            current_rename_from = Some(from_path.to_string());
-            active_hunk_new_line = None;
+            self.current_rename_from = Some(from_path.to_string());
+            self.active_hunk_new_line = None;
         } else if let Some(to_path) = line.strip_prefix("rename to ") {
-            if let Some(from_path) = current_rename_from.take() {
-                renames.push((from_path, to_path.to_string()));
+            if let Some(from_path) = self.current_rename_from.take() {
+                self.renames.push((from_path, to_path.to_string()));
             }
         } else if line.starts_with("@@")
-            && let Some(ref file) = current_file
+            && let Some(ref file) = self.current_file
             && let Some(hunk) = parse_hunk_header(line)
         {
-            active_hunk_new_line = Some(hunk.new_start);
-            hunks_by_file.entry(file.clone()).or_default().push(hunk);
-        } else if let Some(new_line) = active_hunk_new_line.as_mut() {
+            self.active_hunk_new_line = Some(hunk.new_start);
+            self.hunks_by_file
+                .entry(file.clone())
+                .or_default()
+                .push(hunk);
+        } else if let Some(new_line) = self.active_hunk_new_line.as_mut() {
             if line.starts_with('+') {
-                if let Some(ref file) = current_file {
-                    added_lines_by_file
+                if let Some(ref file) = self.current_file {
+                    self.added_lines_by_file
                         .entry(file.clone())
                         .or_default()
                         .push(*new_line);
@@ -1347,16 +1368,27 @@ fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
         }
     }
 
-    for lines in added_lines_by_file.values_mut() {
-        lines.sort_unstable();
-        lines.dedup();
-    }
+    fn finish(mut self) -> DiffTreeResult {
+        for lines in self.added_lines_by_file.values_mut() {
+            lines.sort_unstable();
+            lines.dedup();
+        }
 
-    DiffTreeResult {
-        hunks_by_file,
-        added_lines_by_file,
-        renames,
+        DiffTreeResult {
+            hunks_by_file: self.hunks_by_file,
+            added_lines_by_file: self.added_lines_by_file,
+            renames: self.renames,
+        }
     }
+}
+
+#[cfg(test)]
+fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
+    let mut parser = DiffTreeChunkParser::default();
+    for line in output.lines() {
+        parser.feed_line(line);
+    }
+    parser.finish()
 }
 
 fn extract_b_path(diff_header: &str) -> Option<String> {
@@ -1755,11 +1787,7 @@ index a29bdeb..c0d0fb4 100644
 @@ -1,0 +2 @@ line1
 +line2
 ";
-        let keys = [(
-            "1778ed95466977076f4e5908e6500789be732d2e",
-            "471b7bbf5998ffa15a81b17ee9f6854a357a2a6a",
-        )];
-        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        let results = parse_batched_diff_tree_output(output, 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].hunks_by_file.len(), 1);
         assert_eq!(results[0].hunks_by_file["f.txt"][0].new_count, 1);
@@ -1783,17 +1811,7 @@ index eee..fff 100644
 @@ -5,2 +5,3 @@
 +new line
 ";
-        let keys = [
-            (
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            ),
-            (
-                "cccccccccccccccccccccccccccccccccccccccc",
-                "dddddddddddddddddddddddddddddddddddddddd",
-            ),
-        ];
-        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        let results = parse_batched_diff_tree_output(output, 2);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].hunks_by_file.len(), 1);
         assert!(results[0].hunks_by_file.contains_key("f.txt"));
@@ -1806,11 +1824,7 @@ index eee..fff 100644
         let output = "\
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ";
-        let keys = [(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )];
-        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        let results = parse_batched_diff_tree_output(output, 1);
         assert_eq!(results.len(), 1);
         assert!(results[0].hunks_by_file.is_empty());
         assert!(results[0].renames.is_empty());
@@ -1829,21 +1843,7 @@ diff --git a/g.txt b/g.txt
 @@ -3,1 +3,2 @@
 +y
 ";
-        let keys = [
-            (
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            ),
-            (
-                "cccccccccccccccccccccccccccccccccccccccc",
-                "cccccccccccccccccccccccccccccccccccccccc",
-            ),
-            (
-                "dddddddddddddddddddddddddddddddddddddddd",
-                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            ),
-        ];
-        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        let results = parse_batched_diff_tree_output(output, 3);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].hunks_by_file.len(), 1);
         assert!(results[1].hunks_by_file.is_empty());
@@ -1852,7 +1852,49 @@ diff --git a/g.txt b/g.txt
 
     #[test]
     fn test_parse_batched_diff_tree_output_empty() {
-        let results = parse_batched_diff_tree_output("", &[]).unwrap();
+        let results = parse_batched_diff_tree_output("", 0);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_batched_diff_tree_parser_streams_line_by_line() {
+        // The streaming exec path feeds the parser one line at a time (without
+        // trailing newlines); the result must match parsing the whole output.
+        let output = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+diff --git a/src/old.rs b/src/new.rs
+similarity index 90%
+rename from src/old.rs
+rename to src/new.rs
+index abc123..def456 100644
+--- a/src/old.rs
++++ b/src/new.rs
+@@ -5,2 +5,3 @@ fn bar()
++new line
+cccccccccccccccccccccccccccccccccccccccc dddddddddddddddddddddddddddddddddddddddd
+diff --git a/g.txt b/g.txt
+index eee..fff 100644
+--- a/g.txt
++++ b/g.txt
+@@ -10,0 +11,2 @@
++line1
++line2
+";
+        // Pad expected_pairs beyond what git emitted (identical trees case).
+        let mut parser = BatchedDiffTreeParser::new(3);
+        for line in output.lines() {
+            parser.feed_line(line);
+        }
+        let streamed = parser.finish();
+
+        assert_eq!(streamed, parse_batched_diff_tree_output(output, 3));
+        assert_eq!(streamed.len(), 3);
+        assert_eq!(
+            streamed[0].renames,
+            vec![("src/old.rs".to_string(), "src/new.rs".to_string())]
+        );
+        assert_eq!(streamed[0].added_lines_by_file["src/new.rs"], vec![5]);
+        assert_eq!(streamed[1].added_lines_by_file["g.txt"], vec![11, 12]);
+        assert_eq!(streamed[2], DiffTreeResult::default());
     }
 }
