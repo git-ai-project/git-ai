@@ -2288,6 +2288,126 @@ fn daemon_late_cherry_pick_trace_uses_actual_destination_not_stale_commit_entry(
 }
 
 #[test]
+fn daemon_delayed_conflicted_cherry_pick_preserves_source_session_metadata() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let mut file = repo.filename("conflict.txt");
+    file.set_contents(lines!["shared".human(), "base".human(), "tail".human(),]);
+    repo.stage_all_and_commit("base")
+        .expect("base commit should succeed");
+    file.assert_lines_and_blame(lines!["shared".human(), "base".human(), "tail".human(),]);
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "source"])
+        .expect("checkout source should succeed");
+    file.replace_at(1, "source".ai());
+    let source_commit = repo
+        .stage_all_and_commit("AI source change")
+        .expect("source commit should succeed");
+    file.assert_lines_and_blame(lines!["shared".human(), "source".ai(), "tail".human(),]);
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+    file.replace_at(1, "main".human());
+    repo.stage_all_and_commit("main conflict")
+        .expect("main conflict commit should succeed");
+    file.assert_lines_and_blame(lines!["shared".human(), "main".human(), "tail".human(),]);
+    drop(file);
+
+    repo.restart_dedicated_daemon_for_test();
+    let source_short_sha = &source_commit.commit_sha[..7];
+    let cherry_pick = repo.git_og(&["cherry-pick", source_short_sha]);
+    assert!(cherry_pick.is_err(), "cherry-pick should conflict");
+    fs::write(
+        repo.path().join("conflict.txt"),
+        "shared\nmain\nsource\ntail\n",
+    )
+    .expect("write conflict resolution");
+    repo.git_og(&["add", "conflict.txt"])
+        .expect("stage conflict resolution");
+    repo.git_og_with_env(&["cherry-pick", "--continue"], &[("GIT_EDITOR", "true")])
+        .expect("cherry-pick continue should succeed");
+    let picked_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("resolve cherry-picked commit")
+        .trim()
+        .to_string();
+
+    let failed_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let continue_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let failed_session_arg = format!("git-ai.testSyncSession={failed_session}");
+    let continue_session_arg = format!("git-ai.testSyncSession={continue_session}");
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "delayed-conflicted-cherry-pick",
+                "argv": ["git", "-c", failed_session_arg, "-C", worktree, "cherry-pick", source_short_sha],
+                "time_ns": 1_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "delayed-conflicted-cherry-pick",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 1_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "delayed-conflicted-cherry-pick",
+                "code": 1,
+                "time_ns": 1_100u64,
+            }),
+            trace_atexit_frame("delayed-conflicted-cherry-pick", 1, 1_101u64),
+            json!({
+                "event": "start",
+                "sid": "delayed-cherry-pick-continue",
+                "argv": ["git", "-c", continue_session_arg, "-C", worktree, "cherry-pick", "--continue"],
+                "time_ns": 2_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "delayed-cherry-pick-continue",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 2_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "delayed-cherry-pick-continue",
+                "code": 0,
+                "time_ns": 2_100u64,
+            }),
+            trace_atexit_frame("delayed-cherry-pick-continue", 0, 2_101u64),
+        ],
+    );
+    repo.sync_daemon_external_completion_sessions(&[failed_session, continue_session]);
+
+    let mut file = repo.filename("conflict.txt");
+    file.assert_lines_and_blame(lines![
+        "shared".human(),
+        "main".human(),
+        "source".ai(),
+        "tail".human(),
+    ]);
+    let stats = repo.stats().expect("read cherry-pick stats");
+    let tool_model = stats
+        .tool_model_breakdown
+        .get("mock_ai::unknown")
+        .expect("conflicted cherry-pick should preserve source session metadata");
+    assert_eq!(tool_model.ai_additions, 1);
+    assert_eq!(tool_model.ai_accepted, 1);
+    assert!(
+        repo.read_authorship_note(&picked_commit).is_some(),
+        "cherry-picked commit should receive an authorship note"
+    );
+}
+
+#[test]
 fn daemon_failed_rebase_does_not_consume_later_skip_reflog_entry() {
     let repo = TestRepo::new_dedicated_daemon();
     let trace_socket = daemon_trace_socket_path(&repo);
