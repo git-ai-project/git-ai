@@ -3,6 +3,7 @@ pub mod parse;
 mod agent_v1;
 mod ai_tab;
 mod amp;
+mod augment;
 mod claude;
 mod codex;
 mod continue_cli;
@@ -161,6 +162,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "github-copilot" => Ok(Box::new(github_copilot::GithubCopilotPreset)),
         "amp" => Ok(Box::new(amp::AmpPreset)),
         "ai_tab" => Ok(Box::new(ai_tab::AiTabPreset)),
+        "augment" => Ok(Box::new(augment::AugmentPreset)),
         "firebender" => Ok(Box::new(firebender::FirebenderPreset)),
         "agent-v1" => Ok(Box::new(agent_v1::AgentV1Preset)),
         "droid" => Ok(Box::new(droid::DroidPreset)),

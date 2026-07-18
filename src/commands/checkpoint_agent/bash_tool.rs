@@ -369,6 +369,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "run_command" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Augment => match tool_name {
+            "save-file" | "str-replace-editor" | "remove-files" => ToolClass::FileEdit,
+            "launch-process" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
         Agent::Cursor => match tool_name {
             "Write" | "Delete" | "StrReplace" | "ApplyPatch" => ToolClass::FileEdit,
             "Shell" => ToolClass::Bash,
@@ -391,6 +396,7 @@ pub enum Agent {
     Pi,
     Windsurf,
     Cursor,
+    Augment,
 }
 
 // ---------------------------------------------------------------------------
@@ -1519,6 +1525,33 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+
+        // Augment Code (kebab-case lowercase tool names)
+        assert_eq!(
+            classify_tool(Agent::Augment, "save-file"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Augment, "str-replace-editor"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Augment, "remove-files"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::Augment, "launch-process"),
+            ToolClass::Bash
+        );
+        assert_eq!(classify_tool(Agent::Augment, "view"), ToolClass::Skip);
+        assert_eq!(
+            classify_tool(Agent::Augment, "grep-search"),
+            ToolClass::Skip
+        );
+        assert_eq!(classify_tool(Agent::Augment, "web-fetch"), ToolClass::Skip);
+        // Claude-shaped names must NOT match (case + naming differs).
+        assert_eq!(classify_tool(Agent::Augment, "Write"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Augment, "Bash"), ToolClass::Skip);
     }
 
     #[test]
