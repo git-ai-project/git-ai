@@ -1261,12 +1261,12 @@ fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
     );
 }
 
-/// Regression test: INITIAL attributions without stored file_blobs are invalid.
+/// Regression test: INITIAL attributions without stored file_blobs are ignored.
 /// Line attributions are only meaningful relative to the exact file snapshot
-/// they describe, so checkpointing must fail loudly instead of guessing from
-/// dirty-file content.
+/// they describe, so malformed legacy INITIAL state must not seed new checkpoints
+/// or make status/post-commit disagree.
 #[test]
-fn test_checkpoint_fails_with_initial_missing_blobs() {
+fn test_checkpoint_ignores_initial_missing_blobs() {
     let repo = TestRepo::new();
     let file_a = repo.path().join("file_a.txt");
     let file_b = repo.path().join("file_b.txt");
@@ -1318,7 +1318,8 @@ fn test_checkpoint_fails_with_initial_missing_blobs() {
     // Directly invoke checkpoint daemon logic on file_b only. The no-blob INITIAL
     // state is invalid even though dirty_files contains file_b, because INITIAL
     // also references file_a and neither attribution can be resolved against the
-    // exact snapshot it describes.
+    // exact snapshot it describes. The malformed INITIAL should be ignored rather
+    // than trusted or allowed to abort checkpointing.
     let mut dirty_files = HashMap::new();
     dirty_files.insert(
         "file_b.txt".to_string(),
@@ -1354,19 +1355,19 @@ fn test_checkpoint_fails_with_initial_missing_blobs() {
         metadata: HashMap::new(),
     };
 
-    let result = execute_resolved_checkpoint_from_daemon(
+    execute_resolved_checkpoint_from_daemon(
         &git_ai_repo,
         "test",
         CheckpointKind::AiAgent,
         checkpoint_request,
         resolved,
-    );
-    let error = result.expect_err("checkpoint should reject INITIAL without persisted blobs");
+    )
+    .expect("checkpoint should ignore INITIAL entries without persisted blobs");
+
+    let sanitized = working_log.read_initial_attributions();
     assert!(
-        error
-            .to_string()
-            .contains("INITIAL missing persisted file snapshot"),
-        "unexpected error: {error}"
+        sanitized.files.is_empty(),
+        "malformed INITIAL entries without file_blobs should not be returned"
     );
 }
 

@@ -780,34 +780,58 @@ impl PersistedWorkingLog {
 
     /// Write a fully-formed INITIAL state, preserving any persisted blob references.
     pub fn write_initial(&self, initial: InitialAttributions) -> Result<(), GitAiError> {
-        let filtered_files: HashMap<String, Vec<LineAttribution>> = initial
-            .files
-            .into_iter()
-            .filter(|(_, attrs)| !attrs.is_empty())
-            .collect();
+        let initial_data = self.sanitize_initial_attributions(initial);
 
-        if filtered_files.is_empty() {
+        if initial_data.files.is_empty() {
             if self.initial_file.exists() {
                 fs::remove_file(&self.initial_file)?;
             }
             return Ok(());
         }
 
+        let json = serde_json::to_string_pretty(&initial_data)?;
+        fs::write(&self.initial_file, json)?;
+
+        Ok(())
+    }
+
+    fn sanitize_initial_attributions(&self, initial: InitialAttributions) -> InitialAttributions {
         let mut file_blobs = initial.file_blobs;
+        let filtered_files: HashMap<String, Vec<LineAttribution>> = initial
+            .files
+            .into_iter()
+            .filter(|(_, attrs)| !attrs.is_empty())
+            .filter(|(file_path, _)| {
+                let Some(blob_sha) = file_blobs.get(file_path) else {
+                    tracing::debug!(
+                        "Dropping INITIAL attribution for {} because it has no persisted file snapshot",
+                        file_path
+                    );
+                    return false;
+                };
+
+                let blob_exists = self.dir.join("blobs").join(blob_sha).is_file();
+                if !blob_exists {
+                    tracing::debug!(
+                        "Dropping INITIAL attribution for {} because its persisted file snapshot is missing",
+                        file_path
+                    );
+                }
+                blob_exists
+            })
+            .collect();
+
         file_blobs.retain(|file_path, _| filtered_files.contains_key(file_path));
 
-        let initial_data = InitialAttributions {
+        let mut initial_data = InitialAttributions {
             files: filtered_files,
             prompts: initial.prompts,
             file_blobs,
             humans: initial.humans,
             sessions: initial.sessions,
         };
-
-        let json = serde_json::to_string_pretty(&initial_data)?;
-        fs::write(&self.initial_file, json)?;
-
-        Ok(())
+        trim_initial_metadata_to_referenced_authors(&mut initial_data);
+        initial_data
     }
 
     pub fn initial_file_content_from(
@@ -869,7 +893,7 @@ impl PersistedWorkingLog {
 
         match fs::read_to_string(&self.initial_file) {
             Ok(content) => match serde_json::from_str(&content) {
-                Ok(initial_data) => initial_data,
+                Ok(initial_data) => self.sanitize_initial_attributions(initial_data),
                 Err(e) => {
                     tracing::debug!("Failed to parse INITIAL file: {}. Returning empty.", e);
                     InitialAttributions::default()
@@ -881,6 +905,41 @@ impl PersistedWorkingLog {
             }
         }
     }
+}
+
+pub(crate) fn trim_initial_metadata_to_referenced_authors(initial: &mut InitialAttributions) {
+    let human_sentinel = CheckpointKind::Human.to_str();
+    let mut referenced_authors = HashSet::new();
+    let mut referenced_sessions = HashSet::new();
+
+    for attrs in initial.files.values() {
+        for attr in attrs {
+            if attr.author_id == human_sentinel {
+                continue;
+            }
+
+            referenced_authors.insert(attr.author_id.clone());
+            if attr.author_id.starts_with("s_") {
+                let session_key = attr
+                    .author_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&attr.author_id)
+                    .to_string();
+                referenced_sessions.insert(session_key);
+            }
+        }
+    }
+
+    initial
+        .prompts
+        .retain(|author_id, _| referenced_authors.contains(author_id));
+    initial
+        .humans
+        .retain(|author_id, _| referenced_authors.contains(author_id));
+    initial
+        .sessions
+        .retain(|session_id, _| referenced_sessions.contains(session_id));
 }
 
 #[cfg(test)]
@@ -910,6 +969,8 @@ mod tests {
 
         // OLD base: shared.txt -> old author, plus a unique old-only file.
         let old_log = storage.working_log_for_base_commit(old_sha).unwrap();
+        let old_shared_blob = old_log.persist_file_version("OLD CONTENT").unwrap();
+        let old_only_blob = old_log.persist_file_version("OLD ONLY CONTENT").unwrap();
         let mut old_initial = InitialAttributions::default();
         old_initial.files.insert("shared.txt".into(), attr("h_OLD"));
         old_initial
@@ -917,11 +978,16 @@ mod tests {
             .insert("old_only.txt".into(), attr("h_OLD"));
         old_initial
             .file_blobs
-            .insert("shared.txt".into(), "OLD CONTENT".into());
+            .insert("shared.txt".into(), old_shared_blob.clone());
+        old_initial
+            .file_blobs
+            .insert("old_only.txt".into(), old_only_blob);
         old_log.write_initial(old_initial).unwrap();
 
         // NEW base: shared.txt -> new author (conflict), plus a unique new-only file.
         let new_log = storage.working_log_for_base_commit(new_sha).unwrap();
+        let new_shared_blob = new_log.persist_file_version("NEW CONTENT").unwrap();
+        let new_only_blob = new_log.persist_file_version("NEW ONLY CONTENT").unwrap();
         let mut new_initial = InitialAttributions::default();
         new_initial
             .files
@@ -931,7 +997,10 @@ mod tests {
             .insert("new_only.txt".into(), attr("ai_NEW"));
         new_initial
             .file_blobs
-            .insert("shared.txt".into(), "NEW CONTENT".into());
+            .insert("shared.txt".into(), new_shared_blob);
+        new_initial
+            .file_blobs
+            .insert("new_only.txt".into(), new_only_blob);
         new_log.write_initial(new_initial).unwrap();
 
         // Merge old into new (destination already exists).
@@ -943,6 +1012,7 @@ mod tests {
             .read_initial_attributions();
 
         // Shared key: OLD base wins.
+        let merged_log = storage.working_log_for_base_commit(new_sha).unwrap();
         assert_eq!(
             merged
                 .files
@@ -953,8 +1023,15 @@ mod tests {
         );
         assert_eq!(
             merged.file_blobs.get("shared.txt").map(|s| s.as_str()),
-            Some("OLD CONTENT"),
+            Some(old_shared_blob.as_str()),
             "old-base blob must win on a shared path (kept consistent with files)"
+        );
+        assert_eq!(
+            merged_log
+                .stored_initial_file_content_from(&merged, "shared.txt")
+                .as_deref(),
+            Some("OLD CONTENT"),
+            "merged old-base blob must be readable from the destination working log"
         );
         // Both sides' unique entries survive.
         assert!(merged.files.contains_key("old_only.txt"));

@@ -7,9 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
-use crate::authorship::working_log::{Checkpoint, CheckpointKind};
+use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
-use crate::git::repo_storage::{InitialAttributions, PersistedWorkingLog};
+use crate::git::repo_storage::{
+    InitialAttributions, PersistedWorkingLog, trim_initial_metadata_to_referenced_authors,
+};
 use crate::git::repository::{
     Repository, batch_read_paths_at_treeishes, disable_internal_git_hooks,
     exec_git_allow_nonzero_with_env,
@@ -355,41 +357,6 @@ fn copy_blob_sha(
     fs::create_dir_all(&target_blobs)?;
     fs::copy(source, target_blobs.join(blob_sha))?;
     Ok(())
-}
-
-fn trim_initial_metadata_to_referenced_authors(initial: &mut InitialAttributions) {
-    let human_sentinel = CheckpointKind::Human.to_str();
-    let mut referenced_authors = HashSet::new();
-    let mut referenced_sessions = HashSet::new();
-
-    for attrs in initial.files.values() {
-        for attr in attrs {
-            if attr.author_id == human_sentinel {
-                continue;
-            }
-
-            referenced_authors.insert(attr.author_id.clone());
-            if attr.author_id.starts_with("s_") {
-                let session_key = attr
-                    .author_id
-                    .split("::")
-                    .next()
-                    .unwrap_or(&attr.author_id)
-                    .to_string();
-                referenced_sessions.insert(session_key);
-            }
-        }
-    }
-
-    initial
-        .prompts
-        .retain(|author_id, _| referenced_authors.contains(author_id));
-    initial
-        .humans
-        .retain(|author_id, _| referenced_authors.contains(author_id));
-    initial
-        .sessions
-        .retain(|session_id, _| referenced_sessions.contains(session_id));
 }
 
 fn restore_stash_attributions(

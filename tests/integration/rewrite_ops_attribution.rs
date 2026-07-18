@@ -80,7 +80,7 @@ fn test_raw_git_commit_before_traced_commit_does_not_poison_ref_cursor() {
 }
 
 #[test]
-fn test_daemon_reports_post_commit_side_effect_error() {
+fn test_daemon_ignores_malformed_initial_without_side_effect_error() {
     let repo = TestRepo::new();
 
     let base_path = repo.path().join("base.txt");
@@ -100,25 +100,27 @@ fn test_daemon_reports_post_commit_side_effect_error() {
             overrode: None,
         }],
     );
-    working_log
-        .write_initial(InitialAttributions {
+    fs::write(
+        &working_log.initial_file,
+        serde_json::to_string_pretty(&InitialAttributions {
             files,
             ..InitialAttributions::default()
         })
-        .unwrap();
+        .unwrap(),
+    )
+    .unwrap();
 
     fs::write(repo.path().join("broken.txt"), "broken\n").unwrap();
     repo.git(&["add", "broken.txt"]).unwrap();
     repo.git(&["commit", "-m", "commit with broken initial"])
         .unwrap();
 
-    let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        repo.sync_daemon_force();
-    }));
-    assert!(
-        sync.is_err(),
-        "post-commit side-effect failure must be reported through daemon sync"
-    );
+    repo.sync_daemon_force();
+
+    let stats = repo.git_ai(&["stats", "HEAD", "--json"]).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stats).unwrap();
+    assert_eq!(parsed["ai_additions"], 0);
+    assert_eq!(parsed["unknown_additions"], 1);
 }
 
 #[test]
