@@ -5,7 +5,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 #[cfg(not(any(test, feature = "test-support")))]
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::imara_diff_utils::{
-    LineChangeTag, compute_line_changes, normalize_line_endings,
+    LineChangeTag, compute_line_changes, content_eq_ignoring_line_endings,
 };
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
@@ -524,14 +524,6 @@ fn get_previous_content_from_head(
     }
 }
 
-/// Compare file contents ignoring CRLF/LF differences.
-fn content_eq_normalized(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    normalize_line_endings(a) == normalize_line_endings(b)
-}
-
 #[doc(hidden)]
 pub fn is_ai_author_id(author_id: &str) -> bool {
     author_id != "human" && !author_id.starts_with("h_")
@@ -621,7 +613,7 @@ fn get_checkpoint_entry_for_file(
             get_previous_content_from_head(&repo, &file_path, head_tree_id.as_ref())
         };
 
-        if content_eq_normalized(&current_content, &previous_content) {
+        if content_eq_ignoring_line_endings(&current_content, &previous_content) {
             return Ok(None);
         }
 
@@ -651,7 +643,7 @@ fn get_checkpoint_entry_for_file(
 
         // Skip if no changes, UNLESS we have INITIAL attributions for this file
         // (in which case we need to create an entry to record those attributions)
-        if content_eq_normalized(&current_content, &previous_content)
+        if content_eq_ignoring_line_endings(&current_content, &previous_content)
             && initial_attrs_for_file.is_empty()
         {
             return Ok(None);
@@ -682,7 +674,7 @@ fn get_checkpoint_entry_for_file(
             let snapshot = initial_snapshot_content
                 .as_deref()
                 .unwrap_or(&previous_content);
-            if content_eq_normalized(snapshot, &current_content) {
+            if content_eq_ignoring_line_endings(snapshot, &current_content) {
                 &previous_content
             } else {
                 snapshot
@@ -743,7 +735,7 @@ fn get_checkpoint_entry_for_file(
 
     // Skip if no changes (but we already checked this earlier, accounting for INITIAL attributions)
     // For files from previous checkpoints, check if content has changed
-    if is_from_checkpoint && content_eq_normalized(&current_content, &previous_content) {
+    if is_from_checkpoint && content_eq_ignoring_line_endings(&current_content, &previous_content) {
         if current_content == previous_content {
             // Byte-identical — truly no change.
             return Ok(None);

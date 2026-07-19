@@ -61,6 +61,35 @@ fn test_stats_for_simple_ai_commit() {
 }
 
 #[test]
+fn test_stats_for_ai_insertions_across_multiple_hunks() {
+    let repo = TestRepo::new();
+
+    let initial = "package com.example;\n\n/**\n * @author test\n * @date 2021/7/22\n */\npublic class Content {\n    public static final String LOCAL_DATA_EXAMPLE = \"2021-07-22\";\n\n    public static final String SUNDAY = \"sunday\";\n    public static final String MONDAY = \"monday\";\n    public static final String TUESDAY = \"tuesday\";\n    public static final String WEDNESDAY = \"wednesday\";\n    public static final String THURSDAY = \"thursday\";\n    public static final String FRIDAY = \"friday\";\n    public static final String SATURDAY = \"saturday\";\n}\n";
+    let updated = "package com.example;\n\n/**\n * Common content constants used by BTM models.\n *\n * @author test\n * @date 2021/7/22\n */\npublic class Content {\n    /** Example date value in local data format. */\n    public static final String LOCAL_DATA_EXAMPLE = \"2021-07-22\";\n\n    /** Day name constant for Sunday. */\n    public static final String SUNDAY = \"sunday\";\n    /** Day name constant for Monday. */\n    public static final String MONDAY = \"monday\";\n    /** Day name constant for Tuesday. */\n    public static final String TUESDAY = \"tuesday\";\n    /** Day name constant for Wednesday. */\n    public static final String WEDNESDAY = \"wednesday\";\n    /** Day name constant for Thursday. */\n    public static final String THURSDAY = \"thursday\";\n    /** Day name constant for Friday. */\n    public static final String FRIDAY = \"friday\";\n    /** Day name constant for Saturday. */\n    public static final String SATURDAY = \"saturday\";\n}\n";
+
+    std::fs::write(repo.path().join("Content.java"), initial).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    std::fs::write(repo.path().join("Content.java"), updated).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "Content.java"])
+        .unwrap();
+    repo.stage_all_and_commit("AI adds comments").unwrap();
+
+    let head_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let stats = stats_for_commit_stats(&gitai_repo, &head_sha, &[]).unwrap();
+
+    assert_eq!(stats.git_diff_added_lines, 10);
+    assert_eq!(stats.ai_accepted, 10);
+    assert_eq!(stats.ai_additions, 10);
+    assert_eq!(stats.unknown_additions, 0);
+}
+
+#[test]
 fn test_stats_for_mixed_commit() {
     let repo = TestRepo::new();
 

@@ -4,6 +4,9 @@ use crate::authorship::attribution_tracker::{
 };
 use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, SessionRecord};
 use crate::authorship::hunk_shift::{DiffHunk, apply_hunk_shifts_to_line_attributions};
+use crate::authorship::imara_diff_utils::{
+    content_eq_ignoring_line_endings, split_lines_normalized_terminators,
+};
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
@@ -1386,12 +1389,12 @@ fn collect_unstaged_hunks_from_snapshot(
             .cloned()
             .unwrap_or_else(|| committed_content.clone());
 
-        if committed_content == final_content {
+        if content_eq_ignoring_line_endings(&committed_content, &final_content) {
             continue;
         }
 
-        let committed_lines = split_lines_preserving_terminators(&committed_content);
-        let final_lines = split_lines_preserving_terminators(&final_content);
+        let committed_lines = split_lines_normalized_terminators(&committed_content);
+        let final_lines = split_lines_normalized_terminators(&final_content);
         let diff_ops = crate::authorship::imara_diff_utils::capture_diff_slices(
             &committed_lines,
             &final_lines,
@@ -1459,9 +1462,19 @@ fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
     lines
 }
 
+fn normalized_line_at(content: &str, line_num: u32) -> Option<std::borrow::Cow<'_, str>> {
+    if line_num == 0 {
+        return None;
+    }
+
+    split_lines_normalized_terminators(content)
+        .into_iter()
+        .nth((line_num - 1) as usize)
+}
+
 fn diff_hunks_between_contents(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
-    let old_lines = split_lines_preserving_terminators(old_content);
-    let new_lines = split_lines_preserving_terminators(new_content);
+    let old_lines = split_lines_normalized_terminators(old_content);
+    let new_lines = split_lines_normalized_terminators(new_content);
     crate::authorship::imara_diff_utils::capture_diff_slices(&old_lines, &new_lines)
         .into_iter()
         .filter_map(|op| match op {
@@ -1502,13 +1515,13 @@ fn diff_hunks_between_contents(old_content: &str, new_content: &str) -> Vec<Diff
 }
 
 fn line_sequence_contains(needle: &str, haystack: &str) -> bool {
-    let needle_lines = split_lines_preserving_terminators(needle);
+    let needle_lines = split_lines_normalized_terminators(needle);
     if needle_lines.is_empty() {
         return true;
     }
 
     let mut next_needle = 0;
-    for haystack_line in split_lines_preserving_terminators(haystack) {
+    for haystack_line in split_lines_normalized_terminators(haystack) {
         if haystack_line == needle_lines[next_needle] {
             next_needle += 1;
             if next_needle == needle_lines.len() {
@@ -1529,16 +1542,19 @@ fn merged_carryover_content_pure(
     if committed_content == observed_content {
         return observed_content.to_string();
     }
+    if content_eq_ignoring_line_endings(committed_content, observed_content) {
+        return committed_content.to_string();
+    }
     if line_sequence_contains(committed_content, observed_content) {
         return observed_content.to_string();
     }
     if line_sequence_contains(observed_content, committed_content) {
         return committed_content.to_string();
     }
-    if committed_content == parent_content {
+    if content_eq_ignoring_line_endings(committed_content, parent_content) {
         return observed_content.to_string();
     }
-    if observed_content == parent_content {
+    if content_eq_ignoring_line_endings(observed_content, parent_content) {
         return committed_content.to_string();
     }
     carryover_merge_content(parent_content, committed_content, observed_content)
@@ -1559,21 +1575,31 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
     if committed == observed {
         return observed.to_string();
     }
-    if parent == committed {
+    if content_eq_ignoring_line_endings(committed, observed) {
+        return committed.to_string();
+    }
+    if content_eq_ignoring_line_endings(parent, committed) {
         return observed.to_string();
     }
-    if parent == observed {
+    if content_eq_ignoring_line_endings(parent, observed) {
         return committed.to_string();
     }
 
     let base_lines = split_lines_preserving_terminators(parent);
     let committed_lines = split_lines_preserving_terminators(committed);
     let observed_lines = split_lines_preserving_terminators(observed);
+    let base_cmp_lines = split_lines_normalized_terminators(parent);
+    let committed_cmp_lines = split_lines_normalized_terminators(committed);
+    let observed_cmp_lines = split_lines_normalized_terminators(observed);
 
     // For each side, map every base line index to its aligned index on that
     // side (None if the base line was changed/deleted on that side). Also record
     // each side's content so we can emit it for changed chunks.
-    fn align_to_base(base_len: usize, base: &[&str], side: &[&str]) -> Vec<Option<usize>> {
+    fn align_to_base<T: std::hash::Hash + Eq + Clone>(
+        base: &[T],
+        side: &[T],
+    ) -> Vec<Option<usize>> {
+        let base_len = base.len();
         let mut map = vec![None; base_len];
         for op in capture_diff_slices(base, side) {
             if let DiffOp::Equal {
@@ -1590,8 +1616,8 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
         map
     }
 
-    let committed_map = align_to_base(base_lines.len(), &base_lines, &committed_lines);
-    let observed_map = align_to_base(base_lines.len(), &base_lines, &observed_lines);
+    let committed_map = align_to_base(&base_cmp_lines, &committed_cmp_lines);
+    let observed_map = align_to_base(&base_cmp_lines, &observed_cmp_lines);
 
     // A base line is "stable" when both sides keep it aligned (unchanged on
     // both). We walk base lines; runs of stable lines are emitted verbatim,
@@ -1636,7 +1662,9 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
             // Resolve pending region: if both sides inserted differing content,
             // favor observed; else take whichever inserted.
             if !c_pending.is_empty() && !o_pending.is_empty() {
-                if c_pending == o_pending {
+                if committed_cmp_lines[committed_i..c_anchor]
+                    == observed_cmp_lines[observed_i..o_anchor]
+                {
                     result.extend(c_pending);
                 } else {
                     result.extend(o_pending);
@@ -1681,8 +1709,11 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect();
-            let committed_changed = committed_chunk != base_chunk;
-            let observed_changed = observed_chunk != base_chunk;
+            let base_cmp_chunk = &base_cmp_lines[chunk_base_start..base_i];
+            let committed_cmp_chunk = &committed_cmp_lines[committed_i..c_anchor];
+            let observed_cmp_chunk = &observed_cmp_lines[observed_i..o_anchor];
+            let committed_changed = committed_cmp_chunk != base_cmp_chunk;
+            let observed_changed = observed_cmp_chunk != base_cmp_chunk;
 
             match (committed_changed, observed_changed) {
                 (true, false) => result.extend(committed_chunk),
@@ -1690,7 +1721,7 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
                 (true, true) => {
                     // Two-sided change → favor observed (matches --theirs),
                     // unless both produced identical content.
-                    if committed_chunk == observed_chunk {
+                    if committed_cmp_chunk == observed_cmp_chunk {
                         result.extend(committed_chunk);
                     } else {
                         result.extend(observed_chunk);
@@ -1714,7 +1745,7 @@ fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> Str
         .map(|s| (*s).to_string())
         .collect();
     if !c_tail.is_empty() && !o_tail.is_empty() {
-        if c_tail == o_tail {
+        if committed_cmp_lines[committed_i..] == observed_cmp_lines[observed_i..] {
             result.extend(c_tail);
         } else {
             result.extend(o_tail);
@@ -2246,6 +2277,30 @@ impl VirtualAttributions {
         // Remove files with no unstaged hunks
         unstaged_hunks.retain(|_, ranges| !ranges.is_empty());
 
+        let mut committed_content_requests: Vec<(String, String)> = Vec::new();
+        for (file_path, (_, line_attrs)) in &self.attributions {
+            if line_attrs.is_empty() {
+                continue;
+            }
+
+            let nfc_file_path: String = file_path.nfc().collect();
+            let has_unstaged_lines = unstaged_hunks
+                .get(&nfc_file_path)
+                .or_else(|| {
+                    rename_map
+                        .get(&nfc_file_path)
+                        .and_then(|np| unstaged_hunks.get(np))
+                })
+                .is_some_and(|ranges| !ranges.is_empty());
+            if has_unstaged_lines {
+                let attestation_path = rename_map.get(&nfc_file_path).unwrap_or(&nfc_file_path);
+                committed_content_requests.push((commit_sha.to_string(), attestation_path.clone()));
+            }
+        }
+        committed_content_requests.sort();
+        committed_content_requests.dedup();
+        let committed_contents_for_unstaged = batch_file_contents(repo, &committed_content_requests)?;
+
         // Process each file
         for (file_path, (_, line_attrs)) in &self.attributions {
             if line_attrs.is_empty() {
@@ -2298,12 +2353,22 @@ impl VirtualAttributions {
                 }
                 unstaged_lines.sort_unstable();
             }
+            let pure_insertion_lines: std::collections::HashSet<u32> = pure_insertion_hunks
+                .get(&nfc_file_path)
+                .or_else(|| {
+                    rename_map
+                        .get(&nfc_file_path)
+                        .and_then(|np| pure_insertion_hunks.get(np))
+                })
+                .map(|ranges| ranges.iter().flat_map(|r| r.expand()).collect())
+                .unwrap_or_default();
 
             // Split line attributions into committed and uncommitted
             // VirtualAttributions has line numbers in working directory coordinates,
             // so we need to convert to commit coordinates before comparing with committed hunks
             let mut committed_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
             let mut uncommitted_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
+            let mut pending_unstaged_lines: Vec<(String, u32, u32)> = Vec::new();
 
             // Get the committed hunks for this file (if any) - these are in commit coordinates.
             // If the file was renamed, committed_hunks is keyed by the new path.
@@ -2312,6 +2377,16 @@ impl VirtualAttributions {
                     .get(&nfc_file_path)
                     .and_then(|np| committed_hunks.get(np))
             });
+            let attestation_path = rename_map.get(&nfc_file_path).unwrap_or(&nfc_file_path);
+            let line_content_source = if let Some(snapshot) = &carryover_snapshot {
+                snapshot
+                    .get(&nfc_file_path)
+                    .or_else(|| snapshot.get(file_path))
+            } else {
+                self.file_contents
+                    .get(file_path)
+                    .or_else(|| self.file_contents.get(&nfc_file_path))
+            };
 
             for line_attr in line_attrs {
                 // Check each line individually
@@ -2320,18 +2395,28 @@ impl VirtualAttributions {
                     let is_unstaged = unstaged_lines.binary_search(&workdir_line_num).is_ok();
 
                     if is_unstaged {
-                        // Line is unstaged, mark as uncommitted
-                        uncommitted_lines_map
-                            .entry(line_attr.author_id.clone())
-                            .or_default()
-                            .push(workdir_line_num);
-                        referenced_prompts.insert(line_attr.author_id.clone());
+                        // Defer bucketing until we can check whether this is a
+                        // committed line that only overlaps an unstaged pure insertion.
+                        let adjustment = unstaged_lines
+                            .iter()
+                            .filter(|&&l| {
+                                l < workdir_line_num && pure_insertion_lines.contains(&l)
+                            })
+                            .count() as u32;
+                        let commit_line_num = workdir_line_num.saturating_sub(adjustment);
+                        pending_unstaged_lines.push((
+                            line_attr.author_id.clone(),
+                            workdir_line_num,
+                            commit_line_num,
+                        ));
                     } else {
                         // Convert working directory line number to commit line number
                         // by subtracting the count of unstaged lines before this line
                         let adjustment = unstaged_lines
                             .iter()
-                            .filter(|&&l| l < workdir_line_num)
+                            .filter(|&&l| {
+                                l < workdir_line_num && pure_insertion_lines.contains(&l)
+                            })
                             .count() as u32;
                         let commit_line_num = workdir_line_num - adjustment;
 
@@ -2363,6 +2448,42 @@ impl VirtualAttributions {
                                 .or_default()
                                 .push(commit_line_num);
                         }
+                    }
+                }
+            }
+
+            if !pending_unstaged_lines.is_empty() {
+                let committed_path = attestation_path.to_string();
+                let committed_content = committed_contents_for_unstaged
+                    .get(&(commit_sha.to_string(), committed_path))
+                    .map(String::as_str)
+                    .unwrap_or_default();
+
+                for (author_id, workdir_line_num, commit_line_num) in pending_unstaged_lines {
+                    let is_ai_author = author_id != CheckpointKind::Human.to_str()
+                        && !author_id.starts_with("h_");
+                    let is_committed = file_committed_hunks
+                        .map(|hunks| hunks.iter().any(|hunk| hunk.contains(commit_line_num)))
+                        .unwrap_or(false);
+                    let content_matches = match line_content_source {
+                        Some(content) => normalized_line_at(content, workdir_line_num)
+                            .zip(normalized_line_at(committed_content, commit_line_num))
+                            .map(|(left, right)| left == right)
+                            .unwrap_or(false),
+                        None => false,
+                    };
+
+                    if is_ai_author && is_committed && content_matches {
+                        committed_lines_map
+                            .entry(author_id)
+                            .or_default()
+                            .push(commit_line_num);
+                    } else {
+                        uncommitted_lines_map
+                            .entry(author_id.clone())
+                            .or_default()
+                            .push(workdir_line_num);
+                        referenced_prompts.insert(author_id);
                     }
                 }
             }
@@ -3652,6 +3773,31 @@ mod tests {
         assert_eq!(
             carryover_merge_content(parent, committed, observed),
             "a\nB\n"
+        );
+    }
+
+    #[test]
+    fn carryover_merge_ignores_mixed_eol_when_content_matches_committed() {
+        let parent = "base one\nbase two\n";
+        let committed = "base one\nbase two\nai line\n";
+        let observed = "base one\r\nbase two\r\nai line\n";
+
+        assert_eq!(
+            merged_carryover_content_pure(parent, committed, observed),
+            committed
+        );
+        assert!(diff_hunks_between_contents(observed, committed).is_empty());
+    }
+
+    #[test]
+    fn carryover_merge_does_not_treat_crlf_only_observed_chunk_as_change() {
+        let parent = "a\nb\nc\n";
+        let committed = "A\nb\nC\n";
+        let observed = "a\r\nb\r\nD\r\n";
+
+        assert_eq!(
+            carryover_merge_content(parent, committed, observed),
+            "A\nb\nD\r\n"
         );
     }
 
