@@ -1,6 +1,7 @@
-use crate::authorship::authorship_log::{LineRange, SessionRecord};
+use crate::authorship::authorship_log::{HumanRecord, LineRange, SessionRecord};
 use crate::authorship::authorship_log_serialization::{
-    AuthorshipLog, generate_session_id, generate_trace_id,
+    AuthorshipLog, FileAttestation, generate_human_short_hash, generate_session_id,
+    generate_trace_id,
 };
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint_agent::bash_tool::StatEntry;
@@ -19,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const BASH_RECOVERY_COARSE_TIMESTAMP_NS: u128 = 1_000_000_000;
 pub(crate) const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
+const PURE_HUMAN_RECOVERY_MAX_ADDED_LINES: usize = 1000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
@@ -157,6 +159,7 @@ const KNOWN_COMMIT_AGENT_KINDS: &[CommitAgentKind] = &[
 
 pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
 pub(crate) type UnknownLinesByFile = BTreeMap<String, Vec<u32>>;
+type LineRangesByFile = BTreeMap<String, Vec<LineRange>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CommitAgentKind {
@@ -212,7 +215,7 @@ pub(crate) fn recover_attribution(
         return Ok(());
     }
 
-    if unknown_lines_by_file(authorship_log, committed_hunks).is_empty() {
+    if committed_untracked_line_ranges_by_file(authorship_log, committed_hunks).is_empty() {
         return Ok(());
     }
 
@@ -234,25 +237,44 @@ pub(crate) fn recover_attribution(
         committed_hunks,
     );
     let unknown_after_edges = unknown_lines_by_file(authorship_log, committed_hunks);
-    if unknown_after_edges.is_empty() {
-        return Ok(());
-    }
 
-    if let Some(before_external_recovery) = context.before_external_recovery {
+    if !unknown_after_edges.is_empty()
+        && let Some(before_external_recovery) = context.before_external_recovery
+    {
         before_external_recovery(&unknown_after_edges);
     }
 
-    recover_session_event_mtime(
+    if !unknown_after_edges.is_empty() {
+        recover_session_event_mtime(
+            repo,
+            parent_sha,
+            commit_sha,
+            human_author,
+            authorship_log,
+            committed_hunks,
+            context.file_timestamps,
+        )?;
+
+        recover_commit_metadata(
+            repo,
+            parent_sha,
+            commit_sha,
+            human_author,
+            authorship_log,
+            committed_hunks,
+            context.file_timestamps,
+        )?;
+    }
+
+    recover_known_human_remaining_lines(
         repo,
         parent_sha,
         commit_sha,
-        human_author,
         authorship_log,
         committed_hunks,
-        context.file_timestamps,
     )?;
 
-    recover_commit_metadata(
+    recover_pure_human_no_ai_signals(
         repo,
         parent_sha,
         commit_sha,
@@ -392,6 +414,7 @@ fn recover_bash_mtime(
             external_tool_use_id: Some(&candidate.tool_use_id),
             edit_kind: "bash",
             checkpoint_type: "recovered_bash",
+            checkpoint_kind: CheckpointKind::AiAgent,
             recovered_line_count: unknown_lines.len() as u32,
             metadata,
             event_ts: Some((candidate.start_time_ns / 1_000_000_000) as u32),
@@ -505,6 +528,7 @@ fn recover_session_event_mtime(
             external_tool_use_id: candidate.external_tool_use_id.as_deref(),
             edit_kind: "attribution_recovery_session_event",
             checkpoint_type: "recovered_session_event_mtime",
+            checkpoint_kind: CheckpointKind::AiAgent,
             recovered_line_count: unknown_lines.len() as u32,
             metadata,
             event_ts: Some(candidate.event_ts),
@@ -613,9 +637,155 @@ fn recover_commit_metadata(
             external_tool_use_id: selection.external_tool_use_id.as_deref(),
             edit_kind: "attribution_recovery_commit_metadata",
             checkpoint_type: "recovered_commit_metadata",
+            checkpoint_kind: CheckpointKind::AiAgent,
             recovered_line_count: unknown_lines.len() as u32,
             metadata,
             event_ts: selection.event_ts,
+        });
+    }
+
+    Ok(())
+}
+
+fn recover_pure_human_no_ai_signals(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    human_author: &str,
+    authorship_log: &mut AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
+) -> Result<(), GitAiError> {
+    if committed_hunks.is_empty()
+        || total_added_line_count(committed_hunks) >= PURE_HUMAN_RECOVERY_MAX_ADDED_LINES
+    {
+        return Ok(());
+    }
+
+    if committed_hunks_have_ai_authorship(authorship_log, committed_hunks) {
+        return Ok(());
+    }
+
+    let human_ranges_by_file =
+        committed_untracked_line_ranges_by_file(authorship_log, committed_hunks);
+    if human_ranges_by_file.is_empty() {
+        return Ok(());
+    }
+
+    let workdir = repo.workdir()?;
+    let (timestamps_by_file, all_timestamps) =
+        timestamps_for_recovery_files(&workdir, &human_ranges_by_file, captured_file_timestamps);
+    if all_timestamps.is_empty() || external_ai_signal_near_timestamps(&all_timestamps)? {
+        return Ok(());
+    }
+
+    let human_id = generate_human_short_hash(human_author);
+    authorship_log
+        .metadata
+        .humans
+        .entry(human_id.clone())
+        .or_insert_with(|| HumanRecord {
+            author: human_author.to_string(),
+        });
+
+    for (file_path, ranges) in human_ranges_by_file {
+        let recovered_line_count = line_ranges_total_count_u32(&ranges);
+        let recovered_range_count = ranges.len();
+        add_attestation_ranges(authorship_log, &file_path, &human_id, ranges);
+        let file_timestamps = timestamps_by_file
+            .get(&file_path)
+            .cloned()
+            .unwrap_or_default();
+        let event_ts = latest_event_ts_from_timestamps(&file_timestamps);
+        let trace_id = generate_trace_id();
+        let metadata = json!({
+            "solver": "pure_human_no_ai_signals",
+            "file_path": file_path.as_str(),
+            "recovered_line_count": recovered_line_count,
+            "recovered_range_count": recovered_range_count,
+            "human_author": human_author,
+            "human_id": human_id.as_str(),
+            "file_timestamps_ns": file_timestamps,
+            "session_event_window_ns": SESSION_EVENT_RECOVERY_WINDOW_NS,
+            "bash_window_ns": BASH_RECOVERY_WINDOW_NS,
+        });
+        record_recovery_metric(RecoveryMetricInput {
+            repo,
+            parent_sha,
+            commit_sha,
+            file_path: &file_path,
+            author_id: &human_id,
+            session_id: "",
+            trace_id: &trace_id,
+            tool: "",
+            model: "",
+            external_session_id: "",
+            external_tool_use_id: None,
+            edit_kind: "attribution_recovery_pure_human",
+            checkpoint_type: "recovered_pure_human_no_ai_signals",
+            checkpoint_kind: CheckpointKind::KnownHuman,
+            recovered_line_count,
+            metadata,
+            event_ts,
+        });
+    }
+
+    Ok(())
+}
+
+fn recover_known_human_remaining_lines(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    authorship_log: &mut AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+) -> Result<(), GitAiError> {
+    let Some(human_id) = unique_committed_known_human(authorship_log, committed_hunks) else {
+        return Ok(());
+    };
+    let human_ranges_by_file =
+        committed_untracked_line_ranges_by_file(authorship_log, committed_hunks);
+    if human_ranges_by_file.is_empty() {
+        return Ok(());
+    }
+    let human_author = authorship_log
+        .metadata
+        .humans
+        .get(&human_id)
+        .map(|record| record.author.clone())
+        .unwrap_or_default();
+
+    for (file_path, ranges) in human_ranges_by_file {
+        let recovered_line_count = line_ranges_total_count_u32(&ranges);
+        let recovered_range_count = ranges.len();
+        add_attestation_ranges(authorship_log, &file_path, &human_id, ranges);
+        let trace_id = generate_trace_id();
+        let metadata = json!({
+            "solver": "known_human_existing_attribution",
+            "file_path": file_path.as_str(),
+            "recovered_line_count": recovered_line_count,
+            "recovered_range_count": recovered_range_count,
+            "human_author": human_author.as_str(),
+            "human_id": human_id.as_str(),
+        });
+        record_recovery_metric(RecoveryMetricInput {
+            repo,
+            parent_sha,
+            commit_sha,
+            file_path: &file_path,
+            author_id: &human_id,
+            session_id: "",
+            trace_id: &trace_id,
+            tool: "",
+            model: "",
+            external_session_id: "",
+            external_tool_use_id: None,
+            edit_kind: "attribution_recovery_known_human",
+            checkpoint_type: "recovered_known_human_remaining_lines",
+            checkpoint_kind: CheckpointKind::KnownHuman,
+            recovered_line_count,
+            metadata,
+            event_ts: None,
         });
     }
 
@@ -833,6 +1003,72 @@ fn latest_timestamps_for_unknown_files(
         .unwrap_or_default();
 
     (timestamps_by_file, latest_timestamps)
+}
+
+fn timestamps_for_recovery_files(
+    workdir: &std::path::Path,
+    ranges_by_file: &LineRangesByFile,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
+) -> (HashMap<String, Vec<u128>>, Vec<u128>) {
+    let mut timestamps_by_file = HashMap::new();
+    let mut all_timestamps = Vec::new();
+    for file_path in ranges_by_file.keys() {
+        let timestamps = captured_file_timestamps
+            .and_then(|timestamps| timestamps.get(file_path))
+            .filter(|timestamps| !timestamps.is_empty())
+            .cloned()
+            .unwrap_or_else(|| file_timestamps_ns(workdir, file_path));
+        if !timestamps.is_empty() {
+            all_timestamps.extend(timestamps.iter().copied());
+            timestamps_by_file.insert(file_path.clone(), timestamps);
+        }
+    }
+    all_timestamps.sort_unstable();
+    all_timestamps.dedup();
+
+    (timestamps_by_file, all_timestamps)
+}
+
+fn latest_event_ts_from_timestamps(timestamps_ns: &[u128]) -> Option<u32> {
+    timestamps_ns
+        .iter()
+        .copied()
+        .max()
+        .map(|timestamp| (timestamp / NS_PER_SECOND).min(u128::from(u32::MAX)) as u32)
+}
+
+fn external_ai_signal_near_timestamps(timestamps_ns: &[u128]) -> Result<bool, GitAiError> {
+    if timestamps_ns.is_empty() {
+        return Ok(false);
+    }
+
+    let session_event_found = match crate::metrics::db::MetricsDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(db) => !db
+                .session_event_candidates_near_timestamps(
+                    timestamps_ns,
+                    SESSION_EVENT_RECOVERY_WINDOW_NS,
+                )?
+                .is_empty(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    if session_event_found {
+        return Ok(true);
+    }
+
+    let bash_candidate_found = match crate::daemon::bash_history_db::BashHistoryDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(db) => !db
+                .candidates_near_timestamps(timestamps_ns, BASH_RECOVERY_WINDOW_NS)?
+                .is_empty(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+
+    Ok(bash_candidate_found)
 }
 
 fn select_commit_metadata_session(
@@ -1171,6 +1407,7 @@ fn recover_adjacent_edges(
                 external_tool_use_id: None,
                 edit_kind: "attribution_recovery_edge",
                 checkpoint_type: "recovered_edge_extension",
+                checkpoint_kind: CheckpointKind::AiAgent,
                 recovered_line_count,
                 metadata,
                 event_ts: None,
@@ -1529,6 +1766,164 @@ fn unknown_lines_by_file(
     result
 }
 
+fn total_added_line_count(committed_hunks: &HashMap<String, Vec<LineRange>>) -> usize {
+    committed_hunks
+        .values()
+        .map(|ranges| line_ranges_total_count(ranges))
+        .sum()
+}
+
+fn line_ranges_total_count(ranges: &[LineRange]) -> usize {
+    ranges.iter().map(line_range_len).sum()
+}
+
+fn line_ranges_total_count_u32(ranges: &[LineRange]) -> u32 {
+    line_ranges_total_count(ranges).min(u32::MAX as usize) as u32
+}
+
+fn line_range_len(range: &LineRange) -> usize {
+    match range {
+        LineRange::Single(_) => 1,
+        LineRange::Range(start, end) => end.saturating_sub(*start).saturating_add(1) as usize,
+    }
+}
+
+fn committed_untracked_line_ranges_by_file(
+    authorship_log: &AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+) -> LineRangesByFile {
+    committed_line_ranges_matching_author(authorship_log, committed_hunks, |author| match author {
+        None => true,
+        Some("human") => true,
+        Some(_) => false,
+    })
+}
+
+fn committed_line_ranges_matching_author<F>(
+    authorship_log: &AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+    mut predicate: F,
+) -> LineRangesByFile
+where
+    F: FnMut(Option<&str>) -> bool,
+{
+    let mut result = BTreeMap::new();
+    for (file_path, ranges) in committed_hunks {
+        let file_attestation = authorship_log
+            .attestations
+            .iter()
+            .find(|att| att.file_path == *file_path);
+        let mut matching_ranges = Vec::new();
+        for_each_line_in_ranges(ranges, |line| {
+            let author = latest_author_for_line(file_attestation, line);
+            if predicate(author) {
+                push_line_as_compressed_range(&mut matching_ranges, line);
+            }
+        });
+        if !matching_ranges.is_empty() {
+            result.insert(file_path.clone(), matching_ranges);
+        }
+    }
+    result
+}
+
+fn committed_hunks_have_ai_authorship(
+    authorship_log: &AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+) -> bool {
+    for (file_path, ranges) in committed_hunks {
+        let file_attestation = authorship_log
+            .attestations
+            .iter()
+            .find(|att| att.file_path == *file_path);
+        let mut has_ai = false;
+        for_each_line_in_ranges(ranges, |line| {
+            if latest_author_for_line(file_attestation, line).is_some_and(is_ai_attestation) {
+                has_ai = true;
+            }
+        });
+        if has_ai {
+            return true;
+        }
+    }
+    false
+}
+
+fn unique_committed_known_human(
+    authorship_log: &AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+) -> Option<String> {
+    let mut known_human = None;
+    for (file_path, ranges) in committed_hunks {
+        let file_attestation = authorship_log
+            .attestations
+            .iter()
+            .find(|att| att.file_path == *file_path);
+        let mut multiple = false;
+        for_each_line_in_ranges(ranges, |line| {
+            if let Some(author) = latest_author_for_line(file_attestation, line)
+                && author.starts_with("h_")
+            {
+                match known_human.as_deref() {
+                    None => known_human = Some(author.to_string()),
+                    Some(existing) if existing == author => {}
+                    Some(_) => multiple = true,
+                }
+            }
+        });
+        if multiple {
+            return None;
+        }
+    }
+    known_human
+}
+
+fn latest_author_for_line(file_attestation: Option<&FileAttestation>, line: u32) -> Option<&str> {
+    let file_attestation = file_attestation?;
+    for entry in file_attestation.entries.iter().rev() {
+        if entry.line_ranges.iter().any(|range| range.contains(line)) {
+            return Some(entry.hash.as_str());
+        }
+    }
+    None
+}
+
+fn for_each_line_in_ranges<F>(ranges: &[LineRange], mut visit: F)
+where
+    F: FnMut(u32),
+{
+    for range in ranges {
+        match range {
+            LineRange::Single(line) => visit(*line),
+            LineRange::Range(start, end) => {
+                for line in *start..=*end {
+                    visit(line);
+                }
+            }
+        }
+    }
+}
+
+fn push_line_as_compressed_range(ranges: &mut Vec<LineRange>, line: u32) {
+    if let Some(last) = ranges.last_mut() {
+        match last {
+            LineRange::Single(previous) if *previous == line => return,
+            LineRange::Single(previous) if previous.checked_add(1) == Some(line) => {
+                let start = *previous;
+                *last = LineRange::Range(start, line);
+                return;
+            }
+            LineRange::Range(_, end) if *end >= line => return,
+            LineRange::Range(_, end) if end.checked_add(1) == Some(line) => {
+                *end = line;
+                return;
+            }
+            _ => {}
+        }
+    }
+    ranges.push(LineRange::Single(line));
+}
+
 fn covered_lines_by_file(authorship_log: &AuthorshipLog) -> HashMap<String, HashSet<u32>> {
     let mut covered = HashMap::new();
     for file_attestation in &authorship_log.attestations {
@@ -1673,6 +2068,24 @@ fn add_attestation(
         .add_entry(entry);
 }
 
+fn add_attestation_ranges(
+    authorship_log: &mut AuthorshipLog,
+    file_path: &str,
+    author_id: &str,
+    ranges: Vec<LineRange>,
+) {
+    if ranges.is_empty() {
+        return;
+    }
+    let entry = crate::authorship::authorship_log_serialization::AttestationEntry::new(
+        author_id.to_string(),
+        ranges,
+    );
+    authorship_log
+        .get_or_create_file(file_path)
+        .add_entry(entry);
+}
+
 struct RecoveryMetricInput<'a> {
     repo: &'a Repository,
     parent_sha: &'a str,
@@ -1687,6 +2100,7 @@ struct RecoveryMetricInput<'a> {
     external_tool_use_id: Option<&'a str>,
     edit_kind: &'a str,
     checkpoint_type: &'a str,
+    checkpoint_kind: CheckpointKind,
     recovered_line_count: u32,
     metadata: serde_json::Value,
     event_ts: Option<u32>,
@@ -1705,7 +2119,7 @@ fn record_recovery_metric(input: RecoveryMetricInput<'_>) {
     });
     let mut values = CheckpointValues::new()
         .checkpoint_ts(checkpoint_ts)
-        .kind(CheckpointKind::AiAgent.to_str())
+        .kind(input.checkpoint_kind.to_str())
         .file_path(input.file_path)
         .lines_added(input.recovered_line_count)
         .lines_deleted(0)
@@ -1720,10 +2134,14 @@ fn record_recovery_metric(input: RecoveryMetricInput<'_>) {
 
     let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .base_commit_sha(input.parent_sha)
-        .commit_sha(input.commit_sha)
-        .session_id(input.session_id)
-        .trace_id(input.trace_id);
+        .commit_sha(input.commit_sha);
 
+    if !input.session_id.is_empty() {
+        attrs = attrs.session_id(input.session_id);
+    }
+    if !input.trace_id.is_empty() {
+        attrs = attrs.trace_id(input.trace_id);
+    }
     if !input.tool.is_empty() {
         attrs = attrs.tool(input.tool);
     }
@@ -1852,6 +2270,51 @@ mod tests {
 
         let unknown = unknown_lines_by_file(&log, &committed);
         assert_eq!(unknown.get("a.txt").unwrap(), &vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn committed_untracked_ranges_stay_compressed_and_use_latest_author() {
+        let mut log = AuthorshipLog::new();
+        log.attestations.push(FileAttestation {
+            file_path: "a.txt".to_string(),
+            entries: vec![
+                AttestationEntry::new("human".to_string(), vec![LineRange::Range(1, 12)]),
+                AttestationEntry::new("h_alice".to_string(), vec![LineRange::Range(3, 4)]),
+                AttestationEntry::new("s_ai::t_ai".to_string(), vec![LineRange::Single(7)]),
+            ],
+        });
+        let committed = HashMap::from([("a.txt".to_string(), vec![LineRange::Range(1, 12)])]);
+
+        let untracked = committed_untracked_line_ranges_by_file(&log, &committed);
+
+        assert_eq!(
+            untracked.get("a.txt").unwrap(),
+            &vec![
+                LineRange::Range(1, 2),
+                LineRange::Range(5, 6),
+                LineRange::Range(8, 12),
+            ]
+        );
+        assert!(committed_hunks_have_ai_authorship(&log, &committed));
+        assert_eq!(
+            unique_committed_known_human(&log, &committed).as_deref(),
+            Some("h_alice")
+        );
+    }
+
+    #[test]
+    fn unique_committed_known_human_rejects_multiple_humans() {
+        let mut log = AuthorshipLog::new();
+        log.attestations.push(FileAttestation {
+            file_path: "a.txt".to_string(),
+            entries: vec![
+                AttestationEntry::new("h_alice".to_string(), vec![LineRange::Single(1)]),
+                AttestationEntry::new("h_bob".to_string(), vec![LineRange::Single(2)]),
+            ],
+        });
+        let committed = HashMap::from([("a.txt".to_string(), vec![LineRange::Range(1, 2)])]);
+
+        assert_eq!(unique_committed_known_human(&log, &committed), None);
     }
 
     #[test]
