@@ -7323,6 +7323,90 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
     }
 }
 
+type HooksSyncFn = Arc<dyn Fn() -> Result<usize, String> + Send + Sync>;
+
+fn run_hooks_sync_in_background(
+    sync_hooks: HooksSyncFn,
+) -> std::io::Result<tokio::sync::oneshot::Receiver<Result<usize, String>>> {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("git-ai-hooks-sync".to_string())
+        .spawn(move || {
+            let _ = completion_tx.send(sync_hooks());
+        })?;
+    Ok(completion_rx)
+}
+
+async fn daemon_hooks_sync_loop(
+    coordinator: Arc<ActorDaemonCoordinator>,
+    interval: Duration,
+    sync_hooks: HooksSyncFn,
+) {
+    tracing::info!(
+        interval_secs = interval.as_secs(),
+        "hooks sync worker started"
+    );
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = coordinator.wait_for_shutdown() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+
+        if coordinator.is_shutting_down() {
+            return;
+        }
+
+        let completion = match run_hooks_sync_in_background(sync_hooks.clone()) {
+            Ok(completion) => completion,
+            Err(error) => {
+                tracing::warn!(%error, "failed to start hooks sync");
+                continue;
+            }
+        };
+
+        tokio::select! {
+            biased;
+            _ = coordinator.wait_for_shutdown() => return,
+            result = completion => match result {
+                Ok(Ok(tool_count)) => {
+                    tracing::info!(tool_count, "hooks sync completed");
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "hooks sync failed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "hooks sync worker stopped without a result");
+                }
+            }
+        }
+    }
+}
+
+fn spawn_daemon_hooks_sync_worker(
+    coordinator: Arc<ActorDaemonCoordinator>,
+    interval_secs: u64,
+    sync_hooks: HooksSyncFn,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if interval_secs == 0 {
+        tracing::info!("hooks sync worker disabled");
+        return None;
+    }
+
+    Some(tokio::spawn(daemon_hooks_sync_loop(
+        coordinator,
+        Duration::from_secs(interval_secs),
+        sync_hooks,
+    )))
+}
+
+fn sync_agent_hooks() -> Result<usize, String> {
+    crate::commands::install_hooks::run_without_daemon_restart(&[])
+        .map(|statuses| statuses.len())
+        .map_err(|error| error.to_string())
+}
+
 /// After the daemon has fully shut down, attempt to install any pending update.
 ///
 /// On Unix the installer atomically replaces the binary via `mv`; on Windows
@@ -7492,7 +7576,18 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
         daemon_socket_health_check_loop(health_coord, health_control, health_trace);
     });
 
+    let hooks_sync_handle = spawn_daemon_hooks_sync_worker(
+        coordinator.clone(),
+        config::Config::get()
+            .get_feature_flags()
+            .hooks_sync_interval,
+        Arc::new(sync_agent_hooks),
+    );
+
     coordinator.wait_for_shutdown().await;
+    if let Some(handle) = hooks_sync_handle {
+        handle.abort();
+    }
 
     // Best-effort wake listeners to allow clean process exit.
     // Connect to each socket to unblock `accept()`.  If the socket files
@@ -9238,5 +9333,77 @@ mod tests {
             tokio::task::yield_now().await;
         }
         coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn hooks_sync_worker_runs_after_its_interval() {
+        let coordinator = Arc::new(ActorDaemonCoordinator::new());
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let completed_for_sync = completed.clone();
+        let sync_hooks: HooksSyncFn = Arc::new(move || {
+            completed_for_sync.notify_one();
+            Ok(1)
+        });
+
+        let handle = tokio::spawn(daemon_hooks_sync_loop(
+            coordinator.clone(),
+            Duration::from_millis(10),
+            sync_hooks,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), completed.notified())
+            .await
+            .expect("hooks sync should run after the configured interval");
+        coordinator.request_shutdown();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("hooks sync worker should stop after shutdown")
+            .expect("hooks sync worker should not panic");
+    }
+
+    #[tokio::test]
+    async fn zero_hooks_sync_interval_does_not_spawn_worker() {
+        let coordinator = Arc::new(ActorDaemonCoordinator::new());
+        let sync_hooks: HooksSyncFn = Arc::new(|| panic!("disabled hooks sync must not run"));
+
+        let handle = spawn_daemon_hooks_sync_worker(coordinator, 0, sync_hooks);
+
+        assert!(handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn hooks_sync_does_not_block_daemon_shutdown() {
+        let coordinator = Arc::new(ActorDaemonCoordinator::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_for_sync = started.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let sync_hooks: HooksSyncFn = Arc::new(move || {
+            started_for_sync.notify_one();
+            release_rx
+                .lock()
+                .expect("release receiver lock should not be poisoned")
+                .recv()
+                .expect("test should release the hook sync thread");
+            Ok(1)
+        });
+
+        let handle = tokio::spawn(daemon_hooks_sync_loop(
+            coordinator.clone(),
+            Duration::from_millis(1),
+            sync_hooks,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("hook sync should begin");
+
+        coordinator.request_shutdown();
+        tokio::time::timeout(Duration::from_millis(100), handle)
+            .await
+            .expect("daemon shutdown must not wait for an in-progress hooks sync")
+            .expect("hooks sync worker should not panic");
+        release_tx
+            .send(())
+            .expect("hook sync test thread should still be waiting");
     }
 }

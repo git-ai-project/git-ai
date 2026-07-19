@@ -5,7 +5,7 @@ mod repos;
 use git_ai::daemon::control_api::CasSyncPayload;
 use git_ai::daemon::{
     ControlRequest, ControlResponse, DaemonConfig, TelemetryEnvelope,
-    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout,
+    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout, read_daemon_pid,
     send_control_request,
 };
 use repos::test_repo::{DaemonTestScope, TestRepo, get_binary_path, real_git_executable};
@@ -33,6 +33,20 @@ fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn set_global_git_config(repo: &TestRepo, key: &str, value: &str) {
+    let mut command = Command::new(real_git_executable());
+    command.args(["config", "--global", key, value]);
+    command.current_dir(repo.path());
+    configure_test_home_env(&mut command, repo);
+    let output = command.output().expect("failed to write global git config");
+    assert!(
+        output.status.success(),
+        "failed to set {key}: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
@@ -77,13 +91,17 @@ fn configure_test_daemon_env(command: &mut Command, repo: &TestRepo) {
 }
 
 fn write_daemon_config(repo: &TestRepo) {
+    write_daemon_config_with_feature_flags(repo, serde_json::json!({}));
+}
+
+fn write_daemon_config_with_feature_flags(repo: &TestRepo, feature_flags: Value) {
     let config_dir = repo.test_home_path().join(".git-ai");
     fs::create_dir_all(&config_dir).expect("failed to create daemon config dir");
     let config_path = config_dir.join("config.json");
     let config = serde_json::json!({
         "git_path": real_git_executable(),
         "disable_auto_updates": true,
-        "feature_flags": {},
+        "feature_flags": feature_flags,
         "quiet": false
     });
     fs::write(
@@ -212,6 +230,21 @@ fn start_daemon(repo: &TestRepo) {
     daemon_cmd.spawn().expect("failed to start daemon");
 }
 
+fn start_daemon_without_test_db_marker(repo: &TestRepo) -> Child {
+    let mut daemon_cmd = Command::new(repos::test_repo::get_binary_path());
+    daemon_cmd
+        .arg("bg")
+        .arg("run")
+        .current_dir(repo.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env_remove("GIT_AI_TEST_DB_PATH")
+        .env_remove("GITAI_TEST_DB_PATH");
+    configure_test_home_env(&mut daemon_cmd, repo);
+    configure_test_daemon_env(&mut daemon_cmd, repo);
+    daemon_cmd.spawn().expect("failed to start daemon")
+}
+
 fn shutdown_daemon(home_repo: &TestRepo) {
     let output = daemon_command_output(home_repo, &["bg", "shutdown"], home_repo.test_home_path());
     assert!(
@@ -232,6 +265,138 @@ fn wait_for_child_exit(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn cursor_hooks_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path().join(".cursor").join("hooks.json")
+}
+
+fn write_stale_cursor_hooks(repo: &TestRepo) -> PathBuf {
+    let hooks_path = cursor_hooks_path(repo);
+    fs::create_dir_all(
+        hooks_path
+            .parent()
+            .expect("hooks path should have a parent"),
+    )
+    .expect("failed to create Cursor config directory");
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{"command": "/old/git-ai checkpoint cursor"}],
+                "postToolUse": [{"command": "/old/git-ai checkpoint cursor"}]
+            }
+        }))
+        .expect("failed to serialize stale Cursor hooks"),
+    )
+    .expect("failed to write stale Cursor hooks");
+    hooks_path
+}
+
+fn cursor_hooks_use_current_binary(hooks_path: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(hooks_path) else {
+        return false;
+    };
+    let Ok(hooks) = serde_json::from_str::<Value>(&contents) else {
+        return false;
+    };
+    let expected_binary = get_binary_path()
+        .canonicalize()
+        .expect("test binary should be canonicalizable")
+        .to_string_lossy()
+        .to_string();
+
+    ["preToolUse", "postToolUse"].iter().all(|hook_name| {
+        hooks["hooks"][hook_name].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["command"]
+                    .as_str()
+                    .is_some_and(|command| command.starts_with(&expected_binary))
+            })
+        })
+    })
+}
+
+#[test]
+fn daemon_periodically_syncs_agent_hooks() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    write_daemon_config_with_feature_flags(&repo, serde_json::json!({"hooks_sync_interval": 1}));
+    let hooks_path = write_stale_cursor_hooks(&repo);
+    let installed_skill = repo
+        .test_home_path()
+        .join(".git-ai")
+        .join("skills")
+        .join("existing-skill")
+        .join("SKILL.md");
+    fs::create_dir_all(
+        installed_skill
+            .parent()
+            .expect("installed skill should have a parent directory"),
+    )
+    .expect("failed to create installed skill directory");
+    fs::write(&installed_skill, "# Existing skill\n")
+        .expect("failed to write installed skill marker");
+    set_global_git_config(&repo, "trace2.configParams", "hooks-sync-sentinel");
+
+    let mut daemon = start_daemon_without_test_db_marker(&repo);
+    wait_for_daemon_sockets(&repo);
+    let daemon_config = DaemonConfig::from_home(repo.test_home_path());
+    let initial_pid = read_daemon_pid(&daemon_config).expect("daemon PID should be readable");
+
+    for _ in 0..100 {
+        if cursor_hooks_use_current_binary(&hooks_path) {
+            assert_eq!(
+                read_daemon_pid(&daemon_config).expect("daemon PID should remain readable"),
+                initial_pid,
+                "periodic install-hooks reconciliation must not restart the daemon"
+            );
+            assert_eq!(
+                read_global_git_config(&repo, "trace2.configParams").as_deref(),
+                Some("hooks-sync-sentinel"),
+                "periodic hook sync must not rewrite global trace2 configuration"
+            );
+            assert_eq!(
+                read_global_git_config(&repo, "trace2.eventTarget"),
+                None,
+                "periodic hook sync must not install trace2 configuration"
+            );
+            assert!(
+                installed_skill.exists(),
+                "periodic hook sync must preserve installed skills"
+            );
+            shutdown_daemon(&repo);
+            wait_for_child_exit(&mut daemon);
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    shutdown_daemon(&repo);
+    wait_for_child_exit(&mut daemon);
+    panic!(
+        "daemon did not reconcile stale Cursor hooks: {}",
+        fs::read_to_string(&hooks_path).unwrap_or_else(|error| error.to_string())
+    );
+}
+
+#[test]
+fn zero_hooks_sync_interval_disables_automatic_sync() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    write_daemon_config_with_feature_flags(&repo, serde_json::json!({"hooks_sync_interval": 0}));
+    let hooks_path = write_stale_cursor_hooks(&repo);
+    let original = fs::read_to_string(&hooks_path).expect("failed to read stale Cursor hooks");
+
+    start_daemon(&repo);
+    wait_for_daemon_sockets(&repo);
+    thread::sleep(Duration::from_millis(1_250));
+    shutdown_daemon(&repo);
+
+    assert_eq!(
+        fs::read_to_string(&hooks_path).expect("failed to read Cursor hooks after daemon run"),
+        original,
+        "hooks_sync_interval=0 must leave agent hooks untouched"
+    );
 }
 
 #[test]
