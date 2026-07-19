@@ -1459,7 +1459,7 @@ fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
     lines
 }
 
-fn diff_hunks_between_contents(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
+pub(crate) fn diff_hunks_between_contents(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
     let old_lines = split_lines_preserving_terminators(old_content);
     let new_lines = split_lines_preserving_terminators(new_content);
     crate::authorship::imara_diff_utils::capture_diff_slices(&old_lines, &new_lines)
