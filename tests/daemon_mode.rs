@@ -10,7 +10,6 @@ use git_ai::commands::checkpoint_agent::orchestrator::{
 use git_ai::config::{NotesBackendConfig, NotesBackendKind};
 #[cfg(not(windows))]
 use git_ai::daemon::checkpoint::PreparedPathRole;
-#[cfg(not(windows))]
 use git_ai::daemon::send_control_request_with_timeout;
 use git_ai::daemon::{
     ControlRequest, DaemonConfig, DaemonLock, local_socket_connects_with_timeout,
@@ -914,6 +913,57 @@ fn daemon_start_spawns_detached_run_process() {
         &daemon_control_socket_path(&repo),
         &ControlRequest::Shutdown,
     );
+}
+
+#[test]
+#[serial]
+fn daemon_refuses_to_start_in_sandbox() {
+    for (env_var, sandbox) in [
+        ("CURSOR_SANDBOX", "Cursor"),
+        ("SANDBOX_RUNTIME", "Claude Code"),
+        ("CODEX_SANDBOX", "Codex"),
+        ("CODEX_SANDBOX_NETWORK_DISABLED", "Codex"),
+    ] {
+        let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+        for subcommand in ["start", "run"] {
+            let output = bg_command_with_env(&repo, subcommand, &[], &[(env_var, "1")]);
+            if output.status.success() {
+                let _ = send_control_request(
+                    &daemon_control_socket_path(&repo),
+                    &ControlRequest::Shutdown,
+                );
+            }
+
+            assert!(
+                !output.status.success(),
+                "daemon {subcommand} should fail in the {sandbox} sandbox"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!("{sandbox} sandbox")) && stderr.contains(env_var),
+                "daemon {subcommand} should explain the sandbox refusal: {stderr}"
+            );
+        }
+
+        assert!(
+            send_control_request_with_timeout(
+                &daemon_control_socket_path(&repo),
+                &ControlRequest::Ping,
+                DAEMON_TEST_PROBE_TIMEOUT,
+            )
+            .is_err(),
+            "daemon control socket should not be available"
+        );
+        assert!(
+            local_socket_connects_with_timeout(
+                &daemon_trace_socket_path(&repo),
+                DAEMON_TEST_PROBE_TIMEOUT,
+            )
+            .is_err(),
+            "daemon trace socket should not be available"
+        );
+    }
 }
 
 #[test]
@@ -4522,6 +4572,15 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
 }
 
 fn bg_command(repo: &TestRepo, subcommand: &str, extra_args: &[&str]) -> Output {
+    bg_command_with_env(repo, subcommand, extra_args, &[])
+}
+
+fn bg_command_with_env(
+    repo: &TestRepo,
+    subcommand: &str,
+    extra_args: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     let daemon_home = repo.daemon_home_path();
     let control_socket_path = daemon_control_socket_path(repo);
     let trace_socket_path = daemon_trace_socket_path(repo);
@@ -4534,6 +4593,9 @@ fn bg_command(repo: &TestRepo, subcommand: &str, extra_args: &[&str]) -> Output 
         .current_dir(repo.path())
         .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
         .env("GITAI_TEST_DB_PATH", repo.test_db_path());
+    for (key, value) in env {
+        command.env(key, value);
+    }
     configure_test_home_env(&mut command, repo.test_home_path());
     configure_test_daemon_env(
         &mut command,
