@@ -112,8 +112,15 @@ pub struct MetricHistoryRecord {
     pub event: MetricEvent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttributionRecoveryCandidateSource {
+    SessionEvent,
+    SandboxedBashCheckpoint,
+    SandboxedFileEditCheckpoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionEventRecoveryCandidate {
+pub(crate) struct AttributionRecoveryCandidate {
     pub row_id: i64,
     pub event_ts: u32,
     pub session_id: String,
@@ -123,6 +130,7 @@ pub(crate) struct SessionEventRecoveryCandidate {
     pub external_session_id: String,
     pub external_tool_use_id: Option<String>,
     pub repo_url: Option<String>,
+    pub source: AttributionRecoveryCandidateSource,
 }
 
 /// Point-in-time status summary for local metric delivery.
@@ -994,11 +1002,11 @@ impl MetricsDatabase {
         Ok(records)
     }
 
-    pub(crate) fn session_event_candidates_near_timestamps(
+    pub(crate) fn attribution_recovery_candidates_near_timestamps(
         &self,
         timestamps_ns: &[u128],
         window_ns: u128,
-    ) -> Result<Vec<SessionEventRecoveryCandidate>, GitAiError> {
+    ) -> Result<Vec<AttributionRecoveryCandidate>, GitAiError> {
         if timestamps_ns.is_empty() {
             return Ok(Vec::new());
         }
@@ -1014,6 +1022,7 @@ impl MetricsDatabase {
             SELECT
                 id,
                 event_json,
+                event_kind,
                 event_ts,
                 session_id,
                 trace_id,
@@ -1021,9 +1030,9 @@ impl MetricsDatabase {
                 external_session_id,
                 external_tool_use_id
             FROM metrics
-            WHERE event_kind = ?1
-              AND event_ts >= ?2
-              AND event_ts <= ?3
+            WHERE event_kind IN (?1, ?2)
+              AND event_ts >= ?3
+              AND event_ts <= ?4
               AND session_id IS NOT NULL
               AND session_id != ''
               AND tool IS NOT NULL
@@ -1037,6 +1046,7 @@ impl MetricsDatabase {
         let rows = stmt.query_map(
             params![
                 MetricEventId::SessionEvent as i64,
+                MetricEventId::Checkpoint as i64,
                 min_event_ts as i64,
                 max_event_ts as i64
             ],
@@ -1045,11 +1055,12 @@ impl MetricsDatabase {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )?;
@@ -1059,6 +1070,7 @@ impl MetricsDatabase {
             let (
                 row_id,
                 event_json,
+                event_kind,
                 event_ts,
                 session_id,
                 trace_id,
@@ -1069,6 +1081,11 @@ impl MetricsDatabase {
             if event_ts < 0 || event_ts > u32::MAX as i64 {
                 continue;
             }
+            let Some((source, repo_url, model)) =
+                parse_attribution_recovery_candidate(&event_json, event_kind)
+            else {
+                continue;
+            };
             let event_ts = event_ts as u32;
             if min_distance_to_event_ts(timestamps_ns, event_ts)
                 .is_none_or(|distance| distance > window_ns)
@@ -1076,8 +1093,7 @@ impl MetricsDatabase {
                 continue;
             }
 
-            let (repo_url, model) = recovery_attrs_from_event_json(&event_json);
-            candidates.push(SessionEventRecoveryCandidate {
+            candidates.push(AttributionRecoveryCandidate {
                 row_id,
                 event_ts,
                 session_id,
@@ -1087,6 +1103,7 @@ impl MetricsDatabase {
                 external_session_id,
                 external_tool_use_id,
                 repo_url,
+                source,
             });
         }
 
@@ -1096,7 +1113,7 @@ impl MetricsDatabase {
     pub(crate) fn latest_session_event_candidates_for_tools(
         &self,
         tools: &[&str],
-    ) -> Result<Vec<SessionEventRecoveryCandidate>, GitAiError> {
+    ) -> Result<Vec<AttributionRecoveryCandidate>, GitAiError> {
         if tools.is_empty() {
             return Ok(Vec::new());
         }
@@ -1172,7 +1189,7 @@ impl MetricsDatabase {
             }
 
             let (repo_url, model) = recovery_attrs_from_event_json(&event_json);
-            candidates.push(SessionEventRecoveryCandidate {
+            candidates.push(AttributionRecoveryCandidate {
                 row_id,
                 event_ts: event_ts as u32,
                 session_id,
@@ -1182,6 +1199,7 @@ impl MetricsDatabase {
                 external_session_id,
                 external_tool_use_id,
                 repo_url,
+                source: AttributionRecoveryCandidateSource::SessionEvent,
             });
         }
 
@@ -1391,6 +1409,60 @@ fn recovery_attrs_from_event_json(event_json: &str) -> (Option<String>, Option<S
         sparse_object_string(attrs, attr_pos::REPO_URL),
         sparse_object_string(attrs, attr_pos::MODEL),
     )
+}
+
+fn parse_attribution_recovery_candidate(
+    event_json: &str,
+    event_kind: i64,
+) -> Option<(
+    AttributionRecoveryCandidateSource,
+    Option<String>,
+    Option<String>,
+)> {
+    let value = serde_json::from_str::<Value>(event_json).ok()?;
+    let attrs = value.get("a").and_then(Value::as_object);
+    let repo_url = sparse_object_string(attrs, attr_pos::REPO_URL);
+    let model = sparse_object_string(attrs, attr_pos::MODEL);
+
+    if event_kind == MetricEventId::SessionEvent as i64 {
+        return Some((
+            AttributionRecoveryCandidateSource::SessionEvent,
+            repo_url,
+            model,
+        ));
+    }
+    if event_kind != MetricEventId::Checkpoint as i64 {
+        return None;
+    }
+
+    let values = value.get("v").and_then(Value::as_object);
+    if sparse_object_string(values, checkpoint_pos::KIND).as_deref() != Some("ai_agent")
+        || sparse_object_string(values, checkpoint_pos::CHECKPOINT_TYPE).as_deref()
+            != Some("sandboxed_fallback")
+    {
+        return None;
+    }
+    let phase = sparse_object_string(values, checkpoint_pos::ATTRIBUTION_RECOVERY_METADATA)
+        .and_then(|metadata| serde_json::from_str::<Value>(&metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("phase")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let source = match (
+        sparse_object_string(values, checkpoint_pos::EDIT_KIND).as_deref(),
+        phase.as_deref(),
+    ) {
+        (Some("bash_sandboxed"), Some("pre" | "post")) => {
+            AttributionRecoveryCandidateSource::SandboxedBashCheckpoint
+        }
+        (Some("file_edit_sandboxed"), Some("post")) => {
+            AttributionRecoveryCandidateSource::SandboxedFileEditCheckpoint
+        }
+        _ => return None,
+    };
+    Some((source, repo_url, model))
 }
 
 fn metric_row_is_older_than_cutoff(
@@ -2170,8 +2242,41 @@ mod tests {
         )
     }
 
+    fn sandboxed_checkpoint_json(
+        ts: u32,
+        session_id: &str,
+        edit_kind: &str,
+        phase: &str,
+        file_path: Option<&str>,
+    ) -> String {
+        use crate::metrics::{CheckpointValues, EventAttributes, PosEncoded};
+
+        let mut values = CheckpointValues::new()
+            .checkpoint_ts(ts.into())
+            .kind("ai_agent")
+            .edit_kind(edit_kind)
+            .checkpoint_type("sandboxed_fallback")
+            .attribution_recovery_metadata(serde_json::json!({ "phase": phase }).to_string());
+        if let Some(file_path) = file_path {
+            values = values.file_path(file_path);
+        }
+        let attrs = EventAttributes::with_version("test")
+            .repo_url("https://github.com/acme/repo")
+            .tool("codex")
+            .model("gpt-5")
+            .external_session_id(format!("external-{session_id}"))
+            .session_id(session_id)
+            .trace_id(format!("trace-{session_id}"));
+        serde_json::to_string(&MetricEvent::from_values_with_timestamp(
+            values,
+            attrs.to_sparse(),
+            Some(ts),
+        ))
+        .unwrap()
+    }
+
     #[test]
-    fn test_session_event_candidates_near_timestamps_filters_kind_and_window() {
+    fn test_attribution_recovery_candidates_near_timestamps_filters_kind_and_window() {
         let (mut db, _temp_dir) = create_test_db();
         let base_ts = seconds_ago(60);
         let events = vec![
@@ -2202,7 +2307,7 @@ mod tests {
 
         let timestamp_ns = (base_ts as u128 * 1_000_000_000) + 500_000_000;
         let candidates = db
-            .session_event_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
+            .attribution_recovery_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
             .unwrap();
 
         assert_eq!(candidates.len(), 1);
@@ -2226,7 +2331,7 @@ mod tests {
 
         let timestamp_ns = base_ts as u128 * NS_PER_SECOND + 3_500_000_000;
         let candidates = db
-            .session_event_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
+            .attribution_recovery_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
             .unwrap();
 
         assert_eq!(candidates.len(), 1);
@@ -2258,7 +2363,7 @@ mod tests {
 
         let timestamp_ns = ts as u128 * 1_000_000_000;
         let candidates = db
-            .session_event_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
+            .attribution_recovery_candidates_near_timestamps(&[timestamp_ns], 3_000_000_000)
             .unwrap();
 
         assert_eq!(candidates.len(), 1);
@@ -2278,6 +2383,48 @@ mod tests {
         assert_eq!(
             candidate.repo_url.as_deref(),
             Some("https://github.com/acme/repo")
+        );
+    }
+
+    #[test]
+    fn test_recovery_candidates_include_eligible_sandboxed_checkpoints() {
+        let (mut db, _temp_dir) = create_test_db();
+        let ts = seconds_ago(30);
+        db.insert_events(&[
+            sandboxed_checkpoint_json(ts, "bash-pre", "bash_sandboxed", "pre", None),
+            sandboxed_checkpoint_json(
+                ts,
+                "file-post",
+                "file_edit_sandboxed",
+                "post",
+                Some("src/lib.rs"),
+            ),
+            sandboxed_checkpoint_json(
+                ts,
+                "file-pre",
+                "file_edit_sandboxed",
+                "pre",
+                Some("src/ignored.rs"),
+            ),
+            sandboxed_checkpoint_json(ts, "other", "file_edit", "post", Some("src/other.rs")),
+        ])
+        .unwrap();
+
+        let candidates = db
+            .attribution_recovery_candidates_near_timestamps(
+                &[ts as u128 * NS_PER_SECOND],
+                3 * NS_PER_SECOND,
+            )
+            .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].source,
+            AttributionRecoveryCandidateSource::SandboxedBashCheckpoint
+        );
+        assert_eq!(
+            candidates[1].source,
+            AttributionRecoveryCandidateSource::SandboxedFileEditCheckpoint
         );
     }
 

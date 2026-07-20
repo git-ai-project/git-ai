@@ -8,7 +8,7 @@ use crate::daemon::bash_history_db::{BashCheckpointCall, distance_to_call_window
 use crate::error::GitAiError;
 use crate::git::repo_state::worktree_root_for_path;
 use crate::git::repository::{Repository, exec_git};
-use crate::metrics::db::SessionEventRecoveryCandidate;
+use crate::metrics::db::{AttributionRecoveryCandidate, AttributionRecoveryCandidateSource};
 use crate::metrics::{CheckpointValues, EventAttributes, MetricEvent, PosEncoded};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const BASH_RECOVERY_COARSE_TIMESTAMP_NS: u128 = 1_000_000_000;
-pub(crate) const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
+pub(crate) const METRIC_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
@@ -242,7 +242,7 @@ pub(crate) fn recover_attribution(
         before_external_recovery(&unknown_after_edges);
     }
 
-    recover_session_event_mtime(
+    recover_metric_mtime(
         repo,
         parent_sha,
         commit_sha,
@@ -264,7 +264,7 @@ pub(crate) fn recover_attribution(
     Ok(())
 }
 
-pub(crate) fn matching_session_event_candidate_exists(
+pub(crate) fn matching_metric_recovery_candidate_exists(
     timestamps_ns: &[u128],
     target_repo_url: &str,
 ) -> Result<bool, GitAiError> {
@@ -274,16 +274,19 @@ pub(crate) fn matching_session_event_candidate_exists(
 
     let candidates = match crate::metrics::db::MetricsDatabase::global() {
         Ok(db) => match db.lock() {
-            Ok(db) => db.session_event_candidates_near_timestamps(
+            Ok(db) => db.attribution_recovery_candidates_near_timestamps(
                 timestamps_ns,
-                SESSION_EVENT_RECOVERY_WINDOW_NS,
+                METRIC_RECOVERY_WINDOW_NS,
             )?,
             Err(_) => Vec::new(),
         },
         Err(_) => Vec::new(),
     };
 
-    Ok(select_best_session_event_candidate(&candidates, timestamps_ns, target_repo_url).is_some())
+    Ok(
+        select_best_metric_recovery_candidate(&candidates, timestamps_ns, target_repo_url)
+            .is_some(),
+    )
 }
 
 fn recover_bash_mtime(
@@ -401,7 +404,7 @@ fn recover_bash_mtime(
     Ok(())
 }
 
-fn recover_session_event_mtime(
+fn recover_metric_mtime(
     repo: &Repository,
     parent_sha: &str,
     commit_sha: &str,
@@ -437,9 +440,9 @@ fn recover_session_event_mtime(
 
     let candidates = match crate::metrics::db::MetricsDatabase::global() {
         Ok(db) => match db.lock() {
-            Ok(db) => db.session_event_candidates_near_timestamps(
+            Ok(db) => db.attribution_recovery_candidates_near_timestamps(
                 &all_timestamps,
-                SESSION_EVENT_RECOVERY_WINDOW_NS,
+                METRIC_RECOVERY_WINDOW_NS,
             )?,
             Err(_) => Vec::new(),
         },
@@ -457,23 +460,37 @@ fn recover_session_event_mtime(
             continue;
         };
         let Some(selection) =
-            select_best_session_event_candidate(&candidates, timestamps, &target_repo_url)
+            select_best_metric_recovery_candidate(&candidates, timestamps, &target_repo_url)
         else {
             continue;
         };
-        if selection.distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
+        if selection.distance_ns > METRIC_RECOVERY_WINDOW_NS {
             continue;
         }
 
         let candidate = selection.candidate;
         let trace_id = generate_trace_id();
         let author_id = format!("{}::{}", candidate.session_id, trace_id);
-        insert_session_event_record(authorship_log, candidate, human_author);
+        insert_metric_recovery_session_record(authorship_log, candidate, human_author);
         add_attestation(authorship_log, &file_path, &author_id, &unknown_lines);
 
-        let selected_model = session_event_model(candidate);
+        let selected_model = metric_recovery_model(candidate);
+        let (solver, edit_kind, checkpoint_type) = match candidate.source {
+            AttributionRecoveryCandidateSource::SessionEvent => (
+                "session_event_mtime",
+                "attribution_recovery_session_event",
+                "recovered_session_event_mtime",
+            ),
+            AttributionRecoveryCandidateSource::SandboxedBashCheckpoint
+            | AttributionRecoveryCandidateSource::SandboxedFileEditCheckpoint => (
+                "sandboxed_checkpoint_mtime",
+                "attribution_recovery_sandboxed_checkpoint",
+                "recovered_sandboxed_checkpoint_mtime",
+            ),
+        };
         let metadata = json!({
-            "solver": "session_event_mtime",
+            "solver": solver,
+            "candidate_source": recovery_candidate_source_name(candidate.source),
             "file_path": file_path.as_str(),
             "unknown_lines": &unknown_lines,
             "file_timestamps_ns": timestamps,
@@ -487,7 +504,7 @@ fn recover_session_event_mtime(
             "selected_repo_url": candidate.repo_url.as_deref(),
             "target_repo_url": target_repo_url.as_str(),
             "distance_ns": selection.distance_ns,
-            "window_ns": SESSION_EVENT_RECOVERY_WINDOW_NS,
+            "window_ns": METRIC_RECOVERY_WINDOW_NS,
             "selection_tier": selection.tier.as_str(),
             "candidate_count": candidates.len(),
         });
@@ -503,8 +520,8 @@ fn recover_session_event_mtime(
             model: &selected_model,
             external_session_id: &candidate.external_session_id,
             external_tool_use_id: candidate.external_tool_use_id.as_deref(),
-            edit_kind: "attribution_recovery_session_event",
-            checkpoint_type: "recovered_session_event_mtime",
+            edit_kind,
+            checkpoint_type,
             recovered_line_count: unknown_lines.len() as u32,
             metadata,
             event_ts: Some(candidate.event_ts),
@@ -927,7 +944,7 @@ impl CommitMetadataMetricRepoTier {
 }
 
 fn commit_metadata_metric_repo_tier(
-    candidate: &SessionEventRecoveryCandidate,
+    candidate: &AttributionRecoveryCandidate,
     target_repo_url: Option<&str>,
 ) -> Option<CommitMetadataMetricRepoTier> {
     match (target_repo_url, candidate.repo_url.as_deref()) {
@@ -960,9 +977,9 @@ fn select_nearest_commit_metadata_metric_session(
 
     let candidates = match crate::metrics::db::MetricsDatabase::global() {
         Ok(db) => match db.lock() {
-            Ok(db) => db.session_event_candidates_near_timestamps(
+            Ok(db) => db.attribution_recovery_candidates_near_timestamps(
                 latest_timestamps,
-                SESSION_EVENT_RECOVERY_WINDOW_NS,
+                METRIC_RECOVERY_WINDOW_NS,
             )?,
             Err(_) => Vec::new(),
         },
@@ -977,6 +994,9 @@ fn select_nearest_commit_metadata_metric_session(
         CommitMetadataSessionSelection,
     )> = None;
     for candidate in &candidates {
+        if candidate.source != AttributionRecoveryCandidateSource::SessionEvent {
+            continue;
+        }
         let Some((detection_index, _)) = detections
             .iter()
             .enumerate()
@@ -984,10 +1004,10 @@ fn select_nearest_commit_metadata_metric_session(
         else {
             continue;
         };
-        let Some(distance_ns) = session_event_distance(candidate, latest_timestamps) else {
+        let Some(distance_ns) = metric_recovery_distance(candidate, latest_timestamps) else {
             continue;
         };
-        if distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
+        if distance_ns > METRIC_RECOVERY_WINDOW_NS {
             continue;
         }
         let Some(repo_tier) = commit_metadata_metric_repo_tier(candidate, target_repo_url) else {
@@ -1067,7 +1087,7 @@ fn select_latest_commit_metadata_metric_session(
 }
 
 fn commit_metadata_selection_from_metric_candidate(
-    candidate: &SessionEventRecoveryCandidate,
+    candidate: &AttributionRecoveryCandidate,
     tier: &'static str,
     distance_ns: Option<u128>,
 ) -> CommitMetadataSessionSelection {
@@ -1076,7 +1096,7 @@ fn commit_metadata_selection_from_metric_candidate(
         agent_id: AgentId {
             tool: candidate.tool.clone(),
             id: candidate.external_session_id.clone(),
-            model: session_event_model(candidate),
+            model: metric_recovery_model(candidate),
         },
         tier,
         metric_row_id: Some(candidate.row_id),
@@ -1323,16 +1343,16 @@ fn bash_candidate_session_id(candidate: &BashCheckpointCall) -> String {
     generate_session_id(&candidate.agent_id.id, &candidate.agent_id.tool)
 }
 
-fn select_best_session_event_candidate<'a>(
-    candidates: &'a [SessionEventRecoveryCandidate],
+fn select_best_metric_recovery_candidate<'a>(
+    candidates: &'a [AttributionRecoveryCandidate],
     timestamps: &[u128],
     target_repo_url: &str,
-) -> Option<SessionEventCandidateSelection<'a>> {
+) -> Option<MetricRecoveryCandidateSelection<'a>> {
     let matching_candidates = candidates
         .iter()
         .filter_map(|candidate| {
-            let distance_ns = session_event_distance(candidate, timestamps)?;
-            if distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
+            let distance_ns = metric_recovery_distance(candidate, timestamps)?;
+            if distance_ns > METRIC_RECOVERY_WINDOW_NS {
                 return None;
             }
             Some((candidate, distance_ns))
@@ -1345,8 +1365,8 @@ fn select_best_session_event_candidate<'a>(
     matching_candidates
         .into_iter()
         .filter_map(|(candidate, distance_ns)| {
-            let tier = session_event_candidate_tier(candidate, target_repo_url)?;
-            Some(SessionEventCandidateSelection {
+            let tier = metric_recovery_candidate_tier(candidate, target_repo_url)?;
+            Some(MetricRecoveryCandidateSelection {
                 candidate,
                 distance_ns,
                 tier,
@@ -1361,18 +1381,18 @@ fn select_best_session_event_candidate<'a>(
         })
 }
 
-struct SessionEventCandidateSelection<'a> {
-    candidate: &'a SessionEventRecoveryCandidate,
+struct MetricRecoveryCandidateSelection<'a> {
+    candidate: &'a AttributionRecoveryCandidate,
     distance_ns: u128,
-    tier: SessionEventCandidateTier,
+    tier: MetricRecoveryCandidateTier,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionEventCandidateTier {
+enum MetricRecoveryCandidateTier {
     SameRepoUrl,
 }
 
-impl SessionEventCandidateTier {
+impl MetricRecoveryCandidateTier {
     fn score(self) -> u8 {
         match self {
             Self::SameRepoUrl => 0,
@@ -1386,16 +1406,16 @@ impl SessionEventCandidateTier {
     }
 }
 
-fn session_event_candidate_tier(
-    candidate: &SessionEventRecoveryCandidate,
+fn metric_recovery_candidate_tier(
+    candidate: &AttributionRecoveryCandidate,
     target_repo_url: &str,
-) -> Option<SessionEventCandidateTier> {
+) -> Option<MetricRecoveryCandidateTier> {
     (candidate.repo_url.as_deref() == Some(target_repo_url))
-        .then_some(SessionEventCandidateTier::SameRepoUrl)
+        .then_some(MetricRecoveryCandidateTier::SameRepoUrl)
 }
 
-fn session_event_distance(
-    candidate: &SessionEventRecoveryCandidate,
+fn metric_recovery_distance(
+    candidate: &AttributionRecoveryCandidate,
     timestamps: &[u128],
 ) -> Option<u128> {
     timestamps
@@ -1478,9 +1498,9 @@ fn insert_session_record(
         });
 }
 
-fn insert_session_event_record(
+fn insert_metric_recovery_session_record(
     authorship_log: &mut AuthorshipLog,
-    candidate: &SessionEventRecoveryCandidate,
+    candidate: &AttributionRecoveryCandidate,
     human_author: &str,
 ) {
     authorship_log
@@ -1491,19 +1511,29 @@ fn insert_session_event_record(
             agent_id: AgentId {
                 tool: candidate.tool.clone(),
                 id: candidate.external_session_id.clone(),
-                model: session_event_model(candidate),
+                model: metric_recovery_model(candidate),
             },
             human_author: Some(human_author.to_string()),
             custom_attributes: None,
         });
 }
 
-fn session_event_model(candidate: &SessionEventRecoveryCandidate) -> String {
+fn metric_recovery_model(candidate: &AttributionRecoveryCandidate) -> String {
     candidate
         .model
         .clone()
         .filter(|model| !model.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn recovery_candidate_source_name(source: AttributionRecoveryCandidateSource) -> &'static str {
+    match source {
+        AttributionRecoveryCandidateSource::SessionEvent => "session_event",
+        AttributionRecoveryCandidateSource::SandboxedBashCheckpoint => "sandboxed_bash_checkpoint",
+        AttributionRecoveryCandidateSource::SandboxedFileEditCheckpoint => {
+            "sandboxed_file_edit_checkpoint"
+        }
+    }
 }
 
 fn unknown_lines_by_file(
@@ -1821,8 +1851,8 @@ mod tests {
         external_session_id: &str,
         event_ts: u32,
         repo_url: Option<&str>,
-    ) -> crate::metrics::db::SessionEventRecoveryCandidate {
-        crate::metrics::db::SessionEventRecoveryCandidate {
+    ) -> crate::metrics::db::AttributionRecoveryCandidate {
+        crate::metrics::db::AttributionRecoveryCandidate {
             row_id,
             event_ts,
             session_id: session_id.to_string(),
@@ -1832,6 +1862,7 @@ mod tests {
             external_session_id: external_session_id.to_string(),
             external_tool_use_id: Some(format!("tool-use-{row_id}")),
             repo_url: repo_url.map(ToString::to_string),
+            source: crate::metrics::db::AttributionRecoveryCandidateSource::SessionEvent,
         }
     }
 
@@ -1998,7 +2029,7 @@ mod tests {
             ),
         ];
 
-        let selection = select_best_session_event_candidate(
+        let selection = select_best_metric_recovery_candidate(
             &candidates,
             &[timestamp_ns],
             "https://github.com/acme/repo",
@@ -2006,7 +2037,7 @@ mod tests {
         .expect("expected session-event candidate");
 
         assert_eq!(selection.candidate.session_id, "s_matching_repo");
-        assert_eq!(selection.tier, SessionEventCandidateTier::SameRepoUrl);
+        assert_eq!(selection.tier, MetricRecoveryCandidateTier::SameRepoUrl);
     }
 
     #[test]
@@ -2020,7 +2051,7 @@ mod tests {
             None,
         )];
 
-        let selection = select_best_session_event_candidate(
+        let selection = select_best_metric_recovery_candidate(
             &candidates,
             &[timestamp_ns],
             "https://github.com/acme/repo",
@@ -2044,7 +2075,7 @@ mod tests {
             Some("https://github.com/acme/repo"),
         )];
 
-        let selection = select_best_session_event_candidate(
+        let selection = select_best_metric_recovery_candidate(
             &candidates,
             &[timestamp_ns],
             "https://github.com/acme/repo",
