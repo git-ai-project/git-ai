@@ -2684,7 +2684,7 @@ impl ActorDaemonCoordinator {
         completion
     }
 
-    fn wait_for_session_event_recovery_candidate(
+    fn wait_for_metric_recovery_candidate(
         &self,
         repo: &Repository,
         commit_sha: &str,
@@ -2749,12 +2749,12 @@ impl ActorDaemonCoordinator {
         };
 
         let has_candidate = || {
-            crate::authorship::attribution_recovery::matching_session_event_candidate_exists(
+            crate::authorship::attribution_recovery::matching_metric_recovery_candidate_exists(
                 &timestamps,
                 &target_repo_url,
             )
             .unwrap_or_else(|error| {
-                tracing::debug!(%error, "failed checking session-event recovery candidates");
+                tracing::debug!(%error, "failed checking metric recovery candidates");
                 false
             })
         };
@@ -5536,7 +5536,7 @@ impl ActorDaemonCoordinator {
                             )
                             .await;
                             let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
-                                self.wait_for_session_event_recovery_candidate(
+                                self.wait_for_metric_recovery_candidate(
                                     &repo,
                                     new_head,
                                     recovery_file_timestamps.as_ref(),
@@ -5599,7 +5599,7 @@ impl ActorDaemonCoordinator {
                             )
                             .await;
                             let recovery_preflight = |unknown_by_file: &crate::authorship::attribution_recovery::UnknownLinesByFile| {
-                                self.wait_for_session_event_recovery_candidate(
+                                self.wait_for_metric_recovery_candidate(
                                     &repo,
                                     new_head,
                                     recovery_file_timestamps.as_ref(),

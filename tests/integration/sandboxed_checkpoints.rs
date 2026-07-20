@@ -1,6 +1,8 @@
+use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use git_ai::metrics::db::MetricsDatabase;
-use git_ai::metrics::{CheckpointValues, PosEncoded};
+use git_ai::metrics::types::MetricEventId;
+use git_ai::metrics::{CheckpointValues, MetricEvent, PosEncoded};
 use git_ai::sandboxed_checkpoints::{
     SandboxedCheckpointKind, SandboxedCheckpointPhase, SandboxedCheckpointRecord,
 };
@@ -35,6 +37,37 @@ fn checkpoint_files(dir: &Path) -> Vec<std::path::PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+fn wait_for_checkpoint_metrics(
+    metrics_path: &Path,
+    edit_kind: &str,
+    expected_count: usize,
+) -> Vec<MetricEvent> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let db = MetricsDatabase::open_at_path(metrics_path).unwrap();
+        let records = db
+            .get_metric_history(0, None, &[MetricEventId::Checkpoint as u16])
+            .unwrap();
+        let events = records
+            .into_iter()
+            .map(|record| record.event)
+            .filter(|event| {
+                let values = CheckpointValues::from_sparse(&event.values);
+                values.edit_kind.as_ref().and_then(|value| value.as_deref()) == Some(edit_kind)
+            })
+            .collect::<Vec<_>>();
+        if events.len() >= expected_count {
+            return events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {expected_count} {edit_kind} checkpoint metrics, found {}",
+            events.len()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
@@ -144,23 +177,10 @@ fn daemon_imports_sandboxed_checkpoint_into_metrics_database() {
     )
     .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let event = loop {
-        let db = MetricsDatabase::open_at_path(&metrics_path).unwrap();
-        let records = db.get_metric_history(0, None, &[4]).unwrap();
-        if let Some(record) = records.into_iter().find(|record| {
-            let values = CheckpointValues::from_sparse(&record.event.values);
-            values.edit_kind.as_ref().and_then(|value| value.as_deref())
-                == Some("file_edit_sandboxed")
-        }) {
-            break record.event;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "daemon did not import checkpoint"
-        );
-        thread::sleep(Duration::from_millis(25));
-    };
+    let event = wait_for_checkpoint_metrics(&metrics_path, "file_edit_sandboxed", 1)
+        .into_iter()
+        .next()
+        .unwrap();
 
     let values = CheckpointValues::from_sparse(&event.values);
     assert_eq!(
@@ -190,5 +210,148 @@ fn daemon_imports_sandboxed_checkpoint_into_metrics_database() {
     assert!(
         checkpoint_files(spool.path()).is_empty(),
         "a healthy daemon should use the normal checkpoint flow"
+    );
+}
+
+#[test]
+fn sandboxed_file_edit_checkpoint_recovers_ai_attribution() {
+    let spool = tempfile::tempdir().unwrap();
+    let metrics = tempfile::tempdir().unwrap();
+    let metrics_path = metrics.path().join("metrics.db");
+    let metrics_path_string = metrics_path.to_string_lossy().to_string();
+    let spool_path_string = spool.path().to_string_lossy().to_string();
+    let repo = TestRepo::new_with_daemon_env(&[
+        (
+            "GIT_AI_TEST_SANDBOX_CHECKPOINT_DIR",
+            spool_path_string.as_str(),
+        ),
+        ("GIT_AI_TEST_SANDBOX_CHECKPOINT_POLL_MS", "10"),
+        ("GIT_AI_TEST_METRICS_DB_PATH", metrics_path_string.as_str()),
+    ]);
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/sandboxed-file-recovery.git",
+    ])
+    .unwrap();
+
+    let file_path = repo.path().join("generated.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    fs::write(&file_path, "base\nAI file edit\n").unwrap();
+
+    let hook_input = codex_hook_input(&repo, "sandboxed-file-session");
+    repo.git_ai_with_env(
+        &["checkpoint", "codex", "--hook-input", &hook_input],
+        &[
+            ("CODEX_SANDBOX", "1"),
+            (
+                "GIT_AI_TEST_SANDBOX_CHECKPOINT_DIR",
+                spool_path_string.as_str(),
+            ),
+        ],
+    )
+    .unwrap();
+    wait_for_checkpoint_metrics(&metrics_path, "file_edit_sandboxed", 1);
+
+    let commit = repo.stage_all_and_commit("Sandboxed file edit").unwrap();
+    let mut file = repo.filename("generated.txt");
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI file edit".ai(),
+    ]);
+    assert!(
+        commit
+            .authorship_log
+            .metadata
+            .sessions
+            .values()
+            .any(|session| {
+                session.agent_id.tool == "codex" && session.agent_id.id == "sandboxed-file-session"
+            })
+    );
+    wait_for_checkpoint_metrics(
+        &metrics_path,
+        "attribution_recovery_sandboxed_checkpoint",
+        1,
+    );
+}
+
+#[test]
+fn sandboxed_bash_checkpoints_recover_ai_attribution() {
+    let spool = tempfile::tempdir().unwrap();
+    let metrics = tempfile::tempdir().unwrap();
+    let metrics_path = metrics.path().join("metrics.db");
+    let metrics_path_string = metrics_path.to_string_lossy().to_string();
+    let spool_path_string = spool.path().to_string_lossy().to_string();
+    let repo = TestRepo::new_with_daemon_env(&[
+        (
+            "GIT_AI_TEST_SANDBOX_CHECKPOINT_DIR",
+            spool_path_string.as_str(),
+        ),
+        ("GIT_AI_TEST_SANDBOX_CHECKPOINT_POLL_MS", "10"),
+        ("GIT_AI_TEST_METRICS_DB_PATH", metrics_path_string.as_str()),
+    ]);
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/sandboxed-bash-recovery.git",
+    ])
+    .unwrap();
+
+    let file_path = repo.path().join("generated.txt");
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    for hook_event_name in ["PreToolUse", "PostToolUse"] {
+        if hook_event_name == "PostToolUse" {
+            fs::write(&file_path, "base\nAI bash edit\n").unwrap();
+        }
+        let hook_input = json!({
+            "session_id": "sandboxed-bash-session",
+            "cwd": repo.canonical_path(),
+            "hook_event_name": hook_event_name,
+            "tool_name": "shell_command",
+            "tool_use_id": "bash-tool-use-1",
+            "model": "gpt-5",
+            "tool_input": { "command": "printf 'AI bash edit\\n' >> generated.txt" }
+        })
+        .to_string();
+        repo.git_ai_with_env(
+            &["checkpoint", "codex", "--hook-input", &hook_input],
+            &[
+                ("CODEX_SANDBOX", "1"),
+                (
+                    "GIT_AI_TEST_SANDBOX_CHECKPOINT_DIR",
+                    spool_path_string.as_str(),
+                ),
+            ],
+        )
+        .unwrap();
+    }
+    wait_for_checkpoint_metrics(&metrics_path, "bash_sandboxed", 2);
+
+    let commit = repo.stage_all_and_commit("Sandboxed bash edit").unwrap();
+    let mut file = repo.filename("generated.txt");
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI bash edit".ai(),
+    ]);
+    assert!(
+        commit
+            .authorship_log
+            .metadata
+            .sessions
+            .values()
+            .any(|session| {
+                session.agent_id.tool == "codex" && session.agent_id.id == "sandboxed-bash-session"
+            })
+    );
+    wait_for_checkpoint_metrics(
+        &metrics_path,
+        "attribution_recovery_sandboxed_checkpoint",
+        1,
     );
 }
