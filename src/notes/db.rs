@@ -462,6 +462,21 @@ impl NotesDatabase {
 
     // ----- Read operations -----
 
+    /// Count unsynced notes that can be dequeued for upload right now.
+    pub fn count_pending_uploadable(&self) -> Result<usize, GitAiError> {
+        let now = unix_now();
+        let count: i64 = self.conn.query_row(
+            r#"SELECT COUNT(*) FROM notes
+               WHERE synced = 0
+                 AND processing_started_at IS NULL
+                 AND next_retry_at <= ?1
+                 AND attempts < 6"#,
+            params![now],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Retrieve the note content for a single commit SHA.
     pub fn get_note(&self, commit_sha: &str) -> Result<Option<String>, GitAiError> {
         match self.conn.query_row(
@@ -788,6 +803,35 @@ mod tests {
             batch.is_empty(),
             "cache_synced_notes rows must not appear in dequeue_pending"
         );
+    }
+
+    #[test]
+    fn test_count_pending_uploadable_excludes_deferred_and_processing_rows() {
+        let (mut db, _tmp) = create_test_db();
+
+        for sha in ["ready", "backoff", "processing", "permanent"] {
+            db.upsert_note(sha, "content").unwrap();
+        }
+        db.conn
+            .execute(
+                "UPDATE notes SET attempts = 1, next_retry_at = ?1 WHERE commit_sha = 'backoff'",
+                params![unix_now() + 3_600],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE notes SET processing_started_at = ?1 WHERE commit_sha = 'processing'",
+                params![unix_now()],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE notes SET attempts = 6 WHERE commit_sha = 'permanent'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.count_pending_uploadable().unwrap(), 1);
     }
 
     // --- cache_synced_notes ---

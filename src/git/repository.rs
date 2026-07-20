@@ -2833,18 +2833,20 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
     exec_git_stdin_with_profile(args, stdin_data, InternalGitProfile::General)
 }
 
-/// Helper to execute a git command with data provided on stdin and an explicit profile.
-pub fn exec_git_stdin_with_profile(
-    args: &[String],
+/// Spawn a fully-piped git child for `effective_args` and start a thread
+/// writing `stdin_data` to it. Writing stdin in a separate thread avoids
+/// deadlock: if we wrote all stdin before reading stdout, the child's stdout
+/// pipe buffer could fill up, causing the child to block on write, which
+/// prevents it from consuming more stdin, which would block our write_all.
+type StdinWriterHandle = std::thread::JoinHandle<std::io::Result<()>>;
+
+fn spawn_git_stdin_piped(
+    effective_args: &[String],
     stdin_data: &[u8],
-    profile: InternalGitProfile,
-) -> Result<Output, GitAiError> {
-    // TODO Make sure to handle process signals, etc.
-    let effective_args =
-        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
-    spawn_probe_log(&effective_args);
+) -> Result<(Child, Option<StdinWriterHandle>), GitAiError> {
+    spawn_probe_log(effective_args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(&effective_args)
+    cmd.args(effective_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2859,10 +2861,6 @@ pub fn exec_git_stdin_with_profile(
 
     let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
 
-    // Write stdin in a separate thread to avoid deadlock: if we write all stdin
-    // before reading stdout, the child's stdout pipe buffer can fill up, causing
-    // the child to block on write, which prevents it from consuming more stdin,
-    // which blocks our write_all. Writing concurrently avoids this.
     let stdin_handle = child.stdin.take().map(|mut stdin| {
         let data = stdin_data.to_vec();
         std::thread::spawn(move || {
@@ -2870,6 +2868,100 @@ pub fn exec_git_stdin_with_profile(
             stdin.write_all(&data)
         })
     });
+
+    Ok((child, stdin_handle))
+}
+
+/// Like `exec_git_stdin`, but streams the child's stdout to `on_line` one line
+/// at a time instead of buffering the entire output in memory. Use this for
+/// commands whose output can be arbitrarily large (e.g. batched
+/// `diff-tree --stdin -p`), where `wait_with_output()` would hold the full
+/// output (plus a lossy-conversion copy) in memory at once.
+///
+/// Each line is lossily UTF-8 converted individually and passed without its
+/// trailing `\n` (and at most one preceding `\r`), matching `str::lines()`.
+pub fn exec_git_stdin_streaming(
+    args: &[String],
+    stdin_data: &[u8],
+    mut on_line: impl FnMut(&str),
+) -> Result<(), GitAiError> {
+    use std::io::BufRead;
+
+    let effective_args = args_with_internal_git_profile(
+        &args_with_disabled_hooks_if_needed(args),
+        InternalGitProfile::General,
+    );
+    let (mut child, stdin_handle) = spawn_git_stdin_piped(&effective_args, stdin_data)?;
+
+    // Drain stderr concurrently so the child can never block on a full stderr
+    // pipe while we are still reading stdout.
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let stdout = child.stdout.take().expect("child stdout is piped");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut buf: Vec<u8> = Vec::new();
+    let read_result = loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                }
+                on_line(&String::from_utf8_lossy(&buf));
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    if let Err(e) = read_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GitAiError::IoError(e));
+    }
+
+    let status = child.wait().map_err(GitAiError::IoError)?;
+
+    if let Some(handle) = stdin_handle
+        && let Err(e) = handle.join().expect("stdin writer thread panicked")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(GitAiError::IoError(e));
+    }
+
+    if !status.success() {
+        let stderr_bytes = stderr_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        return Err(GitAiError::GitCliError {
+            code: status.code(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
+            args: effective_args,
+        });
+    }
+
+    Ok(())
+}
+
+/// Helper to execute a git command with data provided on stdin and an explicit profile.
+pub fn exec_git_stdin_with_profile(
+    args: &[String],
+    stdin_data: &[u8],
+    profile: InternalGitProfile,
+) -> Result<Output, GitAiError> {
+    // TODO Make sure to handle process signals, etc.
+    let effective_args =
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    let (child, stdin_handle) = spawn_git_stdin_piped(&effective_args, stdin_data)?;
 
     let output = child.wait_with_output().map_err(GitAiError::IoError)?;
 

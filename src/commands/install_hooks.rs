@@ -545,7 +545,7 @@ async fn async_run_install(
                             let error_msg = e.to_string();
                             spinner.error(&format!("{}: Failed to update hooks", name));
                             eprintln!("  Error: {}", error_msg);
-                            statuses.insert(id.to_string(), InstallStatus::NotFound);
+                            statuses.insert(id.to_string(), InstallStatus::Failed);
                             detailed_results
                                 .push((id.to_string(), InstallResult::failed(error_msg)));
                         }
@@ -626,15 +626,14 @@ async fn async_run_install(
                     }
                 }
             }
-            Err(version_error) => {
-                let error_msg = version_error.to_string();
+            Err(check_error) => {
+                let error_msg = check_error.to_string();
                 any_checked = true;
-                let spinner = Spinner::new(&format!("{}: checking version", name));
+                let spinner = Spinner::new(&format!("{}: checking hooks", name));
                 spinner.start();
-                spinner.error(&format!("{}: Version check failed", name));
+                spinner.error(&format!("{}: Hook check failed", name));
                 eprintln!("  Error: {}", error_msg);
-                eprintln!("  Please update {} to continue using git-ai hooks", name);
-                statuses.insert(id.to_string(), InstallStatus::NotFound);
+                statuses.insert(id.to_string(), InstallStatus::Failed);
                 detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
             }
         }
@@ -866,7 +865,7 @@ async fn async_run_uninstall(
                     Err(e) => {
                         spinner.error(&format!("{}: Failed to remove hooks", name));
                         eprintln!("  Error: {}", e);
-                        statuses.insert(id.to_string(), InstallStatus::NotFound);
+                        statuses.insert(id.to_string(), InstallStatus::Failed);
                     }
                 }
 
@@ -899,7 +898,7 @@ async fn async_run_uninstall(
             }
             Err(e) => {
                 eprintln!("  Error checking {}: {}", name, e);
-                statuses.insert(id.to_string(), InstallStatus::NotFound);
+                statuses.insert(id.to_string(), InstallStatus::Failed);
             }
         }
     }
@@ -1043,6 +1042,42 @@ mod tests {
             VISUAL_STUDIO_INSTALLER_ID,
             &options
         ));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    #[serial]
+    fn install_reports_cline_hook_check_errors_as_failed() {
+        let temp = tempdir().unwrap();
+        let storage = temp.path().join("cline-storage");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(temp.path().join("Documents"), "not a directory").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        let _cline_storage =
+            EnvVarGuard::set("GIT_AI_CLINE_STORAGE_PATH", storage.to_str().unwrap());
+
+        let statuses = run(&["--dry-run".to_string()]).unwrap();
+
+        assert_eq!(statuses.get("cline").map(String::as_str), Some("failed"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    #[serial]
+    fn uninstall_reports_cline_hook_check_errors_as_failed() {
+        let temp = tempdir().unwrap();
+        let storage = temp.path().join("cline-storage");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(temp.path().join("Documents"), "not a directory").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        let _cline_storage =
+            EnvVarGuard::set("GIT_AI_CLINE_STORAGE_PATH", storage.to_str().unwrap());
+
+        let statuses = run_uninstall(&["--dry-run".to_string()]).unwrap();
+
+        assert_eq!(statuses.get("cline").map(String::as_str), Some("failed"));
     }
 
     #[test]

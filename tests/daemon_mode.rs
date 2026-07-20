@@ -7,6 +7,7 @@ use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::orchestrator::{
     BaseCommit, CheckpointFile, CheckpointRequest,
 };
+use git_ai::config::{NotesBackendConfig, NotesBackendKind};
 #[cfg(not(windows))]
 use git_ai::daemon::checkpoint::PreparedPathRole;
 #[cfg(not(windows))]
@@ -183,6 +184,7 @@ impl Drop for ScopedEnvVar {
 struct MockApiServer {
     base_url: String,
     stop: Arc<AtomicBool>,
+    rx: mpsc::Receiver<Value>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -193,7 +195,7 @@ impl MockApiServer {
             .set_nonblocking(true)
             .expect("failed to set nonblocking listener");
         let addr = listener.local_addr().expect("failed to read listener addr");
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
 
@@ -214,12 +216,22 @@ impl MockApiServer {
         Self {
             base_url: format!("http://{}", addr),
             stop,
+            rx,
             thread: Some(thread),
         }
     }
 
     fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Collect all requests captured by the mock so far.
+    fn collect_requests(&mut self) -> Vec<Value> {
+        let mut requests = Vec::new();
+        while let Ok(request) = self.rx.try_recv() {
+            requests.push(request);
+        }
+        requests
     }
 }
 
@@ -238,11 +250,11 @@ fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
         return;
     };
 
+    let request_json: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+
     let response_body = match path.as_str() {
         "/worker/cas/upload" => {
-            let request_json: Value =
-                serde_json::from_slice(&body).expect("CAS upload should contain JSON");
-            let _ = tx.send(request_json.clone());
+            let _ = tx.send(json!({ "path": path, "body": request_json }));
             let hashes = request_json["objects"]
                 .as_array()
                 .cloned()
@@ -262,7 +274,22 @@ fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
             })
             .to_string()
         }
-        "/worker/metrics/upload" => json!({ "errors": [] }).to_string(),
+        "/worker/metrics/upload" => {
+            let _ = tx.send(json!({ "path": path, "body": request_json }));
+            json!({ "errors": [] }).to_string()
+        }
+        "/worker/notes/upload" => {
+            let _ = tx.send(json!({ "path": path, "body": request_json }));
+            let success_count = request_json["entries"]
+                .as_array()
+                .map(|entries| entries.len())
+                .unwrap_or(0);
+            json!({
+                "success_count": success_count,
+                "failure_count": 0
+            })
+            .to_string()
+        }
         _ => "{}".to_string(),
     };
 
@@ -5017,4 +5044,134 @@ fn daemon_self_heals_after_socket_deletion() {
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn await_waits_for_metrics_and_notes_flush() {
+    let mut mock_api = MockApiServer::start();
+
+    // Metrics recording is gated in test builds; point it at an isolated DB so
+    // post-commit metric events actually get stored and flushed.
+    let metrics_db_path =
+        std::env::temp_dir().join(format!("git-ai-test-metrics-{}.db", std::process::id()));
+    let mut repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_API_BASE_URL", mock_api.base_url()),
+        ("GIT_AI_API_KEY", "test-api-key"),
+        ("GIT_AI_NOTES_BACKEND_KIND", "http"),
+        ("GIT_AI_NOTES_BACKEND_URL", mock_api.base_url()),
+        (
+            "GIT_AI_TEST_METRICS_DB_PATH",
+            metrics_db_path.to_str().unwrap(),
+        ),
+    ]);
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+        patch.prompt_storage = Some("default".to_string());
+        patch.telemetry_oss_disabled = Some(true);
+        patch.notes_backend = Some(NotesBackendConfig {
+            kind: NotesBackendKind::Http,
+            backend_url: Some(mock_api.base_url().to_string()),
+        });
+    });
+
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("test.ts");
+
+    // First commit: known-human baseline, then an AI-style edit to produce metrics.
+    fs::write(&file_path, "const x = 1;\n").expect("failed to write initial file");
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.ts"])
+        .expect("known-human checkpoint should succeed");
+    fs::write(&file_path, "const x = 2;\n").expect("failed to write update");
+    repo.git_ai(&["checkpoint", "mock_ai", "test.ts"])
+        .expect("ai checkpoint should succeed");
+    repo.git(&["add", "-A"])
+        .expect("initial add should succeed");
+    repo.git(&["commit", "-m", "Initial commit"])
+        .expect("initial commit should succeed");
+
+    // Second commit: repeat the same pattern to queue more metrics and notes.
+    fs::write(&file_path, "const x = 3;\n").expect("failed to write update");
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.ts"])
+        .expect("known-human checkpoint should succeed");
+    fs::write(&file_path, "const x = 4;\n").expect("failed to write update");
+    repo.git_ai(&["checkpoint", "mock_ai", "test.ts"])
+        .expect("ai checkpoint should succeed");
+    repo.git(&["add", "-A"]).expect("second add should succeed");
+    repo.git(&["commit", "-m", "Second commit"])
+        .expect("second commit should succeed");
+
+    // Wait for the daemon to finish and flush telemetry.
+    let output = repo
+        .git_ai(&["await", "--timeout", "30"])
+        .expect("await should succeed");
+    assert!(
+        output.contains("finished"),
+        "await should report finished: {}",
+        output
+    );
+
+    let requests = mock_api.collect_requests();
+    let metrics_requests = requests
+        .iter()
+        .filter(|r| r["path"].as_str() == Some("/worker/metrics/upload"))
+        .count();
+    let notes_requests = requests
+        .iter()
+        .filter(|r| r["path"].as_str() == Some("/worker/notes/upload"))
+        .count();
+    assert!(
+        metrics_requests > 0,
+        "expected at least one metrics upload, got {}",
+        metrics_requests
+    );
+    assert!(
+        notes_requests > 0,
+        "expected at least one notes upload, got {}",
+        notes_requests
+    );
+}
+
+#[test]
+fn await_is_marked_beta_and_returns_promptly_when_idle() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::Dedicated);
+
+    let top_level_help = repo
+        .git_ai(&["--help"])
+        .expect("top-level help should succeed");
+    assert!(
+        top_level_help.contains("await [beta]"),
+        "top-level help should mark await as beta: {}",
+        top_level_help
+    );
+
+    let await_help = repo
+        .git_ai(&["await", "--help"])
+        .expect("await help should succeed");
+    assert!(
+        await_help.contains("beta"),
+        "await help should mark the command as beta: {}",
+        await_help
+    );
+
+    let started_at = std::time::Instant::now();
+    repo.git_ai(&["await", "--timeout", "10"])
+        .expect("await should succeed when the daemon is idle");
+    assert!(
+        started_at.elapsed() < Duration::from_secs(4),
+        "await should return promptly instead of waiting for the progress interval"
+    );
+}
+
+#[test]
+fn await_rejects_zero_timeout() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::Dedicated);
+
+    let error = repo
+        .git_ai(&["await", "--timeout", "0"])
+        .expect_err("zero timeout should be rejected");
+
+    assert!(
+        error.contains("--timeout must be a positive integer"),
+        "await should report an input validation error: {error}"
+    );
 }

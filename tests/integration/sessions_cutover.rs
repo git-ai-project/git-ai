@@ -2657,8 +2657,16 @@ fn test_amend_preserves_sessions_under_http_notes_backend() {
     };
     let daemon_patch_json =
         serde_json::to_string(&daemon_patch).expect("serialize daemon config patch");
-    let mut repo =
-        TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_CONFIG_PATCH", daemon_patch_json.as_str())]);
+    // `dirs::home_dir()` does not honor HOME/USERPROFILE overrides on Windows,
+    // so explicitly isolate the daemon's HTTP notes cache at a path this test
+    // can read on every platform.
+    let notes_db_dir = tempfile::tempdir().expect("create isolated notes-db directory");
+    let notes_db_path = notes_db_dir.path().join("notes-db");
+    let notes_db_path_string = notes_db_path.to_string_lossy().to_string();
+    let mut repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_TEST_CONFIG_PATCH", daemon_patch_json.as_str()),
+        ("GIT_AI_TEST_NOTES_DB_PATH", notes_db_path_string.as_str()),
+    ]);
     // CLI invocations (checkpoint, blame) should use the HTTP backend too.
     repo.patch_git_ai_config(|patch| {
         patch.notes_backend = Some(NotesBackendConfig {
@@ -2670,11 +2678,6 @@ fn test_amend_preserves_sessions_under_http_notes_backend() {
     // Poll the notes-db for a commit's note: post-commit note writes land in the
     // daemon's notes-db queue (never refs/notes/ai), so the harness's usual
     // "note visible in refs/notes/ai" commit assertion cannot be used here.
-    let notes_db_path = repo
-        .test_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("notes-db");
     let read_note_from_db = |sha: &str| -> Option<String> {
         for _ in 0..100 {
             if let Ok(db) = NotesDatabase::open_at_path(&notes_db_path)
