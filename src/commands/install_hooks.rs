@@ -309,42 +309,6 @@ fn ensure_daemon(dry_run: bool) {
     }
 }
 
-fn install_user_home(binary_path: &Path) -> Option<&Path> {
-    let bin_dir = binary_path.parent()?;
-    if bin_dir.file_name()? != "bin" {
-        return None;
-    }
-
-    let state_dir = bin_dir.parent()?;
-    if state_dir.file_name()? != ".git-ai" {
-        return None;
-    }
-
-    state_dir.parent()
-}
-
-fn set_install_user_home(binary_path: &Path) {
-    let Some(home) = install_user_home(binary_path) else {
-        return;
-    };
-
-    // SAFETY: this runs synchronously during CLI startup, before install-hooks
-    // initializes the daemon, telemetry, or async runtime.
-    unsafe {
-        std::env::set_var("HOME", home);
-        #[cfg(windows)]
-        std::env::set_var("USERPROFILE", home);
-    }
-}
-
-/// Align home-directory discovery with the per-user installation containing
-/// the running binary before any install work reads or writes user state.
-pub fn prepare_install_user_environment() -> Result<(), GitAiError> {
-    let binary_path = get_current_binary_path()?;
-    set_install_user_home(&binary_path);
-    Ok(())
-}
-
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let options = parse_install_options(args)?;
@@ -473,19 +437,11 @@ fn persist_install_config_with_values(
     let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let mut changed = false;
 
-    if let Some(api_base) = api_base
-        && file_config.api_base_url.as_deref() != Some(api_base.as_str())
-    {
-        file_config.api_base_url = Some(api_base.clone());
-        changed = true;
-    }
-
-    if let Some(api_key) = api_key
-        && file_config.api_key.as_deref() != Some(api_key.as_str())
-    {
-        file_config.api_key = Some(api_key.clone());
-        changed = true;
-    }
+    changed |= crate::config::set_api_config_values(
+        &mut file_config,
+        api_base.as_deref(),
+        api_key.as_deref(),
+    );
 
     if api_base.is_some() {
         let git_path_missing = file_config
@@ -1165,40 +1121,6 @@ mod tests {
         let err = parse_install_options(&args).unwrap_err();
 
         assert!(err.to_string().contains("missing value for --api-base"));
-    }
-
-    #[test]
-    fn install_user_home_is_derived_only_from_the_standard_runtime_path() {
-        let installed_binary = Path::new("/Users/alice/.git-ai/bin/git-ai");
-        let other_binary = Path::new("/usr/local/bin/git-ai");
-
-        assert_eq!(
-            install_user_home(installed_binary),
-            Some(Path::new("/Users/alice"))
-        );
-        assert_eq!(install_user_home(other_binary), None);
-    }
-
-    #[test]
-    #[serial]
-    fn install_environment_uses_the_home_containing_the_runtime() {
-        let temp = tempdir().unwrap();
-        let binary = temp.path().join(".git-ai").join("bin").join("git-ai");
-        let _home = EnvVarGuard::set("HOME", "/wrong/home");
-        #[cfg(windows)]
-        let _user_profile = EnvVarGuard::set("USERPROFILE", r"C:\wrong\profile");
-
-        set_install_user_home(&binary);
-
-        assert_eq!(
-            std::env::var_os("HOME").as_deref(),
-            Some(temp.path().as_os_str())
-        );
-        #[cfg(windows)]
-        assert_eq!(
-            std::env::var_os("USERPROFILE").as_deref(),
-            Some(temp.path().as_os_str())
-        );
     }
 
     #[test]
