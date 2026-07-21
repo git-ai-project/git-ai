@@ -2505,6 +2505,31 @@ impl TestRepo {
         self.git_ai_with_env_inner(args, envs, false)
     }
 
+    pub fn git_ai_command_without_pre_sync_for_test(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Command {
+        let binary_path = get_binary_path();
+        let normalized_args = normalize_test_git_ai_checkpoint_args(args);
+
+        let mut command = Command::new(binary_path);
+        command.args(&normalized_args).current_dir(&self.path);
+        self.configure_git_ai_env(&mut command);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        command
+    }
+
     pub fn git(&self, args: &[&str]) -> Result<String, String> {
         self.git_with_env(args, &[], None)
     }
@@ -2908,28 +2933,7 @@ impl TestRepo {
 
         let is_checkpoint = git_ai_primary_command(args) == Some("checkpoint");
 
-        let binary_path = get_binary_path();
-        let normalized_args = normalize_test_git_ai_checkpoint_args(args);
-
-        let mut command = Command::new(binary_path);
-        command.args(&normalized_args).current_dir(&self.path);
-        self.configure_git_ai_env(&mut command);
-
-        // Add config patch as environment variable if present
-        if let Some(patch) = &self.config_patch
-            && let Ok(patch_json) = serde_json::to_string(patch)
-        {
-            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
-        }
-
-        // Add test database path for isolation
-        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-
-        // Add custom environment variables
-        for (key, value) in envs {
-            command.env(key, value);
-        }
+        let mut command = self.git_ai_command_without_pre_sync_for_test(args, envs);
 
         let output = run_command_output(&mut command, &format!("git-ai {:?}", args))?;
 
