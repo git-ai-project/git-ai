@@ -16,12 +16,14 @@ const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
 const TRACE2_EVENT_NESTING_VALUE: &str = "0";
 const VISUAL_STUDIO_INSTALLER_ID: &str = "visual-studio";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct InstallOptions {
     dry_run: bool,
     verbose: bool,
     install_skills: bool,
     include_visual_studio_extension: bool,
+    api_base: Option<String>,
+    api_key: Option<String>,
 }
 
 /// Installation status for a tool
@@ -309,7 +311,19 @@ fn ensure_daemon(dry_run: bool) {
 
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
-    let options = parse_install_options(args);
+    let options = parse_install_options(args)?;
+    let install_config = InstallConfig {
+        api_base: options.api_base.clone().or_else(|| {
+            std::env::var("API_BASE")
+                .ok()
+                .filter(|value| !value.is_empty())
+        }),
+        api_key: options.api_key.clone().or_else(|| {
+            std::env::var("API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty())
+        }),
+    };
 
     // Daemon trace2 config must be in place before any install work starts.
     // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
@@ -326,7 +340,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
-    persist_install_config(&binary_path, options.dry_run)?;
+    persist_install_config_with_values(&binary_path, options.dry_run, &install_config)?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations and convert result.
@@ -341,33 +355,80 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     Ok(to_hashmap(statuses))
 }
 
-fn parse_install_options(args: &[String]) -> InstallOptions {
+fn parse_install_options(args: &[String]) -> Result<InstallOptions, GitAiError> {
     let mut options = InstallOptions::default();
 
-    for arg in args {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dry-run" | "--dry-run=true" => options.dry_run = true,
             "--verbose" | "-v" => options.verbose = true,
             "--skills" => options.install_skills = true,
             "--visual-studio-extension" => options.include_visual_studio_extension = true,
+            value if value.starts_with("--api-base=") => {
+                options.api_base = non_empty_value(&value[11..]);
+            }
+            "--api-base" => {
+                let value = args.next().ok_or_else(|| {
+                    GitAiError::Generic("missing value for --api-base".to_string())
+                })?;
+                options.api_base = non_empty_value(value);
+            }
+            value if value.starts_with("--api-key=") => {
+                options.api_key = non_empty_value(&value[10..]);
+            }
+            "--api-key" => {
+                let value = args.next().ok_or_else(|| {
+                    GitAiError::Generic("missing value for --api-key".to_string())
+                })?;
+                options.api_key = non_empty_value(value);
+            }
             _ => {}
         }
     }
 
-    options
+    Ok(options)
+}
+
+fn non_empty_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn should_include_installer(id: &str, options: &InstallOptions) -> bool {
     options.include_visual_studio_extension || id != VISUAL_STUDIO_INSTALLER_ID
 }
 
+#[derive(Default)]
+struct InstallConfig {
+    api_base: Option<String>,
+    api_key: Option<String>,
+}
+
+#[cfg(test)]
 fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
+    persist_install_config_with_values(binary_path, dry_run, &install_config_from_environment())
+}
+
+#[cfg(test)]
+fn install_config_from_environment() -> InstallConfig {
+    InstallConfig {
+        api_base: std::env::var("API_BASE").ok().filter(|s| !s.is_empty()),
+        api_key: std::env::var("API_KEY").ok().filter(|s| !s.is_empty()),
+    }
+}
+
+fn persist_install_config_with_values(
+    binary_path: &Path,
+    dry_run: bool,
+    install_config: &InstallConfig,
+) -> Result<bool, GitAiError> {
     if dry_run {
         return Ok(false);
     }
 
-    let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
-    let api_key = std::env::var("API_KEY").ok().filter(|s| !s.is_empty());
+    let api_base = &install_config.api_base;
+    let api_key = &install_config.api_key;
 
     if api_base.is_none() && api_key.is_none() {
         return Ok(false);
@@ -376,14 +437,14 @@ fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, Git
     let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let mut changed = false;
 
-    if let Some(ref api_base) = api_base
+    if let Some(api_base) = api_base
         && file_config.api_base_url.as_deref() != Some(api_base.as_str())
     {
         file_config.api_base_url = Some(api_base.clone());
         changed = true;
     }
 
-    if let Some(ref api_key) = api_key
+    if let Some(api_key) = api_key
         && file_config.api_key.as_deref() != Some(api_key.as_str())
     {
         file_config.api_key = Some(api_key.clone());
@@ -1014,7 +1075,7 @@ mod tests {
 
     #[test]
     fn parse_install_options_defaults_visual_studio_extension_to_disabled() {
-        let options = parse_install_options(&[]);
+        let options = parse_install_options(&[]).unwrap();
 
         assert!(!options.include_visual_studio_extension);
         assert!(!should_include_installer(
@@ -1032,7 +1093,7 @@ mod tests {
             "--skills".to_string(),
             "-v".to_string(),
         ];
-        let options = parse_install_options(&args);
+        let options = parse_install_options(&args).unwrap();
 
         assert!(options.dry_run);
         assert!(options.verbose);
@@ -1042,6 +1103,32 @@ mod tests {
             VISUAL_STUDIO_INSTALLER_ID,
             &options
         ));
+    }
+
+    #[test]
+    fn parse_install_options_accepts_package_api_configuration() {
+        let args = vec![
+            "--api-base=https://enterprise.example".to_string(),
+            "--api-key".to_string(),
+            "sk-enterprise-key".to_string(),
+        ];
+
+        let options = parse_install_options(&args).unwrap();
+
+        assert_eq!(
+            options.api_base.as_deref(),
+            Some("https://enterprise.example")
+        );
+        assert_eq!(options.api_key.as_deref(), Some("sk-enterprise-key"));
+    }
+
+    #[test]
+    fn parse_install_options_rejects_missing_package_api_value() {
+        let args = vec!["--api-base".to_string()];
+
+        let err = parse_install_options(&args).unwrap_err();
+
+        assert!(err.to_string().contains("missing value for --api-base"));
     }
 
     #[test]
