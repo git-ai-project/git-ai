@@ -437,11 +437,19 @@ fn persist_install_config_with_values(
     let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let mut changed = false;
 
-    changed |= crate::config::set_api_config_values(
-        &mut file_config,
-        api_base.as_deref(),
-        api_key.as_deref(),
-    );
+    if let Some(api_base) = api_base
+        && file_config.api_base_url.as_deref() != Some(api_base.as_str())
+    {
+        file_config.api_base_url = Some(api_base.clone());
+        changed = true;
+    }
+
+    if let Some(api_key) = api_key
+        && file_config.api_key.as_deref() != Some(api_key.as_str())
+    {
+        file_config.api_key = Some(api_key.clone());
+        changed = true;
+    }
 
     if api_base.is_some() {
         let git_path_missing = file_config

@@ -733,12 +733,12 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 println!("[feature_flags]: {}", value);
             }
             "api_base_url" => {
-                crate::config::set_api_config_values(&mut file_config, Some(value), None);
+                file_config.api_base_url = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
                 println!("[api_base_url]: {}", value);
             }
             "api_key" => {
-                crate::config::set_api_config_values(&mut file_config, None, Some(value));
+                file_config.api_key = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
                 let masked = mask_api_key(value);
                 println!("[api_key]: {}", masked);

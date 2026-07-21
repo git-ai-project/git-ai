@@ -1545,34 +1545,6 @@ pub fn load_file_config_public() -> Result<FileConfig, String> {
     parse_file_config_bytes(&data).map_err(|e| format!("Failed to parse config file: {}", e))
 }
 
-/// Apply API connection values to an in-memory file config.
-///
-/// This is shared by the `git-ai config set` surface and installer setup so
-/// both paths preserve the same config.json field semantics.
-pub(crate) fn set_api_config_values(
-    config: &mut FileConfig,
-    api_base_url: Option<&str>,
-    api_key: Option<&str>,
-) -> bool {
-    let mut changed = false;
-
-    if let Some(api_base_url) = api_base_url
-        && config.api_base_url.as_deref() != Some(api_base_url)
-    {
-        config.api_base_url = Some(api_base_url.to_string());
-        changed = true;
-    }
-
-    if let Some(api_key) = api_key
-        && config.api_key.as_deref() != Some(api_key)
-    {
-        config.api_key = Some(api_key.to_string());
-        changed = true;
-    }
-
-    changed
-}
-
 /// Save the file config
 pub fn save_file_config(config: &FileConfig) -> Result<(), String> {
     let path =
@@ -1762,35 +1734,6 @@ fn apply_test_config_patch(config: &mut Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn set_api_config_values_updates_only_supplied_values() {
-        let mut config = FileConfig {
-            api_base_url: Some("https://old.example".to_string()),
-            api_key: Some("existing-key".to_string()),
-            ..Default::default()
-        };
-
-        assert!(set_api_config_values(
-            &mut config,
-            Some("https://new.example"),
-            None
-        ));
-        assert_eq!(config.api_base_url.as_deref(), Some("https://new.example"));
-        assert_eq!(config.api_key.as_deref(), Some("existing-key"));
-
-        assert!(!set_api_config_values(
-            &mut config,
-            Some("https://new.example"),
-            None
-        ));
-        assert!(set_api_config_values(
-            &mut config,
-            None,
-            Some("replacement-key")
-        ));
-        assert_eq!(config.api_key.as_deref(), Some("replacement-key"));
-    }
 
     fn create_test_config(
         allow_repositories: Vec<String>,
