@@ -39,6 +39,8 @@ OUTPUT_ABS="$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$
 rm -rf "$WORK_DIR"
 mkdir -p "$SCRIPTS" "$(dirname "$OUTPUT_ABS")"
 install -m 0755 "$BINARY" "$SCRIPTS/git-ai"
+install -m 0755 "$ROOT/packaging/macos/launchagents/git-ai-daemon-launcher" "$SCRIPTS/git-ai-daemon-launcher"
+install -m 0644 "$ROOT/packaging/macos/launchagents/com.git-ai.daemon.plist" "$SCRIPTS/com.git-ai.daemon.plist"
 install -m 0755 "$ROOT/packaging/macos/scripts/preinstall" "$SCRIPTS/preinstall"
 install -m 0755 "$ROOT/packaging/macos/scripts/postinstall" "$SCRIPTS/postinstall"
 xattr -cr "$SCRIPTS" 2>/dev/null || true
