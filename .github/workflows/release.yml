@@ -917,4 +917,8 @@ jobs:
             RELEASE_TAG="${BASE_VERSION}-next-${SHORT_SHA}"
           fi
 
-          gh release upload "$RELEASE_TAG" release/git-ai-macos-*.pkg release/PKG-SHA256SUMS --clobber
+          gh release upload "$RELEASE_TAG" \
+            release/git-ai-macos-*.pkg \
+            release/PKG-SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
