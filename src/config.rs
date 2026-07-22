@@ -49,12 +49,19 @@ impl std::fmt::Display for NotesBackendKind {
 }
 
 /// Configuration for the notes backend.
+///
+/// The `api_key` here is intentionally distinct from the top-level `Config::api_key`.
+/// The top-level key authenticates the default git-ai API (metrics, CAS, etc.), while
+/// this key authenticates only requests to the custom notes backend, so operators can
+/// point the notes backend at a different service without leaking the primary key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct NotesBackendConfig {
     #[serde(default)]
     pub kind: NotesBackendKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 /// Optional git-ai author override for authorship metadata.
@@ -182,6 +189,7 @@ pub struct Config {
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
     codex_hooks_format: CodexHooksFormat,
+    #[serde(serialize_with = "serialize_notes_backend_masked")]
     notes_backend: NotesBackendConfig,
     transcript_streaming_lookback_days: Option<u32>,
     max_checkpoint_file_size_bytes: usize,
@@ -636,6 +644,14 @@ impl Config {
         self.notes_backend.backend_url.as_deref()
     }
 
+    /// Returns the notes-backend-specific API key, or `None` if unset.
+    ///
+    /// This is distinct from [`Config::api_key`]; it authenticates only requests to the
+    /// custom notes backend.
+    pub fn notes_backend_api_key(&self) -> Option<&str> {
+        self.notes_backend.api_key.as_deref()
+    }
+
     /// Returns true when the HTTP notes backend is active.
     pub fn notes_backend_enabled(&self) -> bool {
         matches!(self.notes_backend.kind, NotesBackendKind::Http)
@@ -899,20 +915,41 @@ fn normalize_repo_path_variants(path: &str) -> Option<Vec<String>> {
     Some(variants)
 }
 
+/// Mask an API key for display: show the first and last 4 chars when long enough,
+/// otherwise fully redact. Shared by the top-level and notes-backend key serializers.
+fn mask_api_key_string(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() > 8 {
+        let prefix: String = chars[..4].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}...{}", prefix, suffix)
+    } else {
+        "****".to_string()
+    }
+}
+
 fn serialize_masked_api_key<S>(api_key: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    let masked = api_key.as_ref().map(|key| {
-        let chars: Vec<char> = key.chars().collect();
-        if chars.len() > 8 {
-            let prefix: String = chars[..4].iter().collect();
-            let suffix: String = chars[chars.len() - 4..].iter().collect();
-            format!("{}...{}", prefix, suffix)
-        } else {
-            "****".to_string()
-        }
-    });
+    let masked = api_key.as_ref().map(|key| mask_api_key_string(key));
+    masked.serialize(serializer)
+}
+
+/// Serialize a runtime `NotesBackendConfig` with its `api_key` masked. Used only for the
+/// runtime `Config` (printable/debug output); `FileConfig` persists the raw key.
+fn serialize_notes_backend_masked<S>(
+    notes_backend: &NotesBackendConfig,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let masked = NotesBackendConfig {
+        kind: notes_backend.kind,
+        backend_url: notes_backend.backend_url.clone(),
+        api_key: notes_backend.api_key.as_deref().map(mask_api_key_string),
+    };
     masked.serialize(serializer)
 }
 
@@ -1163,6 +1200,9 @@ fn build_config() -> Config {
             _ => None,
         });
     let url_from_env = env::var("GIT_AI_NOTES_BACKEND_URL").ok();
+    let api_key_from_env = env::var("GIT_AI_NOTES_BACKEND_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let notes_backend = NotesBackendConfig {
         kind: kind_from_env
@@ -1170,6 +1210,12 @@ fn build_config() -> Config {
             .unwrap_or(NotesBackendKind::GitNotes),
         backend_url: url_from_env
             .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone())),
+        api_key: api_key_from_env.or_else(|| {
+            file_backend
+                .as_ref()
+                .and_then(|b| b.api_key.clone())
+                .filter(|s| !s.is_empty())
+        }),
     };
 
     // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
@@ -1714,6 +1760,9 @@ fn apply_test_config_patch(config: &mut Config) {
             config.notes_backend.kind = nb.kind;
             if let Some(url) = nb.backend_url {
                 config.notes_backend.backend_url = Some(url);
+            }
+            if let Some(api_key) = nb.api_key {
+                config.notes_backend.api_key = Some(api_key);
             }
         }
         if let Some(days) = patch.transcript_streaming_lookback_days {
@@ -2586,6 +2635,41 @@ mod tests {
         let serialized = serde_json::to_string_pretty(&parsed).unwrap();
         assert!(serialized.contains("notes_backend"));
         assert!(serialized.contains("http"));
+    }
+
+    #[test]
+    fn test_notes_backend_api_key_parsed_from_file_config() {
+        // The notes backend has its own api_key, distinct from the top-level api_key.
+        let json = r#"{"notes_backend": {"kind": "http", "backend_url": "https://x", "api_key": "notes-secret"}}"#;
+        let parsed: FileConfig = serde_json::from_str(json).unwrap();
+        let nb = parsed
+            .notes_backend
+            .clone()
+            .expect("notes_backend should be set");
+        assert_eq!(nb.api_key.as_deref(), Some("notes-secret"));
+
+        // File config persists the raw key (like the top-level api_key in FileConfig).
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains("notes-secret"));
+    }
+
+    #[test]
+    fn test_notes_backend_api_key_accessor() {
+        let mut config = create_test_config(vec![], vec![]);
+        assert_eq!(config.notes_backend_api_key(), None);
+        config.notes_backend.api_key = Some("notes-secret".to_string());
+        assert_eq!(config.notes_backend_api_key(), Some("notes-secret"));
+    }
+
+    #[test]
+    fn test_runtime_config_masks_notes_backend_api_key() {
+        // The runtime Config must never emit the raw notes-backend key (mirrors
+        // the top-level api_key masking behavior).
+        let mut config = create_test_config(vec![], vec![]);
+        config.notes_backend.api_key = Some("supersecretkey1234".to_string());
+        let json = config.to_printable_json_pretty().unwrap();
+        assert!(!json.contains("supersecretkey1234"));
+        assert!(json.contains("supe...1234"));
     }
 
     #[test]

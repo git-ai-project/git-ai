@@ -2,7 +2,7 @@ use dirs;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::config::{AuthorConfig, CodexHooksFormat, NotesBackendKind};
+use crate::config::{AuthorConfig, CodexHooksFormat, NotesBackendConfig, NotesBackendKind};
 use crate::git::repository::find_repository_in_path;
 
 /// Determines the type of pattern value provided
@@ -135,6 +135,9 @@ fn print_config_help() {
     );
     println!("                               sent to \"<base>/worker/notes/upload\" and");
     println!("                               \"<base>/worker/notes/?commits=...\".");
+    println!(
+        "  notes_backend.api_key        API key for the notes backend (separate from api_key)."
+    );
     println!();
     println!("Repository Patterns:");
     println!("  For exclude/allow/exclude_prompts_in_repositories, you can provide:");
@@ -424,6 +427,9 @@ fn show_all_config() -> Result<(), String> {
         if let Some(ref url) = nb.backend_url {
             nb_map.insert("backend_url".to_string(), Value::String(url.clone()));
         }
+        if let Some(ref key) = nb.api_key {
+            nb_map.insert("api_key".to_string(), Value::String(mask_api_key(key)));
+        }
         effective_config.insert("notes_backend".to_string(), Value::Object(nb_map));
     }
 
@@ -540,6 +546,9 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 if let Some(ref url) = nb.backend_url {
                     map.insert("backend_url".to_string(), Value::String(url.clone()));
                 }
+                if let Some(ref key) = nb.api_key {
+                    map.insert("api_key".to_string(), Value::String(mask_api_key(key)));
+                }
                 Value::Object(map)
             }
             _ => return Err(format!("Unknown config key: {}", key)),
@@ -588,6 +597,11 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 .backend_url
                 .as_ref()
                 .map(|u| Value::String(u.clone()))
+                .unwrap_or(Value::Null),
+            "api_key" => nb
+                .api_key
+                .as_ref()
+                .map(|k| Value::String(mask_api_key(k)))
                 .unwrap_or(Value::Null),
             other => return Err(format!("Unknown notes_backend field: {}", other)),
         };
@@ -990,6 +1004,12 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 crate::config::save_file_config(&file_config)?;
                 eprintln!("[notes_backend.backend_url]: {}", value);
             }
+            "api_key" => {
+                backend.api_key = Some(value.to_string());
+                file_config.notes_backend = Some(backend);
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("[notes_backend.api_key]: {}", mask_api_key(value));
+            }
             other => return Err(format!("Unknown notes_backend field: {}", other)),
         }
         return Ok(());
@@ -1339,13 +1359,24 @@ fn unset_config_value(key: &str) -> Result<(), String> {
             }
             "backend_url" => {
                 if let Some(old_url) = backend.backend_url.take() {
-                    file_config.notes_backend = if backend.kind == NotesBackendKind::GitNotes {
+                    file_config.notes_backend = if backend == NotesBackendConfig::default() {
                         None // whole object is back to defaults, omit from file
                     } else {
                         Some(backend)
                     };
                     crate::config::save_file_config(&file_config)?;
                     eprintln!("- [notes_backend.backend_url]: {}", old_url);
+                }
+            }
+            "api_key" => {
+                if let Some(old_key) = backend.api_key.take() {
+                    file_config.notes_backend = if backend == NotesBackendConfig::default() {
+                        None // whole object is back to defaults, omit from file
+                    } else {
+                        Some(backend)
+                    };
+                    crate::config::save_file_config(&file_config)?;
+                    eprintln!("- [notes_backend.api_key]: {}", mask_api_key(&old_key));
                 }
             }
             other => return Err(format!("Unknown notes_backend field: {}", other)),

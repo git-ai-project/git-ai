@@ -1278,7 +1278,7 @@ pub fn flush_notes() {
             return;
         }
     };
-    let context = ApiContext::new(Some(backend_url));
+    let context = ApiContext::for_notes_backend(Some(backend_url));
     let client = ApiClient::new(context);
 
     if !client.is_logged_in() && !client.has_api_key() {
