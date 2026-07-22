@@ -62,6 +62,7 @@ pub mod domain;
 pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
+pub mod rebase_reconcile;
 pub mod reducer;
 pub mod ref_cursor;
 pub mod rewrite_metrics;
@@ -2520,6 +2521,9 @@ pub struct ActorDaemonCoordinator {
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     pending_cherry_pick_no_commit_by_worktree: Mutex<HashMap<String, PendingCherryPickNoCommit>>,
     pending_squash_merge_by_worktree: Mutex<HashMap<String, PendingSquashMerge>>,
+    /// Worktrees already scanned for rebases that completed while no daemon
+    /// was observing (reconciliation runs once per worktree per daemon life).
+    reconciled_unobserved_rebase_worktrees: Mutex<HashSet<String>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
@@ -2608,6 +2612,7 @@ impl ActorDaemonCoordinator {
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_no_commit_by_worktree: Mutex::new(HashMap::new()),
             pending_squash_merge_by_worktree: Mutex::new(HashMap::new()),
+            reconciled_unobserved_rebase_worktrees: Mutex::new(HashSet::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
@@ -4711,6 +4716,125 @@ impl ActorDaemonCoordinator {
     }
 
     /// Detects non-fast-forward ref moves and fires handle_rewrite_event.
+    /// Recover rebases that completed while no daemon was observing (daemon
+    /// down, or its trace ingestion broken) and replay them through the
+    /// non-fast-forward shift path so stranded authorship notes reach the
+    /// rewritten commits. Runs at most once per worktree per daemon lifetime,
+    /// on the first command that reaches side-effect processing for that
+    /// worktree.
+    ///
+    /// `exclude_newest_span` must be true when the triggering command is
+    /// itself a completing rebase / pull --rebase: its own span is already in
+    /// the reflog by side-effect time and is owned by the live path
+    /// (`detect_and_handle_non_ff_rewrites`), which additionally renames
+    /// working logs — something this after-the-fact replay does not attempt.
+    fn reconcile_unobserved_rebases(
+        &self,
+        cmd: &crate::daemon::domain::NormalizedCommand,
+        exclude_newest_span: bool,
+    ) -> Result<(), GitAiError> {
+        let worktree = match cmd.worktree.as_ref() {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+        {
+            let mut seen = self
+                .reconciled_unobserved_rebase_worktrees
+                .lock()
+                .map_err(|_| {
+                    GitAiError::Generic(
+                        "reconciled unobserved rebase worktrees lock poisoned".to_string(),
+                    )
+                })?;
+            if !seen.insert(worktree.to_string_lossy().to_string()) {
+                return Ok(());
+            }
+        }
+
+        let head_log_path = match git_dir_for_worktree(worktree) {
+            Some(git_dir) => git_dir.join("logs").join("HEAD"),
+            None => return Ok(()),
+        };
+        let head_reflog = match fs::read_to_string(&head_log_path) {
+            Ok(contents) => contents,
+            // No reflog — nothing could have been missed.
+            Err(_) => return Ok(()),
+        };
+
+        let mut spans =
+            crate::daemon::rebase_reconcile::completed_rebase_spans(&head_reflog);
+        if exclude_newest_span {
+            spans.pop();
+        }
+        if spans.is_empty() {
+            return Ok(());
+        }
+
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+
+        for span in spans {
+            if now_secs.saturating_sub(span.finished_at_secs)
+                > crate::daemon::rebase_reconcile::MAX_SPAN_AGE_SECS
+            {
+                continue;
+            }
+            if span.old_tip == span.new_tip {
+                continue;
+            }
+            if !crate::daemon::rebase_reconcile::commit_exists(&repo, &span.old_tip)
+                || !crate::daemon::rebase_reconcile::commit_exists(&repo, &span.new_tip)
+            {
+                continue;
+            }
+            // Fast-forward "rebases" rewrite nothing.
+            if is_ancestor_commit(&repo, &span.old_tip, &span.new_tip) {
+                continue;
+            }
+            match crate::daemon::rebase_reconcile::span_has_stranded_notes(&repo, &span) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        old_tip = %span.old_tip,
+                        new_tip = %span.new_tip,
+                        "unobserved rebase note probe failed"
+                    );
+                    continue;
+                }
+            }
+            tracing::info!(
+                old_tip = %span.old_tip,
+                new_tip = %span.new_tip,
+                onto = %span.onto,
+                finished_at_secs = span.finished_at_secs,
+                repo = %worktree.display(),
+                "reconciling rebase that completed while unobserved"
+            );
+            if let Err(error) =
+                crate::authorship::rewrite::handle_non_fast_forward_rewrite_with_operation(
+                    &repo,
+                    &span.old_tip,
+                    &span.new_tip,
+                    Some(span.onto.as_str()),
+                    crate::authorship::rewrite::RewriteMetricOperation::Rebase,
+                )
+            {
+                tracing::warn!(
+                    error = %error,
+                    old_tip = %span.old_tip,
+                    new_tip = %span.new_tip,
+                    "unobserved rebase reconciliation failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn detect_and_handle_non_ff_rewrites(
         &self,
         cmd: &crate::daemon::domain::NormalizedCommand,
@@ -5120,6 +5244,17 @@ impl ActorDaemonCoordinator {
                 Some("checkout" | "switch" | "branch" | "stash")
             )
         };
+        // Rebases that completed while no daemon was observing left their
+        // notes stranded on the pre-rebase commits (cursor state is in-memory
+        // only, and cold seeding skips pre-daemon reflog history). Replay any
+        // such recent span once per worktree — before the current command's
+        // own non-FF handling, so a chained rebase can find its source notes.
+        if cmd.exit_code == 0
+            && let Err(error) =
+                self.reconcile_unobserved_rebases(cmd, is_completing_rebase || is_pull_rebase)
+        {
+            tracing::warn!(error = %error, "unobserved rebase reconciliation failed");
+        }
         if !skip_non_ff && cmd.exit_code == 0 {
             self.detect_and_handle_non_ff_rewrites(cmd)?;
         }

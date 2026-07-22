@@ -1,0 +1,246 @@
+//! Reconciliation of rebases that completed while no daemon was observing.
+//!
+//! The live pipeline shifts authorship notes onto rebased commits only when
+//! the daemon observes the rebase (trace2 → `RefCursor` → non-fast-forward
+//! rewrite detection). If a rebase runs while the daemon is down — or while
+//! its trace ingestion is broken — the note stays on the pre-rebase commit
+//! forever: cursor offsets live only in memory, and cold seeding deliberately
+//! treats reflog history from before the first observed command as prior
+//! untraced history. This module closes that gap: recently completed rebase
+//! spans are recovered from the HEAD reflog and any span that stranded notes
+//! is replayed through the normal non-fast-forward shift path (which
+//! merges/skips targets that already have notes, so replaying an
+//! already-handled span is a no-op).
+
+use crate::error::GitAiError;
+use crate::git::notes_api;
+use crate::git::repository::{Repository, exec_git};
+
+/// Upper bound on reflog entries scanned (from the tail) per worktree.
+pub(crate) const MAX_REFLOG_ENTRIES: usize = 512;
+/// Only spans that finished within this window are reconciled.
+pub(crate) const MAX_SPAN_AGE_SECS: i64 = 14 * 24 * 60 * 60;
+/// Upper bound on commits listed per span side when probing for stranded notes.
+const MAX_SPAN_COMMITS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompletedRebaseSpan {
+    /// HEAD before `rebase (start)` — the pre-rebase tip whose notes may be stranded.
+    pub(crate) old_tip: String,
+    /// HEAD at `rebase (finish)` — the rewritten tip that may be missing notes.
+    pub(crate) new_tip: String,
+    /// The commit checked out by `rebase (start)` (the rebase target / `--onto`).
+    pub(crate) onto: String,
+    /// Reflog timestamp (epoch seconds) of the finish entry.
+    pub(crate) finished_at_secs: i64,
+}
+
+#[derive(Debug)]
+struct ReflogEntry {
+    old: String,
+    new: String,
+    timestamp_secs: i64,
+    message: String,
+}
+
+fn parse_reflog_entry(line: &str) -> Option<ReflogEntry> {
+    let (left, message) = line.split_once('\t')?;
+    let fields: Vec<&str> = left.split_whitespace().collect();
+    // "<old> <new> <ident...> <epoch-secs> <tz>"
+    if fields.len() < 4 {
+        return None;
+    }
+    let timestamp_secs = fields[fields.len() - 2].parse::<i64>().ok()?;
+    Some(ReflogEntry {
+        old: fields[0].to_string(),
+        new: fields[1].to_string(),
+        timestamp_secs,
+        message: message.to_string(),
+    })
+}
+
+/// Parse completed `rebase (start) … rebase (finish)` spans out of a HEAD
+/// reflog, oldest first. Only the last [`MAX_REFLOG_ENTRIES`] entries are
+/// examined. Spans without a finish row are ignored: a conflicted rebase is
+/// still owned by the live path once it continues, and an abort restores the
+/// pre-rebase tip so there is nothing to shift.
+pub(crate) fn completed_rebase_spans(head_reflog: &str) -> Vec<CompletedRebaseSpan> {
+    let lines: Vec<&str> = head_reflog.lines().collect();
+    let tail_start = lines.len().saturating_sub(MAX_REFLOG_ENTRIES);
+
+    let mut spans = Vec::new();
+    let mut open_start: Option<ReflogEntry> = None;
+    for line in &lines[tail_start..] {
+        let Some(entry) = parse_reflog_entry(line) else {
+            continue;
+        };
+        // Covers both "rebase (...)" and legacy "rebase -i (...)" messages.
+        let is_rebase = entry.message.starts_with("rebase");
+        if is_rebase && entry.message.contains("(start)") {
+            open_start = Some(entry);
+        } else if is_rebase && entry.message.contains("(finish)") {
+            if let Some(start) = open_start.take() {
+                spans.push(CompletedRebaseSpan {
+                    old_tip: start.old,
+                    onto: start.new,
+                    new_tip: entry.new,
+                    finished_at_secs: entry.timestamp_secs,
+                });
+            }
+        } else if !is_rebase || entry.message.contains("(abort)") {
+            // Any non-rebase HEAD move (or an abort) while a span is open
+            // means that rebase never finished as a rewrite of this branch.
+            open_start = None;
+        }
+    }
+    spans
+}
+
+/// True when the span moved notes-bearing work onto commits that are missing
+/// notes: at least one source commit (reachable from `old_tip` only) has an
+/// authorship note while at least one target commit (reachable from `new_tip`
+/// only) has none. Keeps reconciliation from re-fetching/re-shifting spans
+/// that were already handled or never carried AI work.
+pub(crate) fn span_has_stranded_notes(
+    repo: &Repository,
+    span: &CompletedRebaseSpan,
+) -> Result<bool, GitAiError> {
+    let sources = rev_list_capped(repo, &span.old_tip, &span.new_tip)?;
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    if notes_api::commits_with_notes(repo, &sources)?.is_empty() {
+        return Ok(false);
+    }
+    let targets = rev_list_capped(repo, &span.new_tip, &span.old_tip)?;
+    if targets.is_empty() {
+        return Ok(false);
+    }
+    let noted_targets = notes_api::commits_with_notes(repo, &targets)?;
+    Ok(noted_targets.len() < targets.len())
+}
+
+pub(crate) fn commit_exists(repo: &Repository, sha: &str) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "cat-file".to_string(),
+        "-e".to_string(),
+        format!("{sha}^{{commit}}"),
+    ]);
+    exec_git(&args).is_ok()
+}
+
+fn rev_list_capped(
+    repo: &Repository,
+    include: &str,
+    exclude: &str,
+) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        format!("--max-count={MAX_SPAN_COMMITS}"),
+        include.to_string(),
+        format!("^{exclude}"),
+    ]);
+    let output = exec_git(&args)?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+    const D: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const E: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    fn entry(old: &str, new: &str, ts: i64, message: &str) -> String {
+        format!("{old} {new} Test User <test@example.com> {ts} +0000\t{message}\n")
+    }
+
+    #[test]
+    fn extracts_completed_span() {
+        let reflog = [
+            entry(A, B, 100, "commit: base"),
+            entry(B, C, 200, "rebase (start): checkout main"),
+            entry(C, D, 201, "rebase (pick): feature work"),
+            entry(D, D, 202, "rebase (finish): returning to refs/heads/feature"),
+        ]
+        .concat();
+        let spans = completed_rebase_spans(&reflog);
+        assert_eq!(
+            spans,
+            vec![CompletedRebaseSpan {
+                old_tip: B.to_string(),
+                new_tip: D.to_string(),
+                onto: C.to_string(),
+                finished_at_secs: 202,
+            }]
+        );
+    }
+
+    #[test]
+    fn ignores_unfinished_and_aborted_spans() {
+        let unfinished = [
+            entry(B, C, 200, "rebase (start): checkout main"),
+            entry(C, D, 201, "rebase (pick): feature work"),
+        ]
+        .concat();
+        assert!(completed_rebase_spans(&unfinished).is_empty());
+
+        let aborted = [
+            entry(B, C, 200, "rebase (start): checkout main"),
+            entry(C, B, 201, "rebase (abort): returning to refs/heads/feature"),
+            entry(B, E, 300, "commit: after abort"),
+        ]
+        .concat();
+        assert!(completed_rebase_spans(&aborted).is_empty());
+    }
+
+    #[test]
+    fn non_rebase_entry_closes_open_span() {
+        // A checkout in the middle of a conflicted rebase abandons the span;
+        // a later stray finish row must not pair with the stale start.
+        let reflog = [
+            entry(B, C, 200, "rebase (start): checkout main"),
+            entry(C, A, 210, "checkout: moving from feature to main"),
+            entry(A, E, 300, "rebase (finish): returning to refs/heads/other"),
+        ]
+        .concat();
+        assert!(completed_rebase_spans(&reflog).is_empty());
+    }
+
+    #[test]
+    fn extracts_multiple_spans_oldest_first() {
+        let reflog = [
+            entry(A, B, 100, "rebase (start): checkout main"),
+            entry(B, C, 101, "rebase (finish): returning to refs/heads/x"),
+            entry(C, C, 150, "commit (amend): tweak"),
+            entry(C, D, 200, "rebase -i (start): checkout main"),
+            entry(D, E, 201, "rebase -i (finish): returning to refs/heads/x"),
+        ]
+        .concat();
+        let spans = completed_rebase_spans(&reflog);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].new_tip, C);
+        assert_eq!(spans[0].finished_at_secs, 101);
+        assert_eq!(spans[1].old_tip, C);
+        assert_eq!(spans[1].new_tip, E);
+    }
+
+    #[test]
+    fn malformed_lines_are_skipped() {
+        let reflog = format!(
+            "not a reflog line\n{}{}",
+            entry(B, C, 200, "rebase (start): checkout main"),
+            entry(C, D, 201, "rebase (finish): returning to refs/heads/feature"),
+        );
+        assert_eq!(completed_rebase_spans(&reflog).len(), 1);
+    }
+}

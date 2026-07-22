@@ -361,6 +361,52 @@ fn test_cold_repo_first_traced_rebase_is_processed() {
     assert_no_ai_authorship_for_commit(&repo, &rebased);
 }
 
+/// Regression: a rebase that completed while git-ai observed nothing (daemon
+/// down, or a daemon whose trace ingestion was broken) used to strand the AI
+/// authorship note on the pre-rebase commit forever. `RefCursor` offsets live
+/// only in memory and cold seeding intentionally treats reflog history from
+/// before the first observed command as prior untraced history, so no later
+/// daemon ever replayed the missed span -- the rebased commit stayed
+/// unattributed in blame and on the backend even though the source note
+/// existed the whole time. The daemon must reconcile recently completed
+/// rebase spans from the HEAD reflog when it first observes a command in the
+/// worktree, and shift the stranded notes onto the rewritten commits.
+#[test]
+fn test_rebase_completed_while_unobserved_is_reconciled_on_next_traced_command() {
+    let mut repo = cold_repo();
+    raw_commit_file(&repo, "base.txt", "base\n", "raw base");
+    raw_git(&repo, &["branch", "-M", "main"]);
+
+    // AI-authored commit on a feature branch, observed by a live daemon so
+    // the authorship note is written for the pre-rebase commit.
+    start_cold_daemon(&mut repo);
+    run_traced_git(&repo, &["checkout", "-b", "feature"]);
+    let old_feature = traced_ai_commit_file(&repo, "feature.txt", "ai feature\n", "ai feature");
+    assert_ai_authorship_note(&repo, &old_feature);
+
+    // Advance main so the upcoming rebase is a real rewrite.
+    run_traced_git(&repo, &["checkout", "main"]);
+    raw_commit_file(&repo, "main.txt", "main advance\n", "raw main advance");
+    run_traced_git(&repo, &["checkout", "feature"]);
+
+    // The rebase runs with hooks and trace2 disabled: git-ai sees nothing.
+    // This is the daemon-down / blind-ingestion window.
+    raw_git(&repo, &["rebase", "main"]);
+    let rebased = raw_head(&repo);
+    assert_ne!(rebased, old_feature);
+    assert_no_ai_authorship_for_commit(&repo, &rebased);
+
+    // Restart the daemon so no in-memory state survives the blind window,
+    // then run any traced command in the worktree. Reconciliation must pick
+    // the completed span out of the reflog and shift the note.
+    repo.restart_dedicated_daemon_for_test();
+    run_traced_git(&repo, &["commit", "--allow-empty", "-m", "poke"]);
+
+    assert_ai_authorship_note(&repo, &rebased);
+    let mut file = repo.filename("feature.txt");
+    file.assert_committed_lines(crate::lines!["ai feature".ai()]);
+}
+
 #[test]
 fn test_cold_repo_first_traced_conflict_rebase_ignores_stale_rebase_reflog_history() {
     let mut repo = TestRepo::new_dedicated_daemon();
