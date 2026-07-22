@@ -59,6 +59,28 @@ impl AgentPreset for GeminiPreset {
         let is_pre = matches!(hook_event, Some("BeforeTool") | Some("PreToolUse"));
 
         let bash_command = parse::bash_command_from_hook_input(&data);
+        let mut file_paths = parse::file_paths_from_tool_input(&data, cwd);
+
+        // Filter out any paths modified within the internal `$HOME/.gemini` folder (e.g., gemini-cli auto-memory state files).
+        // Since these reside outside the target git workspace, git-ai would fail trying to locate a repository for them.
+        // We normalize relative components (`.` and `..`) entirely in-memory first so that newly created files
+        // can be matched accurately without needing filesystem canonicalization.
+        if let Some(gemini_dir) = dirs::home_dir().map(|h| h.join(".gemini")) {
+            file_paths.retain(|p| {
+                let mut normalized = std::path::PathBuf::new();
+                for component in p.components() {
+                    match component {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            normalized.pop();
+                        }
+                        c => normalized.push(c),
+                    }
+                }
+                !normalized.starts_with(&gemini_dir)
+            });
+        }
+
         let event = match (is_pre, is_bash) {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
@@ -67,7 +89,7 @@ impl AgentPreset for GeminiPreset {
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
-                file_paths: parse::file_paths_from_tool_input(&data, cwd),
+                file_paths,
                 dirty_files: None,
                 tool_use_id: Some(tool_use_id.to_string()),
             }),
@@ -79,7 +101,7 @@ impl AgentPreset for GeminiPreset {
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
-                file_paths: parse::file_paths_from_tool_input(&data, cwd),
+                file_paths,
                 dirty_files: None,
                 stream_source,
                 tool_use_id: Some(tool_use_id.to_string()),
@@ -187,5 +209,83 @@ mod tests {
         let events = GeminiPreset.parse(&input, "t_test123456789a").unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ParsedHookEvent::PreFileEdit(_)));
+    }
+
+    #[test]
+    fn test_gemini_ignores_home_gemini_paths() {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/user"));
+        let gemini_path_direct = home
+            .join(".gemini")
+            .join("tmp")
+            .join("project")
+            .join("memory")
+            .join(".inbox")
+            .join("private")
+            .join("extraction.patch");
+        // Create an unnormalized path with ".." components
+        let gemini_path_unnormalized = home
+            .join(".gemini")
+            .join("tmp")
+            .join("project")
+            .join("memory")
+            .join("..")
+            .join("memory")
+            .join(".inbox")
+            .join("private")
+            .join("extraction.patch");
+
+        let input_direct = json!({
+            "transcript_path": "/home/user/.gemini/sessions/test.json",
+            "cwd": "/home/user/project",
+            "hook_event_name": "BeforeTool",
+            "tool_name": "write_file",
+            "session_id": "gemini-sess-1",
+            "tool_use_id": "tu-1",
+            "tool_input": {"file_path": gemini_path_direct.to_str().unwrap()}
+        })
+        .to_string();
+
+        let input_unnormalized = json!({
+            "transcript_path": "/home/user/.gemini/sessions/test.json",
+            "cwd": "/home/user/project",
+            "hook_event_name": "BeforeTool",
+            "tool_name": "write_file",
+            "session_id": "gemini-sess-1",
+            "tool_use_id": "tu-1",
+            "tool_input": {"file_path": gemini_path_unnormalized.to_str().unwrap()}
+        })
+        .to_string();
+
+        // Direct path check
+        let events_direct = GeminiPreset
+            .parse(&input_direct, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events_direct.len(), 1);
+        match &events_direct[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert!(
+                    e.file_paths.is_empty(),
+                    "Direct path should have been ignored and resulted in empty file_paths: {:?}",
+                    e.file_paths
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+
+        // Unnormalized path check
+        let events_unnorm = GeminiPreset
+            .parse(&input_unnormalized, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events_unnorm.len(), 1);
+        match &events_unnorm[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert!(
+                    e.file_paths.is_empty(),
+                    "Unnormalized path should have been ignored and resulted in empty file_paths: {:?}",
+                    e.file_paths
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
     }
 }
