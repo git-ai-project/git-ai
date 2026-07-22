@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::authorship::diff_ai_accepted::diff_ai_accepted_stats;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
-use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_authorship_log};
+use crate::authorship::stats::{CommitStats, accepted_lines_from_attestations, stats_for_commit_stats, stats_from_authorship_log};
 use crate::error::GitAiError;
 use crate::git::notes_api::{CommitAuthorship, filter_commits_with_notes};
 use crate::git::repository::{CommitRange, InternalGitProfile, Repository, exec_git_with_profile};
@@ -417,13 +417,27 @@ fn calculate_range_stats_direct(
     let authorship_log =
         create_authorship_log_for_range(repo, &start_sha, &end_sha, commit_shas, ignore_patterns)?;
 
+    // Step 2.5: Build added_lines_by_file to extract human attestations from authorship log
+    let mut added_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
+    let git_diff_added = repo.diff_added_lines(&start_sha, &end_sha, None)?;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+    for (file, lines) in git_diff_added {
+        if !should_ignore_file_with_matcher(&file, &ignore_matcher) {
+            added_lines_by_file.insert(file, lines);
+        }
+    }
+
+    // Extract both ai_accepted and known_human_accepted from the authorship log
+    let (_ai_from_log, known_human_accepted, _ai_by_tool) =
+        accepted_lines_from_attestations(Some(&authorship_log), &added_lines_by_file, false);
+
     // Step 3: Calculate stats from the authorship log
     let stats = stats_from_authorship_log(
         Some(&authorship_log),
         git_diff_added_lines,
         git_diff_deleted_lines,
         diff_ai_stats.total_ai_accepted,
-        0,
+        known_human_accepted,
         &diff_ai_stats.per_tool_model,
     );
 
