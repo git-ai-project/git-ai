@@ -876,7 +876,12 @@ jobs:
   publish-pkg:
     name: Publish macOS PKG installers
     needs: [create-release, package-pkg, test-pkg, build]
-    if: inputs.dry_run != true && needs.create-release.result == 'success' && needs.package-pkg.result == 'success' && needs.test-pkg.result == 'success'
+    if: >-
+      !cancelled() &&
+      inputs.dry_run != true &&
+      needs.create-release.result == 'success' &&
+      needs.package-pkg.result == 'success' &&
+      needs.test-pkg.result == 'success'
     runs-on: ubuntu-latest
     environment: release
     permissions:
