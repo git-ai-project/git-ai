@@ -264,6 +264,98 @@ fn test_config_agent_profile_roots_add_get_unset() {
 }
 
 #[test]
+fn test_config_agent_profile_roots_add_deduplicates_persisted_values() {
+    let repo = TestRepo::new();
+    let root = "/Users/alice/.codex-personal";
+
+    repo.git_ai(&["config", "--add", "agent_profile_roots.codex", root])
+        .expect("add Codex profile root");
+    repo.git_ai(&["config", "--add", "agent_profile_roots.codex", root])
+        .expect("add duplicate Codex profile root");
+
+    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
+    let contents = std::fs::read_to_string(&config_path).expect("read persisted config");
+    let persisted: Value = serde_json::from_str(&contents).expect("parse persisted config");
+    assert_eq!(
+        persisted["agent_profile_roots"]["codex"],
+        serde_json::json!([root])
+    );
+}
+
+#[test]
+fn test_config_agent_profile_roots_add_repairs_existing_duplicates() {
+    let repo = TestRepo::new();
+    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
+    let contents = std::fs::read_to_string(&config_path).expect("read initial config");
+    let mut persisted: Value = serde_json::from_str(&contents).expect("parse initial config");
+    persisted["agent_profile_roots"] = serde_json::json!({
+        "codex": [
+            "/Users/alice/.codex-personal",
+            "/Users/alice/.codex-personal"
+        ]
+    });
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&persisted).expect("serialize duplicated config"),
+    )
+    .expect("write duplicated config");
+
+    repo.git_ai(&[
+        "config",
+        "--add",
+        "agent_profile_roots.codex",
+        "/Users/alice/.codex-personal2",
+    ])
+    .expect("add another Codex profile root");
+
+    let contents = std::fs::read_to_string(&config_path).expect("read repaired config");
+    let persisted: Value = serde_json::from_str(&contents).expect("parse repaired config");
+    assert_eq!(
+        persisted["agent_profile_roots"]["codex"],
+        serde_json::json!([
+            "/Users/alice/.codex-personal",
+            "/Users/alice/.codex-personal2"
+        ])
+    );
+}
+
+#[test]
+fn test_config_agent_profile_roots_add_reports_config_file_path() {
+    let repo = TestRepo::new();
+    let output = repo
+        .git_ai(&[
+            "config",
+            "--add",
+            "agent_profile_roots.codex",
+            "/Users/alice/.codex-personal",
+        ])
+        .expect("add Codex profile root");
+    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
+
+    assert!(
+        output.contains(&config_path.display().to_string()),
+        "output should identify the written config file: {output}"
+    );
+}
+
+#[test]
+fn test_config_agent_profile_roots_duplicate_add_still_reports_requested_value() {
+    let repo = TestRepo::new();
+    let root = "/Users/alice/.codex-personal";
+    repo.git_ai(&["config", "--add", "agent_profile_roots.codex", root])
+        .expect("add Codex profile root");
+
+    let output = repo
+        .git_ai(&["config", "--add", "agent_profile_roots.codex", root])
+        .expect("repeat Codex profile root");
+
+    assert!(
+        output.contains(&format!("+ [agent_profile_roots.codex]: {root}")),
+        "duplicate add should preserve the existing success output: {output}"
+    );
+}
+
+#[test]
 fn test_config_show_all_includes_new_keys() {
     let repo = TestRepo::new();
     let out = repo.git_ai(&["config"]).expect("show all config");

@@ -92,9 +92,11 @@ git-ai config agent_profile_roots.codex
 git-ai config unset agent_profile_roots.codex
 ```
 
-The configuration is stored in `~/.git-ai/config.json`. Existing official
-environment overrides continue to work and are combined with manually
-configured roots and the official default.
+The configuration is stored in `~/.git-ai/config.json`; every successful
+profile-root update prints the resolved file path. Repeating the same `--add`
+command does not create duplicate entries. Existing official environment
+overrides continue to work and are combined with manually configured roots and
+the official default.
 
 **The [Git AI standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) is supported by:**
 <table>

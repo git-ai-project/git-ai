@@ -998,19 +998,40 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
 
         let mut roots = file_config.agent_profile_roots.unwrap_or_default();
         let values = parse_hook_command_values(value)?;
+        let mut unique_values = Vec::new();
+        for value in values {
+            if !unique_values.contains(&value) {
+                unique_values.push(value);
+            }
+        }
+
+        let reported_values = unique_values.clone();
         if add_mode {
-            roots
-                .entry(agent_name.to_string())
-                .or_default()
-                .extend(values.clone());
+            let existing = roots.entry(agent_name.to_string()).or_default();
+            let mut deduplicated = Vec::with_capacity(existing.len());
+            for value in existing.drain(..) {
+                if !deduplicated.contains(&value) {
+                    deduplicated.push(value);
+                }
+            }
+            *existing = deduplicated;
+
+            for value in unique_values {
+                if !existing.contains(&value) {
+                    existing.push(value);
+                }
+            }
         } else {
-            roots.insert(agent_name.to_string(), values.clone());
+            roots.insert(agent_name.to_string(), unique_values);
         }
         file_config.agent_profile_roots = Some(roots);
         crate::config::save_file_config(&file_config)?;
-        for root in values {
+        for root in reported_values {
             let prefix = if add_mode { "+ " } else { "" };
             println!("{}[agent_profile_roots.{}]: {}", prefix, agent_name, root);
+        }
+        if let Some(config_path) = crate::config::config_file_path_public() {
+            println!("Config file: {}", config_path.display());
         }
         return Ok(());
     }
