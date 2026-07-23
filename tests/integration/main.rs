@@ -114,6 +114,8 @@ mod repo_storage_unit;
 mod repository_unit;
 mod reset;
 mod rewrite_ops_attribution;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod sandboxed_checkpoints;
 mod secrets_benchmark;
 mod session_event_attribution;
 mod session_event_repo_url;

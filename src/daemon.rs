@@ -7403,6 +7403,8 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     let telemetry_handle = crate::daemon::telemetry_worker::spawn_telemetry_worker();
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    crate::sandboxed_checkpoints::spawn_worker(telemetry_handle.clone());
 
     // Spawn the transcript worker BEFORE wrapping coordinator in Arc
     if config::Config::get()

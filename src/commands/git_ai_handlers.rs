@@ -45,6 +45,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "--version"
             | "-v"
             | "config"
+            | "checkpoint"
             | "bg"
             | "d"
             | "daemon"
@@ -455,8 +456,29 @@ fn handle_checkpoint(args: &[String]) {
         (args[0].as_str(), &args[1..])
     };
 
-    let effective_hook_input =
-        hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, file_args));
+    let fallback_reason = crate::sandbox::ensure_daemon_start_allowed()
+        .err()
+        .or_else(|| {
+            use crate::daemon::telemetry_handle::{
+                DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+            };
+            match init_daemon_telemetry_handle() {
+                DaemonTelemetryInitResult::Connected => None,
+                DaemonTelemetryInitResult::Failed(error) => Some(error),
+                DaemonTelemetryInitResult::Skipped => {
+                    Some("background worker is unavailable".to_string())
+                }
+            }
+        });
+
+    let effective_hook_input = hook_input.unwrap_or_else(|| {
+        synthesize_hook_input_from_cli_args(preset_name, file_args, fallback_reason.is_none())
+    });
+
+    if let Some(reason) = fallback_reason {
+        handle_sandboxed_checkpoint_fallback(preset_name, &effective_hook_input, &reason);
+        return;
+    }
 
     if perf {
         eprintln!(
@@ -552,8 +574,9 @@ fn handle_checkpoint(args: &[String]) {
         );
     }
 
-    let mut sent_count = 0u64;
-    for request in requests {
+    let mut sent_count = 0usize;
+    let mut requests = std::collections::VecDeque::from(requests);
+    while let Some(request) = requests.pop_front() {
         let t_send = std::time::Instant::now();
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
@@ -567,8 +590,18 @@ fn handle_checkpoint(args: &[String]) {
             );
         }
         if let Err(e) = send_result {
-            eprintln!("Failed to send checkpoint to background worker: {}", e);
-            std::process::exit(0);
+            let ControlRequest::CheckpointRun { request } = control_request else {
+                unreachable!();
+            };
+            requests.push_front(*request);
+            let unsent_requests = requests.into_iter().collect::<Vec<_>>();
+            handle_sandboxed_checkpoint_request_fallback(
+                preset_name,
+                &effective_hook_input,
+                &unsent_requests,
+                &format!("failed to send checkpoint to background worker: {e}"),
+            );
+            return;
         }
         sent_count += 1;
     }
@@ -583,6 +616,55 @@ fn handle_checkpoint(args: &[String]) {
             t0.elapsed().as_secs_f64() * 1000.0
         );
     }
+}
+
+fn handle_sandboxed_checkpoint_fallback(_preset_name: &str, _hook_input: &str, reason: &str) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    match crate::sandboxed_checkpoints::capture(_preset_name, _hook_input) {
+        Ok(paths) if !paths.is_empty() => {
+            tracing::debug!(
+                reason,
+                records = paths.len(),
+                "saved sandboxed checkpoint metadata"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Failed to save sandboxed checkpoint metadata: {error}");
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    eprintln!("Background worker unavailable: {reason}");
+}
+
+fn handle_sandboxed_checkpoint_request_fallback(
+    _preset_name: &str,
+    _hook_input: &str,
+    _requests: &[crate::commands::checkpoint_agent::orchestrator::CheckpointRequest],
+    reason: &str,
+) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    match crate::sandboxed_checkpoints::capture_unsent_requests(
+        _preset_name,
+        _hook_input,
+        _requests,
+    ) {
+        Ok(paths) if !paths.is_empty() => {
+            tracing::debug!(
+                reason,
+                records = paths.len(),
+                "saved sandboxed checkpoint metadata"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Failed to save sandboxed checkpoint metadata: {error}");
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    eprintln!("Background worker unavailable: {reason}");
 }
 
 fn strip_utf8_bom(input: String) -> String {
@@ -1124,7 +1206,11 @@ fn handle_git_hooks(args: &[String]) {
 
 /// Synthesize JSON hook_input from CLI args for mock/test presets that can be
 /// invoked without --hook-input.
-fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
+fn synthesize_hook_input_from_cli_args(
+    preset_name: &str,
+    remaining_args: &[String],
+    discover_files: bool,
+) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -1140,7 +1226,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
                     }
                 })
                 .collect();
-            if paths.is_empty() {
+            if paths.is_empty() && discover_files {
                 paths = discover_dirty_files_from_status(&cwd);
             }
             serde_json::json!({

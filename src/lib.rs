@@ -19,6 +19,8 @@ pub mod observability;
 pub mod process_timeout;
 pub mod repo_url;
 pub(crate) mod sandbox;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod sandboxed_checkpoints;
 pub mod sqlite;
 pub mod streams;
 pub mod tokio_runtime;
