@@ -12,6 +12,7 @@
 //! merges/skips targets that already have notes, so replaying an
 //! already-handled span is a no-op).
 
+use crate::daemon::domain::RefChange;
 use crate::error::GitAiError;
 use crate::git::notes_api;
 use crate::git::repository::{Repository, exec_git};
@@ -94,6 +95,23 @@ pub(crate) fn completed_rebase_spans(head_reflog: &str) -> Vec<CompletedRebaseSp
         }
     }
     spans
+}
+
+/// True when the span's tips line up with a real ref movement observed for
+/// the current command — i.e. the span was produced by this command and is
+/// owned by the live non-fast-forward path, not left over from an earlier
+/// unobserved rebase. A no-op rebase ("current branch is up to date") writes
+/// no reflog span and observes no movement, and a fast-forward `pull
+/// --rebase` moves HEAD between tips unrelated to a stranded span, so
+/// neither matches.
+pub(crate) fn span_matches_command_ref_changes(
+    span: &CompletedRebaseSpan,
+    ref_changes: &[RefChange],
+) -> bool {
+    ref_changes
+        .iter()
+        .filter(|change| change.old != change.new)
+        .any(|change| change.old == span.old_tip || change.new == span.new_tip)
 }
 
 /// True when the span moved notes-bearing work onto commits that are missing
@@ -232,6 +250,49 @@ mod tests {
         assert_eq!(spans[0].finished_at_secs, 101);
         assert_eq!(spans[1].old_tip, C);
         assert_eq!(spans[1].new_tip, E);
+    }
+
+    fn ref_change(old: &str, new: &str) -> RefChange {
+        RefChange {
+            reference: "HEAD".to_string(),
+            old: old.to_string(),
+            new: new.to_string(),
+        }
+    }
+
+    fn span(old_tip: &str, new_tip: &str) -> CompletedRebaseSpan {
+        CompletedRebaseSpan {
+            old_tip: old_tip.to_string(),
+            new_tip: new_tip.to_string(),
+            onto: C.to_string(),
+            finished_at_secs: 100,
+        }
+    }
+
+    #[test]
+    fn span_matches_command_that_produced_it() {
+        // A live rebase's enriched ref changes start at the span's old tip
+        // and end at its new tip.
+        let changes = [ref_change(A, C), ref_change(C, B)];
+        assert!(span_matches_command_ref_changes(&span(A, B), &changes));
+    }
+
+    #[test]
+    fn stranded_span_does_not_match_noop_or_fast_forward_command() {
+        let stranded = span(A, B);
+        // No-op rebase ("current branch is up to date"): no ref movement.
+        assert!(!span_matches_command_ref_changes(&stranded, &[]));
+        // Degenerate change (old == new) must not count as the span's owner.
+        assert!(!span_matches_command_ref_changes(
+            &stranded,
+            &[ref_change(B, B)]
+        ));
+        // Fast-forward pull --rebase moves HEAD onward from the stranded
+        // span's new tip; neither endpoint pairs with the span.
+        assert!(!span_matches_command_ref_changes(
+            &stranded,
+            &[ref_change(B, D)]
+        ));
     }
 
     #[test]

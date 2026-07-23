@@ -4723,15 +4723,22 @@ impl ActorDaemonCoordinator {
     /// on the first command that reaches side-effect processing for that
     /// worktree.
     ///
-    /// `exclude_newest_span` must be true when the triggering command is
-    /// itself a completing rebase / pull --rebase: its own span is already in
-    /// the reflog by side-effect time and is owned by the live path
+    /// `command_is_completing_rebase` must be true when the triggering
+    /// command is itself a completing rebase / pull --rebase: if that command
+    /// actually rewrote history, its own span is already in the reflog by
+    /// side-effect time and is owned by the live path
     /// (`detect_and_handle_non_ff_rewrites`), which additionally renames
     /// working logs — something this after-the-fact replay does not attempt.
+    /// The span is identified by matching the command's observed ref
+    /// movement, not by position: an already-up-to-date rebase or a
+    /// fast-forward `pull --rebase` writes no span, and dropping the newest
+    /// span blindly would discard a genuinely stranded one — precisely the
+    /// natural case of a user re-running the same rebase after the blind
+    /// window.
     fn reconcile_unobserved_rebases(
         &self,
         cmd: &crate::daemon::domain::NormalizedCommand,
-        exclude_newest_span: bool,
+        command_is_completing_rebase: bool,
     ) -> Result<(), GitAiError> {
         let worktree = match cmd.worktree.as_ref() {
             Some(w) => w,
@@ -4763,7 +4770,14 @@ impl ActorDaemonCoordinator {
 
         let mut spans =
             crate::daemon::rebase_reconcile::completed_rebase_spans(&head_reflog);
-        if exclude_newest_span {
+        if command_is_completing_rebase
+            && spans.last().is_some_and(|newest| {
+                crate::daemon::rebase_reconcile::span_matches_command_ref_changes(
+                    newest,
+                    &cmd.ref_changes,
+                )
+            })
+        {
             spans.pop();
         }
         if spans.is_empty() {
