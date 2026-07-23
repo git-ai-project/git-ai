@@ -978,6 +978,52 @@ fn daemon_refuses_to_start_in_sandbox() {
 }
 
 #[test]
+#[serial]
+fn daemon_refuses_to_start_without_git_config_access() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let git_config_path = repo.test_home_path().join(".gitconfig");
+    fs::create_dir(&git_config_path).expect("failed to make test git config unreadable");
+
+    for subcommand in ["start", "run"] {
+        let output = bg_command(&repo, subcommand, &[]);
+        if output.status.success() {
+            let _ = send_control_request(
+                &daemon_control_socket_path(&repo),
+                &ControlRequest::Shutdown,
+            );
+        }
+
+        assert!(
+            !output.status.success(),
+            "daemon {subcommand} should fail without git config access"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot read Git config"),
+            "daemon {subcommand} should explain the Git config failure: {stderr}"
+        );
+    }
+
+    assert!(
+        send_control_request_with_timeout(
+            &daemon_control_socket_path(&repo),
+            &ControlRequest::Ping,
+            DAEMON_TEST_PROBE_TIMEOUT,
+        )
+        .is_err(),
+        "daemon control socket should not be available"
+    );
+    assert!(
+        local_socket_connects_with_timeout(
+            &daemon_trace_socket_path(&repo),
+            DAEMON_TEST_PROBE_TIMEOUT,
+        )
+        .is_err(),
+        "daemon trace socket should not be available"
+    );
+}
+
+#[test]
 #[should_panic(expected = "pending daemon sync work")]
 fn dedicated_daemon_restart_rejects_pending_traced_command_for_test() {
     let mut repo = TestRepo::new_dedicated_daemon();
