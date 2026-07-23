@@ -325,6 +325,9 @@ fn print_help() {
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
+    eprintln!(
+        "    --agent-profile-root <path> Explicit agent profile for runtime transcript fallback"
+    );
     eprintln!("    human [pathspecs...]             Untracked/legacy human checkpoint");
     eprintln!("    mock_ai [pathspecs...]           Test preset accepting optional file pathspecs");
     eprintln!("    mock_known_human [pathspecs...]  Test preset for KnownHuman checkpoints");
@@ -393,6 +396,13 @@ fn print_help() {
 fn handle_checkpoint(args: &[String]) {
     let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
     let t0 = std::time::Instant::now();
+    let agent_profile_root = match parse_agent_profile_root(args) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("Error: {}", error);
+            std::process::exit(0);
+        }
+    };
 
     let mut hook_input = None;
     let mut i = 0;
@@ -469,6 +479,7 @@ fn handle_checkpoint(args: &[String]) {
     let requests = match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
         preset_name,
         &effective_hook_input,
+        &crate::commands::checkpoint_agent::presets::PresetRuntimeContext { agent_profile_root },
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -1122,6 +1133,32 @@ fn handle_git_hooks(args: &[String]) {
     }
 }
 
+fn parse_agent_profile_root(args: &[String]) -> Result<Option<std::path::PathBuf>, String> {
+    let mut root = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] != "--agent-profile-root" {
+            index += 1;
+            continue;
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| "--agent-profile-root requires an absolute path".to_string())?;
+        let path = std::path::PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err(format!(
+                "--agent-profile-root requires an absolute path: {}",
+                path.display()
+            ));
+        }
+        if root.replace(path).is_some() {
+            return Err("--agent-profile-root may only be provided once".to_string());
+        }
+        index += 2;
+    }
+    Ok(root)
+}
+
 /// Synthesize JSON hook_input from CLI args for mock/test presets that can be
 /// invoked without --hook-input.
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
@@ -1268,4 +1305,32 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_agent_profile_root;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_parse_agent_profile_root_requires_an_absolute_path() {
+        let args = vec![
+            "codex".to_string(),
+            "--hook-input".to_string(),
+            "{}".to_string(),
+            "--agent-profile-root".to_string(),
+            "/Users/alice/.codex-personal2".to_string(),
+        ];
+        assert_eq!(
+            parse_agent_profile_root(&args).unwrap(),
+            Some(PathBuf::from("/Users/alice/.codex-personal2"))
+        );
+
+        let relative = vec![
+            "codex".to_string(),
+            "--agent-profile-root".to_string(),
+            ".codex-personal2".to_string(),
+        ];
+        assert!(parse_agent_profile_root(&relative).is_err());
+    }
 }

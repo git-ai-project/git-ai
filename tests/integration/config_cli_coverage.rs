@@ -227,6 +227,43 @@ fn test_config_custom_attributes_nested_unset_trims_name() {
 }
 
 #[test]
+fn test_config_agent_profile_roots_add_get_unset() {
+    let repo = TestRepo::new();
+
+    assert_eq!(
+        get_json(&repo, "agent_profile_roots"),
+        Value::Object(serde_json::Map::new())
+    );
+
+    repo.git_ai(&[
+        "config",
+        "--add",
+        "agent_profile_roots.codex",
+        "/Users/alice/.codex-work",
+    ])
+    .expect("add first Codex profile root");
+    repo.git_ai(&[
+        "config",
+        "--add",
+        "agent_profile_roots.codex",
+        "/Users/alice/.codex-personal",
+    ])
+    .expect("add second Codex profile root");
+
+    assert_eq!(
+        get_json(&repo, "agent_profile_roots.codex"),
+        serde_json::json!(["/Users/alice/.codex-work", "/Users/alice/.codex-personal"])
+    );
+
+    repo.git_ai(&["config", "unset", "agent_profile_roots.codex"])
+        .expect("unset Codex profile roots");
+    assert_eq!(
+        get_json(&repo, "agent_profile_roots"),
+        Value::Object(serde_json::Map::new())
+    );
+}
+
+#[test]
 fn test_config_show_all_includes_new_keys() {
     let repo = TestRepo::new();
     let out = repo.git_ai(&["config"]).expect("show all config");
@@ -238,6 +275,7 @@ fn test_config_show_all_includes_new_keys() {
     assert!(value.get("max_checkpoint_total_size_bytes").is_some());
     assert!(value.get("max_checkpoint_total_lines").is_some());
     assert!(value.get("custom_attributes").is_some());
+    assert!(value.get("agent_profile_roots").is_some());
 }
 
 /// Map a `FileConfig` field name to the CLI key used to read it back, when the
@@ -272,6 +310,11 @@ fn fully_populated_file_config() -> FileConfig {
         "post_notes_updated".to_string(),
         vec!["./hook.sh".to_string()],
     );
+    let mut agent_profile_roots = HashMap::new();
+    agent_profile_roots.insert(
+        "codex".to_string(),
+        vec!["/Users/alice/.codex-work".to_string()],
+    );
 
     FileConfig {
         git_path: Some("git".to_string()),
@@ -297,6 +340,7 @@ fn fully_populated_file_config() -> FileConfig {
         }),
         custom_attributes: Some(custom_attributes),
         git_ai_hooks: Some(git_ai_hooks),
+        agent_profile_roots: Some(agent_profile_roots),
         codex_hooks_format: Some("config_toml".to_string()),
         notes_backend: Some(NotesBackendConfig::default()),
         transcript_streaming_lookback_days: Some(7),

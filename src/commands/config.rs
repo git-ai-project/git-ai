@@ -124,6 +124,7 @@ fn print_config_help() {
     println!("  max_checkpoint_total_lines          Per-checkpoint content limit in lines");
     println!("  custom_attributes            Custom telemetry attributes, string->string (object)");
     println!("  git_ai_hooks                 Hook name -> shell commands map (object)");
+    println!("  agent_profile_roots          Agent name -> additional profile roots map (object)");
     println!("  codex_hooks_format           Codex hook install format (config_toml/hooks_json)");
     println!("  notes_backend.kind           Notes backend kind (git_notes/http)");
     println!("  notes_backend.backend_url    Notes backend base URL. Required when kind=http.");
@@ -153,6 +154,7 @@ fn print_config_help() {
     println!("  git-ai config --add allow_repositories ~/projects/my-repo");
     println!("  git-ai config --add feature_flags.my_flag true");
     println!("  git-ai config --add git_ai_hooks.post_notes_updated \"./my-hook.sh\"");
+    println!("  git-ai config --add agent_profile_roots.codex ~/.codex-work");
     println!("  git-ai config set codex_hooks_format hooks_json");
     println!("  git-ai config set allow_superuser true");
     println!("  git-ai config set transcript_streaming_lookback_days 1");
@@ -356,6 +358,12 @@ fn show_all_config() -> Result<(), String> {
     );
 
     effective_config.insert(
+        "agent_profile_roots".to_string(),
+        serde_json::to_value(runtime_config.agent_profile_roots())
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+
+    effective_config.insert(
         "codex_hooks_format".to_string(),
         Value::String(runtime_config.codex_hooks_format().as_str().to_string()),
     );
@@ -509,6 +517,8 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "git_ai_hooks" => serde_json::to_value(runtime_config.git_ai_hooks())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            "agent_profile_roots" => serde_json::to_value(runtime_config.agent_profile_roots())
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "codex_hooks_format" => {
                 Value::String(runtime_config.codex_hooks_format().as_str().to_string())
             }
@@ -552,9 +562,15 @@ fn get_config_value(key: &str) -> Result<(), String> {
     }
 
     // Handle nested keys (dot notation)
-    if key_path[0] == "feature_flags" || key_path[0] == "git_ai_hooks" {
+    if key_path[0] == "feature_flags"
+        || key_path[0] == "git_ai_hooks"
+        || key_path[0] == "agent_profile_roots"
+    {
         let root = if key_path[0] == "feature_flags" {
             serde_json::to_value(runtime_config.get_feature_flags())
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+        } else if key_path[0] == "agent_profile_roots" {
+            serde_json::to_value(runtime_config.agent_profile_roots())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
         } else {
             serde_json::to_value(runtime_config.git_ai_hooks())
@@ -967,6 +983,38 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
         return Ok(());
     }
 
+    if key_path[0] == "agent_profile_roots" {
+        if key_path.len() != 2 {
+            return Err(
+                "agent_profile_roots requires an agent name (e.g., agent_profile_roots.codex)"
+                    .to_string(),
+            );
+        }
+
+        let agent_name = key_path[1].trim();
+        if agent_name.is_empty() {
+            return Err("agent_profile_roots agent name cannot be empty".to_string());
+        }
+
+        let mut roots = file_config.agent_profile_roots.unwrap_or_default();
+        let values = parse_hook_command_values(value)?;
+        if add_mode {
+            roots
+                .entry(agent_name.to_string())
+                .or_default()
+                .extend(values.clone());
+        } else {
+            roots.insert(agent_name.to_string(), values.clone());
+        }
+        file_config.agent_profile_roots = Some(roots);
+        crate::config::save_file_config(&file_config)?;
+        for root in values {
+            let prefix = if add_mode { "+ " } else { "" };
+            println!("{}[agent_profile_roots.{}]: {}", prefix, agent_name, root);
+        }
+        return Ok(());
+    }
+
     if key_path[0] == "notes_backend" {
         if key_path.len() != 2 {
             return Err(
@@ -1183,6 +1231,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     println!("- [git_ai_hooks]: {:?}", v);
                 }
             }
+            "agent_profile_roots" => {
+                let old_value = file_config.agent_profile_roots.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [agent_profile_roots]: {:?}", v);
+                }
+            }
             "codex_hooks_format" => {
                 let old_value = file_config.codex_hooks_format.take();
                 crate::config::save_file_config(&file_config)?;
@@ -1315,6 +1370,33 @@ fn unset_config_value(key: &str) -> Result<(), String> {
         if let Some(commands) = old_value {
             for command in commands {
                 println!("- [{}]: {}", key, command);
+            }
+        }
+        return Ok(());
+    }
+
+    if key_path[0] == "agent_profile_roots" {
+        if key_path.len() != 2 {
+            return Err(
+                "agent_profile_roots requires an agent name (e.g., agent_profile_roots.codex)"
+                    .to_string(),
+            );
+        }
+
+        let agent_name = key_path[1].trim();
+        let mut roots = file_config
+            .agent_profile_roots
+            .ok_or_else(|| format!("Config key not found: {}", key))?;
+        let old_value = roots.remove(agent_name);
+        if old_value.is_none() {
+            return Err(format!("Config key not found: {}", key));
+        }
+
+        file_config.agent_profile_roots = if roots.is_empty() { None } else { Some(roots) };
+        crate::config::save_file_config(&file_config)?;
+        if let Some(paths) = old_value {
+            for path in paths {
+                println!("- [agent_profile_roots.{}]: {}", agent_name, path);
             }
         }
         return Ok(());
