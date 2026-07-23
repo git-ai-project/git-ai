@@ -1528,6 +1528,25 @@ fn line_sequence_contains(needle: &str, haystack: &str) -> bool {
     false
 }
 
+fn same_line_multiset(a: &str, b: &str) -> bool {
+    let normalized_a = normalize_line_endings(a);
+    let normalized_b = normalize_line_endings(b);
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for line in split_lines_preserving_terminators(&normalized_a) {
+        *counts.entry(line).or_default() += 1;
+    }
+    for line in split_lines_preserving_terminators(&normalized_b) {
+        let Some(count) = counts.get_mut(line) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            counts.remove(line);
+        }
+    }
+    counts.is_empty()
+}
+
 /// Pure carryover reconciliation given already-fetched contents (no git ops).
 /// `parent_content` is the file at the parent commit ("" if absent / initial).
 fn merged_carryover_content_pure(
@@ -1548,6 +1567,14 @@ fn merged_carryover_content_pure(
         return observed_content.to_string();
     }
     if content_eq_ignoring_line_endings(observed_content, parent_content) {
+        return committed_content.to_string();
+    }
+    // A formatter can reorder the checkpointed lines before the index is
+    // committed. A three-way merge treats the two insertion positions as
+    // independent and duplicates the moved lines in the carryover snapshot.
+    // Check this only after the one-sided cases so a real uncommitted reorder
+    // is retained when the committed side is unchanged from the parent.
+    if same_line_multiset(committed_content, observed_content) {
         return committed_content.to_string();
     }
     carryover_merge_content(parent_content, committed_content, observed_content)
@@ -2268,7 +2295,7 @@ impl VirtualAttributions {
         unstaged_hunks.retain(|_, ranges| !ranges.is_empty());
 
         // Process each file
-        for (file_path, (_, line_attrs)) in &self.attributions {
+        for (file_path, (char_attrs, line_attrs)) in &self.attributions {
             if line_attrs.is_empty() {
                 continue;
             }
@@ -2298,9 +2325,29 @@ impl VirtualAttributions {
                             file_path
                         ))
                     })?;
-                let shift_hunks = diff_hunks_between_contents(observed_content, carryover_content);
-                rebased_line_attrs =
-                    apply_hunk_shifts_to_line_attributions(line_attrs, &shift_hunks);
+                if !content_eq_ignoring_line_endings(observed_content, carryover_content)
+                    && same_line_multiset(observed_content, carryover_content)
+                {
+                    // Since the carryover snapshot adopted a formatter's ordering,
+                    // move each checkpoint attribution to that line's committed
+                    // position. Import sorters commonly move one line at a time.
+                    let tracker =
+                        crate::authorship::attribution_tracker::AttributionTracker::with_move_lines_threshold(1);
+                    let rebased_char_attrs = transform_attributions_to_final(
+                        &tracker,
+                        observed_content,
+                        char_attrs,
+                        carryover_content,
+                        self.ts,
+                    )?;
+                    rebased_line_attrs =
+                        attributions_to_line_attributions(&rebased_char_attrs, carryover_content);
+                } else {
+                    let shift_hunks =
+                        diff_hunks_between_contents(observed_content, carryover_content);
+                    rebased_line_attrs =
+                        apply_hunk_shifts_to_line_attributions(line_attrs, &shift_hunks);
+                }
                 &rebased_line_attrs
             } else {
                 line_attrs
@@ -3687,6 +3734,34 @@ mod tests {
             committed
         );
         assert!(diff_hunks_between_contents(observed, committed).is_empty());
+    }
+
+    #[test]
+    fn carryover_merge_uses_committed_order_for_the_same_lines() {
+        let parent = "import m\nimport n\n";
+        let committed = "import a\nimport b\nimport m\nimport n\n";
+        let observed = "import m\nimport n\nimport a\nimport b\n";
+
+        assert_eq!(
+            merged_carryover_content_pure(parent, committed, observed),
+            committed
+        );
+    }
+
+    #[test]
+    fn carryover_merge_retains_observed_only_reordering() {
+        let parent = "import a\nimport b\n";
+        let observed = "import b\nimport a\n";
+
+        assert_eq!(
+            merged_carryover_content_pure(parent, parent, observed),
+            observed
+        );
+    }
+
+    #[test]
+    fn line_multiset_comparison_counts_duplicate_lines() {
+        assert!(!same_line_multiset("duplicate\nduplicate\n", "duplicate\n"));
     }
 
     #[test]

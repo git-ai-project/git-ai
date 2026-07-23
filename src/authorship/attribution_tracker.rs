@@ -284,6 +284,15 @@ impl AttributionTracker {
         }
     }
 
+    /// Create a tracker that recognizes moves down to the specified number of lines.
+    pub(crate) fn with_move_lines_threshold(move_lines_threshold: usize) -> Self {
+        AttributionTracker {
+            config: AttributionConfig {
+                move_lines_threshold,
+            },
+        }
+    }
+
     /// Create a new attribution tracker with custom configuration
     #[allow(dead_code)]
     pub fn with_config(config: AttributionConfig) -> Self {
