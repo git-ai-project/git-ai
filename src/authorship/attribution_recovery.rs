@@ -8,7 +8,7 @@ use crate::daemon::bash_history_db::{BashCheckpointCall, distance_to_call_window
 use crate::error::GitAiError;
 use crate::git::repo_state::worktree_root_for_path;
 use crate::git::repository::{Repository, exec_git};
-use crate::metrics::db::SessionEventRecoveryCandidate;
+use crate::metrics::db::{AiCheckpointRecoveryCandidate, SessionEventRecoveryCandidate};
 use crate::metrics::{CheckpointValues, EventAttributes, MetricEvent, PosEncoded};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const BASH_RECOVERY_COARSE_TIMESTAMP_NS: u128 = 1_000_000_000;
+const AI_CHECKPOINT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 pub(crate) const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 const NS_PER_SECOND: u128 = 1_000_000_000;
@@ -226,6 +227,16 @@ pub(crate) fn recover_attribution(
         context.file_timestamps,
     )?;
 
+    recover_ai_checkpoint_mtime(
+        repo,
+        parent_sha,
+        commit_sha,
+        human_author,
+        authorship_log,
+        committed_hunks,
+        context.file_timestamps,
+    )?;
+
     recover_adjacent_edges(
         repo,
         parent_sha,
@@ -395,6 +406,124 @@ fn recover_bash_mtime(
             recovered_line_count: unknown_lines.len() as u32,
             metadata,
             event_ts: Some((candidate.start_time_ns / 1_000_000_000) as u32),
+        });
+    }
+
+    Ok(())
+}
+
+fn recover_ai_checkpoint_mtime(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    human_author: &str,
+    authorship_log: &mut AuthorshipLog,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+    captured_file_timestamps: Option<&FileTimestampsByPath>,
+) -> Result<(), GitAiError> {
+    let workdir = repo.workdir()?;
+    let unknown_by_file = unknown_lines_by_file(authorship_log, committed_hunks);
+    if unknown_by_file.is_empty() {
+        return Ok(());
+    }
+
+    let mut timestamps_by_file = HashMap::new();
+    let mut all_timestamps = Vec::new();
+    for file_path in unknown_by_file.keys() {
+        let timestamps = captured_file_timestamps
+            .and_then(|timestamps| timestamps.get(file_path))
+            .filter(|timestamps| !timestamps.is_empty())
+            .cloned()
+            .unwrap_or_else(|| file_timestamps_ns(&workdir, file_path));
+        if !timestamps.is_empty() {
+            all_timestamps.extend(timestamps.iter().copied());
+            timestamps_by_file.insert(file_path.clone(), timestamps);
+        }
+    }
+    if all_timestamps.is_empty() {
+        return Ok(());
+    }
+    all_timestamps.sort_unstable();
+    all_timestamps.dedup();
+
+    let candidates = match crate::metrics::db::MetricsDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(db) => db.ai_checkpoint_candidates_near_timestamps(
+                &all_timestamps,
+                AI_CHECKPOINT_RECOVERY_WINDOW_NS,
+            )?,
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let target_repo_url = crate::repo_url::resolve_repo_url_from_repo(repo);
+    for (file_path, unknown_lines) in unknown_by_file {
+        let Some(timestamps) = timestamps_by_file.get(&file_path) else {
+            continue;
+        };
+        let Some(selection) = select_best_ai_checkpoint_candidate(
+            &candidates,
+            timestamps,
+            &file_path,
+            parent_sha,
+            target_repo_url.as_deref(),
+        ) else {
+            continue;
+        };
+
+        let candidate = selection.candidate;
+        let trace_id = generate_trace_id();
+        let author_id = format!("{}::{}", candidate.session_id, trace_id);
+        insert_ai_checkpoint_session_record(authorship_log, candidate, human_author);
+        add_attestation(authorship_log, &file_path, &author_id, &unknown_lines);
+
+        let selected_model = ai_checkpoint_model(candidate);
+        let metadata = json!({
+            "solver": "ai_checkpoint_mtime",
+            "file_path": file_path.as_str(),
+            "candidate_file_path": candidate.file_path.as_str(),
+            "unknown_lines": &unknown_lines,
+            "file_timestamps_ns": timestamps,
+            "selected_metric_row_id": candidate.row_id,
+            "selected_event_ts": candidate.event_ts,
+            "selected_checkpoint_ts": candidate.checkpoint_ts,
+            "selected_checkpoint_kind": candidate.kind.as_str(),
+            "selected_session_id": candidate.session_id.as_str(),
+            "selected_trace_id": candidate.trace_id.as_deref(),
+            "selected_external_session_id": candidate.external_session_id.as_str(),
+            "selected_external_tool_use_id": candidate.external_tool_use_id.as_deref(),
+            "selected_tool": candidate.tool.as_str(),
+            "selected_model": selected_model.as_str(),
+            "selected_repo_url": candidate.repo_url.as_deref(),
+            "selected_base_commit": candidate.base_commit.as_deref(),
+            "target_repo_url": target_repo_url.as_deref(),
+            "target_base_commit": parent_sha,
+            "distance_ns": selection.distance_ns,
+            "window_ns": AI_CHECKPOINT_RECOVERY_WINDOW_NS,
+            "selection_tier": selection.tier.as_str(),
+            "candidate_count": candidates.len(),
+        });
+        record_recovery_metric(RecoveryMetricInput {
+            repo,
+            parent_sha,
+            commit_sha,
+            file_path: &file_path,
+            author_id: &author_id,
+            session_id: &candidate.session_id,
+            trace_id: &trace_id,
+            tool: &candidate.tool,
+            model: &selected_model,
+            external_session_id: &candidate.external_session_id,
+            external_tool_use_id: candidate.external_tool_use_id.as_deref(),
+            edit_kind: "attribution_recovery_ai_checkpoint",
+            checkpoint_type: "recovered_ai_checkpoint_mtime",
+            recovered_line_count: unknown_lines.len() as u32,
+            metadata,
+            event_ts: u32::try_from(candidate.checkpoint_ts).ok(),
         });
     }
 
@@ -1323,6 +1452,97 @@ fn bash_candidate_session_id(candidate: &BashCheckpointCall) -> String {
     generate_session_id(&candidate.agent_id.id, &candidate.agent_id.tool)
 }
 
+fn select_best_ai_checkpoint_candidate<'a>(
+    candidates: &'a [AiCheckpointRecoveryCandidate],
+    timestamps: &[u128],
+    target_file_path: &str,
+    target_base_commit: &str,
+    target_repo_url: Option<&str>,
+) -> Option<AiCheckpointCandidateSelection<'a>> {
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let distance_ns = ai_checkpoint_distance(candidate, timestamps)?;
+            if distance_ns > AI_CHECKPOINT_RECOVERY_WINDOW_NS {
+                return None;
+            }
+            let tier = ai_checkpoint_candidate_tier(
+                candidate,
+                target_file_path,
+                target_base_commit,
+                target_repo_url,
+            )?;
+            Some(AiCheckpointCandidateSelection {
+                candidate,
+                distance_ns,
+                tier,
+            })
+        })
+        .min_by(|left, right| {
+            left.tier
+                .score()
+                .cmp(&right.tier.score())
+                .then_with(|| left.distance_ns.cmp(&right.distance_ns))
+                .then_with(|| right.candidate.row_id.cmp(&left.candidate.row_id))
+        })
+}
+
+struct AiCheckpointCandidateSelection<'a> {
+    candidate: &'a AiCheckpointRecoveryCandidate,
+    distance_ns: u128,
+    tier: AiCheckpointCandidateTier,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiCheckpointCandidateTier {
+    ExactPath,
+    SameRepository,
+}
+
+impl AiCheckpointCandidateTier {
+    fn score(self) -> u8 {
+        match self {
+            Self::ExactPath => 0,
+            Self::SameRepository => 1,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactPath => "exact_path",
+            Self::SameRepository => "same_repository",
+        }
+    }
+}
+
+fn ai_checkpoint_candidate_tier(
+    candidate: &AiCheckpointRecoveryCandidate,
+    target_file_path: &str,
+    target_base_commit: &str,
+    target_repo_url: Option<&str>,
+) -> Option<AiCheckpointCandidateTier> {
+    if candidate.file_path == target_file_path {
+        return Some(AiCheckpointCandidateTier::ExactPath);
+    }
+
+    let same_base_commit = target_base_commit != "initial"
+        && candidate.base_commit.as_deref() == Some(target_base_commit);
+    let same_repo_url =
+        target_repo_url.is_some() && candidate.repo_url.as_deref() == target_repo_url;
+    (same_base_commit || same_repo_url).then_some(AiCheckpointCandidateTier::SameRepository)
+}
+
+fn ai_checkpoint_distance(
+    candidate: &AiCheckpointRecoveryCandidate,
+    timestamps: &[u128],
+) -> Option<u128> {
+    let checkpoint_ts = u32::try_from(candidate.checkpoint_ts).ok()?;
+    timestamps
+        .iter()
+        .map(|timestamp_ns| distance_to_event_second(*timestamp_ns, checkpoint_ts))
+        .min()
+}
+
 fn select_best_session_event_candidate<'a>(
     candidates: &'a [SessionEventRecoveryCandidate],
     timestamps: &[u128],
@@ -1496,6 +1716,34 @@ fn insert_session_event_record(
             human_author: Some(human_author.to_string()),
             custom_attributes: None,
         });
+}
+
+fn insert_ai_checkpoint_session_record(
+    authorship_log: &mut AuthorshipLog,
+    candidate: &AiCheckpointRecoveryCandidate,
+    human_author: &str,
+) {
+    authorship_log
+        .metadata
+        .sessions
+        .entry(candidate.session_id.clone())
+        .or_insert_with(|| SessionRecord {
+            agent_id: AgentId {
+                tool: candidate.tool.clone(),
+                id: candidate.external_session_id.clone(),
+                model: ai_checkpoint_model(candidate),
+            },
+            human_author: Some(human_author.to_string()),
+            custom_attributes: None,
+        });
+}
+
+fn ai_checkpoint_model(candidate: &AiCheckpointRecoveryCandidate) -> String {
+    candidate
+        .model
+        .clone()
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn session_event_model(candidate: &SessionEventRecoveryCandidate) -> String {
@@ -1835,6 +2083,30 @@ mod tests {
         }
     }
 
+    fn ai_checkpoint_candidate(
+        row_id: i64,
+        checkpoint_ts: u64,
+        file_path: &str,
+        repo_url: Option<&str>,
+        base_commit: Option<&str>,
+    ) -> AiCheckpointRecoveryCandidate {
+        AiCheckpointRecoveryCandidate {
+            row_id,
+            event_ts: checkpoint_ts as u32,
+            checkpoint_ts,
+            kind: "ai_agent".to_string(),
+            file_path: file_path.to_string(),
+            session_id: format!("s_{row_id}"),
+            trace_id: Some(format!("trace-{row_id}")),
+            tool: "codex".to_string(),
+            model: Some("gpt-5".to_string()),
+            external_session_id: format!("external-{row_id}"),
+            external_tool_use_id: Some(format!("tool-use-{row_id}")),
+            repo_url: repo_url.map(ToString::to_string),
+            base_commit: base_commit.map(ToString::to_string),
+        }
+    }
+
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
         let mut log = AuthorshipLog::new();
@@ -1976,6 +2248,72 @@ mod tests {
         assert_eq!(selection.candidate.tool_use_id, "tool-near");
         assert_eq!(selection.tier, BashCandidateTier::TimeOnly);
         assert_eq!(selection.distance_ns, 10);
+    }
+
+    #[test]
+    fn ai_checkpoint_candidate_ranking_prefers_exact_path() {
+        let event_ts = 1_700_000_000;
+        let candidates = vec![
+            ai_checkpoint_candidate(
+                1,
+                event_ts,
+                "renamed.txt",
+                Some("https://github.com/acme/repo"),
+                Some("parent"),
+            ),
+            ai_checkpoint_candidate(2, event_ts - 1, "target.txt", None, None),
+        ];
+
+        let selection = select_best_ai_checkpoint_candidate(
+            &candidates,
+            &[event_ts as u128 * NS_PER_SECOND],
+            "target.txt",
+            "parent",
+            Some("https://github.com/acme/repo"),
+        )
+        .expect("expected AI checkpoint candidate");
+
+        assert_eq!(selection.candidate.row_id, 2);
+        assert_eq!(selection.tier, AiCheckpointCandidateTier::ExactPath);
+    }
+
+    #[test]
+    fn ai_checkpoint_candidate_ranking_allows_only_same_repo_path_mismatches() {
+        let event_ts = 1_700_000_000;
+        let candidates = vec![
+            ai_checkpoint_candidate(
+                1,
+                event_ts,
+                "old-name.txt",
+                Some("https://github.com/other/repo"),
+                Some("other-parent"),
+            ),
+            ai_checkpoint_candidate(2, event_ts, "old-name.txt", None, Some("target-parent")),
+        ];
+
+        let selection = select_best_ai_checkpoint_candidate(
+            &candidates,
+            &[event_ts as u128 * NS_PER_SECOND],
+            "new-name.txt",
+            "target-parent",
+            Some("https://github.com/acme/repo"),
+        )
+        .expect("expected same-repository AI checkpoint candidate");
+
+        assert_eq!(selection.candidate.row_id, 2);
+        assert_eq!(selection.tier, AiCheckpointCandidateTier::SameRepository);
+
+        assert!(
+            select_best_ai_checkpoint_candidate(
+                &candidates[..1],
+                &[event_ts as u128 * NS_PER_SECOND],
+                "new-name.txt",
+                "target-parent",
+                Some("https://github.com/acme/repo"),
+            )
+            .is_none(),
+            "path mismatches from an unrelated repository must not recover attribution"
+        );
     }
 
     #[test]

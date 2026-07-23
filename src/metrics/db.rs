@@ -34,8 +34,6 @@ const RETRYABLE_METRIC_IDS_SQL: &str = "SELECT id FROM metrics \
      ORDER BY next_retry_at ASC, id DESC \
      LIMIT ?2";
 
-// Consumed by the attribution-recovery child PR in this Graphite stack.
-#[allow(dead_code)]
 const AI_CHECKPOINT_RECOVERY_CANDIDATES_SQL: &str = r#"
     SELECT
         id,
@@ -150,7 +148,6 @@ pub(crate) struct SessionEventRecoveryCandidate {
     pub repo_url: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AiCheckpointRecoveryCandidate {
     pub row_id: i64,
@@ -1136,7 +1133,6 @@ impl MetricsDatabase {
         Ok(candidates)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn ai_checkpoint_candidates_near_timestamps(
         &self,
         timestamps_ns: &[u128],
@@ -1522,7 +1518,6 @@ fn recovery_attrs_from_event_json(event_json: &str) -> (Option<String>, Option<S
     )
 }
 
-#[allow(dead_code)]
 struct AiCheckpointRecoveryValues {
     checkpoint_ts: u64,
     kind: String,
@@ -1532,7 +1527,6 @@ struct AiCheckpointRecoveryValues {
     base_commit: Option<String>,
 }
 
-#[allow(dead_code)]
 fn parse_ai_checkpoint_recovery_values(event_json: &str) -> Option<AiCheckpointRecoveryValues> {
     let event: MetricEvent = serde_json::from_str(event_json).ok()?;
     if event.event_id != MetricEventId::Checkpoint as u16 {
