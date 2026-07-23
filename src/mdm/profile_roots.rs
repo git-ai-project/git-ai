@@ -47,11 +47,7 @@ pub fn agent_profile_roots(agent: AgentProfile, config: &Config) -> Vec<PathBuf>
         AgentProfile::Gemini => {
             environment_value("GEMINI_CLI_HOME").map(|path| path.join(".gemini"))
         }
-        AgentProfile::Amp => std::env::var("GIT_AI_AMP_THREADS_PATH")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
+        AgentProfile::Amp => None,
     };
     let default = official_default_root_for_home(agent, &home);
     let configured = config

@@ -7,6 +7,7 @@ use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
 use crate::streams::watermark::{RecordIndexWatermark, WatermarkStrategy};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -70,14 +71,41 @@ impl AmpAgent {
         })
     }
 
+    #[cfg(test)]
     fn scan_thread_files_in_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, StreamError> {
+        let directories: Vec<PathBuf> = roots.iter().map(|root| root.join("threads")).collect();
+        Self::scan_thread_files_in_directories(&directories)
+    }
+
+    fn selected_thread_directories(roots: &[PathBuf]) -> Vec<PathBuf> {
+        let primary = Self::amp_threads_path()
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty());
+        let mut directories = Vec::new();
+        let mut seen = HashSet::new();
+
+        for directory in primary
+            .into_iter()
+            .chain(roots.iter().map(|root| root.join("threads")))
+        {
+            let identity = fs::canonicalize(&directory).unwrap_or_else(|_| directory.clone());
+            if seen.insert(identity) {
+                directories.push(directory);
+            }
+        }
+
+        directories
+    }
+
+    fn scan_thread_files_in_directories(
+        directories: &[PathBuf],
+    ) -> Result<Vec<PathBuf>, StreamError> {
         let mut paths = Vec::new();
-        for root in roots {
-            let threads_dir = root.join("threads");
+        for threads_dir in directories {
             if !threads_dir.is_dir() {
                 continue;
             }
-            let entries = fs::read_dir(&threads_dir).map_err(|error| StreamError::Transient {
+            let entries = fs::read_dir(threads_dir).map_err(|error| StreamError::Transient {
                 message: format!(
                     "Failed to read Amp threads directory {}: {}",
                     threads_dir.display(),
@@ -114,9 +142,10 @@ impl Agent for AmpAgent {
     fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, StreamError> {
         let config = Config::fresh();
         let roots = agent_profile_roots(AgentProfile::Amp, &config);
+        let directories = Self::selected_thread_directories(&roots);
         let mut sessions = Vec::new();
 
-        for path in Self::scan_thread_files_in_roots(&roots)? {
+        for path in Self::scan_thread_files_in_directories(&directories)? {
             let Some(file_stem) = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -256,6 +285,43 @@ mod tests {
         assert_eq!(
             AmpAgent::scan_thread_files_in_roots(&[profile]).unwrap(),
             vec![transcript]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn custom_environment_threads_directory_is_scanned_verbatim() {
+        let temp = tempfile::tempdir().unwrap();
+        let threads_dir = temp.path().join("amp-sessions");
+        let transcript = threads_dir.join("thread.json");
+        fs::create_dir_all(&threads_dir).unwrap();
+        fs::write(&transcript, "{}").unwrap();
+        let incorrectly_reconstructed = temp.path().join("threads/wrong.json");
+        fs::create_dir_all(incorrectly_reconstructed.parent().unwrap()).unwrap();
+        fs::write(&incorrectly_reconstructed, "{}").unwrap();
+
+        let previous = std::env::var_os("GIT_AI_AMP_THREADS_PATH");
+        unsafe {
+            std::env::set_var("GIT_AI_AMP_THREADS_PATH", &threads_dir);
+        }
+        let result = AmpAgent::new().discover_sessions();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("GIT_AI_AMP_THREADS_PATH", value) },
+            None => unsafe { std::env::remove_var("GIT_AI_AMP_THREADS_PATH") },
+        }
+
+        let sessions = result.unwrap();
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.stream_path == transcript),
+            "Amp must scan the exact GIT_AI_AMP_THREADS_PATH directory"
+        );
+        assert!(
+            sessions
+                .iter()
+                .all(|session| session.stream_path != incorrectly_reconstructed),
+            "Amp must not replace the configured directory name with `threads`"
         );
     }
 
