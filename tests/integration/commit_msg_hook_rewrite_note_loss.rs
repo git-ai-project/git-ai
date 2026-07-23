@@ -8,8 +8,11 @@
 //! the raw argv subject, so the real reflog entry is missed and `ref_changes`
 //! remains empty.
 
+#[cfg(unix)]
 use crate::repos::test_file::ExpectedLineExt;
+#[cfg(unix)]
 use crate::repos::test_repo::TestRepo;
+#[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
