@@ -4753,7 +4753,7 @@ impl ActorDaemonCoordinator {
                         "reconciled unobserved rebase worktrees lock poisoned".to_string(),
                     )
                 })?;
-            if !seen.insert(worktree.to_string_lossy().to_string()) {
+            if !seen.insert(Self::worktree_state_key(worktree)) {
                 return Ok(());
             }
         }
