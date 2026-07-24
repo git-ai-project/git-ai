@@ -5193,10 +5193,16 @@ impl ActorDaemonCoordinator {
                     let new_commits = cherry_pick_destination_commits(cmd);
                     let is_continue = cherry_pick_command_has_flag(cmd, "--continue");
                     let is_skip = cherry_pick_command_has_flag(cmd, "--skip");
+                    let explicit_source_args = cherry_pick_source_args_for_side_effect(cmd);
+                    // Async processing may run after `--continue` removes CHERRY_PICK_HEAD.
+                    // A single explicit source remains bounded to one batched object lookup.
+                    let can_resolve_without_live_state = explicit_source_args.len() == 1
+                        && !cherry_pick_source_is_range(&explicit_source_args[0]);
                     let mut source_oids = cmd.cherry_pick_source_oids.clone();
                     let mut source_oids_from_daemon_pending = false;
                     if source_oids.is_empty()
-                        && (!new_commits.is_empty()
+                        && (can_resolve_without_live_state
+                            || !new_commits.is_empty()
                             || cherry_pick_state_exists_for_worktree(worktree))
                     {
                         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
