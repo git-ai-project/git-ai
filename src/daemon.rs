@@ -4780,34 +4780,72 @@ impl ActorDaemonCoordinator {
         {
             spans.pop();
         }
-        if spans.is_empty() {
-            return Ok(());
-        }
-
+        // Reflog-only filters first (no git): age, degenerate spans, and a
+        // hard cap (newest kept) so total git work is bounded by a constant
+        // no matter how rebase-heavy the reflog is.
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        spans.retain(|span| {
+            span.old_tip != span.new_tip
+                && now_secs.saturating_sub(span.finished_at_secs)
+                    <= crate::daemon::rebase_reconcile::MAX_SPAN_AGE_SECS
+        });
+        if spans.len() > crate::daemon::rebase_reconcile::MAX_RECONCILE_SPANS {
+            spans.drain(..spans.len() - crate::daemon::rebase_reconcile::MAX_RECONCILE_SPANS);
+        }
+        if spans.is_empty() {
+            return Ok(());
+        }
+
         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
 
+        // Batched existence screen: one cat-file --batch-check spawn covers
+        // every tip of every span (never one git spawn per object).
+        let mut tips: Vec<String> = spans
+            .iter()
+            .flat_map(|span| [span.old_tip.clone(), span.new_tip.clone()])
+            .collect();
+        tips.sort();
+        tips.dedup();
+        let existing = match crate::daemon::rebase_reconcile::existing_commits(&repo, &tips) {
+            Ok(existing) => existing,
+            Err(error) => {
+                tracing::warn!(error = %error, "unobserved rebase existence probe failed");
+                return Ok(());
+            }
+        };
+        spans.retain(|span| existing.contains(&span.old_tip) && existing.contains(&span.new_tip));
+
+        // Batched notes screen: the spans' own reflog rows record the commits
+        // each rewrite created, so one commits_with_notes call over their
+        // union drops every span that was already handled — without any
+        // per-span git. Only genuinely stranded candidates (normally zero or
+        // one) reach the precise per-span probe below.
+        let mut rewritten: Vec<String> = spans
+            .iter()
+            .flat_map(|span| span.rewritten_commits.iter().cloned())
+            .collect();
+        rewritten.sort();
+        rewritten.dedup();
+        if !rewritten.is_empty() {
+            let noted = match crate::git::notes_api::commits_with_notes(&repo, &rewritten) {
+                Ok(noted) => noted,
+                Err(error) => {
+                    tracing::warn!(error = %error, "unobserved rebase notes screen failed");
+                    return Ok(());
+                }
+            };
+            spans.retain(|span| {
+                crate::daemon::rebase_reconcile::may_have_stranded_notes(span, &noted)
+            });
+        }
+
         for span in spans {
-            if now_secs.saturating_sub(span.finished_at_secs)
-                > crate::daemon::rebase_reconcile::MAX_SPAN_AGE_SECS
-            {
-                continue;
-            }
-            if span.old_tip == span.new_tip {
-                continue;
-            }
-            if !crate::daemon::rebase_reconcile::commit_exists(&repo, &span.old_tip)
-                || !crate::daemon::rebase_reconcile::commit_exists(&repo, &span.new_tip)
-            {
-                continue;
-            }
-            // Fast-forward "rebases" rewrite nothing.
-            if is_ancestor_commit(&repo, &span.old_tip, &span.new_tip) {
-                continue;
-            }
+            // Precise probe, candidates only: empty sources also screens out
+            // fast-forward "rebases" (nothing reachable from the old tip
+            // alone), so no separate ancestor check is needed.
             match crate::daemon::rebase_reconcile::span_has_stranded_notes(&repo, &span) {
                 Ok(true) => {}
                 Ok(false) => continue,

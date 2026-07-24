@@ -15,12 +15,16 @@
 use crate::daemon::domain::RefChange;
 use crate::error::GitAiError;
 use crate::git::notes_api;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{Repository, exec_git, exec_git_stdin};
+use std::collections::HashSet;
 
 /// Upper bound on reflog entries scanned (from the tail) per worktree.
 pub(crate) const MAX_REFLOG_ENTRIES: usize = 512;
 /// Only spans that finished within this window are reconciled.
 pub(crate) const MAX_SPAN_AGE_SECS: i64 = 14 * 24 * 60 * 60;
+/// Hard cap on spans considered per worktree (newest kept), so the total git
+/// work is bounded by a constant regardless of how rebase-heavy the reflog is.
+pub(crate) const MAX_RECONCILE_SPANS: usize = 8;
 /// Upper bound on commits listed per span side when probing for stranded notes.
 const MAX_SPAN_COMMITS: usize = 100;
 
@@ -34,6 +38,13 @@ pub(crate) struct CompletedRebaseSpan {
     pub(crate) onto: String,
     /// Reflog timestamp (epoch seconds) of the finish entry.
     pub(crate) finished_at_secs: i64,
+    /// Distinct commits the span's own reflog rows record as created by the
+    /// rewrite (`new` of every row after the start, e.g. picks and the
+    /// finish). Free per-span target data — no git spawn needed — used to
+    /// screen out spans whose rewrites are all already noted. May include
+    /// intermediates later superseded within the same rebase; that only
+    /// widens candidacy, and the precise probe rejects false candidates.
+    pub(crate) rewritten_commits: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -71,6 +82,7 @@ pub(crate) fn completed_rebase_spans(head_reflog: &str) -> Vec<CompletedRebaseSp
 
     let mut spans = Vec::new();
     let mut open_start: Option<ReflogEntry> = None;
+    let mut open_rewritten: Vec<String> = Vec::new();
     for line in &lines[tail_start..] {
         let Some(entry) = parse_reflog_entry(line) else {
             continue;
@@ -79,19 +91,29 @@ pub(crate) fn completed_rebase_spans(head_reflog: &str) -> Vec<CompletedRebaseSp
         let is_rebase = entry.message.starts_with("rebase");
         if is_rebase && entry.message.contains("(start)") {
             open_start = Some(entry);
+            open_rewritten.clear();
         } else if is_rebase && entry.message.contains("(finish)") {
             if let Some(start) = open_start.take() {
+                let mut rewritten_commits = std::mem::take(&mut open_rewritten);
+                rewritten_commits.push(entry.new.clone());
+                rewritten_commits.sort();
+                rewritten_commits.dedup();
+                rewritten_commits.retain(|sha| *sha != start.new);
                 spans.push(CompletedRebaseSpan {
                     old_tip: start.old,
                     onto: start.new,
                     new_tip: entry.new,
                     finished_at_secs: entry.timestamp_secs,
+                    rewritten_commits,
                 });
             }
         } else if !is_rebase || entry.message.contains("(abort)") {
             // Any non-rebase HEAD move (or an abort) while a span is open
             // means that rebase never finished as a rewrite of this branch.
             open_start = None;
+            open_rewritten.clear();
+        } else if open_start.is_some() {
+            open_rewritten.push(entry.new.clone());
         }
     }
     spans
@@ -138,14 +160,45 @@ pub(crate) fn span_has_stranded_notes(
     Ok(noted_targets.len() < targets.len())
 }
 
-pub(crate) fn commit_exists(repo: &Repository, sha: &str) -> bool {
+/// Batched existence probe: a single `git cat-file --batch-check` spawn
+/// validates every candidate tip at once (never one spawn per object).
+/// Returns the subset of `shas` that resolve to commits.
+pub(crate) fn existing_commits(
+    repo: &Repository,
+    shas: &[String],
+) -> Result<HashSet<String>, GitAiError> {
+    if shas.is_empty() {
+        return Ok(HashSet::new());
+    }
     let mut args = repo.global_args_for_exec();
-    args.extend([
-        "cat-file".to_string(),
-        "-e".to_string(),
-        format!("{sha}^{{commit}}"),
-    ]);
-    exec_git(&args).is_ok()
+    args.extend(["cat-file".to_string(), "--batch-check".to_string()]);
+    let stdin = shas.join("\n");
+    let output = exec_git_stdin(&args, stdin.as_bytes())?;
+    let mut existing = HashSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut tokens = line.split_whitespace();
+        if let (Some(oid), Some(kind)) = (tokens.next(), tokens.next())
+            && kind == "commit"
+        {
+            existing.insert(oid.to_string());
+        }
+    }
+    Ok(existing)
+}
+
+/// Cheap screen using only reflog-derived data plus one batched note lookup:
+/// a span whose recorded rewritten commits all already carry notes was either
+/// handled live or reconciled before — it cannot be stranded. Spans with no
+/// recorded rewrites stay candidates so the precise probe can decide.
+pub(crate) fn may_have_stranded_notes(
+    span: &CompletedRebaseSpan,
+    noted_rewritten: &HashSet<String>,
+) -> bool {
+    span.rewritten_commits.is_empty()
+        || span
+            .rewritten_commits
+            .iter()
+            .any(|sha| !noted_rewritten.contains(sha))
 }
 
 fn rev_list_capped(
@@ -199,6 +252,7 @@ mod tests {
                 new_tip: D.to_string(),
                 onto: C.to_string(),
                 finished_at_secs: 202,
+                rewritten_commits: vec![D.to_string()],
             }]
         );
     }
@@ -266,7 +320,21 @@ mod tests {
             new_tip: new_tip.to_string(),
             onto: C.to_string(),
             finished_at_secs: 100,
+            rewritten_commits: vec![new_tip.to_string()],
         }
+    }
+
+    #[test]
+    fn screen_drops_spans_whose_rewrites_are_all_noted() {
+        let noted: HashSet<String> = [B.to_string()].into();
+        // All rewritten commits noted -> already handled, not a candidate.
+        assert!(!may_have_stranded_notes(&span(A, B), &noted));
+        // An unnoted rewritten commit keeps the span a candidate.
+        assert!(may_have_stranded_notes(&span(A, D), &noted));
+        // No recorded rewrites: stay a candidate for the precise probe.
+        let mut bare = span(A, B);
+        bare.rewritten_commits.clear();
+        assert!(may_have_stranded_notes(&bare, &noted));
     }
 
     #[test]
