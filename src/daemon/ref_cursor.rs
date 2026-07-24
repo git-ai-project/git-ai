@@ -465,7 +465,39 @@ impl RefCursor {
             .head_expected_transition(cmd, state)
             .without_old_oid_constraint()
             .with_reflog_messages(commit_reflog_messages(&args, amend));
-        self.consume_head_transition_for_command(cmd, state, prefixes, expected)
+        let Some(entry) = self.find_commit_head_entry(cmd, prefixes, expected)? else {
+            return Ok(());
+        };
+
+        self.consume_head_entry_for_command(cmd, entry)
+    }
+
+    fn find_commit_head_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        // Prefer the exact argv-derived reflog message when possible: it is the
+        // strongest discriminator for untraced duplicate commit entries. A
+        // commit-msg hook can rewrite the subject after argv is fixed, though, and
+        // git records that final subject in the reflog. In that case fall back to a
+        // command-window match below instead of dropping the HEAD transition.
+        if let Some(entry) =
+            self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected.clone())?
+        {
+            return Ok(Some(entry));
+        }
+
+        if expected.messages.is_empty() {
+            return Ok(None);
+        }
+
+        self.find_head_entry_in_command_window(
+            cmd,
+            message_prefixes,
+            expected.without_reflog_message_constraint(),
+        )
     }
 
     fn enrich_cherry_pick(
@@ -1353,6 +1385,43 @@ impl RefCursor {
         }
 
         Ok(latest_before_hint)
+    }
+
+    fn find_head_entry_in_command_window(
+        &mut self,
+        cmd: &NormalizedCommand,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let command_window = reflog_timestamp_window(cmd);
+        let candidates = read_reflog_entries(key.clone(), &path, "HEAD", start)?
+            .into_iter()
+            .filter(|entry| {
+                !self.entry_consumed(entry)
+                    && expected.matches(entry)
+                    && message_matches(&entry.message, message_prefixes)
+                    && entry
+                        .timestamp_secs
+                        .is_some_and(|timestamp| command_window.contains(timestamp))
+            })
+            .collect::<Vec<_>>();
+
+        if self.command_start_hints.contains_key(&key) {
+            return Ok(self.select_candidate_with_hint(&key, candidates));
+        }
+        Ok(match candidates.as_slice() {
+            [entry] => Some(entry.clone()),
+            _ => None,
+        })
     }
 
     fn find_head_entry(
@@ -2245,6 +2314,11 @@ fn current_worktree_branch_ref<'a>(
 impl ExpectedTransition {
     fn with_reflog_messages(mut self, messages: HashSet<String>) -> Self {
         self.messages = messages;
+        self
+    }
+
+    fn without_reflog_message_constraint(mut self) -> Self {
+        self.messages.clear();
         self
     }
 
@@ -4023,6 +4097,84 @@ mod tests {
                 new: D.to_string(),
             }],
             "late ingress hint must select the traced duplicate-message commit"
+        );
+    }
+
+    #[test]
+    fn commit_reflog_subject_rewritten_by_hook_falls_back_to_hinted_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        let base_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\tcommit: traced base\n");
+        let untraced_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: untraced\n");
+        let hooked_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcommit: hooked: raw subject\n");
+        let in_order_offset = base_line.len() as u64;
+        let hint_offset = (base_line.len() + untraced_line.len()) as u64;
+        fs::write(
+            &head_log,
+            format!("{base_line}{untraced_line}{hooked_line}"),
+        )
+        .unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        cursor
+            .initialize_reflog_cursor(&head_key(&git_dir), in_order_offset)
+            .unwrap();
+
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "raw subject"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), hint_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }],
+            "commit-msg hooks may rewrite the final subject used by git's reflog"
+        );
+    }
+
+    #[test]
+    fn commit_reflog_subject_rewrite_fallback_does_not_guess_without_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (A, B, "commit: untraced"),
+                (B, C, "commit: hooked: raw subject"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "raw subject"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert!(
+            cmd.ref_changes.is_empty(),
+            "without an exact message or command-start hint, multiple commit entries are ambiguous"
         );
     }
 
