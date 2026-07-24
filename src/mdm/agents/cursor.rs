@@ -3,7 +3,7 @@ use crate::error::GitAiError;
 use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult,
 };
-use crate::mdm::profile_roots::{AgentProfile, agent_profile_roots, official_default_root};
+use crate::mdm::profile_roots::{AgentProfile, agent_profile_roots, install_profile_roots};
 use crate::mdm::utils::{
     MIN_CURSOR_VERSION, generate_diff, get_editor_version, install_vsc_editor_extension,
     is_vsc_editor_extension_installed, normalize_windows_path_for_shell, parse_version,
@@ -267,11 +267,7 @@ impl HookInstaller for CursorInstaller {
 
         let config = Config::fresh();
         let mut diffs = Vec::new();
-        let default_root = official_default_root(AgentProfile::Cursor);
-        for root in agent_profile_roots(AgentProfile::Cursor, &config)
-            .into_iter()
-            .filter(|root| root.is_dir() || root == &default_root)
-        {
+        for root in install_profile_roots(AgentProfile::Cursor, &config) {
             if let Some(diff) = install_at(root.join("hooks.json"))? {
                 diffs.push(format!("{}:\n{}", root.display(), diff));
             }

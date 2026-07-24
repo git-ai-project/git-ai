@@ -33,22 +33,7 @@ impl AgentProfile {
 
 pub fn agent_profile_roots(agent: AgentProfile, config: &Config) -> Vec<PathBuf> {
     let home = home_dir();
-    let environment_value = |name: &str| {
-        std::env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-    };
-    let environment = match agent {
-        AgentProfile::Claude => environment_value("CLAUDE_CONFIG_DIR"),
-        AgentProfile::Codex => environment_value("CODEX_HOME"),
-        AgentProfile::Cursor => environment_value("CURSOR_CONFIG_DIR"),
-        AgentProfile::Droid | AgentProfile::ContinueCli | AgentProfile::CopilotCli => None,
-        AgentProfile::Gemini => {
-            environment_value("GEMINI_CLI_HOME").map(|path| path.join(".gemini"))
-        }
-        AgentProfile::Amp => None,
-    };
+    let environment = official_environment_override_root(agent);
     let default = official_default_root_for_home(agent, &home);
     let configured = config
         .agent_profile_roots()
@@ -57,6 +42,48 @@ pub fn agent_profile_roots(agent: AgentProfile, config: &Config) -> Vec<PathBuf>
         .unwrap_or_default();
 
     merge_profile_roots(configured, environment.as_deref(), &default, &home)
+}
+
+/// 返回该 agent 的官方环境变量覆盖根目录（如 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、
+/// `CURSOR_CONFIG_DIR`、`GEMINI_CLI_HOME`），仅当对应环境变量已设置且非空时返回 `Some`。
+///
+/// 与 [`official_default_root`] 对应：两者都属于“官方”根，即使目录尚不存在，install 路径
+/// 也应主动创建并安装 hooks。这与用户显式配置的额外根（`agent_profile_roots` 配置项）不同——
+/// 后者必须已存在才会被安装，避免为任意配置路径凭空创建目录。
+pub fn official_environment_override_root(agent: AgentProfile) -> Option<PathBuf> {
+    let environment_value = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+    };
+    match agent {
+        AgentProfile::Claude => environment_value("CLAUDE_CONFIG_DIR"),
+        AgentProfile::Codex => environment_value("CODEX_HOME"),
+        AgentProfile::Cursor => environment_value("CURSOR_CONFIG_DIR"),
+        AgentProfile::Droid | AgentProfile::ContinueCli | AgentProfile::CopilotCli => None,
+        AgentProfile::Gemini => {
+            environment_value("GEMINI_CLI_HOME").map(|path| path.join(".gemini"))
+        }
+        AgentProfile::Amp => None,
+    }
+}
+
+/// 返回 install 路径应当处理的 profile roots：已存在的目录，加上两个“官方”根
+/// （官方默认根 + 官方环境变量覆盖根）——即使这两个官方根对应的目录尚不存在也包含在内，
+/// 因为 install 会负责创建它们。
+///
+/// check/uninstall 路径不应使用本函数：它们应继续基于 [`agent_profile_roots`] + `is_dir()`，
+/// 因为只有在目录已存在时才需要检查或卸载其中的 hooks。
+pub fn install_profile_roots(agent: AgentProfile, config: &Config) -> Vec<PathBuf> {
+    let default = official_default_root(agent);
+    let environment_override = official_environment_override_root(agent);
+    agent_profile_roots(agent, config)
+        .into_iter()
+        .filter(|root| {
+            root.is_dir() || root == &default || environment_override.as_ref() == Some(root)
+        })
+        .collect()
 }
 
 pub fn official_default_root(agent: AgentProfile) -> PathBuf {
@@ -138,7 +165,8 @@ fn merge_profile_roots(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentProfile, agent_profile_roots, merge_profile_roots, official_default_root_for_home,
+        AgentProfile, agent_profile_roots, install_profile_roots, merge_profile_roots,
+        official_default_root_for_home, official_environment_override_root,
     };
     use crate::config::Config;
     use std::fs;
@@ -273,5 +301,146 @@ mod tests {
             home.join(".copilot")
         );
         assert!(official_default_root_for_home(AgentProfile::Amp, home).ends_with("amp"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn environment_override_root_resolves_official_env_vars_per_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+
+        let previous_home = std::env::var_os("HOME");
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let previous_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let previous_cursor_config_dir = std::env::var_os("CURSOR_CONFIG_DIR");
+        let previous_gemini_cli_home = std::env::var_os("GEMINI_CLI_HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("CODEX_HOME");
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+            std::env::remove_var("CURSOR_CONFIG_DIR");
+            std::env::remove_var("GEMINI_CLI_HOME");
+        }
+
+        // Droid 等没有官方环境变量覆盖的 agent 恒为 None
+        assert_eq!(
+            official_environment_override_root(AgentProfile::Droid),
+            None
+        );
+
+        let codex_override = home.join("codex-override");
+        let claude_override = home.join("claude-override");
+        let cursor_override = home.join("cursor-override");
+        let gemini_cli_home = home.join("gemini-cli-home");
+        unsafe {
+            std::env::set_var("CODEX_HOME", &codex_override);
+            std::env::set_var("CLAUDE_CONFIG_DIR", &claude_override);
+            std::env::set_var("CURSOR_CONFIG_DIR", &cursor_override);
+            std::env::set_var("GEMINI_CLI_HOME", &gemini_cli_home);
+        }
+
+        assert_eq!(
+            official_environment_override_root(AgentProfile::Codex),
+            Some(codex_override)
+        );
+        assert_eq!(
+            official_environment_override_root(AgentProfile::Claude),
+            Some(claude_override)
+        );
+        assert_eq!(
+            official_environment_override_root(AgentProfile::Cursor),
+            Some(cursor_override)
+        );
+        // Gemini 官方根固定落在 GEMINI_CLI_HOME 下的 .gemini 子目录
+        assert_eq!(
+            official_environment_override_root(AgentProfile::Gemini),
+            Some(gemini_cli_home.join(".gemini"))
+        );
+
+        unsafe {
+            match previous_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match previous_codex_home {
+                Some(v) => std::env::set_var("CODEX_HOME", v),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+            match previous_claude_config_dir {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+            match previous_cursor_config_dir {
+                Some(v) => std::env::set_var("CURSOR_CONFIG_DIR", v),
+                None => std::env::remove_var("CURSOR_CONFIG_DIR"),
+            }
+            match previous_gemini_cli_home {
+                Some(v) => std::env::set_var("GEMINI_CLI_HOME", v),
+                None => std::env::remove_var("GEMINI_CLI_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_profile_roots_includes_missing_environment_override_but_filters_missing_configured()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let config_dir = home.join(".git-ai");
+        fs::create_dir_all(&config_dir).unwrap();
+        // 用户显式配置的额外根：已存在的参与 install；尚不存在的必须被过滤，install 不凭空创建
+        let existing_configured = home.join(".codex-configured-existing");
+        let missing_configured = home.join(".codex-configured-missing");
+        fs::create_dir_all(&existing_configured).unwrap();
+        fs::write(
+            config_dir.join("config.json"),
+            r#"{
+                "agent_profile_roots": {
+                    "codex": ["~/.codex-configured-missing", "~/.codex-configured-existing"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        // 官方环境变量覆盖根尚不存在：作为官方根，即使缺失也必须参与 install
+        let missing_env_override = home.join("codex-env-override-missing");
+
+        let previous_home = std::env::var_os("HOME");
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("CODEX_HOME", &missing_env_override);
+        }
+        let config = Config::fresh();
+        let roots = install_profile_roots(AgentProfile::Codex, &config);
+        unsafe {
+            match previous_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match previous_codex_home {
+                Some(v) => std::env::set_var("CODEX_HOME", v),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+
+        let default_root = home.join(".codex");
+        assert!(
+            roots.contains(&default_root),
+            "official default root must always be install-eligible: {roots:?}"
+        );
+        assert!(
+            roots.contains(&missing_env_override),
+            "official env-override root must remain install-eligible even when missing: {roots:?}"
+        );
+        assert!(
+            roots.contains(&existing_configured),
+            "existing configured root must be install-eligible: {roots:?}"
+        );
+        assert!(
+            !roots.contains(&missing_configured),
+            "missing non-official configured root must not be install-eligible: {roots:?}"
+        );
     }
 }

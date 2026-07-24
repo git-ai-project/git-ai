@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::profile_roots::{AgentProfile, agent_profile_roots, official_default_root};
+use crate::mdm::profile_roots::{AgentProfile, agent_profile_roots, install_profile_roots};
 use crate::mdm::utils::{
     binary_exists, generate_diff, is_git_ai_checkpoint_command, normalize_windows_path_for_shell,
     shell_quote_path, write_atomic,
@@ -420,11 +420,7 @@ impl HookInstaller for DroidInstaller {
     ) -> Result<Option<String>, GitAiError> {
         let config = Config::fresh();
         let mut diffs = Vec::new();
-        let default_root = official_default_root(AgentProfile::Droid);
-        for root in agent_profile_roots(AgentProfile::Droid, &config)
-            .into_iter()
-            .filter(|root| root.is_dir() || root == &default_root)
-        {
+        for root in install_profile_roots(AgentProfile::Droid, &config) {
             if let Some(diff) = Self::install_hooks_at_with_profile(
                 &root.join("settings.json"),
                 params,

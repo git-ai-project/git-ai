@@ -1,7 +1,7 @@
 use crate::config::{CodexHooksFormat, Config};
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::profile_roots::{AgentProfile, agent_profile_roots, official_default_root};
+use crate::mdm::profile_roots::{AgentProfile, agent_profile_roots, install_profile_roots};
 use crate::mdm::utils::{
     binary_exists, generate_diff, is_git_ai_checkpoint_command, normalize_windows_path_for_shell,
     shell_quote_path, write_atomic,
@@ -978,11 +978,7 @@ impl HookInstaller for CodexInstaller {
     ) -> Result<Option<String>, GitAiError> {
         let config = Config::fresh();
         let mut diffs = Vec::new();
-        let default_root = official_default_root(AgentProfile::Codex);
-        for profile_root in agent_profile_roots(AgentProfile::Codex, &config)
-            .into_iter()
-            .filter(|root| root.is_dir() || root == &default_root)
-        {
+        for profile_root in install_profile_roots(AgentProfile::Codex, &config) {
             if let Some(diff) =
                 Self::install_hooks_at(params, dry_run, &profile_root, config.codex_hooks_format())?
             {
@@ -1708,6 +1704,49 @@ codex_hooks = true
             assert!(check.tool_installed);
             assert!(check.hooks_installed);
             assert!(check.hooks_up_to_date);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_creates_missing_codex_home_override() {
+        with_temp_home(|home| {
+            // 指向一个尚未创建的 CODEX_HOME 覆盖目录：官方环境变量覆盖根应与官方默认根一样，
+            // 即使目录尚不存在也参与安装——否则在 agent 首次运行前执行 `git-ai install` 会漏装 hooks，
+            // 导致来自该自定义 agent home 的 AI 编辑在 hooks 装好之前无法被追踪。
+            let missing_override = home.join("codex-home-not-yet-created");
+            assert!(!missing_override.exists());
+
+            // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+            unsafe {
+                std::env::set_var("CODEX_HOME", &missing_override);
+            }
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let diff = installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+            assert!(
+                diff.is_some(),
+                "install should target CODEX_HOME even when the override directory is missing"
+            );
+            assert!(
+                missing_override.join("config.toml").exists(),
+                "missing CODEX_HOME override should be created and populated with hooks"
+            );
+
+            let parsed = CodexInstaller::parse_config_toml(
+                &fs::read_to_string(missing_override.join("config.toml")).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                CodexInstaller::config_has_inline_hooks(&parsed),
+                "inline hooks should be written into the missing CODEX_HOME override"
+            );
         });
     }
 
