@@ -160,3 +160,71 @@ fn test_autocrlf_worktree_preserves_ai_attribution_after_commit() {
     assert_eq!(stats.ai_accepted, 3);
     assert_eq!(stats.unknown_additions, 0);
 }
+
+#[test]
+fn test_commit_time_import_reordering_preserves_ai_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("consumer.js");
+    let mut file = repo.filename("consumer.js");
+    fs::write(
+        &file_path,
+        "const base = 0;\nimport m1 from 'm1';\nimport n1 from 'n1';\nimport o1 from 'o1';\nimport p1 from 'p1';\n",
+    )
+    .unwrap();
+    repo.stage_all_and_commit("baseline").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "const base = 0;".unattributed_human(),
+        "import m1 from 'm1';".unattributed_human(),
+        "import n1 from 'n1';".unattributed_human(),
+        "import o1 from 'o1';".unattributed_human(),
+        "import p1 from 'p1';".unattributed_human(),
+    ]);
+
+    repo.git_ai(&["checkpoint", "human", "consumer.js"])
+        .unwrap();
+    fs::write(
+        &file_path,
+        "const base = 0;\nimport m1 from 'm1';\nimport n1 from 'n1';\nimport o1 from 'o1';\nimport p1 from 'p1';\nimport d1 from 'd1';\nimport b1 from 'b1';\nimport a1 from 'a1';\nimport c1 from 'c1';\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "consumer.js"])
+        .unwrap();
+
+    let status: serde_json::Value =
+        serde_json::from_str(&repo.git_ai(&["status", "--json"]).unwrap()).unwrap();
+    assert_eq!(status["stats"]["ai_additions"], 4);
+    assert_eq!(status["stats"]["unknown_additions"], 0);
+
+    // Simulate an import sorter running after the AI checkpoint but before the
+    // index snapshot is committed.
+    fs::write(
+        &file_path,
+        "const base = 0;\nimport a1 from 'a1';\nimport b1 from 'b1';\nimport c1 from 'c1';\nimport d1 from 'd1';\nimport m1 from 'm1';\nimport n1 from 'n1';\nimport o1 from 'o1';\nimport p1 from 'p1';\n",
+    )
+    .unwrap();
+    repo.stage_all_and_commit("AI imports sorted before commit")
+        .unwrap();
+
+    file.assert_committed_lines(crate::lines![
+        "const base = 0;".unattributed_human(),
+        "import a1 from 'a1';".ai(),
+        "import b1 from 'b1';".ai(),
+        "import c1 from 'c1';".ai(),
+        "import d1 from 'd1';".ai(),
+        "import m1 from 'm1';".unattributed_human(),
+        "import n1 from 'n1';".unattributed_human(),
+        "import o1 from 'o1';".unattributed_human(),
+        "import p1 from 'p1';".unattributed_human(),
+    ]);
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(stats.git_diff_added_lines, 4);
+    assert_eq!(stats.ai_additions, 4);
+    assert_eq!(stats.unknown_additions, 0);
+
+    let initial = repo.current_working_logs().read_initial_attributions();
+    assert!(
+        initial.files.is_empty(),
+        "clean commit left phantom INITIAL attribution: {initial:#?}"
+    );
+}
