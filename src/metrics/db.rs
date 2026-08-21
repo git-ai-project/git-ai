@@ -760,6 +760,61 @@ impl MetricsDatabase {
         Ok(count as usize)
     }
 
+    /// Reset matching metric rows so the telemetry worker can deliver them again.
+    ///
+    /// Bounds are event timestamps and form a half-open `[from_ts, to_ts)` range.
+    /// Passing no bounds resets all rows, including malformed legacy rows that do
+    /// not have cached event metadata.
+    pub fn reingest_metrics(
+        &mut self,
+        from_ts: Option<u32>,
+        to_ts: Option<u32>,
+    ) -> Result<usize, GitAiError> {
+        match (from_ts, to_ts) {
+            (Some(from_ts), Some(to_ts)) if from_ts < to_ts => {
+                // Legacy rows predate cached event metadata. Reuse the existing
+                // bounded-batch backfill before applying an event-time filter so
+                // valid historical events are not silently missed.
+                self.backfill_event_metadata()?;
+                self.conn
+                    .execute(
+                        r#"
+                        UPDATE metrics
+                        SET delivered_ts = NULL,
+                            attempts = 0,
+                            last_sync_error = NULL,
+                            last_sync_at = NULL,
+                            next_retry_at = 0,
+                            processing_started_at = NULL
+                        WHERE event_ts >= ?1
+                          AND event_ts < ?2
+                          AND event_kind IS NOT NULL
+                        "#,
+                        params![i64::from(from_ts), i64::from(to_ts)],
+                    )
+                    .map_err(Into::into)
+            }
+            (None, None) => self
+                .conn
+                .execute(
+                    r#"
+                    UPDATE metrics
+                    SET delivered_ts = NULL,
+                        attempts = 0,
+                        last_sync_error = NULL,
+                        last_sync_at = NULL,
+                        next_retry_at = 0,
+                        processing_started_at = NULL
+                    "#,
+                    [],
+                )
+                .map_err(Into::into),
+            _ => Err(GitAiError::Generic(
+                "metrics reingestion requires no bounds or an ordered from/to pair".to_string(),
+            )),
+        }
+    }
+
     /// Summarize local metrics delivery state for user-facing diagnostics.
     pub fn status(&self) -> Result<MetricsStatus, GitAiError> {
         let now = current_unix_ts();
@@ -2806,6 +2861,108 @@ mod tests {
         assert!(delivered_ts.is_none());
         assert_eq!(attempts, MAX_METRIC_UPLOAD_ATTEMPTS as i64);
         assert_eq!(last_sync_error.as_deref(), Some("validation failed"));
+    }
+
+    #[test]
+    fn test_reingest_metrics_resets_delivery_state_in_half_open_event_time_range() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        let from_ts = seconds_ago(200);
+        let to_ts = seconds_ago(100);
+        let event_jsons = [
+            event_json(from_ts - 1),
+            event_json(from_ts),
+            event_json(from_ts + 50),
+            event_json(to_ts - 1),
+            event_json(to_ts),
+            "not-json".to_string(),
+        ];
+        let ids = db
+            .insert_events_with_delivered_ts(&event_jsons, Some(now))
+            .unwrap();
+
+        db.conn
+            .execute(
+                "UPDATE metrics \
+                 SET attempts = 6, last_sync_error = 'stopped', last_sync_at = ?1, \
+                     next_retry_at = ?1, processing_started_at = ?1",
+                params![now as i64],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET event_ts = NULL, event_kind = NULL WHERE id = ?1",
+                params![ids[2]],
+            )
+            .unwrap();
+
+        let reset = db.reingest_metrics(Some(from_ts), Some(to_ts)).unwrap();
+
+        assert_eq!(reset, 3);
+        struct DeliveryState {
+            id: i64,
+            delivered_ts: Option<i64>,
+            attempts: i64,
+            last_sync_error: Option<String>,
+            last_sync_at: Option<i64>,
+            next_retry_at: i64,
+            processing_started_at: Option<i64>,
+        }
+        let rows: Vec<DeliveryState> = db
+            .conn
+            .prepare(
+                "SELECT id, delivered_ts, attempts, last_sync_error, last_sync_at, \
+                        next_retry_at, processing_started_at \
+                 FROM metrics ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok(DeliveryState {
+                    id: row.get(0)?,
+                    delivered_ts: row.get(1)?,
+                    attempts: row.get(2)?,
+                    last_sync_error: row.get(3)?,
+                    last_sync_at: row.get(4)?,
+                    next_retry_at: row.get(5)?,
+                    processing_started_at: row.get(6)?,
+                })
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        for (index, row) in rows.iter().enumerate() {
+            let in_range = matches!(index, 1..=3);
+            if in_range {
+                assert_eq!(row.delivered_ts, None, "row {} should be pending", row.id);
+                assert_eq!(row.attempts, 0);
+                assert_eq!(row.last_sync_error, None);
+                assert_eq!(row.last_sync_at, None);
+                assert_eq!(row.next_retry_at, 0);
+                assert_eq!(row.processing_started_at, None);
+            } else {
+                assert_eq!(row.delivered_ts, Some(now as i64), "row {} changed", row.id);
+                assert_eq!(row.attempts, 6);
+                assert_eq!(row.last_sync_error.as_deref(), Some("stopped"));
+                assert_eq!(row.last_sync_at, Some(now as i64));
+                assert_eq!(row.next_retry_at, now as i64);
+                assert_eq!(row.processing_started_at, Some(now as i64));
+            }
+        }
+    }
+
+    #[test]
+    fn test_reingest_all_resets_rows_without_event_metadata() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        db.insert_events_with_delivered_ts(
+            &[event_json(seconds_ago(100)), "not-json".to_string()],
+            Some(now),
+        )
+        .unwrap();
+
+        assert_eq!(db.reingest_metrics(None, None).unwrap(), 2);
+        assert_eq!(db.status().unwrap().pending_retryable, 2);
     }
 
     #[test]
