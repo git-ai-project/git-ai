@@ -38,3 +38,6 @@ jobs:
       - name: Run type check
         run: npm run type-check
 
+      - name: Test OpenCode and CodeArts hooks
+        run: npm test
+

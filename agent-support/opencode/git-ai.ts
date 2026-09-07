@@ -22,10 +22,12 @@ import { spawn } from "child_process"
 import { readFile, stat } from "fs/promises"
 import { dirname, isAbsolute, join, resolve } from "path"
 
+// Also embedded by the CodeArts installer, which substitutes this agent name.
+const AGENT_NAME = "opencode"
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
 const CHECKPOINT_TIMEOUT_MS = 10_000
-const CHECKPOINT_ARGS = ["checkpoint", "opencode", "--hook-input", "stdin"]
+const CHECKPOINT_ARGS = ["checkpoint", AGENT_NAME, "--hook-input", "stdin"]
 
 // Tools that modify files and should be tracked
 const FILE_EDIT_TOOLS = new Set([
@@ -44,7 +46,9 @@ const APPLY_PATCH_FILE_PREFIXES = [
   "*** Move to: ",
 ]
 
-const isEditTool = (toolName: string): boolean => FILE_EDIT_TOOLS.has(toolName.toLowerCase())
+const isEditTool = (toolName: string): boolean =>
+  FILE_EDIT_TOOLS.has(toolName.toLowerCase()) ||
+  (AGENT_NAME.toString() === "codearts" && toolName.toLowerCase() === "deletefile")
 
 const isBashTool = (toolName: string): boolean => {
   const name = toolName.toLowerCase()
@@ -107,6 +111,10 @@ const collectToolPaths = (value: unknown, out: Set<string>): void => {
 
   for (const [key, val] of Object.entries(value)) {
     const keyLower = key.toLowerCase()
+    // Source text may itself contain file URIs or examples of apply_patch input.
+    if (["content", "oldstring", "newstring", "oldtext", "newtext", "old_text", "new_text"].includes(keyLower)) {
+      continue
+    }
     const isSinglePathKey = keyLower === "file_path" || keyLower === "filepath" || keyLower === "path" || keyLower === "fspath"
     const isMultiPathKey = keyLower === "files" || keyLower === "filepaths" || keyLower === "file_paths"
 
@@ -167,7 +175,7 @@ const extractToolCwd = (args: Record<string, unknown> | undefined): string | und
 }
 
 const debugEnabled = (): boolean => {
-  const value = process.env.GIT_AI_OPENCODE_DEBUG ?? process.env.GIT_AI_DEBUG
+  const value = process.env[`GIT_AI_${AGENT_NAME.toUpperCase()}_DEBUG`] ?? process.env.GIT_AI_DEBUG
   return value === "1" || value?.toLowerCase() === "true"
 }
 
@@ -182,7 +190,7 @@ const debugLog = (message: string, error?: unknown): void => {
       : error === undefined
         ? ""
         : String(error)
-    console.error(`[git-ai opencode] ${message}${detail ? `: ${detail}` : ""}`)
+    console.error(`[git-ai ${AGENT_NAME}] ${message}${detail ? `: ${detail}` : ""}`)
   } catch {
     // Debug logging must never be the reason a hook fails.
   }
@@ -223,6 +231,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
 
     const child = spawn(GIT_AI_BIN, CHECKPOINT_ARGS, {
       stdio: ["pipe", "ignore", "pipe"],
+      windowsHide: true,
     })
 
     timeout = setTimeout(() => {
@@ -231,7 +240,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
       } catch (error) {
         debugLog("failed to kill timed-out checkpoint command", error)
       }
-      finish(new Error(`git-ai checkpoint opencode timed out after ${CHECKPOINT_TIMEOUT_MS}ms`))
+      finish(new Error(`git-ai checkpoint ${AGENT_NAME} timed out after ${CHECKPOINT_TIMEOUT_MS}ms`))
     }, CHECKPOINT_TIMEOUT_MS)
 
     const stderr: Buffer[] = []
@@ -251,7 +260,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
       }
 
       const stderrText = Buffer.concat(stderr).toString().trim()
-      finish(new Error(`git-ai checkpoint opencode exited with ${code}${stderrText ? `: ${stderrText}` : ""}`))
+      finish(new Error(`git-ai checkpoint ${AGENT_NAME} exited with ${code}${stderrText ? `: ${stderrText}` : ""}`))
     })
 
     child.stdin.end(hookInput)
@@ -269,10 +278,12 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
 const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugin>> => {
   const { worktree, directory } = ctx
-  const defaultCwd = worktree || directory || process.cwd()
+  const defaultCwd = directory || worktree || process.cwd()
 
-  // Track pending calls by callID so we can reference them in the after hook
-  const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
+  // Call IDs can be reused across sessions. Keep each before/after pair together.
+  const callKey = (sessionID: string, callID: string): string => JSON.stringify([sessionID, callID])
+  const pendingCalls = new Map<string, { cwd: string; toolCwd: string; sessionID: string; toolInput: unknown; model?: string }>()
+  const sessionModels = new Map<string, string>()
 
   const nearestExistingDirectory = async (pathHint: string): Promise<string | null> => {
     let candidate = pathHint
@@ -424,25 +435,18 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
     return [...paths]
   }
 
-  const withMetadataFilePaths = (toolInput: unknown, filePaths: string[]): unknown => {
-    if (filePaths.length === 0) {
-      return toolInput
-    }
-
-    if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
-      return {
-        ...toolInput,
-        file_paths: filePaths,
-      }
-    }
-
-    return {
-      input: toolInput,
-      file_paths: filePaths,
-    }
-  }
-
   return {
+    "chat.params": swallowHookErrors(
+      "model capture failed",
+      async (input: { sessionID: string; agent?: string; model: { id?: string }; isEnsureTitle?: boolean }) => {
+        if (input.isEnsureTitle || input.agent === "title") return
+        const model = hookString(input.model?.id).trim()
+        if (input.sessionID && model) {
+          sessionModels.set(input.sessionID, model)
+        }
+      },
+    ),
+
     "tool.execute.before": swallowHookErrors(
       "pre-tool checkpoint failed",
       async (input: ToolHookInput, output?: { args?: unknown }) => {
@@ -455,25 +459,34 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
 
         const callID = hookString(input.callID)
         const sessionID = hookString(input.sessionID)
+        if (!callID.trim() || !sessionID.trim()) {
+          return
+        }
         const toolInput = output?.args ?? input.args
         const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
         const filePaths = isTrackedEdit ? extractFilePaths(toolInput, toolCwd) : []
+        // The checkpoint runs at the repo root, while tool paths may be relative
+        // to a subdirectory. Send resolved edit paths, not the original arguments.
+        const checkpointInput = isTrackedEdit ? { file_paths: filePaths } : toolInput
         const repoDir = await resolveRepoDir(filePaths, toolCwd)
         if (!repoDir) {
           return
         }
 
-        pendingCalls.set(callID, { repoDir, sessionID, toolInput })
+        const model = sessionModels.get(sessionID)
+        const cwd = isTrackedBash ? toolCwd : repoDir
 
         const hookInput = JSON.stringify({
           hook_event_name: "PreToolUse",
           session_id: sessionID,
           tool_use_id: callID,
-          cwd: repoDir,
+          cwd,
           tool_name: toolName,
-          tool_input: toolInput,
+          tool_input: checkpointInput,
+          model,
         })
         await runCheckpoint(hookInput)
+        pendingCalls.set(callKey(sessionID, callID), { cwd, toolCwd, sessionID, toolInput: checkpointInput, model })
       },
     ),
 
@@ -486,25 +499,28 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
         }
 
         const callID = hookString(input.callID)
-        const callInfo = pendingCalls.get(callID)
-        pendingCalls.delete(callID)
+        const key = callKey(hookString(input.sessionID), callID)
+        const callInfo = pendingCalls.get(key)
+        pendingCalls.delete(key)
 
         if (!callInfo) {
           debugLog(`skipping post-tool checkpoint without matching pre-tool call for ${callID}`)
           return
         }
 
-        const toolCwd = resolveCwd(extractToolCwd(asRecord(input.args)))
-        const metadataFilePaths = extractMetadataFilePaths(output?.metadata, toolCwd)
-        const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths)
+        const metadataFilePaths = extractMetadataFilePaths(output?.metadata, callInfo.toolCwd)
+        const toolInput = isEditTool(toolName)
+          ? { file_paths: [...new Set([...extractFilePaths(callInfo.toolInput, callInfo.cwd), ...metadataFilePaths])] }
+          : callInfo.toolInput
 
         const hookInput = JSON.stringify({
           hook_event_name: "PostToolUse",
           session_id: callInfo.sessionID,
           tool_use_id: callID,
-          cwd: callInfo.repoDir,
+          cwd: callInfo.cwd,
           tool_name: toolName,
           tool_input: toolInput,
+          model: callInfo.model,
         })
         await runCheckpoint(hookInput)
       },

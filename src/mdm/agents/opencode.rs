@@ -327,7 +327,8 @@ mod tests {
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
         // Checkpoint execution uses spawn(), which works in OpenCode CLI and Desktop.
         assert!(content.contains("spawn(GIT_AI_BIN"));
-        assert!(content.contains(r#""checkpoint", "opencode", "--hook-input", "stdin""#));
+        assert!(content.contains(r#"const AGENT_NAME = "opencode""#));
+        assert!(content.contains(r#""checkpoint", AGENT_NAME, "--hook-input", "stdin""#));
         assert!(!content.contains("Bun.$"));
     }
 
