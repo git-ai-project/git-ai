@@ -486,6 +486,26 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
     let _ = DAEMON_INTERNAL_TELEMETRY.set(handle);
 }
 
+/// Supplies the pipeline-health fields folded into each heartbeat.
+pub type HeartbeatFieldsProvider =
+    Arc<dyn Fn() -> BTreeMap<String, DaemonLogFieldValue> + Send + Sync>;
+
+/// Registered once at daemon startup by the coordinator, so the worker
+/// carries no coordinator dependency and the 15-minute cadence stays here.
+static DAEMON_HEARTBEAT_FIELDS_PROVIDER: std::sync::OnceLock<HeartbeatFieldsProvider> =
+    std::sync::OnceLock::new();
+
+pub fn set_daemon_heartbeat_fields_provider(provider: HeartbeatFieldsProvider) {
+    let _ = DAEMON_HEARTBEAT_FIELDS_PROVIDER.set(provider);
+}
+
+fn daemon_heartbeat_health_fields() -> BTreeMap<String, DaemonLogFieldValue> {
+    DAEMON_HEARTBEAT_FIELDS_PROVIDER
+        .get()
+        .map(|provider| provider())
+        .unwrap_or_default()
+}
+
 /// Submit telemetry from within the daemon process.
 /// Returns true if the handle was available and envelopes were submitted.
 pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
@@ -719,7 +739,10 @@ async fn telemetry_flush_loop(
             while next_heartbeat_at <= now {
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
             }
-            Some(daemon_heartbeat_event(started_at.elapsed()))
+            Some(daemon_heartbeat_event(
+                started_at.elapsed(),
+                daemon_heartbeat_health_fields(),
+            ))
         } else {
             None
         };
@@ -1261,8 +1284,12 @@ fn daemon_run_id() -> &'static str {
     DAEMON_RUN_ID.get_or_init(crate::uuid::generate_v4).as_str()
 }
 
-fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
-    let mut fields = BTreeMap::new();
+/// Builds the heartbeat from the daemon's health `fields`; the contract fields
+/// (`uptime_seconds`, `os`, `arch`) are set last and always win.
+fn daemon_heartbeat_event(
+    uptime: std::time::Duration,
+    mut fields: BTreeMap<String, DaemonLogFieldValue>,
+) -> DaemonLogEvent {
     fields.insert(
         "uptime_seconds".to_string(),
         DaemonLogFieldValue::from(uptime.as_secs()),
@@ -2862,7 +2889,7 @@ mod tests {
 
     #[test]
     fn daemon_heartbeat_event_uses_upload_contract_shape() {
-        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900));
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), BTreeMap::new());
 
         assert!(event.id.is_some());
         assert_eq!(event.kind, DaemonLogKind::Heartbeat);
@@ -2872,6 +2899,43 @@ mod tests {
         assert_eq!(
             event.fields.get("uptime_seconds"),
             Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert!(event.fields.contains_key("os"));
+        assert!(event.fields.contains_key("arch"));
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_merges_health_fields_and_keeps_contract_fields() {
+        let mut health = BTreeMap::new();
+        health.insert(
+            "sequencer_stalled".to_string(),
+            DaemonLogFieldValue::from(false),
+        );
+        health.insert(
+            "trace_roots_open_mutating".to_string(),
+            DaemonLogFieldValue::from(2_u64),
+        );
+        // A provider must not be able to shadow the contract fields.
+        health.insert(
+            "uptime_seconds".to_string(),
+            DaemonLogFieldValue::from(1_u64),
+        );
+
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), health);
+
+        assert_eq!(event.kind, DaemonLogKind::Heartbeat);
+        assert_eq!(event.message, "alive");
+        assert_eq!(
+            event.fields.get("uptime_seconds"),
+            Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert_eq!(
+            event.fields.get("sequencer_stalled"),
+            Some(&DaemonLogFieldValue::from(false))
+        );
+        assert_eq!(
+            event.fields.get("trace_roots_open_mutating"),
+            Some(&DaemonLogFieldValue::from(2_u64))
         );
         assert!(event.fields.contains_key("os"));
         assert!(event.fields.contains_key("arch"));
