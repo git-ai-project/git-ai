@@ -65,6 +65,53 @@ for (const agent of ["codearts", "opencode"]) {
     assert.deepEqual(calls[1].input.tool_input.file_paths, [args.filePath])
     assert.equal(calls[0].options.windowsHide, true)
   })
+
+  test(`${agent}: deleting a session clears its model without changing a pending call`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    await hooks["chat.params"]({ sessionID: "deleted", model: { id: "deleted-model" } }, {})
+    await hooks["chat.params"]({ sessionID: "retained", model: { id: "retained-model" } }, {})
+    const input = invocation("bash", "deleted")
+    await hooks["tool.execute.before"](input, { args: { command: "true" } })
+    await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "deleted" } } } })
+    await hooks["tool.execute.after"](input, {})
+    assert.equal(calls.at(-1).input.model, "deleted-model")
+    await hooks["tool.execute.before"](invocation("bash", "deleted", "next-call"), { args: { command: "true" } })
+    assert.equal(calls.at(-1).input.model, undefined)
+    await hooks["tool.execute.before"](invocation("bash", "retained"), { args: { command: "true" } })
+    assert.equal(calls.at(-1).input.model, "retained-model")
+  })
+
+  test(`${agent}: model cache is bounded and retains recently used sessions`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    for (let index = 0; index < 256; index++) {
+      await hooks["chat.params"]({ sessionID: `session-${index}`, model: { id: `model-${index}` } }, {})
+    }
+    const recent = invocation("bash", "session-0")
+    await hooks["tool.execute.before"](recent, { args: { command: "true" } })
+    await hooks["tool.execute.after"](recent, {})
+    await hooks["chat.params"]({ sessionID: "session-256", model: { id: "new-model" } }, {})
+
+    await hooks["tool.execute.before"](invocation("bash", "session-1"), { args: { command: "true" } })
+    assert.equal(calls.at(-1).input.model, undefined)
+    await hooks["tool.execute.before"](recent, { args: { command: "true" } })
+    assert.equal(calls.at(-1).input.model, "model-0")
+    await hooks["tool.execute.before"](invocation("bash", "session-256"), { args: { command: "true" } })
+    assert.equal(calls.at(-1).input.model, "new-model")
+  })
+
+  test(`${agent}: evicting a session model preserves the pending call snapshot`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    await hooks["chat.params"]({ sessionID: "pending", model: { id: "original-model" } }, {})
+    const input = invocation("bash", "pending")
+    await hooks["tool.execute.before"](input, { args: { command: "true" } })
+    for (let index = 0; index < 256; index++) {
+      await hooks["chat.params"]({ sessionID: `session-${index}`, model: { id: `model-${index}` } }, {})
+    }
+    await hooks["tool.execute.after"](input, {})
+    assert.equal(calls.at(-1).input.model, "original-model")
+    await hooks["tool.execute.before"](input, { args: { command: "true" } })
+    assert.equal(calls.at(-1).input.model, undefined)
+  })
 }
 
 test("codearts: model is scoped to each session and shell call", async (t) => {

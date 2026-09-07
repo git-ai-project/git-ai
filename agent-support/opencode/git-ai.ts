@@ -17,7 +17,7 @@
  * @see https://opencode.ai/docs/plugins/
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Hooks, Plugin } from "@opencode-ai/plugin"
 import { spawn } from "child_process"
 import { readFile, stat } from "fs/promises"
 import { dirname, isAbsolute, join, resolve } from "path"
@@ -28,6 +28,7 @@ const AGENT_NAME = "opencode"
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
 const CHECKPOINT_TIMEOUT_MS = 10_000
 const CHECKPOINT_ARGS = ["checkpoint", AGENT_NAME, "--hook-input", "stdin"]
+const MAX_SESSION_MODELS = 256
 
 // Tools that modify files and should be tracked
 const FILE_EDIT_TOOLS = new Set([
@@ -284,6 +285,15 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
   const callKey = (sessionID: string, callID: string): string => JSON.stringify([sessionID, callID])
   const pendingCalls = new Map<string, { cwd: string; toolCwd: string; sessionID: string; toolInput: unknown; model?: string }>()
   const sessionModels = new Map<string, string>()
+  const rememberSessionModel = (sessionID: string, model: string): void => {
+    // Keep recent sessions even when the client never emits session.deleted.
+    sessionModels.delete(sessionID)
+    sessionModels.set(sessionID, model)
+    if (sessionModels.size > MAX_SESSION_MODELS) {
+      const oldestSessionID = sessionModels.keys().next().value
+      if (oldestSessionID !== undefined) sessionModels.delete(oldestSessionID)
+    }
+  }
 
   const nearestExistingDirectory = async (pathHint: string): Promise<string | null> => {
     let candidate = pathHint
@@ -436,13 +446,22 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
   }
 
   return {
+    event: swallowHookErrors(
+      "session model cleanup failed",
+      async ({ event }: Parameters<NonNullable<Hooks["event"]>>[0]) => {
+        if (event.type === "session.deleted") {
+          sessionModels.delete(event.properties.info.id)
+        }
+      },
+    ),
+
     "chat.params": swallowHookErrors(
       "model capture failed",
       async (input: { sessionID: string; agent?: string; model: { id?: string }; isEnsureTitle?: boolean }) => {
         if (input.isEnsureTitle || input.agent === "title") return
         const model = hookString(input.model?.id).trim()
         if (input.sessionID && model) {
-          sessionModels.set(input.sessionID, model)
+          rememberSessionModel(input.sessionID, model)
         }
       },
     ),
@@ -474,6 +493,7 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
         }
 
         const model = sessionModels.get(sessionID)
+        if (model) rememberSessionModel(sessionID, model)
         const cwd = isTrackedBash ? toolCwd : repoDir
 
         const hookInput = JSON.stringify({
