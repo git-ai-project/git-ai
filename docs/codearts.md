@@ -23,6 +23,14 @@ Before a tracked file edit, the plugin captures any existing changes as untracke
 
 The plugin captures the model identifier from CodeArts chat hooks when available. If CodeArts does not provide model information for the session, the model is recorded as `unknown`. Set `GIT_AI_CODEARTS_DEBUG=1` or `GIT_AI_DEBUG=1` before launching CodeArts to log checkpoint failures. Hook failures do not interrupt the agent's tool execution.
 
+File checkpoints use the same paths before and after an edit. Paths first
+reported in post-tool metadata are not added to the attribution scope, because
+their previous untracked changes cannot safely be distinguished from AI edits.
+Edits without any resolvable pre-tool paths are skipped. Failed or cancelled
+calls are cleared when the client reports a tool error; retained pending calls
+are also capped at 1,024 if terminal events are missing. An evicted call skips
+its post-checkpoint.
+
 This integration does not import stored conversation transcripts. It covers tool edits reported through CodeArts Agent hooks; legacy CodeArts Snap inline completions are not covered by these hooks.
 
 ### Tool coverage
@@ -35,8 +43,8 @@ repository's OpenCode plugin, plus CodeArts `deleteFile`:
 | --- | --- | --- |
 | `edit`, `write` | Capture changes to the supplied file paths | Real CodeArts CLI 26.8.1 / MiMo edits, commits, stats and blame verified |
 | `bash`, `shell` | Reuse OpenCode's shell snapshot attribution | Real `bash` edits verified; `shell` alias covered by parser tests |
-| `multiedit` | Extract and deduplicate paths across nested edits | Parser tests; no real CodeArts run yet |
-| `apply_patch` | Extract add, update, delete and move paths from `*** ... File:` / `*** Move to:` headers | Parser tests; no real CodeArts run yet |
+| `multiedit` | Extract and deduplicate paths across nested edits | Parser and `TestRepo` commit/blame tests, including unrelated dirty files; no real CodeArts run yet |
+| `apply_patch` | Extract add, update, delete and move paths from `*** ... File:` / `*** Move to:` headers | Parser and `TestRepo` add/move/delete commit tests; no real CodeArts run yet |
 | `patch`, `applypatch` | Recognize the aliases and use the same path extractor | Implemented; no separate real run yet |
 | `deleteFile` | Capture the explicitly named deletion target | Plugin-hook and parser tests; no real deletion attribution run yet |
 
@@ -46,6 +54,11 @@ supported fields such as `filePath`, `file_path`, `path`, `files`, nested edit
 objects, or the supported patch headers. Recognizing `patch` does not imply
 support for every patch format; a raw unified diff without supported path
 fields or headers is not currently parsed.
+
+The plugin decodes standard `file://` paths, including escaped spaces and
+Windows drive letters. On Windows, `edit` and `deleteFile` also follow CodeArts
+26.8.1's `/d/path` to `d:/path` conversion. That conversion is not applied to
+other tools, whose execution uses different path handling.
 
 Read-only tools are skipped. Arbitrarily named custom or MCP file-writing tools
 are not automatically tracked. Subagent edits depend on receiving their own

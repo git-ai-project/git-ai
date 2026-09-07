@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises"
 import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { createRequire } from "node:module"
 import { PassThrough } from "node:stream"
 import { test } from "node:test"
@@ -32,9 +33,10 @@ async function pluginFixture(t, agent = "codearts", exitCode = 0, subdirectory =
         child.stdin = new PassThrough()
         let stdin = ""
         child.stdin.on("data", (data) => { stdin += data })
-        child.stdin.on("finish", () => {
+        child.stdin.on("finish", async () => {
           calls.push({ binary, args: Array.from(args), options, input: JSON.parse(stdin) })
-          queueMicrotask(() => child.emit("close", exitCode))
+          const code = typeof exitCode === "function" ? await exitCode() : exitCode
+          queueMicrotask(() => child.emit("close", code))
         })
         child.kill = () => true
         return child
@@ -64,6 +66,115 @@ for (const agent of ["codearts", "opencode"]) {
     assert.equal(calls[1].input.session_id, "session-1")
     assert.deepEqual(calls[1].input.tool_input.file_paths, [args.filePath])
     assert.equal(calls[0].options.windowsHide, true)
+  })
+
+  test(`${agent}: post-only metadata cannot expand the pre-checkpoint scope`, async (t) => {
+    const { directory, hooks, calls } = await pluginFixture(t, agent)
+    await mkdir(join(directory, "src"))
+    const input = invocation("edit")
+    const args = { workdir: "src", filePath: "main.ts" }
+    await hooks["tool.execute.before"](input, { args })
+    await hooks["tool.execute.after"]({ ...input, args }, {
+      metadata: { files: [{ filePath: "main.ts" }, { filePath: "untracked.ts" }] },
+    })
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[0].input.tool_input.file_paths, [join(directory, "src", "main.ts")])
+    assert.deepEqual(calls[1].input.tool_input, calls[0].input.tool_input)
+  })
+
+  test(`${agent}: file URI edit paths decode spaces and Unicode`, async (t) => {
+    const { directory, hooks, calls } = await pluginFixture(t, agent)
+    const filePath = join(directory, "space 中文.ts")
+    const input = invocation("edit")
+    const uri = pathToFileURL(filePath).href
+    for (const fileUri of [uri, uri.replace("file://", "file://localhost")]) {
+      await hooks["tool.execute.before"](input, { args: { filePath: fileUri } })
+      await hooks["tool.execute.after"](input, {})
+      assert.deepEqual(calls.at(-2).input.tool_input.file_paths, [filePath])
+      assert.deepEqual(calls.at(-1).input.tool_input, calls.at(-2).input.tool_input)
+    }
+    assert.equal(calls.length, 4)
+  })
+
+  test(`${agent}: tools without CodeArts drive conversion preserve rooted paths`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    const tools = agent === "opencode" || process.platform !== "win32" ? ["write", "edit"] : ["write"]
+    for (const tool of tools) {
+      const input = invocation(tool)
+      await hooks["tool.execute.before"](input, { args: { filePath: "/d/example.ts" } })
+      await hooks["tool.execute.after"](input, {})
+      assert.deepEqual(calls.at(-1).input.tool_input.file_paths, ["/d/example.ts"])
+    }
+  })
+
+  test(`${agent}: invalid file URIs do not create a checkpoint`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    const input = invocation("edit")
+    await hooks["tool.execute.before"](input, { args: { filePath: "file:///%ZZ" } })
+    await hooks["tool.execute.after"](input, {})
+    assert.equal(calls.length, 0)
+  })
+
+  test(`${agent}: edits without pre-tool paths never checkpoint the whole repository`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    const input = invocation("patch")
+    await hooks["tool.execute.before"](input, { args: { patch: "unrecognized patch format" } })
+    await hooks["tool.execute.after"](input, { metadata: { files: [{ filePath: "untracked.ts" }] } })
+    assert.equal(calls.length, 0)
+  })
+
+  test(`${agent}: failed tool events clear only the matching pending call`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    const failed = invocation("bash", "failed")
+    const retained = invocation("bash", "retained")
+    await hooks["tool.execute.before"](failed, { args: { command: "failed" } })
+    await hooks["tool.execute.before"](retained, { args: { command: "retained" } })
+    await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+      type: "tool", sessionID: "failed", callID: "call-1", tool: "bash", state: { status: "error" },
+    } } } })
+    await hooks["tool.execute.after"](failed, {})
+    assert.equal(calls.length, 2)
+    await hooks["tool.execute.after"](retained, {})
+    assert.equal(calls.length, 3)
+    assert.equal(calls.at(-1).input.session_id, "retained")
+  })
+
+  test(`${agent}: completed tool events preserve the pending post-checkpoint`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    const input = invocation("bash")
+    await hooks["tool.execute.before"](input, { args: { command: "true" } })
+    await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+      type: "tool", sessionID: input.sessionID, callID: input.callID, state: { status: "completed" },
+    } } } })
+    await hooks["tool.execute.after"](input, {})
+    assert.equal(calls.length, 2)
+  })
+
+  test(`${agent}: cancellation during a pre-checkpoint cannot resurrect a pending call`, async (t) => {
+    const input = invocation("bash")
+    const { hooks, calls } = await pluginFixture(t, agent, async () => {
+      await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+        type: "tool", sessionID: input.sessionID, callID: input.callID, state: { status: "error" },
+      } } } })
+      return 0
+    })
+    await hooks["tool.execute.before"](input, { args: { command: "true" } })
+    await hooks["tool.execute.after"](input, {})
+    assert.equal(calls.length, 1)
+  })
+
+  test(`${agent}: missing terminal events cannot retain pending calls indefinitely`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent)
+    for (let index = 0; index <= 1024; index++) {
+      await hooks["tool.execute.before"](invocation("bash", "session-1", `call-${index}`), {
+        args: { command: `command-${index}` },
+      })
+    }
+    await hooks["tool.execute.after"](invocation("bash", "session-1", "call-0"), {})
+    assert.equal(calls.length, 1025)
+    await hooks["tool.execute.after"](invocation("bash", "session-1", "call-1024"), {})
+    assert.equal(calls.length, 1026)
+    assert.equal(calls.at(-1).input.tool_input.command, "command-1024")
   })
 
   test(`${agent}: deleting a session clears its model without changing a pending call`, async (t) => {
@@ -114,6 +225,21 @@ for (const agent of ["codearts", "opencode"]) {
   })
 }
 
+test("codearts: Windows edit and deleteFile follow the client's drive-path transformation", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const { directory, hooks, calls } = await pluginFixture(t)
+  const filePath = join(directory, "file.ts")
+  const posixDrivePath = filePath.replace(/\\/g, "/").replace(/^([a-zA-Z]):\//, "/$1/")
+  for (const tool of ["edit", "deleteFile"]) {
+    const input = invocation(tool, "session-1", tool)
+    const args = tool === "deleteFile" ? { file_paths: [posixDrivePath] } : { filePath: posixDrivePath }
+    await hooks["tool.execute.before"](input, { args })
+    await hooks["tool.execute.after"](input, {})
+    assert.deepEqual(calls.at(-1).input.tool_input.file_paths, [filePath.replace(/\\/g, "/")])
+  }
+})
+
 test("codearts: model is scoped to each session and shell call", async (t) => {
   const { hooks, calls } = await pluginFixture(t)
   await hooks["chat.params"]({ sessionID: "session-1", model: { id: "deepseek-v3" } }, {})
@@ -133,19 +259,6 @@ test("codearts: title generation does not replace the coding model", async (t) =
   await hooks["chat.params"]({ sessionID: "session-1", model: { id: "cli-title-model" }, agent: "title" }, {})
   await hooks["tool.execute.before"](invocation("bash"), { args: { command: "true" } })
   assert.equal(calls[0].input.model, "coding-model")
-})
-
-test("codearts: relative edit paths resolve against tool workdir before checkpointing", async (t) => {
-  const { directory, hooks, calls } = await pluginFixture(t)
-  await mkdir(join(directory, "src"))
-  const input = invocation("edit")
-  const args = { workdir: "src", filePath: "main.ts" }
-  await hooks["tool.execute.before"](input, { args })
-  await hooks["tool.execute.after"]({ ...input, args }, { metadata: { files: [{ filePath: "extra.ts" }] } })
-  assert.deepEqual(calls[0].input.tool_input.file_paths, [join(directory, "src", "main.ts")])
-  assert.deepEqual(calls[1].input.tool_input.file_paths, [
-    join(directory, "src", "main.ts"), join(directory, "src", "extra.ts"),
-  ])
 })
 
 test("codearts: relative edits use the active directory inside a worktree", async (t) => {
@@ -204,8 +317,9 @@ test("codearts: identical call IDs in different sessions stay separate", async (
 })
 
 test("codearts: checkpoint failures leave tool execution usable", async (t) => {
-  const { hooks } = await pluginFixture(t, "codearts", 1)
+  const { hooks, calls } = await pluginFixture(t, "codearts", 1)
   const input = invocation("bash")
   await assert.doesNotReject(() => hooks["tool.execute.before"](input, { args: { command: "true" } }))
   await assert.doesNotReject(() => hooks["tool.execute.after"](input, {}))
+  assert.equal(calls.length, 1)
 })

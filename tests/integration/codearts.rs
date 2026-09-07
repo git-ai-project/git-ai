@@ -330,3 +330,131 @@ fn test_codearts_e2e_shell_edit_attributes_only_new_changes() {
     assert_eq!(session.agent_id.id, "codearts-session");
     assert_eq!(session.agent_id.model, "deepseek-v3.2");
 }
+
+#[test]
+fn test_codearts_e2e_multiedit_excludes_unrelated_dirty_files() {
+    let repo = TestRepo::new();
+    let mut first = repo.filename("first.txt");
+    let mut second = repo.filename("second.txt");
+    let mut outside = repo.filename("outside.txt");
+
+    fs::write(repo.path().join("first.txt"), "First original line\n").unwrap();
+    fs::write(repo.path().join("second.txt"), "Second original line\n").unwrap();
+    fs::write(repo.path().join("outside.txt"), "Outside original line\n").unwrap();
+    repo.stage_all_and_commit("Initial multiedit files")
+        .unwrap();
+    first.assert_committed_lines(lines!["First original line".unattributed_human()]);
+    second.assert_committed_lines(lines!["Second original line".unattributed_human()]);
+    outside.assert_committed_lines(lines!["Outside original line".unattributed_human()]);
+
+    // These edits have no checkpoint and must remain untracked even when they
+    // are committed together with CodeArts changes in other files.
+    fs::write(
+        repo.path().join("outside.txt"),
+        "Outside original line\nUntracked outside line one\nUntracked outside line two\n",
+    )
+    .unwrap();
+    let input = json!({"edits": [
+        {"file_path": "first.txt"},
+        {"filePath": "second.txt"},
+        {"path": "first.txt"},
+    ]});
+    checkpoint(
+        &repo,
+        "PreToolUse",
+        "multiedit",
+        "multiedit-1",
+        input.clone(),
+    );
+    fs::write(
+        repo.path().join("first.txt"),
+        "First original line\nFirst CodeArts addition\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("second.txt"),
+        "Second original line\nSecond CodeArts addition\n",
+    )
+    .unwrap();
+    checkpoint(&repo, "PostToolUse", "multiedit", "multiedit-1", input);
+    let commit = repo.stage_all_and_commit("CodeArts multiedit").unwrap();
+    first.assert_committed_lines(lines![
+        "First original line".unattributed_human(),
+        "First CodeArts addition".ai(),
+    ]);
+    second.assert_committed_lines(lines![
+        "Second original line".unattributed_human(),
+        "Second CodeArts addition".ai(),
+    ]);
+    outside.assert_committed_lines(lines![
+        "Outside original line".unattributed_human(),
+        "Untracked outside line one".unattributed_human(),
+        "Untracked outside line two".unattributed_human(),
+    ]);
+    let sessions = &commit.authorship_log.metadata.sessions;
+    assert_eq!(sessions.len(), 1);
+    let session = sessions.values().next().unwrap();
+    assert_eq!(session.agent_id.tool, "codearts");
+    assert_eq!(session.agent_id.id, "codearts-session");
+    assert_eq!(session.agent_id.model, "deepseek-v3.2");
+}
+
+#[test]
+fn test_codearts_e2e_apply_patch_adds_and_moves_files() {
+    let repo = TestRepo::new();
+    let mut original = repo.filename("original.txt");
+    let mut renamed = repo.filename("renamed.txt");
+    let mut added = repo.filename("added.txt");
+    let mut deleted = repo.filename("deleted.txt");
+    let original_content = "Original first line\nOriginal second line\nOriginal third line\n";
+
+    fs::write(repo.path().join("original.txt"), original_content).unwrap();
+    fs::write(
+        repo.path().join("deleted.txt"),
+        "Remove this original line\n",
+    )
+    .unwrap();
+    repo.stage_all_and_commit("Initial patch files").unwrap();
+    original.assert_committed_lines(lines![
+        "Original first line".unattributed_human(),
+        "Original second line".unattributed_human(),
+        "Original third line".unattributed_human(),
+    ]);
+    deleted.assert_committed_lines(lines!["Remove this original line".unattributed_human()]);
+
+    let input = json!({"patchText": "*** Begin Patch\n*** Add File: added.txt\n+CodeArts new file\n*** Delete File: deleted.txt\n*** Update File: original.txt\n*** Move to: renamed.txt\n@@\n Original third line\n+CodeArts addition after move\n*** End Patch"});
+    checkpoint(&repo, "PreToolUse", "apply_patch", "patch-1", input.clone());
+    fs::rename(
+        repo.path().join("original.txt"),
+        repo.path().join("renamed.txt"),
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("renamed.txt"),
+        format!("{original_content}CodeArts addition after move\n"),
+    )
+    .unwrap();
+    fs::write(repo.path().join("added.txt"), "CodeArts new file\n").unwrap();
+    fs::remove_file(repo.path().join("deleted.txt")).unwrap();
+    checkpoint(&repo, "PostToolUse", "apply_patch", "patch-1", input);
+    let commit = repo
+        .stage_all_and_commit("CodeArts patch with a move")
+        .unwrap();
+    renamed.assert_committed_lines(lines![
+        "Original first line".unattributed_human(),
+        "Original second line".unattributed_human(),
+        "Original third line".unattributed_human(),
+        "CodeArts addition after move".ai(),
+    ]);
+    added.assert_committed_lines(lines!["CodeArts new file".ai()]);
+    assert!(!repo.path().join("original.txt").exists());
+    assert!(!repo.path().join("deleted.txt").exists());
+    assert!(repo.git(&["cat-file", "-e", "HEAD:original.txt"]).is_err());
+    assert!(repo.git(&["cat-file", "-e", "HEAD:deleted.txt"]).is_err());
+    let sessions = &commit.authorship_log.metadata.sessions;
+    assert_eq!(sessions.len(), 1);
+    let session = sessions.values().next().unwrap();
+    assert_eq!(session.agent_id.tool, "codearts");
+    assert_eq!(session.agent_id.id, "codearts-session");
+    assert_eq!(session.agent_id.model, "deepseek-v3.2");
+}
