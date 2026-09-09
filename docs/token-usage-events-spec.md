@@ -42,7 +42,7 @@ Driven by `TokenUsageWorker` (`src/daemon/token_usage_worker.rs`):
   file already queued for backfill promotes it. Shutdown is observed while a
   pass is in flight (the worker selects on its own shutdown `Notify` around
   the blocking pass).
-- **Feature flag:** `token_usage_metrics` (debug: on, release: off) gates the
+- **Feature flag:** `token_usage_metrics` (on by default) gates the
   worker at daemon startup, like `transcript_streaming`. When the flag is
   off, no worker or ticker runs, the token-usage database is not created, and
   a previously created one is deleted at daemon startup (independent of the

@@ -7,10 +7,9 @@ const YIELD_WINDOW_SECS: u32 = 4 * 3600;
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
 use crate::metrics::db::{MetricHistoryRecord, MetricsDatabase};
-use crate::metrics::events::{checkpoint_pos, committed_pos, session_event_pos};
-use crate::metrics::model_pricing::{ModelPricing, pricing_for};
+use crate::metrics::events::{checkpoint_pos, committed_pos, token_usage_pos};
 use crate::metrics::pos_encoded::{
-    sparse_get_string, sparse_get_u32, sparse_get_vec_string, sparse_get_vec_u32,
+    sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32,
 };
 use crate::metrics::types::MetricEvent;
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
@@ -74,11 +73,14 @@ pub struct ActivitySummary {
     pub favorite_model: Option<String>,
 }
 
+/// Token/spend totals from the v2 token-usage dataset (TokenUsage events,
+/// id 9), whose buckets carry authoritatively priced costs.
 #[derive(Debug, Default, Serialize)]
 pub struct TokenSummary {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
+    /// Cache-write tokens (serialized as `cache_creation` for JSON stability).
     pub cache_creation: u64,
     /// Estimated cost in USD, summed across models with known pricing.
     pub estimated_cost_usd: f64,
@@ -184,8 +186,8 @@ const USAGE_EVENT_IDS: &[u16] = &[
     1, // Committed
     4, // Checkpoint
     5, // SessionEvent
+    9, // TokenUsage
 ];
-const SESSION_RAW_JSON_KEY: &str = "0";
 
 /// Acquire the global DB lock and fetch metric history for the given window.
 fn fetch_metric_history(
@@ -242,15 +244,9 @@ fn compute_activity_from_records(
     let mut session_ids: HashSet<String> = HashSet::new();
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
 
-    // Claude-shaped token usage keyed by assistant message id. Value is
-    // (model, accum, record_ts, session_id). `record_ts` is the Unix timestamp of the
-    // first event that introduced this message id — used for WoW bucketing.
-    let mut message_usage: HashMap<String, (String, TokenAccum, u32, String)> = HashMap::new();
-
-    // Codex-shaped token usage keyed by session id. Codex reports cumulative
-    // session totals (total_token_usage) on each token_count event, so we keep
-    // the per-session max rather than summing.
-    let mut codex_sessions: HashMap<String, CodexSessionAccum> = HashMap::new();
+    // v2 token-usage buckets (event id 9), keeping only the latest emitted
+    // revision per bucket key.
+    let mut token_buckets: HashMap<TokenBucketKey, TokenBucket> = HashMap::new();
 
     // bucket_key -> accumulated stats
     let mut bucket_map: HashMap<String, BucketAccum> = HashMap::new();
@@ -328,18 +324,8 @@ fn compute_activity_from_records(
                     let first = session_first_ts.entry(sid).or_insert(record.ts);
                     *first = (*first).min(record.ts);
                 }
-                let tool = sparse_get_string(&event.attrs, attr_pos::TOOL)
-                    .flatten()
-                    .unwrap_or_default();
-                if tool == "codex" {
-                    aggregate_codex_tokens(event, record.ts, &mut codex_sessions);
-                } else {
-                    let sid = sparse_get_string(&event.attrs, attr_pos::SESSION_ID)
-                        .flatten()
-                        .unwrap_or_default();
-                    aggregate_session_tokens(event, record.ts, sid, &mut message_usage);
-                }
             }
+            9 => aggregate_token_usage(event, &mut token_buckets),
             _ => {}
         }
     }
@@ -394,8 +380,7 @@ fn compute_activity_from_records(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
-    let (tokens, cost_by_day) =
-        build_token_summary(message_usage, codex_sessions, now_ts, since_ts);
+    let (tokens, cost_by_day) = build_token_summary(token_buckets, now_ts, since_ts);
 
     // Map by order key for fill_buckets to look up real data.
     let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
@@ -538,59 +523,70 @@ fn compute_streaks(days: &BTreeMap<NaiveDate, u32>, today: NaiveDate) -> (u32, u
     (longest, current)
 }
 
-/// Per-model token accumulator.
+/// Bucket key for v2 token-usage events: (session_id, model, speed, bucket_ts).
+type TokenBucketKey = (String, String, u32, u64);
+
+/// Latest revision of a v2 token-usage bucket (event id 9). Cost was priced
+/// authoritatively at emission time (`src/token_usage/cost.rs`), so readers
+/// only sum it.
 #[derive(Debug, Default, Clone)]
-struct TokenAccum {
+struct TokenBucket {
+    emitted_seq: u64,
     input: u64,
     output: u64,
     cache_read: u64,
-    cache_creation: u64,
+    cache_write: u64,
+    cost_micro_usd: u64,
 }
 
-/// Per-session codex accumulator. Codex reports *cumulative* session totals on
-/// each `token_count` event, so we track the max of each raw field. The model
-/// name arrives on a separate event (`payload.model`), captured when seen.
-#[derive(Debug, Default, Clone)]
-struct CodexSessionAccum {
-    model: Option<String>,
-    /// Unix timestamp of the latest token-usage event seen for this session
-    /// (WoW bucketing).
-    last_usage_ts: u32,
-    /// Cumulative input tokens (includes cached).
-    input_tokens: u64,
-    /// Cumulative cached input tokens (subset of input_tokens).
-    cached_input_tokens: u64,
-    /// Cumulative output tokens (includes reasoning).
-    output_tokens: u64,
-}
-
-impl CodexSessionAccum {
-    /// Map codex token fields onto the shared `TokenAccum` schema.
-    ///
-    /// Codex `input_tokens` *includes* cached tokens, so non-cached input is
-    /// the difference. Codex has no cache-creation concept.
-    fn to_token_accum(&self) -> TokenAccum {
-        TokenAccum {
-            input: self.input_tokens.saturating_sub(self.cached_input_tokens),
-            output: self.output_tokens,
-            cache_read: self.cached_input_tokens,
-            cache_creation: 0,
-        }
+impl TokenBucket {
+    /// A zeroed correction revision (the bucket's entries were all removed).
+    /// Cost is checked too: a transcript-priced entry can carry a positive
+    /// `costUSD` with zero token counters, and that spend must survive.
+    fn is_empty(&self) -> bool {
+        self.input == 0
+            && self.output == 0
+            && self.cache_read == 0
+            && self.cache_write == 0
+            && self.cost_micro_usd == 0
     }
 }
 
-/// Rough display estimate for `git-ai usage`: flat base rates with the
-/// Claude-shape defaults for unpublished cache rates (0.1x input for reads,
-/// 1.25x for writes) for every tool. The TokenUsage event pipeline
-/// (`src/token_usage/cost.rs`) is the authoritative dollars — it prices
-/// per entry with tier, speed, and per-tool cache-rate semantics (e.g. Codex
-/// bills unpublished cache reads at the full input rate).
-fn estimate_cost(acc: &TokenAccum, pricing: &ModelPricing) -> f64 {
-    (acc.input as f64 * pricing.input
-        + acc.output as f64 * pricing.output
-        + acc.cache_creation as f64 * pricing.cache_write_rate()
-        + acc.cache_read as f64 * pricing.cache_read_rate())
-        / 1_000_000.0
+/// Fold a TokenUsage event into the per-bucket map. Buckets are re-emitted
+/// with a strictly increasing `emitted_seq` whenever their aggregate changes
+/// (including corrections down to zero), so only the highest revision per
+/// bucket key is authoritative.
+fn aggregate_token_usage(event: &MetricEvent, buckets: &mut HashMap<TokenBucketKey, TokenBucket>) {
+    let Some(bucket_ts) = sparse_get_u64(&event.values, token_usage_pos::BUCKET_TS).flatten()
+    else {
+        return;
+    };
+    let session_id = sparse_get_string(&event.attrs, attr_pos::SESSION_ID)
+        .flatten()
+        .unwrap_or_default();
+    let model = sparse_get_string(&event.attrs, attr_pos::MODEL)
+        .flatten()
+        .unwrap_or_else(|| "unknown".to_string());
+    let speed = sparse_get_u32(&event.values, token_usage_pos::SPEED)
+        .flatten()
+        .unwrap_or(0);
+
+    let get = |pos: usize| sparse_get_u64(&event.values, pos).flatten().unwrap_or(0);
+    let revision = TokenBucket {
+        emitted_seq: get(token_usage_pos::EMITTED_SEQ),
+        input: get(token_usage_pos::INPUT_TOKENS),
+        output: get(token_usage_pos::OUTPUT_TOKENS),
+        cache_read: get(token_usage_pos::CACHE_READ_TOKENS),
+        cache_write: get(token_usage_pos::CACHE_WRITE_TOKENS),
+        cost_micro_usd: get(token_usage_pos::EST_COST_MICRO_USD),
+    };
+
+    let entry = buckets
+        .entry((session_id, model, speed, bucket_ts))
+        .or_default();
+    if revision.emitted_seq >= entry.emitted_seq {
+        *entry = revision;
+    }
 }
 
 /// Shorten a model id for display: strip a trailing "-YYYYMMDD" date snapshot
@@ -604,116 +600,70 @@ fn shorten_model(model: &str) -> String {
     }
 }
 
-/// Fold a set of message-usage entries into a per-model cost estimate (USD).
-/// Used to compute each WoW half independently.
-fn cost_for_message_slice(entries: impl Iterator<Item = (String, TokenAccum)>) -> f64 {
-    let mut model_totals: HashMap<String, TokenAccum> = HashMap::new();
-    for (model, acc) in entries {
-        let e = model_totals.entry(model).or_default();
-        e.input += acc.input;
-        e.output += acc.output;
-        e.cache_read += acc.cache_read;
-        e.cache_creation += acc.cache_creation;
-    }
-    model_totals
-        .iter()
-        .filter_map(|(model, acc)| pricing_for(model).map(|p| estimate_cost(acc, &p)))
-        .sum()
-}
-
 /// Returns the aggregate token summary plus a per-local-day spend map (USD),
-/// derived from the same per-message / per-session data so the daily series
-/// reconciles with the headline total.
+/// derived from the same bucket data so the daily series reconciles with the
+/// headline total.
 fn build_token_summary(
-    message_usage: HashMap<String, (String, TokenAccum, u32, String)>,
-    codex_sessions: HashMap<String, CodexSessionAccum>,
+    token_buckets: HashMap<TokenBucketKey, TokenBucket>,
     now_ts: u32,
     since_ts: u32,
 ) -> (TokenSummary, BTreeMap<NaiveDate, f64>) {
-    // Per-day spend, bucketed by the message/session timestamp's local date.
+    // Per-day spend, bucketed by the usage bucket's local date.
     let mut cost_by_day: BTreeMap<NaiveDate, f64> = BTreeMap::new();
     // Week-over-week split: "this week" = last 7 days, "last week" = 7–14 days ago.
     // Only meaningful when the query window covers at least 14 days; otherwise
     // last-week events were never fetched and last_week_cost would be 0 by
     // omission rather than by fact.
-    let this_week_start = now_ts.saturating_sub(7 * 24 * 3600);
-    let last_week_start = now_ts.saturating_sub(14 * 24 * 3600);
-    let wow_eligible = since_ts <= last_week_start;
+    let this_week_start = now_ts.saturating_sub(7 * 24 * 3600) as u64;
+    let last_week_start = now_ts.saturating_sub(14 * 24 * 3600) as u64;
+    let wow_eligible = since_ts as u64 <= last_week_start;
 
-    let mut this_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
-    let mut last_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
+    let mut this_week_cost = 0.0f64;
+    let mut last_week_cost = 0.0f64;
 
-    // Fold per-message (deduped, max) usage into per-model totals.
-    // Key by shorten_model() so date-snapshot variants (e.g. claude-sonnet-4-6-20250101
+    // Fold the latest bucket revisions into per-model totals. Key by
+    // shorten_model() so date-snapshot variants (e.g. claude-sonnet-4-6-20250101
     // and claude-sonnet-4-6-20250201) are folded into a single display row.
-    let mut model_tokens: HashMap<String, TokenAccum> = HashMap::new();
+    let mut model_tokens: HashMap<String, TokenBucket> = HashMap::new();
     let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
-    for (_id, (model, acc, ts, sid)) in message_usage {
-        let short = shorten_model(&model);
-
-        if let Some(pricing) = pricing_for(&short) {
-            *cost_by_day
-                .entry(ts_to_local(ts).date_naive())
-                .or_insert(0.0) += estimate_cost(&acc, &pricing);
+    for ((sid, model, _speed, bucket_ts), bucket) in token_buckets {
+        // A zeroed latest revision deletes the bucket's contribution.
+        if bucket.is_empty() {
+            continue;
+        }
+        // The DB window filters on emission time; a late re-emission can carry
+        // a bucket whose usage predates the window. Keep any bucket that
+        // overlaps the window, including the partial one straddling its start.
+        let bucket_end = bucket_ts + crate::token_usage::types::BUCKET_SECS as u64;
+        if since_ts > 0 && bucket_end <= since_ts as u64 {
+            continue;
         }
 
+        let cost = bucket.cost_micro_usd as f64 / 1e6;
+        if cost > 0.0 {
+            let day_ts = bucket_ts.min(u32::MAX as u64) as u32;
+            *cost_by_day
+                .entry(ts_to_local(day_ts).date_naive())
+                .or_insert(0.0) += cost;
+        }
+        if bucket_ts >= this_week_start {
+            this_week_cost += cost;
+        } else if bucket_ts >= last_week_start {
+            last_week_cost += cost;
+        }
+
+        let short = shorten_model(&model);
         let entry = model_tokens.entry(short.clone()).or_default();
-        entry.input += acc.input;
-        entry.output += acc.output;
-        entry.cache_read += acc.cache_read;
-        entry.cache_creation += acc.cache_creation;
+        entry.input += bucket.input;
+        entry.output += bucket.output;
+        entry.cache_read += bucket.cache_read;
+        entry.cache_write += bucket.cache_write;
+        entry.cost_micro_usd += bucket.cost_micro_usd;
 
         if !sid.is_empty() {
-            model_session_ids
-                .entry(short.clone())
-                .or_default()
-                .insert(sid);
-        }
-
-        if ts >= this_week_start {
-            this_week_msgs.push((short, acc));
-        } else if ts >= last_week_start {
-            last_week_msgs.push((short, acc));
+            model_session_ids.entry(short).or_default().insert(sid);
         }
     }
-
-    // Fold per-session codex totals into per-model totals, mapping codex's
-    // field semantics onto ours: codex input_tokens *includes* cached, so the
-    // non-cached input is the difference; cached maps to cache_read; codex has
-    // no cache-creation concept.
-    let mut this_week_codex: Vec<(String, TokenAccum)> = Vec::new();
-    let mut last_week_codex: Vec<(String, TokenAccum)> = Vec::new();
-
-    for (sid, acc) in codex_sessions {
-        let model = acc.model.clone().unwrap_or_else(|| "codex".to_string());
-        let short = shorten_model(&model);
-        let mapped = acc.to_token_accum();
-
-        if let Some(pricing) = pricing_for(&short) {
-            *cost_by_day
-                .entry(ts_to_local(acc.last_usage_ts).date_naive())
-                .or_insert(0.0) += estimate_cost(&mapped, &pricing);
-        }
-
-        let entry = model_tokens.entry(short.clone()).or_default();
-        entry.input += mapped.input;
-        entry.output += mapped.output;
-        entry.cache_read += mapped.cache_read;
-        model_session_ids
-            .entry(short.clone())
-            .or_default()
-            .insert(sid);
-
-        if acc.last_usage_ts >= this_week_start {
-            this_week_codex.push((short, mapped));
-        } else if acc.last_usage_ts >= last_week_start {
-            last_week_codex.push((short, mapped));
-        }
-    }
-
-    // Compute WoW spend from the two half-slices.
-    let this_week_cost = cost_for_message_slice(this_week_msgs.into_iter().chain(this_week_codex));
-    let last_week_cost = cost_for_message_slice(last_week_msgs.into_iter().chain(last_week_codex));
 
     let wow_spend = if wow_eligible && (this_week_cost > 0.0 || last_week_cost > 0.0) {
         let (change_pct, new_this_week) = if last_week_cost > 0.0 {
@@ -738,22 +688,19 @@ fn build_token_summary(
     let mut by_model: Vec<TokenModelStat> = Vec::new();
 
     for (model, acc) in model_tokens {
-        // Skip placeholder/synthetic entries that carried no real token counts.
-        if acc.input == 0 && acc.output == 0 && acc.cache_read == 0 && acc.cache_creation == 0 {
-            continue;
-        }
-
         summary.input += acc.input;
         summary.output += acc.output;
         summary.cache_read += acc.cache_read;
-        summary.cache_creation += acc.cache_creation;
+        summary.cache_creation += acc.cache_write;
 
-        let cost = pricing_for(&model).map(|p| estimate_cost(&acc, &p));
+        // None preserves the "no pricing" display for models the token-usage
+        // pipeline couldn't price (their buckets carry a zero cost).
+        let cost = (acc.cost_micro_usd > 0).then_some(acc.cost_micro_usd as f64 / 1e6);
         if let Some(c) = cost {
             summary.estimated_cost_usd += c;
         }
 
-        let cache_total = acc.cache_read + acc.cache_creation;
+        let cache_total = acc.cache_read + acc.cache_write;
         let cache_hit_ratio = if cache_total > 0 {
             Some(acc.cache_read as f64 / cache_total as f64)
         } else {
@@ -770,7 +717,7 @@ fn build_token_summary(
             input: acc.input,
             output: acc.output,
             cache_read: acc.cache_read,
-            cache_creation: acc.cache_creation,
+            cache_creation: acc.cache_write,
             estimated_cost_usd: cost,
             cache_hit_ratio,
         });
@@ -1068,107 +1015,6 @@ fn aggregate_session(
     }
 }
 
-/// Extract token usage from a session event's raw transcript JSON (position 0).
-/// Only assistant messages carry usage. Keyed by message id, keeping the
-/// field-wise max across re-emitted copies (streaming partials report lower
-/// counts than the final message). `record_ts` is stored on first insertion
-/// for week-over-week bucketing.
-fn aggregate_session_tokens(
-    event: &MetricEvent,
-    record_ts: u32,
-    session_id: String,
-    message_usage: &mut HashMap<String, (String, TokenAccum, u32, String)>,
-) {
-    debug_assert_eq!(session_event_pos::RAW_JSON, 0);
-    let Some(raw) = event.values.get(SESSION_RAW_JSON_KEY) else {
-        return;
-    };
-    let Some(message) = raw.get("message") else {
-        return;
-    };
-    if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-        return;
-    }
-    let Some(usage) = message.get("usage") else {
-        return;
-    };
-    let Some(id) = message.get("id").and_then(|i| i.as_str()) else {
-        return;
-    };
-
-    let model = message
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
-
-    let (stored_model, acc, _ts, stored_sid) =
-        message_usage.entry(id.to_string()).or_insert_with(|| {
-            (
-                model.clone(),
-                TokenAccum::default(),
-                record_ts,
-                session_id.clone(),
-            )
-        });
-    // If the entry was created with an "unknown" placeholder model (e.g. from a
-    // streaming partial that arrived before the final event), upgrade it now.
-    if stored_model == "unknown" && model != "unknown" {
-        *stored_model = model;
-    }
-    // Similarly, upgrade an empty session_id once a real one is available.
-    if stored_sid.is_empty() && !session_id.is_empty() {
-        *stored_sid = session_id;
-    }
-    // Field-wise max: input/cache are fixed per message; output grows while
-    // streaming, so the final (largest) value is authoritative.
-    acc.input = acc.input.max(get("input_tokens"));
-    acc.output = acc.output.max(get("output_tokens"));
-    acc.cache_read = acc.cache_read.max(get("cache_read_input_tokens"));
-    acc.cache_creation = acc.cache_creation.max(get("cache_creation_input_tokens"));
-}
-
-/// Extract token usage from a codex session event. Codex emits `token_count`
-/// events carrying cumulative `payload.info.total_token_usage`, and reports its
-/// model on a separate event via `payload.model`. Both are keyed by session id;
-/// cumulative totals are tracked as a per-session max.
-fn aggregate_codex_tokens(
-    event: &MetricEvent,
-    record_ts: u32,
-    codex_sessions: &mut HashMap<String, CodexSessionAccum>,
-) {
-    let Some(session_id) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() else {
-        return;
-    };
-    debug_assert_eq!(session_event_pos::RAW_JSON, 0);
-    let Some(raw) = event.values.get(SESSION_RAW_JSON_KEY) else {
-        return;
-    };
-    let Some(payload) = raw.get("payload") else {
-        return;
-    };
-
-    let entry = codex_sessions.entry(session_id).or_default();
-
-    // Capture the model name when it appears (not on token_count events).
-    if let Some(model) = payload.get("model").and_then(|m| m.as_str())
-        && entry.model.is_none()
-    {
-        entry.model = Some(model.to_string());
-    }
-
-    // Cumulative session totals; keep the running max.
-    if let Some(usage) = payload.get("info").and_then(|i| i.get("total_token_usage")) {
-        let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
-        entry.last_usage_ts = entry.last_usage_ts.max(record_ts);
-        entry.input_tokens = entry.input_tokens.max(get("input_tokens"));
-        entry.cached_input_tokens = entry.cached_input_tokens.max(get("cached_input_tokens"));
-        entry.output_tokens = entry.output_tokens.max(get("output_tokens"));
-    }
-}
-
 // ─── Per-repository breakdown ─────────────────────────────────────────────────
 
 /// Summary of activity for a single repository.
@@ -1250,7 +1096,9 @@ pub fn compute_repo_summaries(
 mod tests {
     use super::*;
     use crate::metrics::attrs::EventAttributes;
-    use crate::metrics::events::{CheckpointValues, CommittedValues, SessionEventValues};
+    use crate::metrics::events::{
+        CheckpointValues, CommittedValues, SessionEventValues, TokenUsageValues,
+    };
     use crate::metrics::pos_encoded::{PosEncoded, sparse_get_string};
     use serde_json::json;
 
@@ -1350,14 +1198,64 @@ mod tests {
         ))
     }
 
+    /// A v2 TokenUsage (event id 9) bucket revision. `ts` is the emission time
+    /// (the record timestamp); `bucket_ts` is the 5-minute usage bucket.
+    #[allow(clippy::too_many_arguments)]
+    fn token_usage(
+        ts: u32,
+        repo_url: Option<&str>,
+        session_id: &str,
+        model: &str,
+        bucket_ts: u64,
+        emitted_seq: u64,
+        [input, output, cache_read, cache_write]: [u64; 4],
+        cost_micro_usd: u64,
+    ) -> MetricHistoryRecord {
+        let values = TokenUsageValues::new()
+            .bucket_ts(bucket_ts)
+            .input_tokens(input)
+            .output_tokens(output)
+            .cache_read_tokens(cache_read)
+            .cache_write_tokens(cache_write)
+            .total_tokens(input + output + cache_read + cache_write)
+            .est_cost_micro_usd(cost_micro_usd)
+            .message_count(1)
+            .emitted_seq(emitted_seq)
+            .speed(0);
+        let mut event_attrs = EventAttributes::with_version("test")
+            .tool("claude")
+            .model(model)
+            .session_id(session_id);
+        if let Some(repo_url) = repo_url {
+            event_attrs = event_attrs.repo_url(repo_url);
+        }
+        record(MetricEvent::with_timestamp(
+            ts,
+            &values,
+            event_attrs.to_sparse(),
+        ))
+    }
+
     #[test]
     fn compute_activity_aggregates_commits_checkpoints_sessions_and_tokens() {
         let now = now_ts();
         let repo = "github.com/acme/project";
         let session_ts = now.saturating_sub(600);
         let commit_ts = now.saturating_sub(300);
+        // The session event still embeds raw usage JSON (100/50/20/10); the
+        // token stats must come from the TokenUsage event alone.
         let records = [
             claude_session(session_ts, Some(repo), "session-1"),
+            token_usage(
+                session_ts + 5,
+                Some(repo),
+                "session-1",
+                "claude-sonnet-4-6-20250101",
+                (session_ts as u64 / 300) * 300,
+                1,
+                [1000, 500, 200, 100],
+                2_500_000,
+            ),
             checkpoint(session_ts + 10, repo, 12),
             committed(commit_ts, repo, 10, 2, 12),
         ];
@@ -1389,25 +1287,147 @@ mod tests {
         assert_eq!(stats.sessions.total, 1);
         assert_eq!(stats.sessions.yield_stats.shipped, 1);
         assert_eq!(stats.sessions.yield_stats.abandoned, 0);
-        assert_eq!(stats.tokens.input, 100);
-        assert_eq!(stats.tokens.output, 50);
-        assert_eq!(stats.tokens.cache_read, 20);
-        assert_eq!(stats.tokens.cache_creation, 10);
+        assert_eq!(stats.tokens.input, 1000);
+        assert_eq!(stats.tokens.output, 500);
+        assert_eq!(stats.tokens.cache_read, 200);
+        assert_eq!(stats.tokens.cache_creation, 100);
+        assert!((stats.tokens.estimated_cost_usd - 2.5).abs() < 1e-12);
         assert_eq!(stats.tokens.by_model[0].model, "claude-sonnet-4-6");
+        assert_eq!(stats.tokens.by_model[0].sessions, 1);
         assert!(stats.buckets.iter().any(|bucket| bucket.ai_lines == 10));
     }
 
     #[test]
-    fn token_costs_come_from_models_dev_catalog() {
+    fn token_buckets_keep_only_the_highest_emitted_seq_revision() {
         let now = now_ts();
-        let repo = "github.com/acme/project";
-        // A date-suffixed model id that only the models.dev catalog can price
-        // (the id resolves to "claude-fable-5" after the date suffix is stripped).
-        let records = [claude_session_with_model(
-            now.saturating_sub(600),
-            Some(repo),
+        let bucket_a = (now.saturating_sub(600) as u64 / 300) * 300;
+        let bucket_b = bucket_a - 300;
+        let records = [
+            // Bucket A: a stale large revision superseded by a corrected one.
+            token_usage(
+                now - 500,
+                None,
+                "session-1",
+                "claude-sonnet-4-6",
+                bucket_a,
+                7,
+                [9000, 9000, 9000, 9000],
+                9_000_000,
+            ),
+            token_usage(
+                now - 400,
+                None,
+                "session-1",
+                "claude-sonnet-4-6",
+                bucket_a,
+                8,
+                [100, 50, 20, 10],
+                1_000_000,
+            ),
+            // Bucket B: latest revision zeroes the bucket out entirely.
+            token_usage(
+                now - 500,
+                None,
+                "session-1",
+                "claude-sonnet-4-6",
+                bucket_b,
+                7,
+                [500, 500, 0, 0],
+                2_000_000,
+            ),
+            token_usage(
+                now - 400,
+                None,
+                "session-1",
+                "claude-sonnet-4-6",
+                bucket_b,
+                8,
+                [0, 0, 0, 0],
+                0,
+            ),
+        ];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            now.saturating_sub(24 * 3600),
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        assert_eq!(stats.tokens.input, 100);
+        assert_eq!(stats.tokens.output, 50);
+        assert_eq!(stats.tokens.cache_read, 20);
+        assert_eq!(stats.tokens.cache_creation, 10);
+        assert!((stats.tokens.estimated_cost_usd - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn token_costs_come_from_event_micro_usd() {
+        let now = now_ts();
+        let bucket_ts = (now.saturating_sub(600) as u64 / 300) * 300;
+        // One priced model and one the pipeline couldn't price (cost 0).
+        let records = [
+            token_usage(
+                now - 500,
+                None,
+                "session-1",
+                "claude-fable-5-20260607",
+                bucket_ts,
+                1,
+                [100, 50, 20, 10],
+                1_234_567,
+            ),
+            token_usage(
+                now - 400,
+                None,
+                "session-2",
+                "mystery-model",
+                bucket_ts,
+                1,
+                [40, 0, 0, 0],
+                0,
+            ),
+        ];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            now.saturating_sub(24 * 3600),
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        assert!((stats.tokens.estimated_cost_usd - 1.234_567).abs() < 1e-12);
+        // Sorted by total tokens: the priced model first.
+        assert_eq!(stats.tokens.by_model[0].model, "claude-fable-5");
+        assert_eq!(
+            stats.tokens.by_model[0].estimated_cost_usd,
+            Some(stats.tokens.estimated_cost_usd)
+        );
+        // Unpriced usage keeps its tokens but reports no cost.
+        assert_eq!(stats.tokens.by_model[1].model, "mystery-model");
+        assert_eq!(stats.tokens.by_model[1].input, 40);
+        assert_eq!(stats.tokens.by_model[1].estimated_cost_usd, None);
+    }
+
+    #[test]
+    fn cost_only_token_buckets_keep_their_spend() {
+        let now = now_ts();
+        let bucket_ts = (now.saturating_sub(600) as u64 / 300) * 300;
+        // A transcript-priced entry can carry costUSD with zero token
+        // counters; the spend must not be mistaken for a zeroed correction.
+        let records = [token_usage(
+            now - 500,
+            None,
             "session-1",
-            "claude-fable-5-20260607",
+            "claude-sonnet-4-6",
+            bucket_ts,
+            1,
+            [0, 0, 0, 0],
+            750_000,
         )];
         let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
 
@@ -1419,22 +1439,74 @@ mod tests {
         )
         .unwrap();
 
-        let pricing = crate::metrics::model_pricing::pricing_for("claude-fable-5")
-            .expect("models.dev catalog must price claude-fable-5");
-        // Token counts from claude_session_with_model: 100 input, 50 output,
-        // 20 cache read, 10 cache creation.
-        let expected = (100.0 * pricing.input
-            + 50.0 * pricing.output
-            + 20.0 * pricing.cache_read_rate()
-            + 10.0 * pricing.cache_write_rate())
-            / 1_000_000.0;
-        assert!(expected > 0.0);
-        assert!((stats.tokens.estimated_cost_usd - expected).abs() < 1e-12);
-        assert_eq!(stats.tokens.by_model[0].model, "claude-fable-5");
-        assert_eq!(
-            stats.tokens.by_model[0].estimated_cost_usd,
-            Some(stats.tokens.estimated_cost_usd)
-        );
+        assert!((stats.tokens.estimated_cost_usd - 0.75).abs() < 1e-12);
+        assert_eq!(stats.tokens.by_model[0].model, "claude-sonnet-4-6");
+        assert_eq!(stats.tokens.by_model[0].estimated_cost_usd, Some(0.75));
+    }
+
+    #[test]
+    fn token_bucket_straddling_the_window_start_is_included() {
+        let now = now_ts();
+        // since_ts falls strictly inside the bucket's 5-minute span: usage
+        // after the boundary must not disappear with the bucket.
+        let bucket_ts = (now.saturating_sub(24 * 3600) as u64 / 300) * 300;
+        let since_ts = bucket_ts as u32 + 100;
+        let records = [token_usage(
+            now - 60,
+            None,
+            "session-1",
+            "claude-sonnet-4-6",
+            bucket_ts,
+            1,
+            [100, 50, 0, 0],
+            1_000_000,
+        )];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            since_ts,
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        assert_eq!(stats.tokens.input, 100);
+        assert_eq!(stats.tokens.output, 50);
+        assert!((stats.tokens.estimated_cost_usd - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn token_buckets_outside_the_window_are_excluded() {
+        let now = now_ts();
+        let since_ts = now.saturating_sub(24 * 3600);
+        // Emitted just now (inside the fetch window) but the usage itself
+        // predates the window: a late re-emission must not leak in.
+        let stale_bucket = (since_ts as u64 / 300) * 300 - 3600;
+        let records = [token_usage(
+            now - 60,
+            None,
+            "session-1",
+            "claude-sonnet-4-6",
+            stale_bucket,
+            5,
+            [100, 50, 0, 0],
+            1_000_000,
+        )];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            since_ts,
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        assert_eq!(stats.tokens.input, 0);
+        assert_eq!(stats.tokens.output, 0);
+        assert_eq!(stats.tokens.estimated_cost_usd, 0.0);
+        assert!(stats.tokens.by_model.is_empty());
     }
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -1503,6 +1575,16 @@ mod tests {
             claude_session(session_start, Some(repo), "session-1"),
             claude_session(session_start + 3600, Some(repo), "session-1"),
             claude_session(now.saturating_sub(60), Some(repo), "session-2"),
+            token_usage(
+                now.saturating_sub(60),
+                Some(repo),
+                "session-1",
+                "claude-sonnet-4-6-20250101",
+                (now.saturating_sub(600) as u64 / 300) * 300,
+                1,
+                [100, 50, 20, 10],
+                1_000_000,
+            ),
             committed(now.saturating_sub(300), repo, 40, 0, 40),
             committed(now.saturating_sub(120), repo, 10, 0, 10),
         ];
@@ -1540,6 +1622,16 @@ mod tests {
         let records = [
             committed(now.saturating_sub(300), repo, 8, 0, 8),
             claude_session(now.saturating_sub(200), Some(repo), "session-1"),
+            token_usage(
+                now.saturating_sub(150),
+                Some(repo),
+                "session-1",
+                "claude-sonnet-4-6",
+                (now.saturating_sub(300) as u64 / 300) * 300,
+                1,
+                [100, 50, 0, 0],
+                1_000_000,
+            ),
             claude_session(now.saturating_sub(100), None, "session-unknown"),
         ];
 

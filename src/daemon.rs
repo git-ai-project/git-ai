@@ -2,13 +2,18 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::checkpoint_content_budget::CheckpointContentBudget;
 use crate::config;
 use crate::daemon::git_backend::GitBackend;
+use crate::daemon::ref_cursor::{
+    HeadReflogObservation, UntracedClaimRequest, UntracedReflogCursor, head_reflog_unchanged_since,
+    is_untraced_root_sid, observe_head_reflog,
+};
 use crate::error::GitAiError;
 use crate::git::cli_parser::{
     ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
-    common_dir_for_worktree, git_dir_for_worktree, worktree_root_for_path,
+    common_dir_for_worktree, git_dir_for_worktree, worktree_belongs_to_git_dir,
+    worktree_root_for_path, worktrees_for_common_dir,
 };
 use crate::git::repository::{
     Repository, discover_repository_in_path_no_git_exec, exec_git, exec_git_stdin,
@@ -67,6 +72,7 @@ pub mod health;
 mod memory_watchdog;
 pub mod reducer;
 pub mod ref_cursor;
+pub mod repo_family_store;
 pub mod rewrite_metrics;
 pub mod sentry_layer;
 pub mod stream_worker;
@@ -77,6 +83,8 @@ pub mod test_sync;
 pub mod token_usage_worker;
 pub mod trace_normalizer;
 pub mod transcript_redaction;
+pub mod untraced_commit_fixup;
+pub mod untraced_fixup_ignore;
 
 pub use control_api::{
     BashSessionQueryResponse, BashSnapshotQueryResponse, ControlRequest, ControlResponse,
@@ -990,6 +998,7 @@ fn post_conflict_resolution_working_log(
             supress_output: true,
             compute_stats: false,
             recover_attribution: false,
+            commit_source: None,
         },
         precomputed_parent_diff,
         move |resolution_log| {
@@ -2719,6 +2728,59 @@ enum FamilySequencerEntry {
         receipt_seq: u64,
         reservation: CheckpointIngressReservation,
     },
+    /// One untraced-commit fixup pass over a worktree `HEAD` reflog (see
+    /// `RefCursor::claim_untraced_commits`). Sequenced like a command so it is
+    /// fenced behind older open roots and serialized with the family's other
+    /// passes; it never runs while a traced command of the family is in flight.
+    UntracedCommitScan {
+        git_dir: PathBuf,
+        worktree: PathBuf,
+        /// Persisted cursor for a worktree this daemon has not seen yet.
+        seed: Option<UntracedReflogCursor>,
+        /// `HEAD` reflog length when the pass was scheduled. The causal fence
+        /// only holds a pass for roots that started before it, so records
+        /// written after this point are left for a later pass.
+        max_offset: Option<u64>,
+    },
+}
+
+/// What one round of untraced-commit fixup scheduling did.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct UntracedScanSchedule {
+    /// Families with at least one pass scheduled.
+    families: usize,
+    /// Worktrees a pass was scheduled for.
+    worktrees: usize,
+    /// Worktrees whose `HEAD` reflog has not grown since their cursor settled.
+    unchanged: usize,
+    /// Changed worktrees left for the next tick: by the per-tick cap, or
+    /// because a git command of their family was still running.
+    deferred: usize,
+    /// Families the fixup ignores (temp scratch repositories, configured
+    /// globs) that were named or remembered and therefore skipped.
+    ignored: usize,
+}
+
+/// What the daemon remembers about one worktree between fixup ticks.
+#[derive(Debug, Clone, Default)]
+struct CachedUntracedCursor {
+    /// `None` when the store has no row for the worktree yet.
+    cursor: Option<UntracedReflogCursor>,
+    /// The `HEAD` reflog as it looked when the last pass finished (`None`
+    /// until a pass has run; `Some(None)` when there was no reflog then).
+    reflog_seen: Option<HeadReflogObservation>,
+}
+
+/// Why fixup scans are being scheduled; a tick stats before it schedules,
+/// an explicit request scans regardless.
+#[derive(Debug, Clone, Copy)]
+enum UntracedScanTrigger {
+    Request,
+    Tick {
+        rotation: u64,
+        /// Hourly: prune the store and re-probe families last seen missing.
+        maintenance: bool,
+    },
 }
 
 /// Position of an entry in its family sequencer: the moment its originating
@@ -2990,6 +3052,28 @@ pub struct ActorDaemonCoordinator {
     causal_grace_expirations: AtomicU64,
     /// Fences released at a time bound (hard cap, written-root cap).
     causal_fence_hard_cap_releases: AtomicU64,
+    /// Untraced-commit fixup outcomes (see `run_untraced_commit_scan`).
+    untraced_commits_fixed: AtomicU64,
+    untraced_commits_skipped: AtomicU64,
+    untraced_cursor_reseeds: AtomicU64,
+    untraced_scan_errors: AtomicU64,
+    /// Families remembered in the repo-family store, as of the last tick.
+    known_repo_families: AtomicU64,
+    /// Ticks so far; rotates which worktrees a capped tick scans first.
+    untraced_fixup_ticks: AtomicU64,
+    /// When the repo-family store was last pruned and missing families last
+    /// re-probed (unix seconds).
+    untraced_store_last_maintenance_secs: AtomicU64,
+    /// Per worktree git dir, the fixup cursor last read from or written to the
+    /// store and how the `HEAD` reflog looked when the last pass finished, so
+    /// a routine tick never touches SQLite: its cost is one `stat` per worktree.
+    untraced_cursor_cache: Mutex<HashMap<String, CachedUntracedCursor>>,
+    /// Families remembered in the store as of the last maintenance round,
+    /// plus those recorded by passes since; `None` before the first round.
+    untraced_known_families: Mutex<Option<Vec<String>>>,
+    /// Families whose common dir was found missing since the last maintenance
+    /// round; routine ticks neither probe nor record them again.
+    untraced_missing_families: Mutex<HashSet<String>>,
     /// Fired when a root clears or is released: fenced drains and waits
     /// re-evaluate. Distinct from the per-frame ingest progress notify so a
     /// fenced family does not wake on every trace frame the daemon sees.
@@ -3019,12 +3103,25 @@ pub struct ActorDaemonCoordinator {
     // exits via the shutdown select! arm instead of relying on channel closure.
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
+    /// Families and fixup cursors remembered across restarts; `None` when the
+    /// database could not be opened (fixup then only covers this process).
+    repo_family_store: Option<Arc<crate::daemon::repo_family_store::RepoFamilyStore>>,
+    /// Repositories the untraced-commit fixup leaves alone (temp scratch repos,
+    /// configured globs); consulted only by the fixup scheduler and store, and
+    /// rebuilt from a fresh config read on each maintenance round so a config
+    /// change takes effect within the hour rather than at the next restart.
+    untraced_fixup_ignore: Mutex<crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore>,
+    /// Worktree git dirs whose fixup cursor must not be persisted again this
+    /// lifetime: a pass had a side effect fail, and the durable cursor has to
+    /// stay behind that commit so a later lifetime can retry it.
+    untraced_persistence_blocked: Mutex<HashSet<String>>,
     stream_worker: Option<crate::daemon::stream_worker::StreamWorkerHandle>,
     token_usage_worker: Option<crate::daemon::token_usage_worker::TokenUsageWorkerHandle>,
     transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     // Separate from the transcript worker's Notify: notify_one wakes exactly
     // one waiter, so each worker needs its own.
     token_usage_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    untraced_fixup_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     streams_db: Option<Arc<crate::streams::db::StreamsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -3130,6 +3227,16 @@ impl ActorDaemonCoordinator {
             causal_grace: family_causal_grace(),
             causal_grace_expirations: AtomicU64::new(0),
             causal_fence_hard_cap_releases: AtomicU64::new(0),
+            untraced_commits_fixed: AtomicU64::new(0),
+            untraced_commits_skipped: AtomicU64::new(0),
+            untraced_cursor_reseeds: AtomicU64::new(0),
+            untraced_scan_errors: AtomicU64::new(0),
+            known_repo_families: AtomicU64::new(0),
+            untraced_fixup_ticks: AtomicU64::new(0),
+            untraced_store_last_maintenance_secs: AtomicU64::new(0),
+            untraced_cursor_cache: Mutex::new(HashMap::new()),
+            untraced_known_families: Mutex::new(None),
+            untraced_missing_families: Mutex::new(HashSet::new()),
             trace_root_fence_notify: Notify::new(),
             commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
@@ -3162,10 +3269,14 @@ impl ActorDaemonCoordinator {
             test_completion_log_lock: Mutex::new(()),
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
+            repo_family_store: None,
+            untraced_persistence_blocked: Mutex::new(HashSet::new()),
+            untraced_fixup_ignore: Mutex::new(Default::default()),
             stream_worker: None,
             token_usage_worker: None,
             transcript_shutdown_notify: std::sync::OnceLock::new(),
             token_usage_shutdown_notify: std::sync::OnceLock::new(),
+            untraced_fixup_shutdown_notify: std::sync::OnceLock::new(),
             streams_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -3484,6 +3595,9 @@ impl ActorDaemonCoordinator {
         }
         if let Some(token_usage_shutdown) = self.token_usage_shutdown_notify.get() {
             token_usage_shutdown.notify_one();
+        }
+        if let Some(untraced_fixup_shutdown) = self.untraced_fixup_shutdown_notify.get() {
+            untraced_fixup_shutdown.notify_one();
         }
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
@@ -3934,6 +4048,7 @@ impl ActorDaemonCoordinator {
                 "applied_side_effects",
             ),
             FamilySequencerEntry::Checkpoint { .. } => (None, "checkpoint"),
+            FamilySequencerEntry::UntracedCommitScan { .. } => (None, "untraced_scan"),
         }
     }
 
@@ -4168,6 +4283,22 @@ impl ActorDaemonCoordinator {
         .is_some()
     }
 
+    /// Whether a trace root that may still change `family`'s refs is open: one
+    /// of its git commands is in flight (or a root not yet attributed to any
+    /// family, which fails closed). Routine fixup ticks leave such a family
+    /// for a later tick, so a scan never waits at the causal fence at the head
+    /// of the family's sequencer with the command's own entries queued behind.
+    fn family_has_open_mutating_root(&self, family: &str) -> Result<bool, GitAiError> {
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        Ok(ingress
+            .root_open_connections
+            .keys()
+            .any(|root_sid| Self::open_root_may_mutate_family(&ingress, root_sid, Some(family))))
+    }
+
     /// Whether a sequencer entry positioned at `started_at_ns`, ready for
     /// `waited`, must still wait for an older mutating trace root that is open
     /// (see `classify_root_fence` for how long a root can hold). Roots that
@@ -4281,17 +4412,26 @@ impl ActorDaemonCoordinator {
         result: &Result<(), GitAiError>,
         error_order: u64,
     ) -> Result<(), GitAiError> {
-        let sync_tracked = crate::daemon::test_sync::tracks_primary_command_for_test_sync(
-            applied.command.primary_command.as_deref(),
-            &applied.command.invoked_args,
-        );
+        // A fixup-synthesized commit is not a command a test issued, so it must
+        // never satisfy a test's wait for its own traced commands.
+        let untraced = is_untraced_root_sid(&applied.command.root_sid);
+        let sync_tracked = !untraced
+            && crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                applied.command.primary_command.as_deref(),
+                &applied.command.invoked_args,
+            );
         let test_sync_session = crate::daemon::test_sync::test_sync_session_from_invocation(
             &parsed_invocation_for_normalized_command(&applied.command),
         );
         let log_entry = TestCompletionLogEntry {
             seq: applied.seq,
             family_key: family.to_string(),
-            kind: "command".to_string(),
+            kind: if untraced {
+                "untraced_fixup"
+            } else {
+                "command"
+            }
+            .to_string(),
             primary_command: applied.command.primary_command.clone(),
             test_sync_session,
             exit_code: Some(applied.command.exit_code),
@@ -5362,6 +5502,531 @@ impl ActorDaemonCoordinator {
         read_only_root
     }
 
+    /// Claims the commits no traced command owns from one worktree `HEAD`
+    /// reflog and runs the normal post-commit side effects for each, exactly
+    /// as for a traced `git commit`. Returns the cursor to persist.
+    ///
+    /// A pass stops at `UNTRACED_FIXUP_MAX_COMMITS_PER_PASS` commits (or a
+    /// reflog byte budget) so the family's exec lock is released between
+    /// passes; when it does, a follow-up pass is queued at once rather than
+    /// waiting for the next tick. Once records are claimed nothing here is
+    /// allowed to abandon them: every later failure is logged per commit.
+    ///
+    /// Returns the cursor to persist, or `None` when a side effect failed: the
+    /// in-memory cursor has moved on (the traced path does not retry side
+    /// effects either), but leaving the durable cursor behind lets the next
+    /// daemon lifetime retry the commit, skipping any that did get their note.
+    async fn run_untraced_commit_scan(
+        &self,
+        family: &str,
+        git_dir: PathBuf,
+        worktree: PathBuf,
+        seed: Option<UntracedReflogCursor>,
+        max_offset: Option<u64>,
+        order: u64,
+    ) -> Result<Option<UntracedReflogCursor>, GitAiError> {
+        let request = UntracedClaimRequest {
+            git_dir: git_dir.clone(),
+            worktree: worktree.clone(),
+            seed,
+            // Reflog timestamps are whole seconds: round the age up so a
+            // sub-second override never becomes "no minimum age".
+            min_age_secs: untraced_fixup_min_age().as_millis().div_ceil(1000) as i64,
+            now_secs: crate::utils::unix_timestamp_now() as i64,
+            max_commits: UNTRACED_FIXUP_MAX_COMMITS_PER_PASS,
+            max_offset,
+        };
+        let outcome = self
+            .coordinator
+            .claim_untraced_commits(crate::daemon::domain::FamilyKey::new(family), request)
+            .await?;
+        self.untraced_commits_skipped
+            .fetch_add(outcome.skipped as u64, Ordering::Relaxed);
+        if outcome.reseeded {
+            self.untraced_cursor_reseeds.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // A pass that died between writing a note and recording its cursor
+        // would claim the same commit twice; the note is the durable receipt.
+        let new_heads = outcome
+            .applied
+            .iter()
+            .filter_map(commit_created_new_head)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let already_noted = if new_heads.is_empty() {
+            HashSet::new()
+        } else {
+            let worktree = worktree.clone();
+            run_blocking_side_effect(move || {
+                let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                crate::git::notes_api::commits_with_notes(&repo, &new_heads)
+            })
+            .unwrap_or_else(|error| {
+                // Best-effort guard against a pass that died mid-way; the
+                // claimed commits must still be attributed.
+                tracing::warn!(%error, %family, "could not check existing notes before fixup");
+                HashSet::new()
+            })
+        };
+
+        // A record whose command could not be reduced was consumed without any
+        // side effect: that pass is not settled either.
+        let mut all_side_effects_succeeded = outcome.dropped == 0;
+        if outcome.dropped > 0 {
+            self.untraced_scan_errors
+                .fetch_add(outcome.dropped as u64, Ordering::Relaxed);
+        }
+        for applied in &outcome.applied {
+            if commit_created_new_head(applied).is_some_and(|head| already_noted.contains(head)) {
+                self.untraced_commits_skipped
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let mut snapshots = CommitFileTimestampSnapshotHandles::default();
+            let future = self.maybe_apply_side_effects_for_applied_command(
+                Some(family),
+                applied,
+                &mut snapshots,
+            );
+            let result = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                future,
+            ))
+            .await
+            {
+                Ok(result) => result,
+                Err(panic_payload) => Err(GitAiError::Generic(format!(
+                    "daemon command side effect panic: {}",
+                    panic_payload_message(panic_payload.as_ref())
+                ))),
+            };
+            match &result {
+                Ok(()) => {
+                    self.untraced_commits_fixed.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    all_side_effects_succeeded = false;
+                    self.untraced_scan_errors.fetch_add(1, Ordering::Relaxed);
+                    let _ = self.record_side_effect_error(family, order, error);
+                    tracing::error!(
+                        %error,
+                        %family,
+                        seq = applied.seq,
+                        "untraced commit side effect failed"
+                    );
+                }
+            }
+            if let Err(error) = self.append_command_completion_log(family, applied, &result, order)
+            {
+                tracing::error!(%error, %family, order, "command completion log write failed");
+            }
+        }
+        if outcome.more {
+            let max_offset = head_reflog_len(&git_dir);
+            self.append_family_sequencer_entry(
+                family,
+                now_unix_nanos(),
+                FamilySequencerEntry::UntracedCommitScan {
+                    git_dir,
+                    worktree,
+                    seed: None,
+                    max_offset,
+                },
+            )?;
+        }
+        Ok(all_side_effects_succeeded.then_some(outcome.cursor))
+    }
+
+    /// One periodic fixup tick: every known worktree whose `HEAD` reflog grew
+    /// since its cursor settled gets a pass, at most
+    /// `UNTRACED_FIXUP_MAX_SCANS_PER_TICK` of them (rotating). Skipped
+    /// entirely while trace frames are still queued, so a pass never runs
+    /// ahead of the commands those frames describe.
+    pub(crate) async fn run_untraced_fixup_tick(
+        self: &Arc<Self>,
+    ) -> Result<UntracedScanSchedule, GitAiError> {
+        let ingest_lag = self
+            .next_trace_ingest_seq
+            .load(Ordering::Acquire)
+            .saturating_sub(self.processed_trace_ingest_seq.load(Ordering::Acquire));
+        if self.queued_trace_payloads.load(Ordering::Acquire) > 0 || ingest_lag > 0 {
+            return Ok(UntracedScanSchedule::default());
+        }
+        let tick = self.untraced_fixup_ticks.fetch_add(1, Ordering::Relaxed);
+        let now_secs = crate::utils::unix_timestamp_now();
+        let last_maintenance = self
+            .untraced_store_last_maintenance_secs
+            .load(Ordering::Relaxed);
+        let maintenance = now_secs.saturating_sub(last_maintenance)
+            >= UNTRACED_STORE_MAINTENANCE_INTERVAL.as_secs();
+        if maintenance {
+            self.untraced_store_last_maintenance_secs
+                .store(now_secs, Ordering::Relaxed);
+        }
+        let schedule = self
+            .schedule_untraced_commit_scans(
+                None,
+                UntracedScanTrigger::Tick {
+                    rotation: tick,
+                    maintenance,
+                },
+            )
+            .await?;
+        if maintenance {
+            // Rows for repositories the fixup now ignores (scratch repos from
+            // before this rule, or newly configured globs) are forgotten here.
+            let ignore = self.untraced_fixup_ignore()?;
+            if let Some(count) = self
+                .with_repo_family_store(move |store| {
+                    let forgotten: Vec<String> = store
+                        .known_families(true)?
+                        .into_iter()
+                        .filter(|family| ignore.ignores(family))
+                        .collect();
+                    store.forget_families(&forgotten)?;
+                    store.prune(now_secs)?;
+                    store.family_count()
+                })
+                .await?
+            {
+                self.known_repo_families
+                    .store(count as u64, Ordering::Relaxed);
+            }
+        }
+        Ok(schedule)
+    }
+
+    /// Schedules one fixup pass per worktree of the given repository (or of
+    /// every family this daemon knows) and returns how many were scheduled.
+    async fn schedule_untraced_commit_scans(
+        self: &Arc<Self>,
+        repo_working_dir: Option<String>,
+        trigger: UntracedScanTrigger,
+    ) -> Result<UntracedScanSchedule, GitAiError> {
+        let now_secs = crate::utils::unix_timestamp_now();
+        let mut targets = Vec::new();
+        let mut ignored = 0;
+        match repo_working_dir {
+            Some(dir) => {
+                // The whole family: every worktree of the repository, with the
+                // named one included even when enumeration cannot see it.
+                let family = self.backend.resolve_family(Path::new(&dir))?;
+                if self.untraced_fixup_ignore()?.ignores(&family.0) {
+                    return Ok(UntracedScanSchedule {
+                        ignored: 1,
+                        ..UntracedScanSchedule::default()
+                    });
+                }
+                let worktree = worktree_root_for_path(Path::new(&dir)).ok_or_else(|| {
+                    GitAiError::Generic(format!("{dir} is not inside a git worktree"))
+                })?;
+                let git_dir = git_dir_for_worktree(&worktree)
+                    .ok_or_else(|| GitAiError::Generic(format!("{dir} has no git directory")))?;
+                for (git_dir, worktree) in worktrees_for_common_dir(Path::new(&family.0)) {
+                    targets.push((family.0.clone(), git_dir, worktree));
+                }
+                if !targets.iter().any(|(_, known, _)| *known == git_dir) {
+                    targets.push((family.0, git_dir, worktree));
+                }
+            }
+            None => {
+                // Families this process has heard from, plus those remembered
+                // from earlier daemon lifetimes. Routine ticks work from an
+                // in-memory copy of the remembered list and skip families
+                // already found missing; a maintenance round (hourly, and any
+                // explicit request) re-reads the store, re-probes missing
+                // families and refreshes `last_seen_at` for the present ones so
+                // an idle-but-present repository is never pruned as unseen.
+                let maintenance = !matches!(
+                    trigger,
+                    UntracedScanTrigger::Tick {
+                        maintenance: false,
+                        ..
+                    }
+                );
+                if maintenance {
+                    // Config edits (new globs, flag flips) apply from here on.
+                    *self.untraced_fixup_ignore.lock().map_err(|_| {
+                        GitAiError::Generic("untraced fixup ignore lock poisoned".to_string())
+                    })? = crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore::from_config(
+                        &config::Config::fresh(),
+                    );
+                }
+                let ignore = self.untraced_fixup_ignore()?;
+                let mut families = self.coordinator.family_keys().await;
+                families.extend(self.remembered_families(maintenance).await?);
+                families.sort();
+                families.dedup();
+                if let UntracedScanTrigger::Tick {
+                    rotation,
+                    maintenance: false,
+                } = trigger
+                    && families.len() > UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK
+                {
+                    // A routine tick looks at a rotating window of families so
+                    // its filesystem work stays bounded however many the daemon
+                    // has heard of; every family comes up within a few ticks. A
+                    // maintenance round (hourly) looks at all of them, so every
+                    // present family is marked seen before pruning runs.
+                    let start =
+                        (rotation as usize * UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK) % families.len();
+                    families.rotate_left(start);
+                    families.truncate(UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK);
+                }
+                let known_missing = if maintenance {
+                    self.lock_untraced_missing_families()?.clear();
+                    HashSet::new()
+                } else {
+                    self.lock_untraced_missing_families()?.clone()
+                };
+                for family in families {
+                    if known_missing.contains(&family) {
+                        continue;
+                    }
+                    // Scratch repositories (temp roots, configured globs) are
+                    // dropped before the stat and before any store write.
+                    if ignore.ignores(&family) {
+                        ignored += 1;
+                        continue;
+                    }
+                    let common_dir = Path::new(&family);
+                    if !common_dir.is_dir() {
+                        self.lock_untraced_missing_families()?
+                            .insert(family.clone());
+                        self.with_repo_family_store(move |store| {
+                            store.record_family_missing(&family, now_secs)
+                        })
+                        .await?;
+                        continue;
+                    }
+                    // Present families the store already remembers stay
+                    // fresh; a family is first remembered only by a completed
+                    // pass, together with its cursor.
+                    if maintenance {
+                        let family = family.clone();
+                        self.with_repo_family_store(move |store| {
+                            store.refresh_family_seen(&family, now_secs)
+                        })
+                        .await?;
+                    }
+                    for (git_dir, worktree) in self.family_worktrees(&family).await? {
+                        targets.push((family.clone(), git_dir, worktree));
+                    }
+                }
+            }
+        }
+        if let UntracedScanTrigger::Tick { rotation, .. } = trigger
+            && !targets.is_empty()
+        {
+            // Later worktrees are not starved when more than a tick's worth
+            // of them changed at once.
+            let len = targets.len();
+            targets.rotate_left((rotation as usize) % len);
+        }
+        let mut schedule = UntracedScanSchedule {
+            ignored,
+            ..UntracedScanSchedule::default()
+        };
+        let mut families = HashSet::new();
+        for (family, git_dir, worktree) in targets {
+            if self.family_has_pending_untraced_scan(&family, &git_dir)? {
+                continue;
+            }
+            let max_offset = head_reflog_len(&git_dir);
+            // A pass that runs records the family and its cursor when it
+            // completes; ticks only read, and only the first time they see a
+            // worktree (the cache mirrors every later write).
+            let git_dir_key = git_dir.to_string_lossy().to_string();
+            let cached = match self.cached_untraced_cursor(&git_dir_key) {
+                Some(cached) => cached,
+                None => {
+                    let key = git_dir_key.clone();
+                    let cached = CachedUntracedCursor {
+                        cursor: self
+                            .with_repo_family_store(move |store| store.cursor(&key))
+                            .await?
+                            .flatten(),
+                        reflog_seen: None,
+                    };
+                    self.cache_untraced_cursor(&git_dir_key, cached.clone());
+                    cached
+                }
+            };
+            let seed = cached.cursor;
+            if matches!(trigger, UntracedScanTrigger::Tick { .. }) {
+                if head_reflog_unchanged_since(&git_dir, seed.as_ref(), cached.reflog_seen.as_ref())
+                {
+                    schedule.unchanged += 1;
+                    continue;
+                }
+                if schedule.worktrees >= UNTRACED_FIXUP_MAX_SCANS_PER_TICK
+                    || self.family_has_open_mutating_root(&family)?
+                {
+                    schedule.deferred += 1;
+                    continue;
+                }
+            }
+            self.append_family_sequencer_entry(
+                &family,
+                now_unix_nanos(),
+                FamilySequencerEntry::UntracedCommitScan {
+                    git_dir,
+                    worktree,
+                    seed,
+                    max_offset,
+                },
+            )?;
+            schedule.worktrees += 1;
+            if families.insert(family.clone()) {
+                self.schedule_family_drain(family);
+            }
+        }
+        schedule.families = families.len();
+        Ok(schedule)
+    }
+
+    /// Families remembered in the store: re-read on a maintenance round (and
+    /// then including families last seen missing), otherwise the copy taken at
+    /// the last round plus every family a pass has recorded since.
+    async fn remembered_families(&self, maintenance: bool) -> Result<Vec<String>, GitAiError> {
+        if !maintenance && let Some(cached) = self.lock_untraced_known_families()?.clone() {
+            return Ok(cached);
+        }
+        let ignore = self.untraced_fixup_ignore()?;
+        let remembered: Vec<String> = self
+            .with_repo_family_store(move |store| store.known_families(maintenance))
+            .await?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|family| !ignore.ignores(family))
+            .collect();
+        *self.lock_untraced_known_families()? = Some(remembered.clone());
+        Ok(remembered)
+    }
+
+    fn lock_untraced_known_families(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Vec<String>>>, GitAiError> {
+        self.untraced_known_families
+            .lock()
+            .map_err(|_| GitAiError::Generic("untraced known families lock poisoned".to_string()))
+    }
+
+    fn lock_untraced_missing_families(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashSet<String>>, GitAiError> {
+        self.untraced_missing_families
+            .lock()
+            .map_err(|_| GitAiError::Generic("untraced missing families lock poisoned".to_string()))
+    }
+
+    /// `Some` when this worktree's persisted cursor has been read or written
+    /// since the daemon started.
+    fn cached_untraced_cursor(&self, git_dir_key: &str) -> Option<CachedUntracedCursor> {
+        self.untraced_cursor_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(git_dir_key).cloned())
+    }
+
+    fn cache_untraced_cursor(&self, git_dir_key: &str, cached: CachedUntracedCursor) {
+        if let Ok(mut cache) = self.untraced_cursor_cache.lock() {
+            cache.insert(git_dir_key.to_string(), cached);
+        }
+    }
+
+    /// Whether a fixup pass for this worktree is already queued (a pass held
+    /// behind an open root must not pile up duplicates every tick).
+    fn family_has_pending_untraced_scan(
+        &self,
+        family: &str,
+        git_dir: &Path,
+    ) -> Result<bool, GitAiError> {
+        let sequencers = self
+            .family_sequencers_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("family sequencer map lock poisoned".to_string()))?;
+        Ok(sequencers.get(family).is_some_and(|state| {
+            state.entries.values().any(|slot| {
+                matches!(
+                    &slot.entry,
+                    FamilySequencerEntry::UntracedCommitScan { git_dir: pending, .. }
+                        if pending == git_dir
+                )
+            })
+        }))
+    }
+
+    /// A snapshot of the fixup's ignore rules (cheap: a few paths and globs).
+    fn untraced_fixup_ignore(
+        &self,
+    ) -> Result<crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore, GitAiError> {
+        self.untraced_fixup_ignore
+            .lock()
+            .map(|ignore| ignore.clone())
+            .map_err(|_| GitAiError::Generic("untraced fixup ignore lock poisoned".to_string()))
+    }
+
+    fn untraced_persistence_blocked(&self, git_dir_key: &str) -> Result<bool, GitAiError> {
+        Ok(self
+            .lock_untraced_persistence_blocked()?
+            .contains(git_dir_key))
+    }
+
+    fn lock_untraced_persistence_blocked(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashSet<String>>, GitAiError> {
+        self.untraced_persistence_blocked.lock().map_err(|_| {
+            GitAiError::Generic("untraced persistence block set lock poisoned".to_string())
+        })
+    }
+
+    /// A family's worktrees: what the filesystem shows under its common dir,
+    /// plus worktrees remembered from earlier passes (the only way back to a
+    /// `--separate-git-dir` main worktree) that still exist.
+    async fn family_worktrees(&self, family: &str) -> Result<Vec<(PathBuf, PathBuf)>, GitAiError> {
+        let mut worktrees = worktrees_for_common_dir(Path::new(family));
+        let common_dir = family.to_string();
+        // A store problem must not take the whole tick down: the filesystem
+        // enumeration still covers every worktree the filesystem can lead to.
+        let remembered = self
+            .with_repo_family_store(move |store| store.known_worktrees(&common_dir))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, %family, "could not read remembered worktrees");
+                None
+            })
+            .unwrap_or_default();
+        for (git_dir, worktree) in remembered {
+            let (git_dir, worktree) = (PathBuf::from(git_dir), PathBuf::from(worktree));
+            // Either path may have been reused by an unrelated repository since;
+            // the worktree must still resolve to this git dir.
+            if worktree_belongs_to_git_dir(&worktree, &git_dir)
+                && !worktrees.iter().any(|(known, _)| *known == git_dir)
+            {
+                worktrees.push((git_dir, worktree));
+            }
+        }
+        Ok(worktrees)
+    }
+
+    /// Runs a store operation off the async runtime; `Ok(None)` when no store
+    /// is open.
+    async fn with_repo_family_store<T, F>(&self, operation: F) -> Result<Option<T>, GitAiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&crate::daemon::repo_family_store::RepoFamilyStore) -> Result<T, GitAiError>
+            + Send
+            + 'static,
+    {
+        let Some(store) = self.repo_family_store.clone() else {
+            return Ok(None);
+        };
+        crate::tokio_runtime::spawn_blocking_result(move || operation(&store))
+            .await
+            .map(Some)
+    }
+
     fn side_effect_exec_lock(&self, family: &str) -> Result<Arc<AsyncMutex<()>>, GitAiError> {
         let mut map = self
             .side_effect_exec_locks
@@ -5435,6 +6100,9 @@ impl ActorDaemonCoordinator {
                     ),
                     FamilySequencerEntry::Checkpoint { receipt_seq, .. } => {
                         format!("checkpoint:seq={receipt_seq}")
+                    }
+                    FamilySequencerEntry::UntracedCommitScan { worktree, .. } => {
+                        format!("untraced_scan:{}", worktree.display())
                     }
                 };
                 format!("order={order} entry={entry}")
@@ -5574,6 +6242,97 @@ impl ActorDaemonCoordinator {
                             order,
                             "command completion log write failed"
                         );
+                    }
+                }
+                FamilySequencerEntry::UntracedCommitScan {
+                    git_dir,
+                    worktree,
+                    seed,
+                    max_offset,
+                } => {
+                    let _side_effect_permit = self
+                        .command_side_effect_semaphore
+                        .acquire()
+                        .await
+                        .map_err(|_| {
+                            GitAiError::Generic("command side-effect semaphore closed".to_string())
+                        })?;
+                    // The rules may have started ignoring this family after the
+                    // pass was queued (a config change, a maintenance refresh).
+                    if self.untraced_fixup_ignore()?.ignores(family) {
+                        tracing::debug!(%family, "untraced fixup pass skipped: family is ignored");
+                        continue;
+                    }
+                    let git_dir_key = git_dir.to_string_lossy().to_string();
+                    let worktree_key = worktree.to_string_lossy().to_string();
+                    let scan = self
+                        .run_untraced_commit_scan(
+                            family, git_dir, worktree, seed, max_offset, order,
+                        )
+                        .await;
+                    let persisted = match scan {
+                        Ok(Some(cursor))
+                            if !self.untraced_persistence_blocked(&git_dir_key)?
+                                && !self.untraced_fixup_ignore()?.ignores(family) =>
+                        {
+                            let family = family.to_string();
+                            self.cache_untraced_cursor(
+                                &git_dir_key,
+                                CachedUntracedCursor {
+                                    cursor: Some(cursor.clone()),
+                                    reflog_seen: Some(observe_head_reflog(Path::new(&git_dir_key))),
+                                },
+                            );
+                            if let Ok(mut known) = self.untraced_known_families.lock()
+                                && let Some(known) = known.as_mut()
+                                && !known.contains(&family)
+                            {
+                                known.push(family.clone());
+                            }
+                            let known = self
+                                .with_repo_family_store(move |store| {
+                                    store.record_pass_completed(
+                                        &family,
+                                        &git_dir_key,
+                                        &worktree_key,
+                                        &cursor,
+                                        crate::utils::unix_timestamp_now(),
+                                    )?;
+                                    store.family_count()
+                                })
+                                .await;
+                            known.map(|count| {
+                                if let Some(count) = count {
+                                    self.known_repo_families
+                                        .store(count as u64, Ordering::Relaxed);
+                                }
+                            })
+                        }
+                        // A side effect failed in this or an earlier pass: the
+                        // durable cursor stays behind that commit for the rest
+                        // of this daemon lifetime, so the next one retries it
+                        // (commits that did get their note are skipped then).
+                        // The in-memory position still moves so ticks keep
+                        // gating on it.
+                        Ok(Some(cursor)) => {
+                            self.cache_untraced_cursor(
+                                &git_dir_key,
+                                CachedUntracedCursor {
+                                    cursor: Some(cursor),
+                                    reflog_seen: Some(observe_head_reflog(Path::new(&git_dir_key))),
+                                },
+                            );
+                            Ok(())
+                        }
+                        Ok(None) => self.lock_untraced_persistence_blocked().map(|mut blocked| {
+                            blocked.insert(git_dir_key);
+                        }),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = persisted {
+                        self.untraced_scan_errors.fetch_add(1, Ordering::Relaxed);
+                        let _ = self.record_side_effect_error(family, order, &error);
+                        tracing::error!(%error, %family, order, "untraced commit scan failed");
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
@@ -7077,6 +7836,9 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.effective_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
+                            let commit_source = is_untraced_root_sid(&cmd.root_sid).then_some(
+                                crate::authorship::post_commit::UNTRACED_FIXUP_COMMIT_SOURCE,
+                            );
                             crate::wltrace::wltrace(
                                 "commit.post_commit",
                                 Path::new(cmd.worktree.as_deref().unwrap_or(Path::new(""))),
@@ -7110,7 +7872,7 @@ impl ActorDaemonCoordinator {
                                     base_opt.clone(),
                                     new_head.clone(),
                                     author,
-                                    true,
+                                    crate::authorship::post_commit::PostCommitOptions::with_recovery(commit_source),
                                     recovery_file_timestamps.as_ref(),
                                     Some(&recovery_preflight),
                                 )
@@ -7880,6 +8642,14 @@ impl ActorDaemonCoordinator {
             ControlRequest::StatsIngest => serde_json::to_value(IngestLossSnapshot::capture(self))
                 .map(|v| ControlResponse::ok(None, Some(v)))
                 .map_err(GitAiError::from),
+            ControlRequest::UntracedFixupScan { repo_working_dir } => self
+                .schedule_untraced_commit_scans(repo_working_dir, UntracedScanTrigger::Request)
+                .await
+                .and_then(|scheduled| {
+                    serde_json::to_value(scheduled)
+                        .map(|v| ControlResponse::ok(None, Some(v)))
+                        .map_err(GitAiError::from)
+                }),
             ControlRequest::Await { timeout_secs } => {
                 let result = self.await_completion(timeout_secs).await;
                 serde_json::to_value(result)
@@ -9291,6 +10061,65 @@ fn family_causal_grace() -> Duration {
     env_duration_ms("GIT_AI_DAEMON_CAUSAL_GRACE_MS", FAMILY_CAUSAL_GRACE)
 }
 
+/// Reflog records younger than this are left for a later untraced-commit
+/// fixup pass: the trace2 frames of the command that wrote them may still be
+/// on their way to the daemon.
+const UNTRACED_FIXUP_MIN_AGE: Duration = Duration::from_secs(5);
+
+/// Commits one untraced-commit fixup pass attributes before yielding the
+/// family; the rest wait for the next pass.
+const UNTRACED_FIXUP_MAX_COMMITS_PER_PASS: usize = 10;
+
+/// Worktrees one periodic tick schedules passes for; more change than this
+/// only during a burst, and the rest follow next tick.
+const UNTRACED_FIXUP_MAX_SCANS_PER_TICK: usize = 32;
+
+/// Families one periodic tick examines (a directory listing and a `stat` per
+/// worktree each); with more, ticks rotate through them.
+const UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK: usize = 256;
+
+/// How often a tick prunes the repo-family store and re-probes families whose
+/// common dir was missing (retention is measured in days, so hourly is plenty).
+const UNTRACED_STORE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+fn untraced_fixup_interval() -> Duration {
+    env_duration_ms(
+        "GIT_AI_DAEMON_UNTRACED_FIXUP_INTERVAL_MS",
+        crate::daemon::untraced_commit_fixup::DEFAULT_INTERVAL,
+    )
+}
+
+fn untraced_fixup_min_age() -> Duration {
+    // Zero is meaningful here (tests claim records at once), unlike the
+    // positive-only overrides `env_duration_ms` accepts.
+    std::env::var("GIT_AI_DAEMON_UNTRACED_FIXUP_MIN_AGE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(UNTRACED_FIXUP_MIN_AGE)
+}
+
+/// Current length of a worktree's `HEAD` reflog (`None` when it has none):
+/// the upper bound a fixup pass scheduled now may claim up to.
+fn head_reflog_len(git_dir: &Path) -> Option<u64> {
+    fs::metadata(git_dir.join("logs").join("HEAD"))
+        .ok()
+        .map(|metadata| metadata.len())
+}
+
+fn commit_created_new_head(applied: &crate::daemon::domain::AppliedCommand) -> Option<&str> {
+    applied
+        .analysis
+        .events
+        .iter()
+        .find_map(|event| match event {
+            crate::daemon::domain::SemanticEvent::CommitCreated { new_head, .. } => {
+                Some(new_head.as_str())
+            }
+            _ => None,
+        })
+}
+
 fn daemon_socket_health_check_interval() -> u64 {
     std::env::var("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS")
         .ok()
@@ -9885,6 +10714,21 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
 
+    coordinator_inner.untraced_fixup_ignore = Mutex::new(
+        crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore::from_config(
+            config::Config::get(),
+        ),
+    );
+    let repo_family_store_path = config.internal_dir.join("repo-families-db");
+    match crate::daemon::repo_family_store::RepoFamilyStore::open(&repo_family_store_path) {
+        Ok(store) => coordinator_inner.repo_family_store = Some(Arc::new(store)),
+        Err(error) => tracing::error!(
+            %error,
+            path = %repo_family_store_path.display(),
+            "failed to open repo-families database; untraced commit fixup will not survive restarts"
+        ),
+    }
+
     // With the token-usage flag off, previously collected data is deleted
     // regardless of the streaming gate below (the spec's "no collected data
     // is retained" holds even when transcript_streaming is also off).
@@ -9973,6 +10817,20 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     }));
     coordinator.start_trace_ingest_worker()?;
     coordinator.start_checkpoint_ingress_worker()?;
+    if config::Config::get()
+        .get_feature_flags()
+        .untraced_commit_fixup
+    {
+        let untraced_fixup_shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let _ = coordinator
+            .untraced_fixup_shutdown_notify
+            .set(untraced_fixup_shutdown_notify.clone());
+        crate::daemon::untraced_commit_fixup::spawn_untraced_fixup_worker(
+            Arc::downgrade(&coordinator),
+            untraced_fixup_interval(),
+            untraced_fixup_shutdown_notify,
+        );
+    }
     if let Some(limit_mb) = config::Config::get().daemon_memory_limit_mb()
         && let Some(limit_bytes) = limit_mb.checked_mul(config::MEBIBYTE_BYTES)
     {
@@ -12013,6 +12871,56 @@ mod tests {
         )
         .await
         .expect("own family fence should pass once the worker has processed the root's close");
+    }
+
+    #[tokio::test]
+    async fn untraced_fixup_tick_leaves_a_family_alone_while_its_git_command_is_in_flight() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        // Outside the OS temp dir, which the fixup ignores by default.
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("untraced-tick-tests");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::tempdir_in(&scratch).unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        coord
+            .status_for_family(repo.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let family = coord.backend.resolve_family(&repo).unwrap().0;
+        // Not a maintenance round (those re-read the config).
+        coord
+            .untraced_store_last_maintenance_secs
+            .store(crate::utils::unix_timestamp_now(), Ordering::Relaxed);
+
+        // A `git commit` of this family is still running.
+        let sid = "20260411T120000.000000-Psid1";
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress.root_open_connections.insert(sid.to_string(), 1);
+            ingress.root_mutating.insert(sid.to_string(), true);
+            ingress
+                .root_families
+                .insert(sid.to_string(), family.clone());
+        }
+        let busy = coord.run_untraced_fixup_tick().await.unwrap();
+        assert_eq!(
+            (busy.worktrees, busy.deferred),
+            (0, 1),
+            "a scan must not queue behind an in-flight command: {busy:?}"
+        );
+
+        // Once the command is gone the next tick scans the worktree.
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress.root_open_connections.remove(sid);
+            ingress.root_mutating.remove(sid);
+            ingress.root_families.remove(sid);
+        }
+        let quiet = coord.run_untraced_fixup_tick().await.unwrap();
+        assert_eq!((quiet.worktrees, quiet.deferred), (1, 0), "{quiet:?}");
     }
 
     #[tokio::test]

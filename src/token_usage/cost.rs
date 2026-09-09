@@ -6,9 +6,9 @@
 //! mapping, and no marginal-at-200K pricing arm (ccusage keeps LiteLLM
 //! `above_200k` data marginal when a model has above-rates but no threshold;
 //! git-ai's models.dev catalog always pairs above-rates with a threshold, so
-//! that arm is unreachable). `git-ai usage` (src/metrics/local_stats.rs)
-//! estimates from the same catalog but without tiering, multipliers, or the
-//! 1h-cache split; TokenUsage events are the authoritative figures.
+//! that arm is unreachable). TokenUsage events carry these costs as the
+//! authoritative figures; `git-ai usage` (src/metrics/local_stats.rs) sums
+//! them directly rather than re-pricing.
 
 use super::types::{PricingShape, Speed, UsageEntry};
 use crate::metrics::model_pricing::{ModelPricing, pricing_catalog_id, pricing_for};

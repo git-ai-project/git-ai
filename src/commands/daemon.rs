@@ -69,11 +69,41 @@ pub fn handle_daemon(args: &[String]) {
     }
 }
 
+/// Pause between `bg start --retry-secs` attempts.
+const START_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
 fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
+    let retry_window = start_retry_window(args)?;
+    let deadline = Instant::now()
+        .checked_add(retry_window)
+        .ok_or_else(|| "--retry-secs is too large".to_string())?;
+    loop {
+        match ensure_daemon_running_attached(daemon_startup_timeout()) {
+            Ok(_) => return Ok(()),
+            // A daemon that is still releasing its lock (logout/login,
+            // self-update) blocks the first attempt; login launchers pass a
+            // retry window so that race does not leave the daemon down.
+            Err(err) if Instant::now() + START_RETRY_INTERVAL < deadline => {
+                eprintln!("Daemon not started yet ({}); retrying", err);
+                thread::sleep(START_RETRY_INTERVAL);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// `--retry-secs <n>`: keep retrying failed starts for up to `n` seconds.
+/// Absent flag means a single attempt.
+fn start_retry_window(args: &[String]) -> Result<Duration, String> {
+    if !has_flag(args, "--retry-secs") {
+        return Ok(Duration::ZERO);
+    }
+    parse_number_arg(args, "--retry-secs")
+        .map(|secs| Duration::from_secs(secs as u64))
+        .ok_or_else(|| "--retry-secs requires a whole number of seconds".to_string())
 }
 
 fn daemon_startup_timeout() -> Duration {
@@ -819,7 +849,7 @@ fn print_help() {
     eprintln!("git-ai bg - run and control git-ai background service");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  git-ai bg start");
+    eprintln!("  git-ai bg start [--retry-secs <n>]");
     eprintln!("  git-ai bg run");
     eprintln!("  git-ai bg status [--repo <path>]");
     eprintln!("  git-ai bg shutdown [--hard]");

@@ -245,6 +245,85 @@ fn claude_transcript_emits_token_usage_bucket_events() {
     }
 }
 
+/// `git-ai usage` sources tokens and cost exclusively from the TokenUsage
+/// events the pipeline emitted (the SessionEvent raw JSON is not re-parsed).
+#[test]
+fn usage_command_reports_tokens_and_cost_from_token_usage_events() {
+    let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
+    let repo =
+        TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str())]);
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/token-usage.git",
+    ])
+    .expect("remote add should succeed");
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+    let repo_root = repo.canonical_path();
+
+    let transcript_path = repo_root.join("claude-session.jsonl");
+    fs::write(
+        &transcript_path,
+        format!(
+            "{}\n{}\n",
+            claude_usage_line("m1", "r1", &recent_ts(1, 0), 50, Some(1.25)),
+            claude_usage_line("m2", "r2", &recent_ts(6, 0), 70, None),
+        ),
+    )
+    .unwrap();
+
+    let file_path = repo_root.join("example.ts");
+    fs::write(&file_path, "const x = 1;\n").unwrap();
+    checkpoint_with_transcript(
+        &repo,
+        "claude",
+        "sess-usage-cmd",
+        &transcript_path,
+        &file_path,
+        "const x = 1;\nconst y = 2;\n",
+    );
+    sync_token_usage_pipeline(&repo);
+    assert_eq!(token_usage_events(&metrics_db_path).len(), 2);
+
+    let output = repo
+        .git_ai_with_env(
+            &["usage", "--json"],
+            &[("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str())],
+        )
+        .expect("usage --json should succeed");
+    let value: serde_json::Value =
+        serde_json::from_str(&crate::test_utils::extract_json_object(&output))
+            .expect("usage output should be JSON");
+
+    // Both transcript entries: 100 input / 200 cache-read / 30 cache-write
+    // each, outputs 50 and 70.
+    let tokens = &value["tokens"];
+    assert_eq!(tokens["input"].as_u64(), Some(200));
+    assert_eq!(tokens["output"].as_u64(), Some(120));
+    assert_eq!(tokens["cache_read"].as_u64(), Some(400));
+    assert_eq!(tokens["cache_creation"].as_u64(), Some(60));
+    // Cost = the first entry's transcript costUSD (1.25) plus a non-zero
+    // catalog-computed cost for the second entry.
+    let cost = tokens["estimated_cost_usd"].as_f64().unwrap();
+    assert!(cost > 1.25, "expected cost above 1.25, got {cost}");
+    let model = &tokens["by_model"][0];
+    assert_eq!(model["model"].as_str(), Some("claude-sonnet-4"));
+    assert_eq!(model["sessions"].as_u64(), Some(1));
+
+    // The per-repo breakdown carries the same authoritative spend.
+    let repo_row = &value["repos"][0];
+    assert!(
+        repo_row["repo_url"]
+            .as_str()
+            .unwrap()
+            .contains("acme/token-usage")
+    );
+    let repo_cost = repo_row["estimated_cost_usd"].as_f64().unwrap();
+    assert!((repo_cost - cost).abs() < 1e-9);
+}
+
 #[test]
 fn codex_transcript_emits_deltas_with_reasoning_tokens() {
     let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
