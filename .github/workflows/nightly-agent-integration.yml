@@ -155,7 +155,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.93.0"
 
@@ -273,7 +273,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
           toolchain: "1.93.0"
 
