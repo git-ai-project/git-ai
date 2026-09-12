@@ -31,7 +31,28 @@ calls are cleared when the client reports a tool error; retained pending calls
 are also capped at 1,024 if terminal events are missing. An evicted call skips
 its post-checkpoint.
 
-This integration does not import stored conversation transcripts. It covers tool edits reported through CodeArts Agent hooks; legacy CodeArts Snap inline completions are not covered by these hooks.
+After a tracked tool call and when an assistant message finishes, Git AI reads
+that session's conversation from the CodeArts SQLite database through its
+existing asynchronous transcript worker. The completion notification collects
+final replies and tool results written after the tool hook, without creating
+another code-attribution checkpoint. Completed conversations without editing
+tools are also collected when the client is running in a Git repository.
+User messages, assistant messages and tool calls retain their native data,
+with the agent recorded as `codearts`. Child sessions retain their parent
+session IDs when CodeArts provides them. Transcript collection follows Git
+AI's existing configuration and secret-redaction rules.
+
+The plugin resolves the database path inside the CodeArts process, using
+`KERNEL_DATA_DIR`, or `XDG_DATA_HOME` and `SCENARIO` with the kernel's defaults.
+The standard database is `opencode.db`; the CLI normally stores it under
+`~/.codeartsdoer/cli-data`. `OPENCODE_DB` can select another absolute path or a
+path relative to the kernel's data directory. An in-memory database
+(`OPENCODE_DB=:memory:`) cannot be collected by Git AI. Missing database files
+do not prevent code attribution. This integration uses the SQLite schema
+verified in CodeArts CLI 26.8.1 and VS Code AgentKernel 26.8.101; custom build
+channels with a different database name should set `OPENCODE_DB` explicitly.
+
+Legacy CodeArts Snap inline completions are not covered by these hooks.
 
 ### Tool coverage
 
@@ -62,8 +83,8 @@ other tools, whose execution uses different path handling.
 
 Read-only tools are skipped. Arbitrarily named custom or MCP file-writing tools
 are not automatically tracked. Subagent edits depend on receiving their own
-tracked tool hooks; this implementation isolates session/call IDs but has not
-live-tested subagent editing or imported parent/child conversation links.
+tracked tool hooks. Parent/child conversation links are covered by integration
+tests; real subagent editing has not yet been verified.
 The shared shell snapshot algorithm detects created and modified files, not
 pure file deletions. Shell deletion attribution is therefore not a guaranteed
 capability of either integration.

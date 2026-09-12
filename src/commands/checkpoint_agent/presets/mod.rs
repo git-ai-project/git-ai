@@ -42,6 +42,7 @@ pub enum ParsedHookEvent {
     PostFileEdit(PostFileEdit),
     PreBashCall(PreBashCall),
     PostBashCall(PostBashCall),
+    SessionUpdate(SessionUpdate),
     KnownHumanEdit(KnownHumanEdit),
     UntrackedEdit(UntrackedEdit),
 }
@@ -96,6 +97,12 @@ pub struct PostBashCall {
     #[serde(default)]
     pub command: Option<String>,
     pub stream_source: Option<StreamSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionUpdate {
+    pub context: PresetContext,
+    pub stream_source: StreamSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

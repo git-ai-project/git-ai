@@ -20,6 +20,7 @@
 import type { Hooks, Plugin } from "@opencode-ai/plugin"
 import { spawn } from "child_process"
 import { readFile, stat } from "fs/promises"
+import { homedir } from "os"
 import { dirname, isAbsolute, join, resolve } from "path"
 import { fileURLToPath } from "url"
 
@@ -56,6 +57,21 @@ const isEditTool = (toolName: string): boolean =>
 const isBashTool = (toolName: string): boolean => {
   const name = toolName.toLowerCase()
   return name === "bash" || name === "shell"
+}
+
+const codeArtsTranscriptPath = (): string | undefined => {
+  if (AGENT_NAME.toString() !== "codearts") return undefined
+
+  // CodeArts CLI and IDE kernels share OpenCode's SQLite format, but set their
+  // own data directory. Resolve here so the daemon need not inherit their env.
+  const database = process.env.OPENCODE_DB || "opencode.db"
+  if (database === ":memory:") return undefined
+  if (isAbsolute(database)) return resolve(process.cwd(), database)
+  const data = process.env.KERNEL_DATA_DIR || join(
+    process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+    process.env.SCENARIO || "opencode",
+  )
+  return resolve(process.cwd(), join(data, database))
 }
 
 const normalizePath = (rawPath: string, cwd?: string, toolName?: string): string | null => {
@@ -292,6 +308,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugin>> => {
   const { worktree, directory } = ctx
   const defaultCwd = directory || worktree || process.cwd()
+  const transcriptPath = codeArtsTranscriptPath()
 
   // Call IDs can be reused across sessions. Keep each before/after pair together.
   const callKey = (sessionID: string, callID: string): string => JSON.stringify([sessionID, callID])
@@ -431,7 +448,7 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
 
   return {
     event: swallowHookErrors(
-      "tool/session cleanup failed",
+      "tool/session event failed",
       async ({ event }: Parameters<NonNullable<Hooks["event"]>>[0]) => {
         if (event.type === "session.deleted") {
           sessionModels.delete(event.properties.info.id)
@@ -441,6 +458,20 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
           if (part.type === "tool" && part.state.status === "error") {
             pendingCalls.delete(callKey(part.sessionID, part.callID))
           }
+        }
+        if (transcriptPath && event.type === "message.updated") {
+          const info = event.properties.info
+          if (info.role !== "assistant" || typeof info.time.completed !== "number" || !info.sessionID.trim()) return
+          const repoDir = await resolveRepoDir([], defaultCwd)
+          if (!repoDir) return
+          // CodeArts persists final tool results and reply parts after the tool
+          // hook. A completed message refreshes only its transcript, not files.
+          await runCheckpoint(JSON.stringify({
+            hook_event_name: "SessionUpdate",
+            session_id: info.sessionID,
+            cwd: repoDir,
+            transcript_path: transcriptPath,
+          }))
         }
       },
     ),
@@ -545,6 +576,7 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
           // discovered in post metadata may already contain unrelated edits.
           tool_input: callInfo.toolInput,
           model: callInfo.model,
+          transcript_path: transcriptPath,
         })
         await runCheckpoint(hookInput)
       },

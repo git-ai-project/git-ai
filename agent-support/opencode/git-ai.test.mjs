@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { EventEmitter } from "node:events"
 import { mkdtemp, mkdir, rm } from "node:fs/promises"
 import { readFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { createRequire } from "node:module"
@@ -13,7 +13,7 @@ import ts from "typescript"
 
 const require = createRequire(import.meta.url)
 
-async function pluginFixture(t, agent = "codearts", exitCode = 0, subdirectory = "") {
+async function pluginFixture(t, agent = "codearts", exitCode = 0, subdirectory = "", runtime = {}) {
   const directory = await mkdtemp(join(tmpdir(), "git-ai-plugin-"))
   await mkdir(join(directory, ".git"))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -25,7 +25,8 @@ async function pluginFixture(t, agent = "codearts", exitCode = 0, subdirectory =
   }).outputText
   const exports = {}
   runInNewContext(compiled, {
-    exports, process, console, Buffer, setTimeout, clearTimeout,
+    exports, console, Buffer, setTimeout, clearTimeout,
+    process: { env: { ...runtime.env }, platform: process.platform, cwd: () => runtime.cwd ?? directory },
     require: (name) => name === "child_process" ? {
       spawn(binary, args, options) {
         const child = new EventEmitter()
@@ -41,7 +42,7 @@ async function pluginFixture(t, agent = "codearts", exitCode = 0, subdirectory =
         child.kill = () => true
         return child
       },
-    } : require(name),
+    } : name === "os" ? { ...require(name), homedir: () => runtime.home ?? homedir() } : require(name),
   })
   const activeDirectory = join(directory, subdirectory)
   await mkdir(activeDirectory, { recursive: true })
@@ -50,6 +51,176 @@ async function pluginFixture(t, agent = "codearts", exitCode = 0, subdirectory =
 }
 
 const invocation = (tool, sessionID = "session-1", callID = "call-1") => ({ tool, sessionID, callID })
+
+const transcriptRoot = join(tmpdir(), "git-ai-codearts-transcript")
+const transcriptHome = join(transcriptRoot, "home")
+const transcriptCwd = join(transcriptRoot, "kernel-process")
+for (const { name, env, expected } of [
+  {
+    name: "kernel data overrides XDG and ignores the runtime channel",
+    env: { KERNEL_DATA_DIR: join(transcriptRoot, "kernel"), XDG_DATA_HOME: join(transcriptRoot, "xdg"), SCENARIO: "codeartsdoer", OPENCODE_CHANNEL: "development" },
+    expected: join(transcriptRoot, "kernel", "opencode.db"),
+  },
+  {
+    name: "absolute database override",
+    env: { KERNEL_DATA_DIR: join(transcriptRoot, "kernel"), OPENCODE_DB: join(transcriptRoot, "custom.db") },
+    expected: join(transcriptRoot, "custom.db"),
+  },
+  {
+    name: "relative database override under kernel data",
+    env: { KERNEL_DATA_DIR: join(transcriptRoot, "kernel"), OPENCODE_DB: "nested/custom.db" },
+    expected: join(transcriptRoot, "kernel", "nested", "custom.db"),
+  },
+  {
+    name: "relative kernel data resolves against the kernel process cwd",
+    env: { KERNEL_DATA_DIR: "relative-data", OPENCODE_DB: "custom.db" },
+    expected: join(transcriptCwd, "relative-data", "custom.db"),
+  },
+  {
+    name: "XDG data and scenario fallback",
+    env: { XDG_DATA_HOME: join(transcriptRoot, "xdg"), SCENARIO: "codeartsdoer" },
+    expected: join(transcriptRoot, "xdg", "codeartsdoer", "opencode.db"),
+  },
+  {
+    name: "XDG data with the kernel's default scenario",
+    env: { XDG_DATA_HOME: join(transcriptRoot, "xdg") },
+    expected: join(transcriptRoot, "xdg", "opencode", "opencode.db"),
+  },
+  {
+    name: "home data fallback for an explicit scenario",
+    env: { KERNEL_DATA_DIR: "", XDG_DATA_HOME: "", SCENARIO: "codeartsdoer", OPENCODE_DB: "" },
+    expected: join(transcriptHome, ".local", "share", "codeartsdoer", "opencode.db"),
+  },
+  {
+    name: "home data and default scenario fallback",
+    env: {},
+    expected: join(transcriptHome, ".local", "share", "opencode", "opencode.db"),
+  },
+  {
+    name: "in-memory database skips transcript collection",
+    env: { KERNEL_DATA_DIR: join(transcriptRoot, "kernel"), OPENCODE_DB: ":memory:" },
+    expected: undefined,
+  },
+]) {
+  test(`codearts: transcript path uses ${name} for file and shell checkpoints`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, "codearts", 0, "src", {
+      env, home: transcriptHome, cwd: transcriptCwd,
+    })
+    for (const tool of ["write", "bash"]) {
+      const input = invocation(tool)
+      const args = tool === "write" ? { filePath: "main.ts" } : { command: "echo hello > main.ts" }
+      await hooks["tool.execute.before"](input, { args })
+      await hooks["tool.execute.after"](input, {})
+      assert.equal(calls.at(-2).input.hook_event_name, "PreToolUse")
+      assert.equal(Object.hasOwn(calls.at(-2).input, "transcript_path"), false)
+      assert.equal(calls.at(-1).input.hook_event_name, "PostToolUse")
+      assert.equal(calls.at(-1).input.transcript_path, expected)
+      assert.equal(Object.hasOwn(calls.at(-1).input, "transcript_path"), expected !== undefined)
+      assert.deepEqual(calls.at(-1).input.tool_input, calls.at(-2).input.tool_input)
+    }
+    assert.equal(calls.length, 4)
+  })
+}
+
+test("opencode: CodeArts transcript environment does not change checkpoint payloads", async (t) => {
+  const { hooks, calls } = await pluginFixture(t, "opencode", 0, "", {
+    env: { KERNEL_DATA_DIR: transcriptRoot, OPENCODE_DB: "custom.db" },
+  })
+  for (const tool of ["write", "bash"]) {
+    const input = invocation(tool)
+    const args = tool === "write" ? { filePath: "main.ts" } : { command: "echo hello > main.ts" }
+    await hooks["tool.execute.before"](input, { args })
+    await hooks["tool.execute.after"](input, {})
+  }
+  assert.equal(calls.length, 4)
+  assert.ok(calls.every(({ input }) => !Object.hasOwn(input, "transcript_path")))
+})
+
+const messageUpdated = (sessionID, properties = {}) => ({ event: {
+  type: "message.updated",
+  properties: { info: {
+    id: `message-${sessionID}`, sessionID, role: "assistant", time: { created: 1, completed: 2 },
+    ...properties,
+  } },
+} })
+
+test("codearts: completed messages refresh transcripts for their own sessions without edit payloads", async (t) => {
+  const { directory, hooks, calls } = await pluginFixture(t, "codearts", 0, "src", {
+    env: { KERNEL_DATA_DIR: transcriptRoot },
+  })
+  await Promise.all([
+    hooks.event(messageUpdated("session-1")),
+    hooks.event(messageUpdated("session-2", { error: { name: "AbortedError", data: { message: "Aborted" } } })),
+  ])
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls.map(({ input }) => input.session_id).sort(), ["session-1", "session-2"])
+  for (const { args, input } of calls) {
+    assert.deepEqual(args, ["checkpoint", "codearts", "--hook-input", "stdin"])
+    assert.deepEqual(input, {
+      hook_event_name: "SessionUpdate",
+      session_id: input.session_id,
+      cwd: directory,
+      transcript_path: join(transcriptRoot, "opencode.db"),
+    })
+  }
+})
+
+test("codearts: session refresh ignores unfinished messages, user messages, idle events and empty IDs", async (t) => {
+  const { hooks, calls } = await pluginFixture(t)
+  for (const event of [
+    messageUpdated("session-1", { time: { created: 1 } }),
+    messageUpdated("session-1", { role: "user" }),
+    messageUpdated(""),
+    messageUpdated("   "),
+    { event: { type: "session.idle", properties: { sessionID: "session-1" } } },
+    { event: { type: "session.status", properties: { sessionID: "session-1", status: { type: "idle" } } } },
+  ]) {
+    await hooks.event(event)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test("codearts: session refresh leaves pending file and shell checkpoint scopes intact", async (t) => {
+  const { hooks, calls } = await pluginFixture(t)
+  for (const tool of ["write", "bash"]) {
+    const input = invocation(tool)
+    const args = tool === "write" ? { filePath: "main.ts" } : { command: "echo hello > main.ts" }
+    await hooks["tool.execute.before"](input, { args })
+    await hooks.event(messageUpdated("other-session"))
+    await hooks["tool.execute.after"](input, {})
+    assert.deepEqual(calls.slice(-3).map(({ input }) => input.hook_event_name), ["PreToolUse", "SessionUpdate", "PostToolUse"])
+    assert.deepEqual(calls.at(-1).input.tool_input, calls.at(-3).input.tool_input)
+    assert.equal(calls.at(-1).input.session_id, input.sessionID)
+    assert.equal(calls.at(-1).input.tool_use_id, input.callID)
+  }
+})
+
+for (const agent of ["codearts", "opencode"]) {
+  test(`${agent}: session refresh skips unsupported or in-memory transcripts`, async (t) => {
+    const { hooks, calls } = await pluginFixture(t, agent, 0, "", {
+      env: { KERNEL_DATA_DIR: transcriptRoot, OPENCODE_DB: agent === "codearts" ? ":memory:" : "custom.db" },
+    })
+    await hooks.event(messageUpdated("session-1"))
+    assert.equal(calls.length, 0)
+  })
+}
+
+test("codearts: session refresh outside a git repository is skipped", async (t) => {
+  const { directory, hooks, calls } = await pluginFixture(t)
+  await rm(join(directory, ".git"), { recursive: true })
+  await hooks.event(messageUpdated("session-1"))
+  assert.equal(calls.length, 0)
+})
+
+test("codearts: a failed session refresh does not interrupt subsequent tool hooks", async (t) => {
+  let attempts = 0
+  const { hooks, calls } = await pluginFixture(t, "codearts", () => attempts++ === 0 ? 1 : 0)
+  await assert.doesNotReject(() => hooks.event(messageUpdated("session-1")))
+  const input = invocation("write")
+  await hooks["tool.execute.before"](input, { args: { filePath: "main.ts" } })
+  await hooks["tool.execute.after"](input, {})
+  assert.deepEqual(calls.map(({ input }) => input.hook_event_name), ["SessionUpdate", "PreToolUse", "PostToolUse"])
+})
 
 for (const agent of ["codearts", "opencode"]) {
   test(`${agent}: edit checkpoints preserve call identity and scoped file paths`, async (t) => {

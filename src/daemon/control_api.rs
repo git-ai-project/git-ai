@@ -1,5 +1,6 @@
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::StatSnapshot;
+use crate::commands::checkpoint_agent::presets::{PresetContext, StreamSource};
 use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +13,12 @@ pub enum ControlRequest {
     Ping,
     #[serde(rename = "checkpoint.run")]
     CheckpointRun { body_bytes: u64 },
+    /// Queue transcript processing without creating a file checkpoint.
+    #[serde(rename = "transcript.update")]
+    TranscriptUpdate {
+        context: PresetContext,
+        stream_source: StreamSource,
+    },
     #[serde(rename = "sync.family")]
     SyncFamily { repo_working_dir: String },
     #[serde(rename = "status.family")]
