@@ -1969,6 +1969,14 @@ impl TestRepo {
         self.daemon_completion_entries_for_family(&family_key).len() as u64
     }
 
+    pub(crate) fn daemon_checkpoint_completion_count(&self) -> u64 {
+        let family_key = self.daemon_family_key();
+        self.daemon_completion_entries_for_family(&family_key)
+            .iter()
+            .filter(|entry| entry.sync_tracked && entry.kind == "checkpoint")
+            .count() as u64
+    }
+
     pub(crate) fn daemon_completion_entries(&self) -> Vec<DaemonTestCompletionLogEntry> {
         let family_key = self.daemon_family_key();
         self.daemon_completion_entries_for_family(&family_key)
@@ -2240,11 +2248,12 @@ impl TestRepo {
         );
     }
 
-    pub(crate) fn wait_for_next_daemon_checkpoint_completion(&self, baseline_count: u64) -> u64 {
-        self.wait_for_daemon_total_completion_count(
-            baseline_count,
-            baseline_count.saturating_add(1),
-        )
+    pub(crate) fn wait_for_next_daemon_checkpoint_completion(
+        &self,
+        checkpoint_baseline: u64,
+    ) -> u64 {
+        let family_key = self.daemon_family_key();
+        self.wait_for_daemon_checkpoint_count(&family_key, checkpoint_baseline.saturating_add(1))
     }
 
     fn daemon_family_key_for_repo_path(&self, repo_path: &Path) -> String {
