@@ -107,6 +107,9 @@ git ai stats <start_sha>..<end_sha> --json
 
 Calculates % AI-code, AI-lines generated vs committed, accepted rates, human overrides broken down by tool and model. Learn more: [Stats command reference docs](https://usegitai.com/docs/cli/reference#stats). 
 
+For commit-level overlap handling and non-additive model counts, see
+[Attribution counts in commit stats](docs/commit-stats-attribution.md).
+
 
 <details>
 <summary>Example JSON output</summary>

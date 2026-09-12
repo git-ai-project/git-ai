@@ -7,7 +7,9 @@ use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::rewrite::DiffTreeResult;
-use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
+use crate::authorship::stats::{
+    stats_for_commit_stats_and_mock_counts_from_hunks, write_stats_to_terminal,
+};
 use crate::authorship::virtual_attribution::{AuthorshipLogDiffContext, VirtualAttributions};
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::Config;
@@ -482,13 +484,12 @@ where
                 &commit_sha,
             )?;
 
-            let computed = stats_for_commit_stats_from_hunks(
-                repo,
-                &commit_sha,
+            let (computed, mock_only) = stats_for_commit_stats_and_mock_counts_from_hunks(
                 &ignore_patterns,
                 &diff_hunks,
                 Some(&authorship_log),
-            )?;
+                is_merge_commit,
+            );
 
             let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
                 repo,
@@ -509,6 +510,7 @@ where
                 &human_author,
                 &authorship_note_str,
                 &computed,
+                &mock_only,
                 &parent_working_log,
                 hunks_json.as_deref(),
                 options.commit_source,
@@ -1001,27 +1003,24 @@ pub(crate) struct MetricToolModelBreakdown {
 }
 
 /// Build the metrics tool/model arrays and remove mock_ai test data.
-/// Returns None when the entire event would only represent mock_ai data.
+/// Returns None when all named models and all qualifying AI coverage are mock.
 pub(crate) fn metric_tool_model_breakdown(
     stats: &crate::authorship::stats::CommitStats,
+    mock_only: &crate::authorship::stats::ToolModelHeadlineStats,
 ) -> Option<MetricToolModelBreakdown> {
     let only_mock_ai = !stats.tool_model_breakdown.is_empty()
         && stats
             .tool_model_breakdown
             .keys()
-            .all(|k| k.starts_with("mock_ai::"));
+            .all(|k| k.starts_with("mock_ai::"))
+        && mock_only.ai_additions == stats.ai_additions
+        && mock_only.ai_accepted == stats.ai_accepted;
     if only_mock_ai {
         return None;
     }
 
-    let mut agg_ai = stats.ai_additions;
-    let mut agg_accepted = stats.ai_accepted;
-    for (key, ts) in &stats.tool_model_breakdown {
-        if key.starts_with("mock_ai::") {
-            agg_ai = agg_ai.saturating_sub(ts.ai_additions);
-            agg_accepted = agg_accepted.saturating_sub(ts.ai_accepted);
-        }
-    }
+    let agg_ai = stats.ai_additions.saturating_sub(mock_only.ai_additions);
+    let agg_accepted = stats.ai_accepted.saturating_sub(mock_only.ai_accepted);
 
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
     let mut ai_additions: Vec<u32> = vec![agg_ai];
@@ -1132,8 +1131,24 @@ pub(crate) fn commit_metric_attrs(
     attrs.custom_attributes_map(Config::fresh().custom_attributes())
 }
 
-/// Record metrics for a committed change.
-/// This is a best-effort operation - failures are silently ignored.
+/// Build the ordinary-commit count payload, excluding mock-only coverage.
+pub(crate) fn committed_metric_values(
+    stats: &crate::authorship::stats::CommitStats,
+    mock_only: &crate::authorship::stats::ToolModelHeadlineStats,
+) -> Option<crate::metrics::CommittedValues> {
+    let breakdown = metric_tool_model_breakdown(stats, mock_only)?;
+    Some(
+        crate::metrics::CommittedValues::new()
+            .human_additions(stats.human_additions)
+            .git_diff_deleted_lines(stats.git_diff_deleted_lines)
+            .git_diff_added_lines(stats.git_diff_added_lines)
+            .tool_model_pairs(breakdown.tool_model_pairs)
+            .ai_additions(breakdown.ai_additions)
+            .ai_accepted(breakdown.ai_accepted),
+    )
+}
+
+/// Record metrics for a committed change on a best-effort basis.
 #[allow(clippy::too_many_arguments)]
 fn record_commit_metrics(
     repo: &Repository,
@@ -1142,24 +1157,16 @@ fn record_commit_metrics(
     human_author: &str,
     authorship_note: &str,
     stats: &crate::authorship::stats::CommitStats,
+    mock_only: &crate::authorship::stats::ToolModelHeadlineStats,
     checkpoints: &[Checkpoint],
     hunks_json: Option<&str>,
     commit_source: Option<&str>,
 ) {
-    use crate::metrics::{CommittedValues, record};
+    use crate::metrics::record;
 
-    let Some(breakdown) = metric_tool_model_breakdown(stats) else {
+    let Some(values) = committed_metric_values(stats, mock_only) else {
         return;
     };
-
-    // Build values with all stats
-    let values = CommittedValues::new()
-        .human_additions(stats.human_additions)
-        .git_diff_deleted_lines(stats.git_diff_deleted_lines)
-        .git_diff_added_lines(stats.git_diff_added_lines)
-        .tool_model_pairs(breakdown.tool_model_pairs)
-        .ai_additions(breakdown.ai_additions)
-        .ai_accepted(breakdown.ai_accepted);
 
     // Add first checkpoint timestamp (null if no checkpoints)
     let values = if let Some(first) = checkpoints.first() {
@@ -1355,11 +1362,44 @@ mod tests {
             ..Default::default()
         };
 
-        let result = metric_tool_model_breakdown(&stats).unwrap();
+        let result = metric_tool_model_breakdown(
+            &stats,
+            &ToolModelHeadlineStats {
+                ai_additions: 4,
+                ai_accepted: 3,
+            },
+        )
+        .unwrap();
 
         assert_eq!(result.tool_model_pairs, vec!["all", "codex::gpt-5"]);
         assert_eq!(result.ai_additions, vec![6, 6]);
         assert_eq!(result.ai_accepted, vec![5, 5]);
+    }
+
+    #[test]
+    fn test_metric_tool_model_breakdown_preserves_real_coverage_overlapping_mock() {
+        use crate::authorship::stats::{CommitStats, ToolModelHeadlineStats};
+
+        // Both models cover every one of the same six added lines.
+        let model = ToolModelHeadlineStats {
+            ai_additions: 6,
+            ai_accepted: 6,
+        };
+        let stats = CommitStats {
+            ai_additions: 6,
+            ai_accepted: 6,
+            tool_model_breakdown: std::collections::BTreeMap::from([
+                ("mock_ai::unknown".to_string(), model.clone()),
+                ("codex::test-model".to_string(), model),
+            ]),
+            ..Default::default()
+        };
+
+        let result =
+            metric_tool_model_breakdown(&stats, &ToolModelHeadlineStats::default()).unwrap();
+        assert_eq!(result.tool_model_pairs, vec!["all", "codex::test-model"]);
+        assert_eq!(result.ai_additions, vec![6, 6]);
+        assert_eq!(result.ai_accepted, vec![6, 6]);
     }
 
     #[test]
@@ -1381,7 +1421,16 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(metric_tool_model_breakdown(&stats), None);
+        assert_eq!(
+            metric_tool_model_breakdown(
+                &stats,
+                &ToolModelHeadlineStats {
+                    ai_additions: 4,
+                    ai_accepted: 3,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
