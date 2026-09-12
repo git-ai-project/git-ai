@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
+    "test": "node --test git-ai.test.mjs",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

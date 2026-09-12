@@ -8573,6 +8573,24 @@ impl ActorDaemonCoordinator {
             ControlRequest::CheckpointRun { .. } => Err(GitAiError::Generic(
                 "checkpoint.run requires the framed checkpoint transport".to_string(),
             )),
+            ControlRequest::TranscriptUpdate {
+                context,
+                stream_source,
+            } => {
+                if let Some(worker) = &self.stream_worker {
+                    worker.notify_checkpoint(
+                        stream_source.session_id,
+                        context.agent_id.tool,
+                        context.trace_id,
+                        None,
+                        stream_source.path,
+                        Some(context.cwd),
+                        stream_source.external_session_id,
+                        stream_source.external_parent_session_id,
+                    );
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
             ControlRequest::SyncFamily { repo_working_dir } => {
                 self.sync_family(repo_working_dir).await.and_then(|status| {
                     serde_json::to_value(status)
