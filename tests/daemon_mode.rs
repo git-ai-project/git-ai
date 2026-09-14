@@ -8545,6 +8545,121 @@ fn daemon_marks_repository_filtered_token_usage_events_delivered_without_uploadi
     assert_eq!(status.delivered, 2);
 }
 
+/// The `await` barrier's pending-metrics count must include every
+/// non-delivered row, not just rows currently eligible for another upload
+/// attempt: a row backed off after a failed attempt, or one that exhausted
+/// its retry budget, was never delivered and must still block `await` from
+/// certifying "finished". This seeds one row of each kind and confirms
+/// `await` honestly reports them as outstanding instead of falsely
+/// declaring success.
+#[test]
+fn await_reports_backed_off_and_exhausted_metrics_as_outstanding() {
+    let mut mock_api = MockApiServer::start();
+    let metrics_db_path = std::env::temp_dir().join(format!(
+        "git-ai-stuck-metrics-{}.db",
+        git_ai::uuid::generate_v4()
+    ));
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_API_BASE_URL", mock_api.base_url()),
+        ("GIT_AI_API_KEY", "test-api-key"),
+        (
+            "GIT_AI_TEST_METRICS_DB_PATH",
+            metrics_db_path.to_str().unwrap(),
+        ),
+    ]);
+
+    let event = |marker: &str| {
+        MetricEvent::from_values(
+            SessionEventValues::new(json!({ "marker": marker })),
+            EventAttributes::with_version("test")
+                .session_id(marker)
+                .trace_id(marker)
+                .to_sparse(),
+        )
+    };
+    let backed_off_event = serde_json::to_string(&event("backed-off-marker")).unwrap();
+    let exhausted_event = serde_json::to_string(&event("exhausted-marker")).unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let ids = {
+        let mut db = MetricsDatabase::open_at_path(&metrics_db_path).unwrap();
+        let ids = db
+            .insert_events(&[backed_off_event, exhausted_event])
+            .unwrap();
+        // Row 0: one failed upload attempt -> backed off ~5 minutes out,
+        // but never delivered.
+        db.mark_records_failed(&[ids[0]], "simulated transient upload failure", now)
+            .unwrap();
+        // Row 1: exhausted its retry budget in one call, but never delivered.
+        db.mark_records_undeliverable(
+            &[(ids[1], "simulated permanent upload failure".to_string())],
+            now,
+        )
+        .unwrap();
+        ids
+    };
+    assert_eq!(ids.len(), 2);
+
+    // Sanity-check the seeded DB state directly before exercising `await`:
+    // both rows are non-delivered, and NEITHER is currently retryable.
+    let status = MetricsDatabase::open_at_path(&metrics_db_path)
+        .unwrap()
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.not_delivered, 2,
+        "expected both seeded rows to be non-delivered: {status:?}"
+    );
+    assert_eq!(
+        status.pending_retryable, 0,
+        "expected neither seeded row to be currently retryable: {status:?}"
+    );
+    assert_eq!(
+        status.waiting_retry, 1,
+        "expected exactly the backed-off row to be waiting out its retry backoff: {status:?}"
+    );
+    assert_eq!(
+        status.stopped_after_errors, 1,
+        "expected exactly the exhausted row to have stopped after errors: {status:?}"
+    );
+
+    // `await` must not certify "finished" while these 2 rows are stuck: it
+    // must report an honest non-success (either the control request itself
+    // timing out, or the daemon promptly answering "not done" with a
+    // nonzero remaining count) instead of falsely reporting success.
+    let err = repo
+        .git_ai(&["await", "--timeout", "5"])
+        .expect_err("await must not report success while 2 metrics rows remain undelivered");
+    assert!(
+        !err.contains("finished"),
+        "await must never claim it finished while 2 metrics rows remain undelivered: {err}\ndaemon log:\n{}",
+        repo.daemon_stderr_contents()
+    );
+    assert!(
+        err.contains("timed out") || err.contains("2 metrics"),
+        "expected an honest timeout or an explicit '2 metrics ... remaining' report, got: {err}\ndaemon log:\n{}",
+        repo.daemon_stderr_contents()
+    );
+
+    // Neither stuck row was ever uploaded, and the await call itself must
+    // not mutate their delivery state.
+    let uploaded_requests = serde_json::to_string(&mock_api.collect_requests()).unwrap();
+    assert!(!uploaded_requests.contains("backed-off-marker"));
+    assert!(!uploaded_requests.contains("exhausted-marker"));
+    let status_after = MetricsDatabase::open_at_path(&metrics_db_path)
+        .unwrap()
+        .status()
+        .unwrap();
+    assert_eq!(
+        status_after.not_delivered, 2,
+        "await must not silently deliver or drop stuck rows: {status_after:?}"
+    );
+}
+
 #[test]
 fn reingest_command_redelivers_bounded_and_all_metrics_through_daemon() {
     let mut mock_api = MockApiServer::start();

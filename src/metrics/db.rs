@@ -746,6 +746,10 @@ impl MetricsDatabase {
     }
 
     /// Get count of pending metrics that are currently eligible for upload.
+    ///
+    /// Excludes rows backed off after a failed attempt or that exhausted
+    /// their retries. Good for backpressure ("how much can I act on right
+    /// now"), but NOT a count of outstanding work -- use `count` for that.
     pub fn count_retryable(&self) -> Result<usize, GitAiError> {
         let now = current_unix_ts();
         let count: i64 = self.conn.query_row(
@@ -970,7 +974,9 @@ impl MetricsDatabase {
         Ok(ids)
     }
 
-    /// Get count of pending metrics.
+    /// Get count of pending (not yet delivered) metrics, regardless of
+    /// retry backoff or attempts exhausted. Used by the `await` barrier to
+    /// decide whether upload work is truly finished.
     pub fn count(&self) -> Result<usize, GitAiError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM metrics WHERE delivered_ts IS NULL",
@@ -2688,6 +2694,8 @@ mod tests {
         db.mark_records_failed(&[failed_id], "upload failed", failed_at)
             .unwrap();
 
+        // The failed row backs off out of count_retryable but was never
+        // delivered, so count (the await barrier's signal) must still see it.
         assert_eq!(db.count().unwrap(), 2);
         assert_eq!(db.count_retryable().unwrap(), 1);
 
