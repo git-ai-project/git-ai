@@ -934,12 +934,16 @@ fn count_pending_metrics_for_await() -> usize {
         return 0;
     }
 
+    // Use `count`, not `count_retryable`: a row that just failed an upload
+    // attempt is backed off (`next_retry_at` in the future) and excluded
+    // from `count_retryable`, even though it was never delivered. `await`
+    // must not certify "finished" while such a row is still undelivered.
     MetricsDatabase::global()
         .and_then(|db| {
             db.lock()
                 .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))
         })
-        .and_then(|db| db.count_retryable())
+        .and_then(|db| db.count())
         .unwrap_or(0)
 }
 
