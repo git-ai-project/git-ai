@@ -9,13 +9,13 @@ use crate::utils::LockFile;
 use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -376,11 +376,6 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
-#[cfg(windows)]
-fn powershell_single_quote_literal(value: &OsStr) -> String {
-    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
-}
-
 #[cfg(any(windows, not(any(test, feature = "test-support"))))]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     // Use current_git_ai_exe() instead of current_exe() to resolve through
@@ -390,33 +385,50 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(config)?;
 
+    let mut child = Command::new(exe);
+    child
+        .arg("bg")
+        .arg("run")
+        .current_dir(&runtime_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Remove git environment variables that must not leak into the daemon.
+    // The daemon is repository-agnostic; variables like GIT_DIR override
+    // the -C flag and cause repository resolution failures.
+    for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
+        child.env_remove(var);
+    }
+    // GIT_AI controls debug routing in the binary (GIT_AI=git → handle_git).
+    // A daemon that inherits this would route "bg run" to the git proxy instead
+    // of starting as a daemon.
+    child.env_remove("GIT_AI");
+
     #[cfg(windows)]
     {
-        let script = format!(
-            "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
-            powershell_single_quote_literal(exe.as_os_str()),
-            powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
-        );
-        let mut child = Command::new("powershell.exe");
-        child
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-WindowStyle")
-            .arg("Hidden")
-            .arg("-Command")
-            .arg(script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Remove git environment variables that must not leak into the daemon.
-        for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
-            child.env_remove(var);
-        }
-        child.env_remove("GIT_AI");
-
+        // Spawn `git-ai bg run` directly instead of shelling out through
+        // `powershell.exe Start-Process`: the PowerShell hop adds CLR startup
+        // latency and swallows failures inside `Start-Process` itself.
+        // `CREATE_BREAKAWAY_FROM_JOB` + `CREATE_NEW_PROCESS_GROUP` reproduces
+        // the same detachment `Start-Process` provided. `Command::spawn` on
+        // Windows always requests `bInheritHandles = TRUE` (stable Rust has
+        // no knob to disable it), so every inheritable handle in this
+        // process -- not just the child's own null stdio -- would be
+        // duplicated into the detached daemon; clear this process's own
+        // stdio inherit flags first so a wrapper's piped stdout/stderr don't
+        // leak into the long-lived daemon and hang the wrapper on EOF. The
+        // returned guard restores each handle's original flags on drop, so
+        // the clear is scoped to this spawn (covering both the preferred
+        // attempt and the CREATE_BREAKAWAY_FROM_JOB fallback retry below)
+        // instead of being left cleared for the rest of this process.
+        let _inherit_guard = disable_inherit_for_own_stdio();
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
         child.creation_flags(preferred_flags);
+        // `_inherit_guard` drops at the end of this block (after the match
+        // below is evaluated), restoring the original inherit flags on
+        // every path -- success, the first failure, and the fallback-retry
+        // failure -- before this function returns.
         match child.spawn() {
             Ok(_) => Ok(()),
             Err(preferred_err) => {
@@ -437,26 +449,134 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        let mut child = Command::new(exe);
-        child
-            .arg("bg")
-            .arg("run")
-            .current_dir(&runtime_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Remove git environment variables that must not leak into the daemon.
-        // The daemon is repository-agnostic; variables like GIT_DIR override
-        // the -C flag and cause repository resolution failures.
-        for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
-            child.env_remove(var);
-        }
-        // GIT_AI controls debug routing in the binary (GIT_AI=git → handle_git).
-        // A daemon that inherits this would route "bg run" to the git proxy instead
-        // of starting as a daemon.
-        child.env_remove("GIT_AI");
         child.spawn().map(|_| ()).map_err(|e| e.to_string())
     }
+}
+
+/// RAII guard returned by [`disable_inherit_for_own_stdio`]. Restores each
+/// affected stdio handle's original `HANDLE_FLAG_INHERIT` state on drop, so
+/// the inherit-clearing is scoped to the detached daemon spawn rather than
+/// left in place for the rest of this process's lifetime.
+///
+/// Handle-inheritance flags are process-wide kernel state, not spawn-scoped:
+/// an unrelated thread in this process that spawned another child while this
+/// guard is alive could still observe the temporarily-cleared inherit flag.
+/// git-ai does not spawn a passthrough git child concurrently with a daemon
+/// auto-start on the same process today, so this is not a practical risk
+/// currently; it would need a process-wide lock (not added here) if that
+/// ever changes.
+#[cfg(windows)]
+struct RestoreStdioInherit {
+    /// (handle, original flags) pairs for handles this guard actually read
+    /// and cleared, so drop only restores what it changed.
+    saved: Vec<(windows_sys::Win32::Foundation::HANDLE, u32)>,
+}
+
+#[cfg(windows)]
+impl Drop for RestoreStdioInherit {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+        // Restore in reverse order of saving (LIFO). With deduplication in
+        // `disable_inherit_for_handles` this is currently equivalent to
+        // forward order (each handle value appears at most once), but
+        // restoring LIFO keeps this guard correct-by-construction even if a
+        // future change reintroduces multiple entries for the same handle.
+        for &(handle, original_flags) in self.saved.iter().rev() {
+            let original_inherit = original_flags & HANDLE_FLAG_INHERIT;
+            // SAFETY: `handle` was read from this process's own stdio via
+            // `AsRawHandle` when the guard was created and is still owned by
+            // this process; `SetHandleInformation` only mutates the
+            // handle's inheritance flag.
+            let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, original_inherit) };
+            if ok == 0 {
+                tracing::debug!(
+                    "failed to restore inherit flag on own stdio handle after detached daemon spawn"
+                );
+            }
+        }
+    }
+}
+
+/// Clears `HANDLE_FLAG_INHERIT` on this process's own stdin/stdout/stderr
+/// handles so they are not duplicated into the detached daemon spawned
+/// above, returning an RAII guard that restores each handle's original
+/// flags when dropped. Best-effort: failures to read or clear a handle's
+/// flags (a console handle, an already non-inheritable handle, or a missing
+/// standard handle) are ignored and that handle is simply left out of the
+/// restore set, since this is defense-in-depth rather than a precondition
+/// for the spawn.
+#[cfg(windows)]
+fn disable_inherit_for_own_stdio() -> RestoreStdioInherit {
+    use windows_sys::Win32::Foundation::HANDLE;
+
+    let handles: [HANDLE; 3] = [
+        std::io::stdin().as_raw_handle() as HANDLE,
+        std::io::stdout().as_raw_handle() as HANDLE,
+        std::io::stderr().as_raw_handle() as HANDLE,
+    ];
+    disable_inherit_for_handles(&handles)
+}
+
+/// Core logic for [`disable_inherit_for_own_stdio`], split out so tests can
+/// exercise it against an explicit handle list (e.g. the same handle value
+/// repeated, mirroring `2>&1`-style stream aliasing) without needing real
+/// process-wide stdio redirection.
+///
+/// Deduplicates by raw handle value: stdin/stdout/stderr can resolve to the
+/// *same* kernel handle (e.g. `> out.log 2>&1`), and processing that value
+/// twice would read its already-cleared flags on the second pass, saving a
+/// bogus `original_flags` entry that clobbers the correct restore on drop.
+/// Skipping a handle already present in `saved` ensures each distinct handle
+/// is read/cleared/restored exactly once.
+#[cfg(windows)]
+fn disable_inherit_for_handles(
+    handles: &[windows_sys::Win32::Foundation::HANDLE],
+) -> RestoreStdioInherit {
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    let mut saved = Vec::with_capacity(handles.len());
+    for &handle in handles {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        // Skip handle values already processed above (e.g. stdout and
+        // stderr aliasing the same kernel handle) so this handle's original
+        // flags are only read, cleared, and restored once.
+        if saved.iter().any(|&(h, _)| h == handle) {
+            continue;
+        }
+        let mut original_flags: u32 = 0;
+        // SAFETY: `handle` is a valid, open standard handle obtained from
+        // `AsRawHandle` on this process's own stdio; `GetHandleInformation`
+        // only reads the handle's current flags.
+        let read_ok = unsafe { GetHandleInformation(handle, &mut original_flags) };
+        if read_ok == 0 {
+            tracing::debug!(
+                "failed to read inherit flag on own stdio handle before detached daemon spawn"
+            );
+            continue;
+        }
+        // SAFETY: `handle` is a valid, open standard handle obtained from
+        // `AsRawHandle` on this process's own stdio; `SetHandleInformation`
+        // only mutates the handle's inheritance flag and cannot invalidate
+        // it for this process's own subsequent use.
+        let ok = unsafe {
+            windows_sys::Win32::Foundation::SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0)
+        };
+        if ok == 0 {
+            tracing::debug!(
+                "failed to clear inherit flag on own stdio handle before detached daemon spawn"
+            );
+            continue;
+        }
+        // Only handles this call actually read and cleared are remembered,
+        // so the guard's drop only restores what it changed.
+        saved.push((handle, original_flags));
+    }
+    RestoreStdioInherit { saved }
 }
 
 #[cfg(not(windows))]
@@ -855,4 +975,119 @@ fn print_help() {
     eprintln!("  git-ai bg shutdown [--hard]");
     eprintln!("  git-ai bg restart [--hard]");
     eprintln!("  git-ai bg tail [-n <lines>] [--full] [-f | --follow]");
+}
+
+#[cfg(all(test, windows))]
+mod windows_stdio_inherit_guard_tests {
+    use super::{disable_inherit_for_handles, disable_inherit_for_own_stdio};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    /// Reads the current `HANDLE_FLAG_INHERIT` bit for each of this
+    /// process's own stdin/stdout/stderr handles, skipping any handle that
+    /// is missing/invalid or whose flags can't currently be read (mirrors
+    /// the best-effort skipping in `disable_inherit_for_own_stdio` itself).
+    fn readable_inherit_flags() -> Vec<u32> {
+        let handles: [HANDLE; 3] = [
+            std::io::stdin().as_raw_handle() as HANDLE,
+            std::io::stdout().as_raw_handle() as HANDLE,
+            std::io::stderr().as_raw_handle() as HANDLE,
+        ];
+        handles
+            .into_iter()
+            .filter(|&h| !(h.is_null() || h == INVALID_HANDLE_VALUE))
+            .filter_map(|h| {
+                let mut flags = 0u32;
+                let ok = unsafe { GetHandleInformation(h, &mut flags) };
+                (ok != 0).then_some(flags & HANDLE_FLAG_INHERIT)
+            })
+            .collect()
+    }
+
+    /// Mirrors the success path in `spawn_daemon_run_detached`: the guard is
+    /// held across a (simulated) spawn attempt and dropped once that attempt
+    /// completes, at which point the original inherit flags must be back.
+    #[test]
+    fn restores_original_flags_after_simulated_successful_spawn() {
+        let before = readable_inherit_flags();
+        {
+            let _guard = disable_inherit_for_own_stdio();
+            let during = readable_inherit_flags();
+            assert!(
+                during.iter().all(|&flag| flag == 0),
+                "HANDLE_FLAG_INHERIT should be cleared while the guard is held"
+            );
+        }
+        assert_eq!(
+            before,
+            readable_inherit_flags(),
+            "inherit flags must be restored once the guard drops after a successful spawn"
+        );
+    }
+
+    /// Mirrors the forced-failure / fallback-retry path in
+    /// `spawn_daemon_run_detached`: the guard must still restore flags via
+    /// `Drop` when the code it scopes returns an error instead of `Ok`.
+    #[test]
+    fn restores_original_flags_after_simulated_forced_failure() {
+        let before = readable_inherit_flags();
+        let result: Result<(), String> = {
+            let _guard = disable_inherit_for_own_stdio();
+            Err("forced failure to exercise guard drop on the error path".to_string())
+        };
+        assert!(result.is_err());
+        assert_eq!(
+            before,
+            readable_inherit_flags(),
+            "inherit flags must be restored even when the scoped code returns an error"
+        );
+    }
+
+    /// Regression test for two stdio streams aliasing the same kernel handle
+    /// (e.g. `> out.log 2>&1`, where stdout and stderr are the same HANDLE
+    /// value). Without deduplication, the second occurrence reads the
+    /// already-cleared flags left by the first, saving a bogus `(handle, 0)`
+    /// entry that clobbers the correct restore on drop, permanently leaving
+    /// the handle non-inheritable for later passthrough git children in the
+    /// same process.
+    #[test]
+    fn restores_original_flags_when_handles_alias_the_same_value() {
+        let stdout_handle = std::io::stdout().as_raw_handle() as HANDLE;
+        assert!(
+            !(stdout_handle.is_null() || stdout_handle == INVALID_HANDLE_VALUE),
+            "test requires a valid stdout handle"
+        );
+
+        let mut original_flags: u32 = 0;
+        let read_ok = unsafe { GetHandleInformation(stdout_handle, &mut original_flags) };
+        assert_ne!(read_ok, 0, "must be able to read stdout's original flags");
+        let original_inherit = original_flags & HANDLE_FLAG_INHERIT;
+
+        {
+            // Simulate stdout and stderr resolving to the same kernel handle
+            // by passing the same value twice.
+            let _guard = disable_inherit_for_handles(&[stdout_handle, stdout_handle]);
+
+            let mut during_flags: u32 = 0;
+            let during_ok = unsafe { GetHandleInformation(stdout_handle, &mut during_flags) };
+            assert_ne!(during_ok, 0);
+            assert_eq!(
+                during_flags & HANDLE_FLAG_INHERIT,
+                0,
+                "HANDLE_FLAG_INHERIT should be cleared while the guard is held"
+            );
+        }
+
+        let mut after_flags: u32 = 0;
+        let after_ok = unsafe { GetHandleInformation(stdout_handle, &mut after_flags) };
+        assert_ne!(after_ok, 0);
+        assert_eq!(
+            after_flags & HANDLE_FLAG_INHERIT,
+            original_inherit,
+            "aliased handle must be restored to its original inherit flag, not left cleared \
+             by a stale duplicate entry"
+        );
+    }
 }
