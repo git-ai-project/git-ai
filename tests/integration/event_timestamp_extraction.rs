@@ -1,8 +1,8 @@
 use crate::test_utils::{fixture_path, load_fixture};
 use git_ai::daemon::stream_worker::extract_event_timestamp;
 use git_ai::streams::agent::Agent;
-use git_ai::streams::agents::CopilotAgent;
-use git_ai::streams::watermark::RecordIndexWatermark;
+use git_ai::streams::agents::{CopilotAgent, OpenCodeAgent};
+use git_ai::streams::watermark::{RecordIndexWatermark, TimestampWatermark};
 
 #[test]
 fn test_copilot_vscode_event_stream_timestamps() {
@@ -229,4 +229,30 @@ fn test_windsurf_has_no_timestamps() {
             i
         );
     }
+}
+
+#[test]
+fn test_opencode_timestamps() {
+    let agent = OpenCodeAgent::new();
+    let fixture = fixture_path("opencode-sqlite/opencode.db");
+    let watermark = Box::new(TimestampWatermark::new(
+        chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    ));
+    let batch = agent
+        .read_incremental(fixture.as_path(), watermark, "test-session-123")
+        .expect("Should parse OpenCode sqlite fixture");
+
+    assert_eq!(batch.events.len(), 2);
+
+    let meta = std::fs::metadata(&fixture).unwrap();
+    let first = agent.extract_event_timestamp(&batch.events[0], &meta, true);
+    let second = agent.extract_event_timestamp(&batch.events[1], &meta, false);
+
+    assert_eq!(first, 1706459830);
+    assert_eq!(second, 1706459831);
+    assert_ne!(
+        first,
+        git_ai::streams::agent::file_time_fallback(&meta, true),
+        "must not use opencode.db birthtime as session start"
+    );
 }
