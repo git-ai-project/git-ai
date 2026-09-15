@@ -189,6 +189,15 @@ fn read_parts_for_messages_with_limit(
     Ok(parts_by_message)
 }
 
+fn extract_opencode_event_timestamp(event: &serde_json::Value) -> Option<u32> {
+    let message = event.get("message")?;
+    let millis = message
+        .get("time_created")
+        .or_else(|| message.get("time_updated"))
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))?;
+    Some((millis / 1000) as u32)
+}
+
 impl Default for OpenCodeAgent {
     fn default() -> Self {
         Self::new()
@@ -323,7 +332,7 @@ impl Agent for OpenCodeAgent {
         file_meta: &std::fs::Metadata,
         is_first_event: bool,
     ) -> u32 {
-        crate::daemon::stream_worker::extract_event_timestamp(event)
+        extract_opencode_event_timestamp(event)
             .unwrap_or_else(|| crate::streams::agent::file_time_fallback(file_meta, is_first_event))
     }
 
@@ -693,5 +702,87 @@ mod tests {
         assert_eq!(eid, Some("msg_c5d400371001TvbvIzWZB1f9il".to_string()));
         assert_eq!(pid, Some("msg_c5d3ff791001Egl5tW62x4Vgzo".to_string()));
         assert_eq!(tid, None);
+    }
+
+    #[test]
+    fn test_extract_event_timestamp_does_not_use_file_birthtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        std::fs::write(&path, b"").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let file_ts = crate::streams::agent::file_time_fallback(&meta, true);
+
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg-1",
+                "session_id": "ses-1",
+                "time_created": 1706459830000i64,
+                "time_updated": 1706459835000i64,
+                "data": {"role": "user"}
+            }
+        });
+        let agent = OpenCodeAgent::new();
+        let ts = agent.extract_event_timestamp(&event, &meta, true);
+        assert_eq!(ts, 1706459830);
+        assert_ne!(
+            ts, file_ts,
+            "session start must come from message.time_created, not opencode.db birthtime"
+        );
+    }
+
+    #[test]
+    fn test_extract_event_timestamp_from_time_created() {
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg-1",
+                "session_id": "ses-1",
+                "time_created": 1706459830000i64,
+                "time_updated": 1706459835000i64,
+                "data": {"role": "user"}
+            }
+        });
+        assert_eq!(extract_opencode_event_timestamp(&event), Some(1706459830));
+    }
+
+    #[test]
+    fn test_extract_event_timestamp_falls_back_to_time_updated() {
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg-1",
+                "session_id": "ses-1",
+                "time_updated": 1706459835000i64,
+                "data": {"role": "user"}
+            }
+        });
+        assert_eq!(extract_opencode_event_timestamp(&event), Some(1706459835));
+    }
+
+    #[test]
+    fn test_extract_event_timestamp_missing_returns_none() {
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg-1",
+                "session_id": "ses-1",
+                "data": {"role": "user"}
+            }
+        });
+        assert_eq!(extract_opencode_event_timestamp(&event), None);
+    }
+
+    #[test]
+    fn test_generic_timestamp_extractor_misses_opencode_fields() {
+        let event = serde_json::json!({
+            "message": {
+                "id": "msg-1",
+                "time_created": 1706459830000i64,
+                "time_updated": 1706459835000i64,
+                "data": {"role": "user"}
+            }
+        });
+        assert_eq!(
+            crate::daemon::stream_worker::extract_event_timestamp(&event),
+            None,
+            "OpenCode events have time_created, not timestamp; generic extractor must not match"
+        );
     }
 }
