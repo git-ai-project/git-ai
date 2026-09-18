@@ -9,6 +9,7 @@ pub mod attrs;
 pub mod db;
 pub mod events;
 pub mod local_stats;
+pub mod model_pricing;
 pub mod pos_encoded;
 pub mod types;
 
@@ -16,7 +17,7 @@ pub mod types;
 pub use attrs::EventAttributes;
 pub use events::{
     AgentUsageValues, CheckpointValues, CommittedValues, InstallHooksValues, OtelTraceValues,
-    RewriteCommittedValues, SessionEventValues,
+    RewriteCommittedValues, SessionEventValues, TokenUsageValues,
 };
 pub use pos_encoded::PosEncoded;
 pub use types::{EventValues, METRICS_API_VERSION, MetricEvent, MetricsBatch};

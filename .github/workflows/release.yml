@@ -79,6 +79,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Get version from Cargo.toml
         id: get-version
@@ -256,6 +258,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Get version from Cargo.toml
         id: get-version
@@ -359,6 +363,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download Windows x64 binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -382,7 +388,7 @@ jobs:
 
       - name: Azure login for MSI signing
         if: inputs.dry_run != true
-        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -418,6 +424,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download macOS ARM64 binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -538,7 +546,7 @@ jobs:
           $gitAi = Join-Path $env:USERPROFILE '.git-ai\bin\git-ai.exe'
           $configPath = Join-Path $env:USERPROFILE '.git-ai\config.json'
 
-          $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey" -Wait -PassThru
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey INSTALL_WSL=0" -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "MSI install failed with exit code $($install.ExitCode)" }
 
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -563,6 +571,16 @@ jobs:
           $productCode = $record.GetType().InvokeMember(
             'StringData', 'GetProperty', $null, $record, 1
           )
+          $wslQuery = "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'INSTALL_WSL'"
+          $wslView = $database.GetType().InvokeMember(
+            'OpenView', 'InvokeMethod', $null, $database, @($wslQuery)
+          )
+          $wslView.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $wslView, $null)
+          $wslRecord = $wslView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $wslView, $null)
+          $wslDefault = $wslRecord.GetType().InvokeMember(
+            'StringData', 'GetProperty', $null, $wslRecord, 1
+          )
+          if ($wslDefault -ne '1') { throw "MSI INSTALL_WSL default is '$wslDefault', expected '1'" }
           $registeredVersion = $installer.GetType().InvokeMember(
             'ProductInfo', 'GetProperty', $null, $installer, @($productCode, 'VersionString')
           )
@@ -709,6 +727,7 @@ jobs:
       - name: Checkout code for install script
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           path: repo
 
       - name: Generate version-pinned install script
@@ -749,13 +768,20 @@ jobs:
           ' repo/install.ps1 > release/install.ps1
           echo "Generated version-pinned install.ps1 for $VERSION from $REPO"
 
+      - name: Copy MDM login-start scripts
+        run: |
+          cp repo/mdm/macos/install-login-start.sh release/git-ai-login-start-macos.sh
+          cp repo/mdm/linux/install-login-start.sh release/git-ai-login-start-linux.sh
+          cp repo/mdm/windows/install-login-start.ps1 release/git-ai-login-start-windows.ps1
+          chmod +x release/git-ai-login-start-*.sh
+
       - name: Add install scripts to SHA256SUMS
         run: |
           cd release
-          sha256sum install.sh install.ps1 >> SHA256SUMS
+          sha256sum install.sh install.ps1 git-ai-login-start-* >> SHA256SUMS
 
       - name: Generate attestations for release artifacts
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release/git-ai-*
@@ -809,6 +835,12 @@ jobs:
             - **macOS PKG (Apple Silicon)**: `git-ai-macos-arm64.pkg`
             - **macOS PKG (Universal)**: `git-ai-macos-universal.pkg`
 
+            ### MDM login-start scripts
+            Register `git-ai bg start` to run at login (see `mdm/README.md`):
+            - **macOS LaunchAgent**: `git-ai-login-start-macos.sh`
+            - **Linux systemd user unit**: `git-ai-login-start-linux.sh`
+            - **Windows Scheduled Task**: `git-ai-login-start-windows.ps1`
+
             ### SHA256 Checksums
             ```
             $(cat release/SHA256SUMS)
@@ -837,6 +869,9 @@ jobs:
         with:
           app-id: 3481373
           private-key: ${{ secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY }}
+          # The token only pushes the version-bump commit; don't inherit the
+          # app installation's full permission set.
+          permission-contents: write
 
       - name: Checkout code for version bump
         if: inputs.release_production == true
@@ -844,6 +879,10 @@ jobs:
         with:
           token: ${{ steps.release-bot-token.outputs.token }}
           fetch-depth: 0
+          # Don't leave the bot token in .git/config while `cargo check`
+          # runs third-party build scripts; the push step authenticates
+          # explicitly instead.
+          persist-credentials: false
 
       - name: Install Rust toolchain
         if: inputs.release_production == true
@@ -882,9 +921,14 @@ jobs:
 
       - name: Commit and push version bump
         if: inputs.release_production == true
+        env:
+          GH_TOKEN: ${{ steps.release-bot-token.outputs.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Authenticate git via a credential helper reading GH_TOKEN, which
+          # is scoped to this step only.
+          gh auth setup-git
           git add Cargo.toml Cargo.lock flake.nix
           git commit -m "chore: bump version to ${{ steps.bump-version.outputs.new_version }} [skip ci]"
           git pull --rebase origin main
@@ -927,7 +971,7 @@ jobs:
           path: release
 
       - name: Generate attestations for notarized PKGs
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release/git-ai-macos-*.pkg

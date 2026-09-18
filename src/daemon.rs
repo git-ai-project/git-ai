@@ -2,13 +2,18 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::checkpoint_content_budget::CheckpointContentBudget;
 use crate::config;
 use crate::daemon::git_backend::GitBackend;
+use crate::daemon::ref_cursor::{
+    HeadReflogObservation, UntracedClaimRequest, UntracedReflogCursor, head_reflog_unchanged_since,
+    is_untraced_root_sid, observe_head_reflog,
+};
 use crate::error::GitAiError;
 use crate::git::cli_parser::{
     ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
-    common_dir_for_worktree, git_dir_for_worktree, worktree_root_for_path,
+    common_dir_for_worktree, git_dir_for_worktree, worktree_belongs_to_git_dir,
+    worktree_root_for_path, worktrees_for_common_dir,
 };
 use crate::git::repository::{
     Repository, discover_repository_in_path_no_git_exec, exec_git, exec_git_stdin,
@@ -46,9 +51,9 @@ use std::os::fd::{AsFd, AsRawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc};
 use tokio::time::Duration;
 
@@ -63,9 +68,11 @@ pub mod domain;
 pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
+pub mod health;
 mod memory_watchdog;
 pub mod reducer;
 pub mod ref_cursor;
+pub mod repo_family_store;
 pub mod rewrite_metrics;
 pub mod sentry_layer;
 pub mod stream_worker;
@@ -73,8 +80,11 @@ pub mod sweep_coordinator;
 pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
+pub mod token_usage_worker;
 pub mod trace_normalizer;
 pub mod transcript_redaction;
+pub mod untraced_commit_fixup;
+pub mod untraced_fixup_ignore;
 
 pub use control_api::{
     BashSessionQueryResponse, BashSnapshotQueryResponse, ControlRequest, ControlResponse,
@@ -83,11 +93,14 @@ pub use control_api::{
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
-const TRACE_ROOT_ARGV_FIELD: &str = "git_ai_root_argv";
-const TRACE_ROOT_STARTED_AT_NS_FIELD: &str = "git_ai_root_started_at_ns";
-const TRACE_ROOT_WORKTREE_FIELD: &str = "git_ai_root_worktree";
 pub(crate) const TRACE_ROOT_REFLOG_START_OFFSETS_FIELD: &str = "git_ai_root_reflog_start_offsets";
 const TRACE_CONNECTION_CLOSED_EVENT: &str = "git_ai_connection_closed";
+// Synthetic frame written by the socket-health loop; recognized at parse time
+// on the reader thread and never enqueued, so it proves the drain path
+// (accept → reader spawn → read → parse) without perturbing ingest ordering
+// or restarting a daemon that is merely busy with legitimate side effects.
+const TRACE_DRAIN_PROBE_EVENT: &str = "git_ai_drain_probe";
+const TRACE_DRAIN_PROBE_ID_FIELD: &str = "git_ai_probe_id";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CONTROL_RECEIVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -97,6 +110,33 @@ const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const CHECKPOINT_INGRESS_REQUEST_LIMIT: usize = 1_024;
 const CHECKPOINT_INGRESS_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 const CHECKPOINT_FAMILY_DRAIN_CONCURRENCY: usize = 2;
+/// Global bound on concurrently executing command side-effect passes. They
+/// do blocking git work directly on the daemon runtime's 4 worker threads,
+/// and with drains running on detached tasks an unbounded number of
+/// simultaneously grinding families could otherwise occupy every worker and
+/// starve the runtime (#2252). Checkpoint side effects keep their own
+/// semaphore: they run on the blocking pool and must not be starved by
+/// long command passes.
+const COMMAND_SIDE_EFFECT_CONCURRENCY: usize = 2;
+/// How long an accepted checkpoint may wait on the trace-ingest watermark
+/// before the delay is logged, and the cadence of repeat logs while it keeps
+/// waiting. Healthy admission takes milliseconds; a wait this long means
+/// trace ingestion is stalled and must be visible in the logs (#2252).
+const CHECKPOINT_ADMISSION_DELAY_LOG_INTERVAL: Duration = Duration::from_secs(5);
+/// How long a completed sequencer entry (or a sync/await request) waits for an
+/// older, still-open mutating trace root of its family before that root's
+/// process is examined: long enough for a git process that just changed refs
+/// to get its `exit`/`atexit` frames to the reader. Overridable via
+/// `GIT_AI_DAEMON_CAUSAL_GRACE_MS`.
+const FAMILY_CAUSAL_GRACE: Duration = Duration::from_secs(1);
+/// Multiple of the grace after which a fence is released although the root is
+/// finishing (its final frames never got processed) or its process is gone or
+/// unknown (frames lost, or a socket fd leaked to a hook's background child).
+const FAMILY_CAUSAL_FENCE_HARD_CAP_MULTIPLIER: u32 = 30;
+/// Multiple of the grace for which a root that has already changed refs (its
+/// worktree HEAD reflog grew since it started) may hold the fence while it is
+/// still running, e.g. through a post-write hook.
+const FAMILY_WRITTEN_ROOT_FENCE_CAP_MULTIPLIER: u32 = 600;
 // Trace2 frames are written synchronously by Git to the daemon's Unix socket.
 // With small kernel socket buffers (macOS defaults to ~8 KiB), a bursty trace2
 // stream can fill the buffer and block the raw `git` process in `write()` until
@@ -107,8 +147,6 @@ const CHECKPOINT_FAMILY_DRAIN_CONCURRENCY: usize = 2;
 #[cfg(not(windows))]
 const TRACE_SOCKET_RECV_BUFFER_BYTES: usize = 512 * 1024;
 const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
-#[cfg(not(windows))]
-const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
 const WINDOWS_TRACE_PIPE_WORKERS: usize = 16;
 #[cfg(windows)]
@@ -152,6 +190,9 @@ struct CheckpointIngressReservation {
 struct AcceptedCheckpoint {
     receipt_seq: u64,
     received_at_ns: u128,
+    /// Monotonic receipt timestamp for admission-delay measurement;
+    /// `received_at_ns` is wall-clock and can move backwards.
+    received_at: std::time::Instant,
     trace_ingest_target: u64,
     body: Vec<u8>,
     reservation: CheckpointIngressReservation,
@@ -475,6 +516,23 @@ fn trace_root_sid(sid: &str) -> &str {
     sid.split('/').next().unwrap_or(sid)
 }
 
+/// Git encodes its pid in the trace2 session id
+/// (`<timestamp>-H<host hash>-P<hex pid>`); child sids append `/<child sid>`.
+fn trace_sid_pid(sid: &str) -> Option<u32> {
+    let root = trace_root_sid(sid);
+    let pid_hex = &root[root.rfind("-P")? + 2..];
+    u32::from_str_radix(pid_hex, 16).ok()
+}
+
+/// Sleeps until `deadline`, or forever when there is no timer to wait for
+/// (for `select!` arms that only sometimes have a deadline).
+pub(crate) async fn sleep_until_or_pending(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 fn is_terminal_root_trace_event(event: &str, sid: &str, root: &str) -> bool {
     sid == root && event == "atexit"
 }
@@ -524,12 +582,6 @@ fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
         }
     }
     if let Some(path) = payload.get("worktree").and_then(Value::as_str) {
-        return Some(normalize(PathBuf::from(path)));
-    }
-    if let Some(path) = payload
-        .get(TRACE_ROOT_WORKTREE_FIELD)
-        .and_then(Value::as_str)
-    {
         return Some(normalize(PathBuf::from(path)));
     }
     if let Some(cwd) = payload.get("cwd").and_then(Value::as_str)
@@ -653,35 +705,11 @@ fn trace_payload_argv(payload: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn trace_payload_effective_argv(payload: &Value) -> Vec<String> {
-    let argv = trace_payload_argv(payload);
-    if !argv.is_empty() {
-        return argv;
-    }
-    payload
-        .get(TRACE_ROOT_ARGV_FIELD)
-        .and_then(Value::as_array)
-        .map(|argv| {
-            argv.iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
 fn trace_payload_primary_command(payload: &Value) -> Option<String> {
     trace_payload_cmd_name(payload).or_else(|| {
         let argv = trace_payload_argv(payload);
         trace_argv_primary_command(&argv)
     })
-}
-
-fn trace_payload_root_started_at_ns(payload: &Value) -> Option<u128> {
-    payload
-        .get(TRACE_ROOT_STARTED_AT_NS_FIELD)
-        .and_then(Value::as_u64)
-        .map(u128::from)
 }
 
 fn trace_argv_primary_command(argv: &[String]) -> Option<String> {
@@ -970,6 +998,7 @@ fn post_conflict_resolution_working_log(
             supress_output: true,
             compute_stats: false,
             recover_attribution: false,
+            commit_source: None,
         },
         precomputed_parent_diff,
         move |resolution_log| {
@@ -2573,7 +2602,7 @@ fn prune_stale_daemon_logs(log_dir: &Path) {
             Some(s) => s,
             None => continue,
         };
-        let _pid: u32 = match stem.parse() {
+        let pid: u32 = match stem.parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -2586,20 +2615,64 @@ fn prune_stale_daemon_logs(log_dir: &Path) {
         if !dominated {
             continue;
         }
-        #[cfg(unix)]
-        {
-            if process_alive(_pid) {
-                continue;
-            }
+        if process_alive(pid) {
+            continue;
         }
         let _ = fs::remove_file(&path);
     }
 }
 
+/// Whether `pid` is a running process. Exited-but-unreaped (zombie) processes
+/// count as gone: they have finished writing. Processes we may not signal
+/// (another user's) count as alive.
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     // kill(pid, 0) checks existence without sending a signal.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    let exists = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    exists && !process_is_zombie(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: u32) -> bool {
+    // `/proc/<pid>/stat`: "<pid> (<comm>) <state> ..."; comm may contain
+    // spaces and parentheses, so read the state after the last ')'.
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let after_comm = &stat[stat.rfind(')')? + 1..];
+            after_comm
+                .split_whitespace()
+                .next()
+                .map(|state| state == "Z")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_zombie(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut exit_code = 0u32;
+        let queried = GetExitCodeProcess(handle, &mut exit_code) != 0;
+        CloseHandle(handle);
+        queried && exit_code == STILL_ACTIVE as u32
+    }
 }
 
 fn read_json_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, GitAiError> {
@@ -2615,16 +2688,20 @@ fn read_checkpoint_body<R: BufRead>(
     reader: &mut R,
     body_bytes: usize,
 ) -> Result<Vec<u8>, GitAiError> {
+    // Preserve the io::ErrorKind: a peer that vanished mid-body (EOF, reset)
+    // must classify as a routine disconnect, not a daemon error.
     let mut body = vec![0; body_bytes];
     reader.read_exact(&mut body).map_err(|error| {
-        GitAiError::Generic(format!(
-            "failed receiving {body_bytes}-byte checkpoint body: {error}"
+        GitAiError::IoError(std::io::Error::new(
+            error.kind(),
+            format!("failed receiving {body_bytes}-byte checkpoint body: {error}"),
         ))
     })?;
     let mut delimiter = [0u8; 1];
     reader.read_exact(&mut delimiter).map_err(|error| {
-        GitAiError::Generic(format!(
-            "failed receiving checkpoint body delimiter: {error}"
+        GitAiError::IoError(std::io::Error::new(
+            error.kind(),
+            format!("failed receiving checkpoint body delimiter: {error}"),
         ))
     })?;
     if delimiter != [b'\n'] {
@@ -2637,32 +2714,216 @@ fn read_checkpoint_body<R: BufRead>(
 
 #[derive(Debug)]
 enum FamilySequencerEntry {
-    PendingRoot,
     ReadyCommand(Box<crate::daemon::domain::NormalizedCommand>),
+    /// A command already applied to family state (it did not participate in
+    /// the sequencer, e.g. `git am`) whose side-effect pass is still pending.
+    /// Sequencing the pass keeps it ordered with, and serialized against,
+    /// the family's other passes (#2252).
+    AppliedSideEffects {
+        applied: Box<crate::daemon::domain::AppliedCommand>,
+        commit_file_timestamp_snapshots: CommitFileTimestampSnapshotHandles,
+    },
     Checkpoint {
         request: Box<CheckpointRequest>,
         receipt_seq: u64,
         reservation: CheckpointIngressReservation,
     },
-    Canceled,
+    /// One untraced-commit fixup pass over a worktree `HEAD` reflog (see
+    /// `RefCursor::claim_untraced_commits`). Sequenced like a command so it is
+    /// fenced behind older open roots and serialized with the family's other
+    /// passes; it never runs while a traced command of the family is in flight.
+    UntracedCommitScan {
+        git_dir: PathBuf,
+        worktree: PathBuf,
+        /// Persisted cursor for a worktree this daemon has not seen yet.
+        seed: Option<UntracedReflogCursor>,
+        /// `HEAD` reflog length when the pass was scheduled. The causal fence
+        /// only holds a pass for roots that started before it, so records
+        /// written after this point are left for a later pass.
+        max_offset: Option<u64>,
+    },
 }
 
+/// What one round of untraced-commit fixup scheduling did.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct UntracedScanSchedule {
+    /// Families with at least one pass scheduled.
+    families: usize,
+    /// Worktrees a pass was scheduled for.
+    worktrees: usize,
+    /// Worktrees whose `HEAD` reflog has not grown since their cursor settled.
+    unchanged: usize,
+    /// Changed worktrees left for the next tick: by the per-tick cap, or
+    /// because a git command of their family was still running.
+    deferred: usize,
+    /// Families the fixup ignores (temp scratch repositories, configured
+    /// globs) that were named or remembered and therefore skipped.
+    ignored: usize,
+}
+
+/// What the daemon remembers about one worktree between fixup ticks.
+#[derive(Debug, Clone, Default)]
+struct CachedUntracedCursor {
+    /// `None` when the store has no row for the worktree yet.
+    cursor: Option<UntracedReflogCursor>,
+    /// The `HEAD` reflog as it looked when the last pass finished (`None`
+    /// until a pass has run; `Some(None)` when there was no reflog then).
+    reflog_seen: Option<HeadReflogObservation>,
+}
+
+/// Why fixup scans are being scheduled; a tick stats before it schedules,
+/// an explicit request scans regardless.
+#[derive(Debug, Clone, Copy)]
+enum UntracedScanTrigger {
+    Request,
+    Tick {
+        rotation: u64,
+        /// Hourly: prune the store and re-probe families last seen missing.
+        maintenance: bool,
+    },
+}
+
+/// Position of an entry in its family sequencer: the moment its originating
+/// command started (for a checkpoint, its receipt). Only entries present at
+/// the same time are ordered by this key; a still-running command is not an
+/// entry at all but an open trace root that fences later entries of its
+/// family (see `family_entry_blocked_by_prior_open_trace_root`). Among
+/// finished commands, start order is the best available predictor of the
+/// order in which they changed refs: a command finishes only after its ref
+/// write, including through post-write hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct FamilySequencerOrder {
     started_at_ns: u128,
     ordinal: u64,
 }
 
+/// A sequenced entry plus the daemon-side moment it became ready. The causal
+/// fence measures its wait from `enqueued_at`, never from git's own
+/// timestamps in the order key.
+#[derive(Debug)]
+struct FamilySequencerSlot {
+    enqueued_at: Instant,
+    entry: FamilySequencerEntry,
+}
+
 #[derive(Debug, Default)]
 struct FamilySequencerState {
     next_ordinal: u64,
-    entries: BTreeMap<FamilySequencerOrder, FamilySequencerEntry>,
+    entries: BTreeMap<FamilySequencerOrder, FamilySequencerSlot>,
 }
 
-#[derive(Debug, Clone)]
-struct PendingRootSlot {
-    family: String,
-    order: FamilySequencerOrder,
+/// One open root's standing against the causal fence for some waiting work
+/// (see `classify_root_fence`).
+enum RootFence {
+    /// Still holds; its time bound next changes the answer after this long.
+    Held(Duration),
+    /// Held past its bound, or judged not causally prior by the fallback
+    /// heuristics: release it, and say so once.
+    Release(&'static str),
+    /// Fences nothing: it has not changed refs.
+    Open,
+}
+
+/// What the causal fence needs to know about one open root. Gathered under
+/// the ingress lock (cheap map reads and clones); the filesystem and process
+/// observations run after the lock is dropped, so a slow worktree or a
+/// liveness syscall never stalls trace ingestion.
+#[derive(Clone)]
+struct RootFenceProbe {
+    root_sid: String,
+    waited: Duration,
+    /// Its atexit is queued (or its socket closed): the worker will clear it.
+    finishing: bool,
+    /// Worktree HEAD reflog start offsets and worktree, for commands that move
+    /// HEAD; `None` when that reflog cannot reveal the root's writes.
+    head_reflog: Option<(HashMap<String, u64>, Option<PathBuf>)>,
+    /// The root's start on git's clock, which a reflog modified later reveals
+    /// as written even when its length was recorded late.
+    started_at_ns: Option<u128>,
+    pid: Option<u32>,
+    wrote_refs: Option<bool>,
+    alive: Option<bool>,
+}
+
+impl RootFenceProbe {
+    /// Performs the observations the classification needs: the reflog stat
+    /// when there is one to consult, else a liveness probe once the grace has
+    /// passed. Runs without any daemon lock held.
+    fn observe(&mut self, grace: Duration) {
+        if self.finishing {
+            return;
+        }
+        self.observe_reflog();
+        if self.wrote_refs.is_none() && self.waited >= grace {
+            self.alive = self.pid.map(process_alive);
+        }
+    }
+
+    /// Performs every observation at once, for a status peek that judges the
+    /// root against several waits without touching the file system or the
+    /// process table again. Runs without any daemon lock held.
+    fn observe_all(&mut self) {
+        if self.finishing {
+            return;
+        }
+        self.observe_reflog();
+        if self.wrote_refs.is_none() {
+            self.alive = self.pid.map(process_alive);
+        }
+    }
+
+    /// Whether the root has written its worktree HEAD reflog since it started.
+    fn observe_reflog(&mut self) {
+        self.wrote_refs = self.head_reflog.as_ref().and_then(|(offsets, worktree)| {
+            crate::daemon::ref_cursor::worktree_head_reflog_grew_since(
+                offsets,
+                worktree.as_deref(),
+                self.started_at_ns,
+            )
+        });
+    }
+}
+
+/// A fence release to log once the ingress lock is dropped.
+struct FenceRelease {
+    reason: &'static str,
+    context: &'static str,
+    root_sid: String,
+    root_primary: Option<String>,
+    root_family: Option<String>,
+    root_age_ms: Option<u64>,
+    waited_ms: u64,
+}
+
+impl FenceRelease {
+    fn log(&self) {
+        tracing::warn!(
+            component = "daemon",
+            phase = "checkpoint_processing",
+            reason = self.reason,
+            context = self.context,
+            root_sid = %self.root_sid,
+            root_primary = self.root_primary.as_deref().unwrap_or("unknown"),
+            root_family = self.root_family.as_deref().unwrap_or("unattributed"),
+            root_age_ms = self.root_age_ms,
+            waited_ms = self.waited_ms,
+            "proceeding past an open mutating trace root"
+        );
+    }
+}
+
+/// What a drain would do with a family's sequencer front right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FamilyFrontDisposition {
+    /// Nothing to pop, or checkpoint admission is in progress: the event that
+    /// appends or admits an entry schedules its own drain.
+    Idle,
+    Ready,
+    /// Fenced behind an older open root; look again after `retry_in` or when
+    /// a root clears or is released (`trace_root_fence_notify`).
+    Fenced {
+        retry_in: Duration,
+    },
 }
 
 type CommitFileTimestampSnapshotHandle =
@@ -2672,6 +2933,30 @@ type CommitFileTimestampSnapshotHandles = HashMap<String, CommitFileTimestampSna
 const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
 const SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_RECOVERY_PREFLIGHT_POLL: Duration = Duration::from_millis(100);
+
+/// RAII registration of an in-flight family side-effect pass; see
+/// [`ActorDaemonCoordinator::begin_family_effect_guarded`].
+struct FamilyEffectGuard<'a> {
+    coordinator: &'a ActorDaemonCoordinator,
+    family: String,
+}
+
+impl Drop for FamilyEffectGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.coordinator.end_family_effect(&self.family);
+    }
+}
+
+/// Extracts a printable message from a `catch_unwind` panic payload.
+fn panic_payload_message(panic_payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = panic_payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = panic_payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        "unknown panic".to_string()
+    }
+}
 
 fn run_blocking_side_effect<T>(operation: impl FnOnce() -> T) -> T {
     if tokio::runtime::Handle::try_current()
@@ -2731,6 +3016,13 @@ struct TraceIngressState {
     root_open_connections: HashMap<String, usize>,
     unidentified_open_connections: usize,
     root_close_markers_enqueued: HashSet<String>,
+    /// Mutating roots whose `atexit` the reader has already consumed: the git
+    /// process is done and its final frame is queued for the ingest worker,
+    /// which clears the root (and lifts its fence) when it reaches it. Socket
+    /// EOF must not clear such a root first, and needs no close marker for it.
+    root_finishing: HashSet<String>,
+    /// Roots whose fence release has been logged and counted already.
+    root_fence_release_logged: HashSet<String>,
 }
 
 #[doc(hidden)]
@@ -2752,14 +3044,51 @@ pub struct ActorDaemonCoordinator {
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
-    pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
+    started_at: Instant,
+    /// See [`FAMILY_CAUSAL_GRACE`].
+    causal_grace: Duration,
+    /// Fences released because the root's process was alive past the grace
+    /// and had written nothing.
+    causal_grace_expirations: AtomicU64,
+    /// Fences released at a time bound (hard cap, written-root cap).
+    causal_fence_hard_cap_releases: AtomicU64,
+    /// Untraced-commit fixup outcomes (see `run_untraced_commit_scan`).
+    untraced_commits_fixed: AtomicU64,
+    untraced_commits_skipped: AtomicU64,
+    untraced_cursor_reseeds: AtomicU64,
+    untraced_scan_errors: AtomicU64,
+    /// Families remembered in the repo-family store, as of the last tick.
+    known_repo_families: AtomicU64,
+    /// Ticks so far; rotates which worktrees a capped tick scans first.
+    untraced_fixup_ticks: AtomicU64,
+    /// When the repo-family store was last pruned and missing families last
+    /// re-probed (unix seconds).
+    untraced_store_last_maintenance_secs: AtomicU64,
+    /// Per worktree git dir, the fixup cursor last read from or written to the
+    /// store and how the `HEAD` reflog looked when the last pass finished, so
+    /// a routine tick never touches SQLite: its cost is one `stat` per worktree.
+    untraced_cursor_cache: Mutex<HashMap<String, CachedUntracedCursor>>,
+    /// Families remembered in the store as of the last maintenance round,
+    /// plus those recorded by passes since; `None` before the first round.
+    untraced_known_families: Mutex<Option<Vec<String>>>,
+    /// Families whose common dir was found missing since the last maintenance
+    /// round; routine ticks neither probe nor record them again.
+    untraced_missing_families: Mutex<HashSet<String>>,
+    /// Fired when a root clears or is released: fenced drains and waits
+    /// re-evaluate. Distinct from the per-frame ingest progress notify so a
+    /// fenced family does not wake on every trace frame the daemon sees.
+    trace_root_fence_notify: Notify,
     commit_file_timestamp_snapshots_by_root:
         Mutex<HashMap<String, CommitFileTimestampSnapshotHandles>>,
     recent_replay_prerequisites_by_family:
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    /// Families with a scheduled-or-running coalesced drain task; see
+    /// [`Self::schedule_family_drain`].
+    scheduled_family_drains: Mutex<HashSet<String>>,
     checkpoint_side_effect_semaphore: Semaphore,
+    command_side_effect_semaphore: Semaphore,
     checkpoint_ingress_quota: Arc<CheckpointIngressQuota>,
     checkpoint_ingress_tx: std::sync::OnceLock<mpsc::Sender<AcceptedCheckpoint>>,
     next_checkpoint_receipt_seq: AtomicUsize,
@@ -2774,8 +3103,25 @@ pub struct ActorDaemonCoordinator {
     // exits via the shutdown select! arm instead of relying on channel closure.
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
+    /// Families and fixup cursors remembered across restarts; `None` when the
+    /// database could not be opened (fixup then only covers this process).
+    repo_family_store: Option<Arc<crate::daemon::repo_family_store::RepoFamilyStore>>,
+    /// Repositories the untraced-commit fixup leaves alone (temp scratch repos,
+    /// configured globs); consulted only by the fixup scheduler and store, and
+    /// rebuilt from a fresh config read on each maintenance round so a config
+    /// change takes effect within the hour rather than at the next restart.
+    untraced_fixup_ignore: Mutex<crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore>,
+    /// Worktree git dirs whose fixup cursor must not be persisted again this
+    /// lifetime: a pass had a side effect fail, and the durable cursor has to
+    /// stay behind that commit so a later lifetime can retry it.
+    untraced_persistence_blocked: Mutex<HashSet<String>>,
     stream_worker: Option<crate::daemon::stream_worker::StreamWorkerHandle>,
+    token_usage_worker: Option<crate::daemon::token_usage_worker::TokenUsageWorkerHandle>,
     transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    // Separate from the transcript worker's Notify: notify_one wakes exactly
+    // one waiter, so each worker needs its own.
+    token_usage_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    untraced_fixup_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     streams_db: Option<Arc<crate::streams::db::StreamsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -2783,6 +3129,34 @@ pub struct ActorDaemonCoordinator {
     processed_trace_ingest_seq: AtomicUsize,
     trace_ingest_progress_notify: Notify,
     trace_ingress_state: Mutex<TraceIngressState>,
+    // Trace drain probe bookkeeping: ids issued by the socket-health loop and
+    // the highest id observed by a trace reader thread. A completed round
+    // trip proves accept → reader spawn → read → parse is still draining.
+    next_trace_drain_probe_id: AtomicU64,
+    observed_trace_drain_probe_id: AtomicU64,
+    // Loss accounting: attribution loss must be loud, never silent. Trace
+    // payloads dropped on a full ingest queue and trace connections dropped
+    // before a reader could serve them both mean lost attribution for the
+    // affected commands.
+    trace_payloads_dropped_queue_full: AtomicU64,
+    trace_connections_dropped: AtomicU64,
+    checkpoints_dropped: AtomicU64,
+    // Retained checkpoints are abandoned at most once per daemon lifetime
+    // (whichever of teardown or the shutdown enforcer gets there first);
+    // this guard keeps the loss from being double-counted.
+    checkpoints_loss_counted: AtomicBool,
+    // Snapshot of the loss counters at the last successful DaemonIngestAnomaly
+    // report, shared by the health loop, teardown, and the shutdown enforcer
+    // so deltas are reported exactly once.
+    last_reported_ingest_losses: Mutex<IngestLossSnapshot>,
+    // Duplicated fds of accepted trace connections, so shutdown can actively
+    // close them: a blocked git writer is released the instant its socket is
+    // shut down instead of waiting for process exit.
+    #[cfg(not(windows))]
+    trace_connection_registry: Mutex<HashMap<u64, std::os::fd::OwnedFd>>,
+    #[cfg(not(windows))]
+    next_trace_connection_id: AtomicU64,
+    teardown_complete: AtomicBool,
     shutting_down: AtomicBool,
     shutdown_action: AtomicU8,
     shutdown_notify: Notify,
@@ -2822,10 +3196,13 @@ impl DaemonExitAction {
     }
 }
 
-enum TracePayloadApplyOutcome {
-    None,
-    Applied(Box<crate::daemon::domain::AppliedCommand>),
-    QueuedFamily,
+/// Which families' sequencers an open mutating trace root was fencing, so
+/// they can be re-drained when it clears.
+#[derive(Debug, PartialEq, Eq)]
+enum FenceScope {
+    Family(String),
+    /// The root never resolved a family, so it fenced every family.
+    EveryFamily,
 }
 
 impl ActorDaemonCoordinator {
@@ -2846,12 +3223,28 @@ impl ActorDaemonCoordinator {
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
-            pending_root_slots_by_root: Mutex::new(HashMap::new()),
+            started_at: Instant::now(),
+            causal_grace: family_causal_grace(),
+            causal_grace_expirations: AtomicU64::new(0),
+            causal_fence_hard_cap_releases: AtomicU64::new(0),
+            untraced_commits_fixed: AtomicU64::new(0),
+            untraced_commits_skipped: AtomicU64::new(0),
+            untraced_cursor_reseeds: AtomicU64::new(0),
+            untraced_scan_errors: AtomicU64::new(0),
+            known_repo_families: AtomicU64::new(0),
+            untraced_fixup_ticks: AtomicU64::new(0),
+            untraced_store_last_maintenance_secs: AtomicU64::new(0),
+            untraced_cursor_cache: Mutex::new(HashMap::new()),
+            untraced_known_families: Mutex::new(None),
+            untraced_missing_families: Mutex::new(HashSet::new()),
+            trace_root_fence_notify: Notify::new(),
             commit_file_timestamp_snapshots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
+            scheduled_family_drains: Mutex::new(HashSet::new()),
             checkpoint_side_effect_semaphore: Semaphore::new(CHECKPOINT_FAMILY_DRAIN_CONCURRENCY),
+            command_side_effect_semaphore: Semaphore::new(COMMAND_SIDE_EFFECT_CONCURRENCY),
             checkpoint_ingress_quota: Arc::new(CheckpointIngressQuota::new(
                 CHECKPOINT_INGRESS_REQUEST_LIMIT,
                 CHECKPOINT_INGRESS_BYTE_LIMIT,
@@ -2876,8 +3269,14 @@ impl ActorDaemonCoordinator {
             test_completion_log_lock: Mutex::new(()),
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
+            repo_family_store: None,
+            untraced_persistence_blocked: Mutex::new(HashSet::new()),
+            untraced_fixup_ignore: Mutex::new(Default::default()),
             stream_worker: None,
+            token_usage_worker: None,
             transcript_shutdown_notify: std::sync::OnceLock::new(),
+            token_usage_shutdown_notify: std::sync::OnceLock::new(),
+            untraced_fixup_shutdown_notify: std::sync::OnceLock::new(),
             streams_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -2885,6 +3284,18 @@ impl ActorDaemonCoordinator {
             processed_trace_ingest_seq: AtomicUsize::new(0),
             trace_ingest_progress_notify: Notify::new(),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
+            next_trace_drain_probe_id: AtomicU64::new(0),
+            observed_trace_drain_probe_id: AtomicU64::new(0),
+            trace_payloads_dropped_queue_full: AtomicU64::new(0),
+            trace_connections_dropped: AtomicU64::new(0),
+            checkpoints_dropped: AtomicU64::new(0),
+            checkpoints_loss_counted: AtomicBool::new(false),
+            last_reported_ingest_losses: Mutex::new(IngestLossSnapshot::default()),
+            #[cfg(not(windows))]
+            trace_connection_registry: Mutex::new(HashMap::new()),
+            #[cfg(not(windows))]
+            next_trace_connection_id: AtomicU64::new(0),
+            teardown_complete: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             shutdown_action: AtomicU8::new(DaemonExitAction::Stop.as_u8()),
             shutdown_notify: Notify::new(),
@@ -2994,18 +3405,22 @@ impl ActorDaemonCoordinator {
             return;
         };
 
-        let has_candidate = || {
+        let candidate_check = || {
             crate::authorship::attribution_recovery::matching_session_event_candidate_exists(
                 &timestamps,
                 &target_repo_url,
             )
-            .unwrap_or_else(|error| {
-                tracing::debug!(%error, "failed checking session-event recovery candidates");
-                false
-            })
         };
-        if has_candidate() {
-            return;
+        // Only a definitive "no candidate" justifies the sweep-and-wait below.
+        // An unknown answer (metrics DB busy under telemetry load) must not
+        // add sweep work and preflight latency to the commit path.
+        match candidate_check() {
+            Some(false) => {}
+            Some(true) => return,
+            None => {
+                tracing::debug!("session-event recovery preflight skipped; metrics DB busy");
+                return;
+            }
         }
 
         let deadline = std::time::Instant::now() + SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT;
@@ -3059,7 +3474,9 @@ impl ActorDaemonCoordinator {
                 return;
             }
             std::thread::sleep(remaining.min(SESSION_EVENT_RECOVERY_PREFLIGHT_POLL));
-            if has_candidate() {
+            // A definitive hit or an unknown (busy DB) both end the wait: the
+            // preflight must never hold the commit path hostage to telemetry.
+            if !matches!(candidate_check(), Some(false)) {
                 tracing::debug!(
                     "session-event recovery candidate became visible before post-commit"
                 );
@@ -3075,15 +3492,112 @@ impl ActorDaemonCoordinator {
         }
     }
 
+    fn issue_trace_drain_probe_id(&self) -> u64 {
+        self.next_trace_drain_probe_id
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
+
+    fn record_trace_drain_probe(&self, probe_id: u64) {
+        // Only ids the health loop actually issued may advance the watermark.
+        // An arbitrary local writer forging a huge probe id would otherwise
+        // make every future drain probe appear satisfied, silently disabling
+        // self-healing.
+        if probe_id > self.next_trace_drain_probe_id.load(Ordering::Acquire) {
+            return;
+        }
+        self.observed_trace_drain_probe_id
+            .fetch_max(probe_id, Ordering::Release);
+    }
+
+    fn trace_drain_probe_watermark(&self) -> u64 {
+        self.observed_trace_drain_probe_id.load(Ordering::Acquire)
+    }
+
+    #[cfg(not(windows))]
+    fn register_trace_connection(&self, fd: std::os::fd::OwnedFd) -> Option<u64> {
+        let id = self
+            .next_trace_connection_id
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let mut registry = self
+            .trace_connection_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        registry.insert(id, fd);
+        Some(id)
+    }
+
+    #[cfg(not(windows))]
+    fn deregister_trace_connection(&self, id: u64) {
+        let mut registry = self
+            .trace_connection_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        registry.remove(&id);
+    }
+
+    /// Actively close every accepted trace connection so blocked git writers
+    /// get EPIPE (git disables its trace2 target and completes) and reader
+    /// threads wake with EOF instead of parking in read until process exit.
+    ///
+    /// Platform note: Linux releases a blocked peer writer directly from this
+    /// shutdown; macOS only releases it once the reader's fd closes, so the
+    /// release path there is sever → reader wakes from read → stream dropped.
+    /// A reader wedged somewhere other than read keeps the writer blocked
+    /// until process exit, which the shutdown deadline enforcer bounds.
+    #[cfg(not(windows))]
+    fn shutdown_registered_trace_connections(&self) {
+        use std::os::fd::AsRawFd;
+
+        let registry = self
+            .trace_connection_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for fd in registry.values() {
+            unsafe {
+                libc::shutdown(fd.as_raw_fd(), libc::SHUT_RDWR);
+            }
+        }
+    }
+
+    /// Count checkpoints that are still retained at the moment the process
+    /// actually gives up on them — exactly once, whichever of graceful
+    /// teardown or the shutdown enforcer reaches that point first. Counting
+    /// earlier (e.g. when a restart is decided) would report checkpoints that
+    /// teardown still manages to drain.
+    fn count_abandoned_checkpoints_once(&self) {
+        if self.checkpoints_loss_counted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (outstanding_checkpoints, _) = self.outstanding_checkpoint_state();
+        if outstanding_checkpoints > 0 {
+            self.checkpoints_dropped
+                .fetch_add(outstanding_checkpoints as u64, Ordering::Relaxed);
+        }
+    }
+
     fn request_shutdown(&self) {
         // Release ensures that any writes made before this store are visible to
         // threads that subsequently load with Acquire (is_shutting_down).
         self.shutting_down.store(true, Ordering::Release);
+        // No shutdown path may keep accepting checkpoints it can no longer
+        // process; the graceful control handler closes this gate too, but
+        // internal shutdown requests must not depend on it.
+        self.accepting_checkpoints.store(false, Ordering::Release);
+        #[cfg(not(windows))]
+        self.shutdown_registered_trace_connections();
         // The ingest worker exits via its select! shutdown arm (watching
         // shutdown_notify); we no longer rely on channel closure to stop it.
         self.shutdown_notify.notify_waiters();
         if let Some(transcript_shutdown) = self.transcript_shutdown_notify.get() {
             transcript_shutdown.notify_one();
+        }
+        if let Some(token_usage_shutdown) = self.token_usage_shutdown_notify.get() {
+            token_usage_shutdown.notify_one();
+        }
+        if let Some(untraced_fixup_shutdown) = self.untraced_fixup_shutdown_notify.get() {
+            untraced_fixup_shutdown.notify_one();
         }
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
@@ -3138,6 +3652,61 @@ impl ActorDaemonCoordinator {
         let entry = map.entry(family.to_string()).or_insert(0);
         *entry = entry.saturating_add(1);
         Ok(())
+    }
+
+    /// Registers an in-flight family side-effect pass for the guard's
+    /// lifetime. Sync, await, and graceful shutdown fence on this
+    /// registration, so it must be released on every exit path — early
+    /// returns, panics, and dropped tasks included — which only a Drop
+    /// impl can guarantee.
+    fn begin_family_effect_guarded<'a>(&'a self, family: &str) -> FamilyEffectGuard<'a> {
+        let _ = self.begin_family_effect(family);
+        FamilyEffectGuard {
+            coordinator: self,
+            family: family.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_causal_grace(causal_grace: Duration) -> Self {
+        let mut coordinator = Self::new();
+        coordinator.causal_grace = causal_grace;
+        coordinator
+    }
+
+    /// Attribution work an automatic restart would abandon mid-flight:
+    /// accepted checkpoints, queued trace payloads, sequencer entries, and
+    /// executing side-effect passes. Still-running commands live in trace
+    /// ingress state, not in the sequencer, so an idle interactive command
+    /// (e.g. a rebase waiting on an editor) is not by itself pending work
+    /// (#2252).
+    fn has_pending_attribution_work(&self) -> bool {
+        if self.outstanding_checkpoint_state().0 > 0 {
+            return true;
+        }
+        if self.queued_trace_payloads.load(Ordering::Relaxed) > 0 {
+            return true;
+        }
+        if self.has_inflight_family_effects() {
+            return true;
+        }
+        if let Ok(map) = self.family_sequencers_by_family.lock()
+            && map.values().any(|state| !state.entries.is_empty())
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Whether any detached side-effect pass is currently in flight, in any
+    /// family. Passes register via `begin_family_effect` before the trace
+    /// ingest watermark advances, so this is a valid completion fence for
+    /// work the watermark no longer covers (#2252).
+    fn has_inflight_family_effects(&self) -> bool {
+        self.inflight_effects_by_family
+            .lock()
+            .map(|map| !map.is_empty())
+            .unwrap_or(false)
     }
 
     fn end_family_effect(&self, family: &str) -> Result<(), GitAiError> {
@@ -3263,152 +3832,55 @@ impl ActorDaemonCoordinator {
         })
     }
 
-    fn append_pending_root_entry(
+    /// Appends an entry to the family sequencer, ordered by the originating
+    /// command's start time. The caller is responsible for scheduling a
+    /// drain of the family afterwards — this must stay a constant-time map
+    /// insert because it runs on the serial trace ingest worker, whose
+    /// watermark checkpoint admission waits on (#2252).
+    fn append_family_sequencer_entry(
         &self,
         family: &str,
-        root_sid: &str,
         started_at_ns: u128,
+        entry: FamilySequencerEntry,
     ) -> Result<(), GitAiError> {
-        {
-            let pending_slots = self.pending_root_slots_by_root.lock().map_err(|_| {
-                GitAiError::Generic("pending root slots map lock poisoned".to_string())
-            })?;
-            if pending_slots.contains_key(root_sid) {
-                return Ok(());
-            }
-        }
-
-        let order = {
-            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
-                GitAiError::Generic("family sequencer map lock poisoned".to_string())
-            })?;
-            let state =
-                sequencers
-                    .entry(family.to_string())
-                    .or_insert_with(|| FamilySequencerState {
-                        next_ordinal: 1,
-                        entries: BTreeMap::new(),
-                    });
-            let order = FamilySequencerOrder {
-                started_at_ns,
-                ordinal: state.next_ordinal,
-            };
-            state.next_ordinal = state.next_ordinal.saturating_add(1);
-            state
-                .entries
-                .insert(order, FamilySequencerEntry::PendingRoot);
-            order
-        };
-
-        self.pending_root_slots_by_root
+        let mut sequencers = self
+            .family_sequencers_by_family
             .lock()
-            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))?
-            .insert(
-                root_sid.to_string(),
-                PendingRootSlot {
-                    family: family.to_string(),
-                    order,
-                },
-            );
+            .map_err(|_| GitAiError::Generic("family sequencer map lock poisoned".to_string()))?;
+        let state = sequencers
+            .entry(family.to_string())
+            .or_insert_with(|| FamilySequencerState {
+                next_ordinal: 1,
+                entries: BTreeMap::new(),
+            });
+        let order = FamilySequencerOrder {
+            started_at_ns,
+            ordinal: state.next_ordinal,
+        };
+        state.next_ordinal = state.next_ordinal.saturating_add(1);
+        state.entries.insert(
+            order,
+            FamilySequencerSlot {
+                enqueued_at: Instant::now(),
+                entry,
+            },
+        );
         Ok(())
     }
 
-    fn take_pending_root_slot(
-        &self,
-        root_sid: &str,
-    ) -> Result<Option<PendingRootSlot>, GitAiError> {
-        self.pending_root_slots_by_root
-            .lock()
-            .map_err(|_| GitAiError::Generic("pending root slots map lock poisoned".to_string()))
-            .map(|mut slots| slots.remove(root_sid))
-    }
-
-    fn maybe_append_pending_root_from_trace_payload(
-        &self,
-        payload: &Value,
-    ) -> Result<(), GitAiError> {
-        let event = payload
-            .get("event")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if event == TRACE_CONNECTION_CLOSED_EVENT {
-            return Ok(());
-        }
-
-        let Some(sid) = payload.get("sid").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        let root_sid = trace_root_sid(sid);
-        if root_sid != sid {
-            return Ok(());
-        }
-
-        let argv = trace_payload_effective_argv(payload);
-        let primary_command =
-            trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
-        if !Self::trace_invocation_participates_in_family_sequencer(
-            primary_command.as_deref(),
-            &argv,
-        ) {
-            return Ok(());
-        }
-
-        let Some(worktree) = trace_payload_worktree_hint(payload) else {
-            return Ok(());
-        };
-        let Some(common_dir) = common_dir_for_worktree(&worktree) else {
-            return Ok(());
-        };
-        let started_at_ns = trace_payload_root_started_at_ns(payload)
-            .or_else(|| trace_payload_time_ns(payload))
-            .unwrap_or_else(now_unix_nanos);
-        let family = common_dir
-            .canonicalize()
-            .unwrap_or(common_dir)
-            .to_string_lossy()
-            .to_string();
-        self.append_pending_root_entry(&family, root_sid, started_at_ns)
-    }
-
-    async fn append_ready_command_entry(
+    /// Drains the family's ready entries; when an older open root still holds
+    /// the front, returns how long until that fence's time bound is next due.
+    async fn drain_ready_family_sequencer_entries(
         &self,
         family: &str,
-        command: crate::daemon::domain::NormalizedCommand,
-    ) -> Result<(), GitAiError> {
-        let exec_lock = self.side_effect_exec_lock(family)?;
-        let _guard = exec_lock.lock().await;
-        {
-            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
-                GitAiError::Generic("family sequencer map lock poisoned".to_string())
-            })?;
-            let state =
-                sequencers
-                    .entry(family.to_string())
-                    .or_insert_with(|| FamilySequencerState {
-                        next_ordinal: 1,
-                        entries: BTreeMap::new(),
-                    });
-            let order = FamilySequencerOrder {
-                started_at_ns: command.started_at_ns,
-                ordinal: state.next_ordinal,
-            };
-            state.next_ordinal = state.next_ordinal.saturating_add(1);
-            state
-                .entries
-                .insert(order, FamilySequencerEntry::ReadyCommand(Box::new(command)));
-        }
-        self.drain_ready_family_sequencer_entries_locked(family)
-            .await
-    }
-
-    async fn drain_ready_family_sequencer_entries(&self, family: &str) -> Result<(), GitAiError> {
+    ) -> Result<Option<Duration>, GitAiError> {
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
         self.drain_ready_family_sequencer_entries_locked(family)
             .await
     }
 
-    async fn drain_all_ready_family_sequencers(&self) -> Result<(), GitAiError> {
+    async fn drain_all_ready_family_sequencers(self: &Arc<Self>) -> Result<(), GitAiError> {
         let families = {
             let map = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
@@ -3418,113 +3890,440 @@ impl ActorDaemonCoordinator {
                 .map(|(family, _)| family.clone())
                 .collect::<Vec<_>>()
         };
-        let first_error = stream::iter(families)
-            .map(|family| async move { self.drain_ready_family_sequencer_entries(&family).await })
-            .buffer_unordered(CHECKPOINT_FAMILY_DRAIN_CONCURRENCY)
-            .fold(None, |first_error, result| async move {
-                first_error.or_else(|| result.err())
+        let outcomes = stream::iter(families)
+            .map(|family| async move {
+                let outcome = self.drain_ready_family_sequencer_entries(&family).await;
+                (family, outcome)
             })
+            .buffer_unordered(CHECKPOINT_FAMILY_DRAIN_CONCURRENCY)
+            .collect::<Vec<_>>()
             .await;
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn drain_ready_family_sequencers_after_root_cleared(
-        &self,
-        family: Option<String>,
-    ) -> Result<(), GitAiError> {
-        if let Some(family) = family {
-            self.drain_ready_family_sequencer_entries(&family).await
-        } else {
-            self.drain_all_ready_family_sequencers().await
-        }
-    }
-
-    async fn replace_pending_root_entry(
-        &self,
-        root_sid: &str,
-        replacement: FamilySequencerEntry,
-    ) -> Result<Option<String>, GitAiError> {
-        let Some(slot) = self.take_pending_root_slot(root_sid)? else {
-            return Ok(None);
-        };
-        let family = slot.family.clone();
-        let exec_lock = self.side_effect_exec_lock(&family)?;
-        let _guard = exec_lock.lock().await;
-        {
-            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
-                GitAiError::Generic("family sequencer map lock poisoned".to_string())
-            })?;
-            let state = sequencers
-                .entry(family.clone())
-                .or_insert_with(|| FamilySequencerState {
-                    next_ordinal: 1,
-                    entries: BTreeMap::new(),
-                });
-            let Some(entry) = state.entries.get_mut(&slot.order) else {
-                return Err(GitAiError::Generic(format!(
-                    "missing pending root sequencer entry for sid={} family={} order={:?}",
-                    root_sid, family, slot.order
-                )));
-            };
-            match entry {
-                FamilySequencerEntry::PendingRoot => {
-                    *entry = replacement;
-                }
-                _ => {
-                    return Err(GitAiError::Generic(format!(
-                        "sequencer entry for sid={} family={} order={:?} was not pending",
-                        root_sid, family, slot.order
-                    )));
-                }
+        let mut first_error = None;
+        for (family, outcome) in outcomes {
+            match outcome {
+                // A fence lifts on a timer as much as on a root clearing; the
+                // coalesced per-family drain task owns that wait.
+                Ok(Some(_)) => self.schedule_family_drain(family),
+                Ok(None) => {}
+                Err(error) => first_error = first_error.or(Some(error)),
             }
         }
-        self.drain_ready_family_sequencer_entries_locked(&family)
-            .await?;
-        Ok(Some(family))
+        first_error.map_or(Ok(()), Err)
     }
 
+    /// Schedules drains for sequencer entries unblocked by a cleared trace
+    /// root. Drains run detached: side-effect passes are unbounded-duration
+    /// git work and must never execute inline on the trace ingest worker,
+    /// whose watermark checkpoint admission waits on (#2252).
+    fn schedule_ready_family_drains_after_root_cleared(
+        self: &Arc<Self>,
+        fenced: Option<FenceScope>,
+    ) {
+        match fenced {
+            None => {}
+            Some(FenceScope::Family(family)) => self.schedule_family_drain(family),
+            Some(FenceScope::EveryFamily) => self.schedule_all_ready_family_drains(),
+        }
+    }
+
+    /// Schedules a detached drain for one family, coalescing to at most one
+    /// scheduled-or-running drain task per family. The marker is released
+    /// only after a pass that ends with no actionable front entry (checked
+    /// atomically with the release), so an entry appended before this call
+    /// is always covered: either the running task's next pass pops it, or
+    /// this call spawns a fresh task.
+    fn schedule_family_drain(self: &Arc<Self>, family: String) {
+        {
+            let Ok(mut scheduled) = self.scheduled_family_drains.lock() else {
+                return;
+            };
+            if !scheduled.insert(family.clone()) {
+                return;
+            }
+        }
+        let coordinator = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                // Enroll before draining so a root clearing or releasing
+                // between the pass and the wait below cannot be lost.
+                let fence_changed = coordinator.trace_root_fence_notify.notified();
+                tokio::pin!(fence_changed);
+                fence_changed.as_mut().enable();
+                let fenced = match coordinator
+                    .drain_ready_family_sequencer_entries(&family)
+                    .await
+                {
+                    Ok(Some(retry_in)) => Some(retry_in),
+                    Ok(None) => {
+                        // Deregister atomically with the front check: an entry
+                        // appended after the pass but before deregistration
+                        // must either be seen here (loop again) or by the
+                        // fresh task its own schedule call spawns after we
+                        // release the marker.
+                        let Ok(mut scheduled) = coordinator.scheduled_family_drains.lock() else {
+                            return;
+                        };
+                        match coordinator.family_front_entry_disposition(&family) {
+                            FamilyFrontDisposition::Idle => {
+                                scheduled.remove(&family);
+                                return;
+                            }
+                            FamilyFrontDisposition::Ready => continue,
+                            FamilyFrontDisposition::Fenced { retry_in } => Some(retry_in),
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            component = "daemon",
+                            phase = "checkpoint_processing",
+                            reason = "family_drain_failed",
+                            %family,
+                            %error,
+                            "failed draining family sequencer"
+                        );
+                        if let Ok(mut scheduled) = coordinator.scheduled_family_drains.lock() {
+                            scheduled.remove(&family);
+                        }
+                        return;
+                    }
+                };
+                // Keep the marker: this task owns the family's re-drain. The
+                // fence lifts when its root clears or is released (notified)
+                // or when its time bound expires (timer).
+                let deadline = fenced.map(|retry_in| tokio::time::Instant::now() + retry_in);
+                tokio::select! {
+                    _ = &mut fence_changed => {}
+                    _ = sleep_until_or_pending(deadline) => {}
+                    _ = coordinator.wait_for_shutdown() => {
+                        if let Ok(mut scheduled) = coordinator.scheduled_family_drains.lock() {
+                            scheduled.remove(&family);
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// What a drain would do with the family's sequencer front right now —
+    /// mirrors the gates of `drain_ready_family_sequencer_entries_locked`
+    /// (unadmitted checkpoints, prior-open-root fencing). Entries gated on
+    /// admission are `Idle`: admission completion schedules its own drain.
+    fn family_front_entry_disposition(&self, family: &str) -> FamilyFrontDisposition {
+        if self.unadmitted_checkpoints.load(Ordering::Acquire) > 0 {
+            return FamilyFrontDisposition::Idle;
+        }
+        let Ok(map) = self.family_sequencers_by_family.lock() else {
+            return FamilyFrontDisposition::Idle;
+        };
+        let Some(state) = map.get(family) else {
+            return FamilyFrontDisposition::Idle;
+        };
+        let Some((order, slot)) = state.entries.first_key_value() else {
+            return FamilyFrontDisposition::Idle;
+        };
+        let (entry_root_sid, entry_kind) = Self::sequencer_entry_identity(&slot.entry);
+        match self.family_entry_blocked_by_prior_open_trace_root(
+            family,
+            order.started_at_ns,
+            entry_root_sid,
+            slot.enqueued_at.elapsed(),
+            entry_kind,
+        ) {
+            Ok(None) => FamilyFrontDisposition::Ready,
+            Ok(Some(retry_in)) => FamilyFrontDisposition::Fenced { retry_in },
+            Err(_) => FamilyFrontDisposition::Idle,
+        }
+    }
+
+    /// The trace root an entry came from (so it never fences itself) and a
+    /// label for logs.
+    fn sequencer_entry_identity(entry: &FamilySequencerEntry) -> (Option<&str>, &'static str) {
+        match entry {
+            FamilySequencerEntry::ReadyCommand(command) => {
+                (Some(command.root_sid.as_str()), "command")
+            }
+            FamilySequencerEntry::AppliedSideEffects { applied, .. } => (
+                Some(applied.command.root_sid.as_str()),
+                "applied_side_effects",
+            ),
+            FamilySequencerEntry::Checkpoint { .. } => (None, "checkpoint"),
+            FamilySequencerEntry::UntracedCommitScan { .. } => (None, "untraced_scan"),
+        }
+    }
+
+    /// Whether an open trace root could still change refs that matter to
+    /// `family` (`None`: any family): open, not definitely read-only,
+    /// mutating or not yet classified, and attributed to `family` or to no
+    /// family yet (unattributed roots fail closed and count for everyone).
+    fn open_root_may_mutate_family(
+        ingress: &TraceIngressState,
+        root_sid: &str,
+        family: Option<&str>,
+    ) -> bool {
+        ingress
+            .root_open_connections
+            .get(root_sid)
+            .is_some_and(|count| *count > 0)
+            && !ingress.root_definitely_read_only.contains(root_sid)
+            && ingress.root_mutating.get(root_sid).copied().unwrap_or(true)
+            && family.is_none_or(|family| {
+                ingress
+                    .root_families
+                    .get(root_sid)
+                    .is_none_or(|root_family| root_family == family)
+            })
+    }
+
+    /// Gathers what the fence needs about open root `root_sid` for work that
+    /// has waited `waited`; see [`RootFenceProbe::observe`] for the rest.
+    fn root_fence_probe(
+        ingress: &TraceIngressState,
+        root_sid: &str,
+        waited: Duration,
+    ) -> RootFenceProbe {
+        let moves_head = ingress
+            .root_argv
+            .get(root_sid)
+            .and_then(|argv| trace_argv_primary_command(argv))
+            .is_some_and(|primary| {
+                crate::git::command_classification::moves_head_command(&primary)
+            });
+        RootFenceProbe {
+            root_sid: root_sid.to_string(),
+            waited,
+            finishing: ingress.root_finishing.contains(root_sid)
+                || ingress.root_close_markers_enqueued.contains(root_sid),
+            head_reflog: moves_head
+                .then(|| ingress.root_reflog_start_offsets.get(root_sid).cloned())
+                .flatten()
+                .map(|offsets| (offsets, ingress.root_worktrees.get(root_sid).cloned())),
+            started_at_ns: ingress.root_started_at_ns.get(root_sid).copied(),
+            pid: trace_sid_pid(root_sid),
+            wrote_refs: None,
+            alive: None,
+        }
+    }
+
+    /// Whether an observed open root holds the causal fence. Decides from
+    /// data first and heuristics last, and applies no bookkeeping itself, so
+    /// status probes can ask too (releases are recorded by `evaluate_fence`).
+    ///
+    /// The fence exists for one hazard: a git process that has changed refs
+    /// while its final frame has not reached the sequencer. So:
+    /// - a *finishing* root (atexit read, or socket closed) holds until the
+    ///   worker processes its queued frame, which always clears it; should
+    ///   that somehow not happen, the hard cap releases it with a warning;
+    /// - a HEAD-moving root whose worktree HEAD reflog has grown or been
+    ///   modified since it started has changed refs and holds until it
+    ///   finishes (a post-write hook, say), bounded by the written-root cap;
+    /// - a HEAD-moving root whose worktree HEAD reflog is untouched has
+    ///   changed nothing: it fences nothing, and nobody waits for an editor or
+    ///   a pre-commit hook;
+    /// - any other root (no reflog to consult, or a command whose ref writes
+    ///   that reflog cannot reveal) falls back to time and liveness: it holds
+    ///   for the causal grace, then is released if its process is alive and
+    ///   held until the hard cap if it is gone.
+    fn classify_root_fence(&self, probe: &RootFenceProbe) -> RootFence {
+        let grace = self.causal_grace;
+        let hard_cap = grace * FAMILY_CAUSAL_FENCE_HARD_CAP_MULTIPLIER;
+        let hold_until = |bound: Duration, release: &'static str| {
+            if probe.waited < bound {
+                RootFence::Held(bound - probe.waited)
+            } else {
+                RootFence::Release(release)
+            }
+        };
+        if probe.finishing {
+            return hold_until(hard_cap, "finishing_root_cap");
+        }
+        match probe.wrote_refs {
+            Some(true) => {
+                return hold_until(
+                    grace * FAMILY_WRITTEN_ROOT_FENCE_CAP_MULTIPLIER,
+                    "written_root_cap",
+                );
+            }
+            Some(false) => return RootFence::Open,
+            None => {}
+        }
+        if probe.waited < grace {
+            return hold_until(grace, "causal_grace_expired");
+        }
+        match probe.alive {
+            Some(true) => RootFence::Release("causal_grace_expired"),
+            _ => hold_until(hard_cap, "causal_fence_hard_cap"),
+        }
+    }
+
+    /// Evaluates every open root accepted by `candidate` against the causal
+    /// fence for work that has waited `waited_for(root)`: gathers probes under
+    /// the ingress lock, observes them with the lock dropped, then applies
+    /// (and logs, once per root) any heuristic release. Returns the
+    /// earliest-expiring hold, if any root still holds.
+    fn evaluate_fence(
+        &self,
+        candidate: impl Fn(&TraceIngressState, &str) -> bool,
+        waited_for: impl Fn(&TraceIngressState, &str) -> Duration,
+        context: &'static str,
+    ) -> Result<Option<Duration>, GitAiError> {
+        let lock_ingress = || {
+            self.trace_ingress_state
+                .lock()
+                .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))
+        };
+        let mut probes = {
+            let ingress = lock_ingress()?;
+            ingress
+                .root_open_connections
+                .keys()
+                .filter(|root_sid| candidate(&ingress, root_sid))
+                .map(|root_sid| {
+                    Self::root_fence_probe(&ingress, root_sid, waited_for(&ingress, root_sid))
+                })
+                .collect::<Vec<_>>()
+        };
+        if probes.is_empty() {
+            return Ok(None);
+        }
+        for probe in &mut probes {
+            probe.observe(self.causal_grace);
+        }
+
+        let mut ingress = lock_ingress()?;
+        let mut held: Option<Duration> = None;
+        let mut releases = Vec::new();
+        for probe in probes {
+            // Cleared while we were observing: it fences nothing any more.
+            if !Self::open_root_may_mutate_family(&ingress, &probe.root_sid, None) {
+                continue;
+            }
+            match self.classify_root_fence(&probe) {
+                RootFence::Held(retry_in) => {
+                    if held.is_none_or(|earliest| retry_in < earliest) {
+                        held = Some(retry_in);
+                    }
+                }
+                RootFence::Release(reason) => {
+                    if ingress
+                        .root_fence_release_logged
+                        .insert(probe.root_sid.clone())
+                    {
+                        releases.push(self.fence_release(
+                            &ingress,
+                            probe.root_sid,
+                            reason,
+                            probe.waited,
+                            context,
+                        ));
+                    }
+                }
+                RootFence::Open => {}
+            }
+        }
+        drop(ingress);
+        if !releases.is_empty() {
+            for release in &releases {
+                release.log();
+            }
+            self.trace_root_fence_notify.notify_waiters();
+        }
+        Ok(held)
+    }
+
+    fn fence_release(
+        &self,
+        ingress: &TraceIngressState,
+        root_sid: String,
+        reason: &'static str,
+        waited: Duration,
+        context: &'static str,
+    ) -> FenceRelease {
+        let counter = if reason == "causal_grace_expired" {
+            &self.causal_grace_expirations
+        } else {
+            &self.causal_fence_hard_cap_releases
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        FenceRelease {
+            reason,
+            context,
+            root_primary: ingress
+                .root_argv
+                .get(&root_sid)
+                .and_then(|argv| trace_argv_primary_command(argv)),
+            root_family: ingress.root_families.get(&root_sid).cloned(),
+            root_age_ms: ingress
+                .root_started_at_ns
+                .get(&root_sid)
+                .map(|started| (now_unix_nanos().saturating_sub(*started) / 1_000_000) as u64),
+            waited_ms: waited.as_millis() as u64,
+            root_sid,
+        }
+    }
+
+    /// Open mutating roots that hold the causal fence right now: `await`
+    /// treats them as pending work. Roots without a reflog to consult are
+    /// judged on how long the daemon has heard nothing from them.
+    fn has_open_mutating_roots_holding_fence(&self) -> bool {
+        let now = now_unix_nanos();
+        self.evaluate_fence(
+            |ingress, root_sid| Self::open_root_may_mutate_family(ingress, root_sid, None),
+            |ingress, root_sid| {
+                ingress
+                    .root_last_activity_ns
+                    .get(root_sid)
+                    .map(|last| Duration::from_nanos(now.saturating_sub(u128::from(*last)) as u64))
+                    .unwrap_or(Duration::ZERO)
+            },
+            "await",
+        )
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    /// Whether a trace root that may still change `family`'s refs is open: one
+    /// of its git commands is in flight (or a root not yet attributed to any
+    /// family, which fails closed). Routine fixup ticks leave such a family
+    /// for a later tick, so a scan never waits at the causal fence at the head
+    /// of the family's sequencer with the command's own entries queued behind.
+    fn family_has_open_mutating_root(&self, family: &str) -> Result<bool, GitAiError> {
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        Ok(ingress
+            .root_open_connections
+            .keys()
+            .any(|root_sid| Self::open_root_may_mutate_family(&ingress, root_sid, Some(family))))
+    }
+
+    /// Whether a sequencer entry positioned at `started_at_ns`, ready for
+    /// `waited`, must still wait for an older mutating trace root that is open
+    /// (see `classify_root_fence` for how long a root can hold). Roots that
+    /// started after the entry cannot precede it. Unattributed roots (no
+    /// family yet) fail closed and fence every family.
     fn family_entry_blocked_by_prior_open_trace_root(
         &self,
         family: &str,
         started_at_ns: u128,
         entry_root_sid: Option<&str>,
-    ) -> Result<bool, GitAiError> {
-        let ingress = self
-            .trace_ingress_state
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-
-        for (root_sid, open_count) in &ingress.root_open_connections {
-            if *open_count == 0 || entry_root_sid == Some(root_sid.as_str()) {
-                continue;
-            }
-            if ingress.root_definitely_read_only.contains(root_sid) {
-                continue;
-            }
-            if !ingress.root_mutating.get(root_sid).copied().unwrap_or(true) {
-                continue;
-            }
-            if ingress
-                .root_started_at_ns
-                .get(root_sid)
-                .copied()
-                .is_some_and(|root_started| root_started > started_at_ns)
-            {
-                continue;
-            }
-            if ingress
-                .root_families
-                .get(root_sid)
-                .is_none_or(|root_family| root_family == family)
-            {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        waited: Duration,
+        entry_kind: &'static str,
+    ) -> Result<Option<Duration>, GitAiError> {
+        self.evaluate_fence(
+            |ingress, root_sid| {
+                entry_root_sid != Some(root_sid)
+                    && Self::open_root_may_mutate_family(ingress, root_sid, Some(family))
+                    && ingress
+                        .root_started_at_ns
+                        .get(root_sid)
+                        .is_none_or(|root_started| *root_started <= started_at_ns)
+            },
+            |_, _| waited,
+            entry_kind,
+        )
     }
 
     fn record_side_effect_error(
@@ -3613,17 +4412,26 @@ impl ActorDaemonCoordinator {
         result: &Result<(), GitAiError>,
         error_order: u64,
     ) -> Result<(), GitAiError> {
-        let sync_tracked = crate::daemon::test_sync::tracks_primary_command_for_test_sync(
-            applied.command.primary_command.as_deref(),
-            &applied.command.invoked_args,
-        );
+        // A fixup-synthesized commit is not a command a test issued, so it must
+        // never satisfy a test's wait for its own traced commands.
+        let untraced = is_untraced_root_sid(&applied.command.root_sid);
+        let sync_tracked = !untraced
+            && crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                applied.command.primary_command.as_deref(),
+                &applied.command.invoked_args,
+            );
         let test_sync_session = crate::daemon::test_sync::test_sync_session_from_invocation(
             &parsed_invocation_for_normalized_command(&applied.command),
         );
         let log_entry = TestCompletionLogEntry {
             seq: applied.seq,
             family_key: family.to_string(),
-            kind: "command".to_string(),
+            kind: if untraced {
+                "untraced_fixup"
+            } else {
+                "command"
+            }
+            .to_string(),
             primary_command: applied.command.primary_command.clone(),
             test_sync_session,
             exit_code: Some(applied.command.exit_code),
@@ -3654,21 +4462,29 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    /// Whether a root closing without its atexit must be cleared by the ingest
+    /// worker (through a close marker) rather than inline: any root the fence
+    /// counts, so the families it fenced get re-drained when it clears.
     fn trace_root_needs_close_marker(ingress: &TraceIngressState, root_sid: &str) -> bool {
-        if ingress.root_definitely_read_only.contains(root_sid) {
-            return false;
-        }
-        ingress
-            .root_mutating
-            .get(root_sid)
-            .copied()
-            .unwrap_or(false)
+        Self::open_root_may_mutate_family(ingress, root_sid, None)
             || ingress.root_reflog_start_offsets.contains_key(root_sid)
     }
 
-    fn clear_trace_ingress_root_locked(ingress: &mut TraceIngressState, root_sid: &str) {
-        ingress.root_worktrees.remove(root_sid);
+    /// Forgets a root; returns what it was fencing (see
+    /// `open_root_may_mutate_family`) so the caller can re-drain it.
+    fn clear_trace_ingress_root_locked(
+        ingress: &mut TraceIngressState,
+        root_sid: &str,
+    ) -> Option<FenceScope> {
+        let fenced = Self::open_root_may_mutate_family(ingress, root_sid, None).then(|| {
+            ingress
+                .root_families
+                .get(root_sid)
+                .cloned()
+                .map_or(FenceScope::EveryFamily, FenceScope::Family)
+        });
         ingress.root_families.remove(root_sid);
+        ingress.root_worktrees.remove(root_sid);
         ingress.root_argv.remove(root_sid);
         ingress.root_started_at_ns.remove(root_sid);
         ingress.root_reflog_start_offsets.remove(root_sid);
@@ -3678,6 +4494,9 @@ impl ActorDaemonCoordinator {
         ingress.root_definitely_read_only.remove(root_sid);
         ingress.root_open_connections.remove(root_sid);
         ingress.root_close_markers_enqueued.remove(root_sid);
+        ingress.root_finishing.remove(root_sid);
+        ingress.root_fence_release_logged.remove(root_sid);
+        fenced
     }
 
     fn record_trace_connection_close(&self, roots: &[String]) -> Result<Vec<String>, GitAiError> {
@@ -3687,12 +4506,16 @@ impl ActorDaemonCoordinator {
             .lock()
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
         for root_sid in roots {
-            if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
-                if *count > 1 {
-                    *count -= 1;
-                    continue;
-                }
-                ingress.root_open_connections.remove(root_sid);
+            if let Some(count) = ingress.root_open_connections.get_mut(root_sid)
+                && *count > 1
+            {
+                *count -= 1;
+                continue;
+            }
+            if ingress.root_finishing.contains(root_sid) {
+                // The root's atexit is queued: the worker clears it (and lifts
+                // its fence) when it processes it.
+                continue;
             }
             if !Self::trace_root_needs_close_marker(&ingress, root_sid) {
                 Self::clear_trace_ingress_root_locked(&mut ingress, root_sid);
@@ -3701,6 +4524,13 @@ impl ActorDaemonCoordinator {
             if ingress.root_close_markers_enqueued.contains(root_sid) {
                 continue;
             }
+            // Keep the root registered as open until the ingest worker has
+            // processed its queued frames and this close marker
+            // (clear_trace_root_tracking removes the registration then). The
+            // reader runs ahead of the worker; clearing here would drop the
+            // open-root fence while the root's own command is still queued,
+            // letting a detached drain execute a later command's pass first
+            // and invert per-family side-effect order (#2252).
             ingress.root_close_markers_enqueued.insert(root_sid.clone());
             close_marker_candidates.push(root_sid.clone());
         }
@@ -3783,49 +4613,24 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
-        {
+    /// Forgets a root and lifts its fence; returns what it fenced so the
+    /// caller can re-drain exactly those families.
+    fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<Option<FenceScope>, GitAiError> {
+        let cleared = {
             let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
                 GitAiError::Generic("trace ingress state lock poisoned".to_string())
             })?;
-            Self::clear_trace_ingress_root_locked(&mut ingress, root_sid);
-        }
+            Self::clear_trace_ingress_root_locked(&mut ingress, root_sid)
+        };
         let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
             GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
         })?;
         queued.remove(root_sid);
         self.trace_ingest_progress_notify.notify_waiters();
-        Ok(())
-    }
-
-    fn has_open_trace_roots_that_may_mutate_refs(&self) -> bool {
-        let Ok(ingress) = self.trace_ingress_state.lock() else {
-            return false;
-        };
-        ingress.root_open_connections.iter().any(|(root, count)| {
-            *count > 0
-                && !ingress.root_definitely_read_only.contains(root)
-                && ingress.root_mutating.get(root).copied().unwrap_or(true)
-        })
-    }
-
-    /// As [`Self::has_open_trace_roots_that_may_mutate_refs`], but scoped to
-    /// one family: roots already attributed to a DIFFERENT family (via their
-    /// `def_repo` worktree) cannot mutate this family's refs and are ignored.
-    /// Roots with no family attribution yet fail closed and block everyone.
-    fn has_open_trace_roots_that_may_mutate_family(&self, family: &str) -> bool {
-        let Ok(ingress) = self.trace_ingress_state.lock() else {
-            return false;
-        };
-        ingress.root_open_connections.iter().any(|(root, count)| {
-            *count > 0
-                && !ingress.root_definitely_read_only.contains(root)
-                && ingress.root_mutating.get(root).copied().unwrap_or(true)
-                && ingress
-                    .root_families
-                    .get(root)
-                    .is_none_or(|root_family| root_family == family)
-        })
+        if cleared.is_some() {
+            self.trace_root_fence_notify.notify_waiters();
+        }
+        Ok(cleared)
     }
 
     fn next_trace_ingest_seq(&self) -> u64 {
@@ -3934,6 +4739,8 @@ impl ActorDaemonCoordinator {
                         object.remove(TRACE_INGEST_SEQ_FIELD);
                     }
                     let ordered_payload_root = Self::trace_payload_root_sid(&ordered_payload);
+                    let ordered_payload_is_final =
+                        Self::trace_payload_is_root_final_frame(&ordered_payload);
 
                     let ingest_result = {
                         let coord = coordinator.clone();
@@ -3954,14 +4761,7 @@ impl ActorDaemonCoordinator {
                                 Err(error)
                             }
                             Err(panic_payload) => {
-                                let panic_msg =
-                                    if let Some(s) = panic_payload.downcast_ref::<String>() {
-                                        s.clone()
-                                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                                        s.to_string()
-                                    } else {
-                                        "unknown panic".to_string()
-                                    };
+                                let panic_msg = panic_payload_message(panic_payload.as_ref());
                                 tracing::error!(
                                     component = "daemon",
                                     phase = "trace_ingest_worker",
@@ -3977,7 +4777,27 @@ impl ActorDaemonCoordinator {
                             }
                         }
                     };
-                    let _ = ingest_result;
+                    if ingest_result.is_err()
+                        && ordered_payload_is_final
+                        && let Some(root_sid) = ordered_payload_root.as_deref()
+                    {
+                        // A root's final frame must lift its fence whatever went
+                        // wrong with it: a root stuck finishing would fence its
+                        // family forever.
+                        match coordinator.clear_trace_root_tracking(root_sid) {
+                            Ok(fenced) => {
+                                coordinator.schedule_ready_family_drains_after_root_cleared(fenced)
+                            }
+                            Err(error) => tracing::error!(
+                                component = "daemon",
+                                phase = "trace_ingest_worker",
+                                reason = "root_clear_failed",
+                                root_sid,
+                                %error,
+                                "failed clearing trace root after a final-frame ingest failure"
+                            ),
+                        }
+                    }
                     let _ = coordinator.queued_trace_payloads.fetch_update(
                         Ordering::Relaxed,
                         Ordering::Relaxed,
@@ -4096,14 +4916,7 @@ impl ActorDaemonCoordinator {
                         }
                     }
                     Err(panic_payload) => {
-                        let panic_msg =
-                            if let Some(message) = panic_payload.downcast_ref::<String>() {
-                                message.clone()
-                            } else if let Some(message) = panic_payload.downcast_ref::<&str>() {
-                                message.to_string()
-                            } else {
-                                "unknown panic".to_string()
-                            };
+                        let panic_msg = panic_payload_message(panic_payload.as_ref());
                         tracing::error!(
                             component = "daemon",
                             phase = "checkpoint_ingress_worker",
@@ -4165,8 +4978,12 @@ impl ActorDaemonCoordinator {
         });
 
         self.notify_checkpoint_stream(&request);
-        self.wait_for_trace_ingest_seq(accepted.trace_ingest_target)
-            .await;
+        self.wait_for_trace_ingest_seq_logging_delay(
+            accepted.trace_ingest_target,
+            accepted.receipt_seq,
+            accepted.received_at,
+        )
+        .await;
 
         tracing::info!(
             component = "daemon",
@@ -4233,10 +5050,13 @@ impl ActorDaemonCoordinator {
             state.next_ordinal = state.next_ordinal.saturating_add(1);
             state.entries.insert(
                 order,
-                FamilySequencerEntry::Checkpoint {
-                    request: Box::new(prepared.request),
-                    receipt_seq: prepared.receipt_seq,
-                    reservation: prepared.reservation,
+                FamilySequencerSlot {
+                    enqueued_at: Instant::now(),
+                    entry: FamilySequencerEntry::Checkpoint {
+                        request: Box::new(prepared.request),
+                        receipt_seq: prepared.receipt_seq,
+                        reservation: prepared.reservation,
+                    },
                 },
             );
             self.unadmitted_checkpoints
@@ -4310,11 +5130,18 @@ impl ActorDaemonCoordinator {
                 ));
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                self.trace_payloads_dropped_queue_full
+                    .fetch_add(1, Ordering::Relaxed);
+                let dropped_root =
+                    Self::trace_payload_root_sid(&payload).unwrap_or_else(|| "unknown".to_string());
                 tracing::error!(
                     component = "daemon",
                     phase = "enqueue_trace_payload",
                     reason = "ingest_worker_queue_full",
-                    "trace ingest queue is full"
+                    dropped_root = %dropped_root,
+                    queue_capacity = Self::trace_ingest_queue_capacity(),
+                    queued_payloads = self.queued_trace_payloads.load(Ordering::Relaxed),
+                    "trace ingest queue is full; dropping payload and shutting down (attribution for this root is lost)"
                 );
                 self.request_shutdown();
                 return Err(GitAiError::Generic(
@@ -4359,20 +5186,89 @@ impl ActorDaemonCoordinator {
         }
     }
 
+    fn checkpoint_admission_delay_log_interval() -> Duration {
+        #[cfg(feature = "test-support")]
+        return env_duration_ms(
+            "GIT_AI_TEST_CHECKPOINT_ADMISSION_DELAY_LOG_INTERVAL_MS",
+            CHECKPOINT_ADMISSION_DELAY_LOG_INTERVAL,
+        );
+        #[cfg(not(feature = "test-support"))]
+        CHECKPOINT_ADMISSION_DELAY_LOG_INTERVAL
+    }
+
+    /// As [`Self::wait_for_trace_ingest_seq`], but logs whenever the total
+    /// time since the checkpoint's receipt exceeds
+    /// [`CHECKPOINT_ADMISSION_DELAY_LOG_INTERVAL`], so a stalled trace-ingest
+    /// watermark shows up as delayed checkpoint admission instead of having
+    /// to be inferred from absent admission log lines. Admission is serial,
+    /// so a checkpoint can spend most of its delay queued behind the
+    /// head-of-line one; measuring from receipt makes the first warning for
+    /// such a checkpoint fire immediately once its turn comes, and
+    /// `unadmitted_checkpoints` shows how many more are queued behind.
+    async fn wait_for_trace_ingest_seq_logging_delay(
+        &self,
+        target: u64,
+        receipt_seq: u64,
+        received_at: std::time::Instant,
+    ) {
+        let log_interval = Self::checkpoint_admission_delay_log_interval();
+        let mut next_log_in = log_interval.saturating_sub(received_at.elapsed());
+        loop {
+            match tokio::time::timeout(next_log_in, self.wait_for_trace_ingest_seq(target)).await {
+                Ok(()) => return,
+                Err(_) => {
+                    tracing::warn!(
+                        component = "daemon",
+                        phase = "checkpoint_admission",
+                        reason = "admission_delayed_by_trace_ingest",
+                        receipt_seq,
+                        trace_ingest_target = target,
+                        processed_trace_ingest_seq =
+                            self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64,
+                        unadmitted_checkpoints =
+                            self.unadmitted_checkpoints.load(Ordering::Acquire) as u64,
+                        waited_ms = received_at.elapsed().as_millis() as u64,
+                        "checkpoint admission delayed waiting for trace ingestion"
+                    );
+                    next_log_in = log_interval;
+                }
+            }
+        }
+    }
+
     /// Waits until all trace payloads enqueued up to now have been processed
-    /// by the ingest worker, and any identified trace root that may mutate refs
-    /// has closed. This is a causal drain fence: it guarantees that trace2 data
+    /// by the ingest worker, and no identified trace root that may mutate refs
+    /// still holds the causal fence (see `classify_root_fence`): it has
+    /// closed, or it has been open past the grace with its process provably
+    /// still running and nothing written. This guarantees that trace2 data
     /// already visible to the daemon for prior mutating git operations has
-    /// reached the family sequencer before returning.
+    /// reached the family sequencer.
     ///
     /// Accepted sockets with no complete trace2 root are not causal evidence for
     /// any repository family. They are tracked for connection cleanup, but must
     /// not globally block checkpoint/sync control requests.
-    ///
-    /// Used by checkpoint entry to ensure ordering: a checkpoint must not be
-    /// processed until all causally-prior git operations have been ingested
-    /// through their root `atexit`/connection-close boundary.
     async fn wait_for_trace_ingest_processed_through(&self) {
+        self.wait_for_trace_ingest_processed_through_scope(None, "global")
+            .await
+    }
+
+    /// As [`Self::wait_for_trace_ingest_processed_through`], but scoped to one
+    /// family: open mutating roots already attributed to a different family do
+    /// not hold this fence, so a long-running git command in one repository
+    /// does not delay `sync.family` for every other repository. Unattributed
+    /// roots still fail closed and count until their `def_repo` arrives.
+    async fn wait_for_trace_ingest_processed_through_family(&self, family: &str) {
+        self.wait_for_trace_ingest_processed_through_scope(Some(family), "sync")
+            .await
+    }
+
+    async fn wait_for_trace_ingest_processed_through_scope(
+        &self,
+        family: Option<&str>,
+        context: &'static str,
+    ) {
+        let started = Instant::now();
+        let started_ns = now_unix_nanos();
         loop {
             // Read the current high-water mark. Any payload enqueued before this
             // point has a seq <= this value. We need to wait until the ingest
@@ -4380,42 +5276,30 @@ impl ActorDaemonCoordinator {
             let target = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
             self.wait_for_trace_ingest_seq(target).await;
 
-            if !self.has_open_trace_roots_that_may_mutate_refs() {
+            // Enroll before checking (see wait_for_trace_ingest_seq): a root
+            // clearing or releasing must not race the evaluation.
+            let fence_changed = self.trace_root_fence_notify.notified();
+            tokio::pin!(fence_changed);
+            fence_changed.as_mut().enable();
+            // Roots that started after this wait began cannot precede the
+            // work it certifies, and must not be judged on this wait's clock.
+            let hold = self.evaluate_fence(
+                |ingress, root_sid| {
+                    Self::open_root_may_mutate_family(ingress, root_sid, family)
+                        && ingress
+                            .root_started_at_ns
+                            .get(root_sid)
+                            .is_none_or(|root_started| *root_started <= started_ns)
+                },
+                |_, _| started.elapsed(),
+                context,
+            );
+            let Ok(Some(retry_in)) = hold else {
                 return;
-            }
-
-            let progress = self.trace_ingest_progress_notify.notified();
-            if !self.has_open_trace_roots_that_may_mutate_refs() {
-                return;
-            }
+            };
             tokio::select! {
-                _ = progress => {}
-                _ = self.wait_for_shutdown() => return,
-            }
-        }
-    }
-
-    /// As [`Self::wait_for_trace_ingest_processed_through`], but scoped to one
-    /// family: open mutating roots already attributed to a different family do
-    /// not hold this fence, so a long-running git command in one repository no
-    /// longer delays `sync.family` for every other repository. Unattributed
-    /// roots still fail closed and block until their `def_repo` arrives.
-    async fn wait_for_trace_ingest_processed_through_family(&self, family: &str) {
-        loop {
-            let target = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
-            self.wait_for_trace_ingest_seq(target).await;
-
-            // Enroll before checking (see wait_for_trace_ingest_seq): the
-            // notify_waiters fired by the root's close/def_repo must not race
-            // the condition load.
-            let progress = self.trace_ingest_progress_notify.notified();
-            tokio::pin!(progress);
-            progress.as_mut().enable();
-            if !self.has_open_trace_roots_that_may_mutate_family(family) {
-                return;
-            }
-            tokio::select! {
-                _ = &mut progress => {}
+                _ = &mut fence_changed => {}
+                _ = tokio::time::sleep(retry_in) => {}
                 _ = self.wait_for_shutdown() => return,
             }
         }
@@ -4468,6 +5352,18 @@ impl ActorDaemonCoordinator {
             trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
         let event_is_read_only =
             trace_invocation_is_definitely_read_only(early_primary.as_deref(), &argv);
+        // Family resolution reads `.git` and canonicalizes the path —
+        // filesystem I/O that must run before taking the process-wide ingress
+        // lock every trace reader serializes on (one hung filesystem must not
+        // stall trace draining for every other repository).
+        let resolved_family = worktree_hint.as_ref().and_then(|worktree| {
+            #[cfg(feature = "test-support")]
+            maybe_stall_family_resolution_for_test(worktree);
+            common_dir_for_worktree(worktree).map(|common_dir| {
+                let family = common_dir.canonicalize().unwrap_or(common_dir);
+                family.to_string_lossy().to_string()
+            })
+        });
 
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,
@@ -4485,12 +5381,14 @@ impl ActorDaemonCoordinator {
                 .or_insert(started_at_ns);
         }
 
-        if let Some(worktree) = worktree_hint.clone() {
-            if let Some(common_dir) = common_dir_for_worktree(&worktree) {
-                let family = common_dir.canonicalize().unwrap_or(common_dir);
-                ingress
-                    .root_families
-                    .insert(root.clone(), family.to_string_lossy().to_string());
+        // Only the root's own frames describe the root: a child git process
+        // (a hook's `git rev-parse`, say) must not retarget its family or
+        // downgrade its classification.
+        if sid == root
+            && let Some(worktree) = worktree_hint.clone()
+        {
+            if let Some(family) = resolved_family {
+                ingress.root_families.insert(root.clone(), family);
             }
             ingress.root_worktrees.insert(root.clone(), worktree);
         }
@@ -4511,7 +5409,9 @@ impl ActorDaemonCoordinator {
             early_primary.or_else(|| trace_argv_primary_command(&effective_argv));
         let command_mutates_refs =
             trace_invocation_may_mutate_refs(effective_primary.as_deref(), &effective_argv);
-        if let Some(primary) = effective_primary.as_deref() {
+        if sid == root
+            && let Some(primary) = effective_primary.as_deref()
+        {
             ingress
                 .root_mutating
                 .entry(root.clone())
@@ -4524,35 +5424,64 @@ impl ActorDaemonCoordinator {
         }
 
         let terminal = is_terminal_root_trace_event(&event, &sid, &root);
-        if command_mutates_refs
+        // Reflog start offsets describe the root's own repository: only its
+        // own frames may trigger the capture (a mutating child git in another
+        // repository must not record that repository under the root).
+        let capture_worktree = if sid == root
+            && command_mutates_refs
             && !terminal
+            && !ingress.root_finishing.contains(&root)
             && !ingress.root_reflog_start_offsets.contains_key(&root)
-            && let Some(worktree) = worktree_hint
+        {
+            worktree_hint
                 .clone()
                 .or_else(|| ingress.root_worktrees.get(&root).cloned())
-        {
+        } else {
+            None
+        };
+        if let Some(worktree) = capture_worktree {
+            // The reflog walk does filesystem I/O; release the process-wide
+            // ingress lock around it so one slow filesystem cannot stall every
+            // trace reader thread at once.
+            drop(ingress);
+            #[cfg(feature = "test-support")]
+            if let Ok(raw_delay_ms) = std::env::var("GIT_AI_TEST_REFLOG_CAPTURE_DELAY_MS")
+                && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
+                && delay_ms > 0
+            {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
             let offsets =
                 crate::daemon::ref_cursor::capture_reflog_start_offsets_for_worktree(&worktree);
-            ingress
-                .root_reflog_start_offsets
-                .insert(root.clone(), offsets);
+            ingress = match self.trace_ingress_state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return false,
+            };
+            // Another connection for this root may have processed its terminal
+            // event while the lock was released; inserting offsets for a
+            // closed root would leak state, so only keep them for a root that
+            // is still live. First insert wins if two frames raced.
+            if ingress.root_last_activity_ns.contains_key(&root) {
+                ingress
+                    .root_reflog_start_offsets
+                    .entry(root.clone())
+                    .or_insert(offsets);
+            }
         }
 
         let read_only_root =
             event_is_read_only || ingress.root_definitely_read_only.contains(&root);
-        let inherited = (
-            ingress.root_argv.get(&root).cloned(),
-            ingress.root_started_at_ns.get(&root).copied(),
-            ingress.root_reflog_start_offsets.get(&root).cloned(),
-            ingress.root_worktrees.get(&root).cloned(),
-        );
+        let inherited_reflog_start_offsets = ingress.root_reflog_start_offsets.get(&root).cloned();
+        if terminal && !read_only_root {
+            ingress.root_finishing.insert(root.clone());
+        }
         if terminal {
+            // Drop what later frames could no longer use. The family, start
+            // time, argv and mutating classification stay until the worker
+            // clears the root, so its fence keeps its scope while the final
+            // frames are queued.
             ingress.root_worktrees.remove(&root);
-            ingress.root_families.remove(&root);
-            ingress.root_argv.remove(&root);
-            ingress.root_started_at_ns.remove(&root);
             ingress.root_reflog_start_offsets.remove(&root);
-            ingress.root_mutating.remove(&root);
             ingress.root_target_repo_only.remove(&root);
             ingress.root_last_activity_ns.remove(&root);
             ingress.root_definitely_read_only.remove(&root);
@@ -4560,42 +5489,542 @@ impl ActorDaemonCoordinator {
 
         drop(ingress);
 
-        if let Some(object) = payload.as_object_mut() {
-            if object.get("argv").is_none()
-                && let Some(root_argv) = inherited.0
-            {
-                object.insert(TRACE_ROOT_ARGV_FIELD.to_string(), json!(root_argv));
-            }
-            if object.get(TRACE_ROOT_STARTED_AT_NS_FIELD).is_none()
-                && let Some(started_at_ns) = inherited.1
-            {
-                let started_at_ns = u64::try_from(started_at_ns).unwrap_or(u64::MAX);
-                object.insert(
-                    TRACE_ROOT_STARTED_AT_NS_FIELD.to_string(),
-                    json!(started_at_ns),
-                );
-            }
-            if object.get(TRACE_ROOT_REFLOG_START_OFFSETS_FIELD).is_none()
-                && let Some(offsets) = inherited.2
-            {
-                object.insert(
-                    TRACE_ROOT_REFLOG_START_OFFSETS_FIELD.to_string(),
-                    json!(offsets),
-                );
-            }
-            if object.get(TRACE_ROOT_WORKTREE_FIELD).is_none()
-                && object.get("worktree").is_none()
-                && object.get("repo_working_dir").is_none()
-                && let Some(worktree) = inherited.3
-            {
-                object.insert(
-                    TRACE_ROOT_WORKTREE_FIELD.to_string(),
-                    json!(worktree.to_string_lossy().to_string()),
-                );
-            }
+        if let Some(object) = payload.as_object_mut()
+            && object.get(TRACE_ROOT_REFLOG_START_OFFSETS_FIELD).is_none()
+            && let Some(offsets) = inherited_reflog_start_offsets
+        {
+            object.insert(
+                TRACE_ROOT_REFLOG_START_OFFSETS_FIELD.to_string(),
+                json!(offsets),
+            );
         }
 
         read_only_root
+    }
+
+    /// Claims the commits no traced command owns from one worktree `HEAD`
+    /// reflog and runs the normal post-commit side effects for each, exactly
+    /// as for a traced `git commit`. Returns the cursor to persist.
+    ///
+    /// A pass stops at `UNTRACED_FIXUP_MAX_COMMITS_PER_PASS` commits (or a
+    /// reflog byte budget) so the family's exec lock is released between
+    /// passes; when it does, a follow-up pass is queued at once rather than
+    /// waiting for the next tick. Once records are claimed nothing here is
+    /// allowed to abandon them: every later failure is logged per commit.
+    ///
+    /// Returns the cursor to persist, or `None` when a side effect failed: the
+    /// in-memory cursor has moved on (the traced path does not retry side
+    /// effects either), but leaving the durable cursor behind lets the next
+    /// daemon lifetime retry the commit, skipping any that did get their note.
+    async fn run_untraced_commit_scan(
+        &self,
+        family: &str,
+        git_dir: PathBuf,
+        worktree: PathBuf,
+        seed: Option<UntracedReflogCursor>,
+        max_offset: Option<u64>,
+        order: u64,
+    ) -> Result<Option<UntracedReflogCursor>, GitAiError> {
+        let request = UntracedClaimRequest {
+            git_dir: git_dir.clone(),
+            worktree: worktree.clone(),
+            seed,
+            // Reflog timestamps are whole seconds: round the age up so a
+            // sub-second override never becomes "no minimum age".
+            min_age_secs: untraced_fixup_min_age().as_millis().div_ceil(1000) as i64,
+            now_secs: crate::utils::unix_timestamp_now() as i64,
+            max_commits: UNTRACED_FIXUP_MAX_COMMITS_PER_PASS,
+            max_offset,
+        };
+        let outcome = self
+            .coordinator
+            .claim_untraced_commits(crate::daemon::domain::FamilyKey::new(family), request)
+            .await?;
+        self.untraced_commits_skipped
+            .fetch_add(outcome.skipped as u64, Ordering::Relaxed);
+        if outcome.reseeded {
+            self.untraced_cursor_reseeds.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // A pass that died between writing a note and recording its cursor
+        // would claim the same commit twice; the note is the durable receipt.
+        let new_heads = outcome
+            .applied
+            .iter()
+            .filter_map(commit_created_new_head)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let already_noted = if new_heads.is_empty() {
+            HashSet::new()
+        } else {
+            let worktree = worktree.clone();
+            run_blocking_side_effect(move || {
+                let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                crate::git::notes_api::commits_with_notes(&repo, &new_heads)
+            })
+            .unwrap_or_else(|error| {
+                // Best-effort guard against a pass that died mid-way; the
+                // claimed commits must still be attributed.
+                tracing::warn!(%error, %family, "could not check existing notes before fixup");
+                HashSet::new()
+            })
+        };
+
+        // A record whose command could not be reduced was consumed without any
+        // side effect: that pass is not settled either.
+        let mut all_side_effects_succeeded = outcome.dropped == 0;
+        if outcome.dropped > 0 {
+            self.untraced_scan_errors
+                .fetch_add(outcome.dropped as u64, Ordering::Relaxed);
+        }
+        for applied in &outcome.applied {
+            if commit_created_new_head(applied).is_some_and(|head| already_noted.contains(head)) {
+                self.untraced_commits_skipped
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let mut snapshots = CommitFileTimestampSnapshotHandles::default();
+            let future = self.maybe_apply_side_effects_for_applied_command(
+                Some(family),
+                applied,
+                &mut snapshots,
+            );
+            let result = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                future,
+            ))
+            .await
+            {
+                Ok(result) => result,
+                Err(panic_payload) => Err(GitAiError::Generic(format!(
+                    "daemon command side effect panic: {}",
+                    panic_payload_message(panic_payload.as_ref())
+                ))),
+            };
+            match &result {
+                Ok(()) => {
+                    self.untraced_commits_fixed.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    all_side_effects_succeeded = false;
+                    self.untraced_scan_errors.fetch_add(1, Ordering::Relaxed);
+                    let _ = self.record_side_effect_error(family, order, error);
+                    tracing::error!(
+                        %error,
+                        %family,
+                        seq = applied.seq,
+                        "untraced commit side effect failed"
+                    );
+                }
+            }
+            if let Err(error) = self.append_command_completion_log(family, applied, &result, order)
+            {
+                tracing::error!(%error, %family, order, "command completion log write failed");
+            }
+        }
+        if outcome.more {
+            let max_offset = head_reflog_len(&git_dir);
+            self.append_family_sequencer_entry(
+                family,
+                now_unix_nanos(),
+                FamilySequencerEntry::UntracedCommitScan {
+                    git_dir,
+                    worktree,
+                    seed: None,
+                    max_offset,
+                },
+            )?;
+        }
+        Ok(all_side_effects_succeeded.then_some(outcome.cursor))
+    }
+
+    /// One periodic fixup tick: every known worktree whose `HEAD` reflog grew
+    /// since its cursor settled gets a pass, at most
+    /// `UNTRACED_FIXUP_MAX_SCANS_PER_TICK` of them (rotating). Skipped
+    /// entirely while trace frames are still queued, so a pass never runs
+    /// ahead of the commands those frames describe.
+    pub(crate) async fn run_untraced_fixup_tick(
+        self: &Arc<Self>,
+    ) -> Result<UntracedScanSchedule, GitAiError> {
+        let ingest_lag = self
+            .next_trace_ingest_seq
+            .load(Ordering::Acquire)
+            .saturating_sub(self.processed_trace_ingest_seq.load(Ordering::Acquire));
+        if self.queued_trace_payloads.load(Ordering::Acquire) > 0 || ingest_lag > 0 {
+            return Ok(UntracedScanSchedule::default());
+        }
+        let tick = self.untraced_fixup_ticks.fetch_add(1, Ordering::Relaxed);
+        let now_secs = crate::utils::unix_timestamp_now();
+        let last_maintenance = self
+            .untraced_store_last_maintenance_secs
+            .load(Ordering::Relaxed);
+        let maintenance = now_secs.saturating_sub(last_maintenance)
+            >= UNTRACED_STORE_MAINTENANCE_INTERVAL.as_secs();
+        if maintenance {
+            self.untraced_store_last_maintenance_secs
+                .store(now_secs, Ordering::Relaxed);
+        }
+        let schedule = self
+            .schedule_untraced_commit_scans(
+                None,
+                UntracedScanTrigger::Tick {
+                    rotation: tick,
+                    maintenance,
+                },
+            )
+            .await?;
+        if maintenance {
+            // Rows for repositories the fixup now ignores (scratch repos from
+            // before this rule, or newly configured globs) are forgotten here.
+            let ignore = self.untraced_fixup_ignore()?;
+            if let Some(count) = self
+                .with_repo_family_store(move |store| {
+                    let forgotten: Vec<String> = store
+                        .known_families(true)?
+                        .into_iter()
+                        .filter(|family| ignore.ignores(family))
+                        .collect();
+                    store.forget_families(&forgotten)?;
+                    store.prune(now_secs)?;
+                    store.family_count()
+                })
+                .await?
+            {
+                self.known_repo_families
+                    .store(count as u64, Ordering::Relaxed);
+            }
+        }
+        Ok(schedule)
+    }
+
+    /// Schedules one fixup pass per worktree of the given repository (or of
+    /// every family this daemon knows) and returns how many were scheduled.
+    async fn schedule_untraced_commit_scans(
+        self: &Arc<Self>,
+        repo_working_dir: Option<String>,
+        trigger: UntracedScanTrigger,
+    ) -> Result<UntracedScanSchedule, GitAiError> {
+        let now_secs = crate::utils::unix_timestamp_now();
+        let mut targets = Vec::new();
+        let mut ignored = 0;
+        match repo_working_dir {
+            Some(dir) => {
+                // The whole family: every worktree of the repository, with the
+                // named one included even when enumeration cannot see it.
+                let family = self.backend.resolve_family(Path::new(&dir))?;
+                if self.untraced_fixup_ignore()?.ignores(&family.0) {
+                    return Ok(UntracedScanSchedule {
+                        ignored: 1,
+                        ..UntracedScanSchedule::default()
+                    });
+                }
+                let worktree = worktree_root_for_path(Path::new(&dir)).ok_or_else(|| {
+                    GitAiError::Generic(format!("{dir} is not inside a git worktree"))
+                })?;
+                let git_dir = git_dir_for_worktree(&worktree)
+                    .ok_or_else(|| GitAiError::Generic(format!("{dir} has no git directory")))?;
+                for (git_dir, worktree) in worktrees_for_common_dir(Path::new(&family.0)) {
+                    targets.push((family.0.clone(), git_dir, worktree));
+                }
+                if !targets.iter().any(|(_, known, _)| *known == git_dir) {
+                    targets.push((family.0, git_dir, worktree));
+                }
+            }
+            None => {
+                // Families this process has heard from, plus those remembered
+                // from earlier daemon lifetimes. Routine ticks work from an
+                // in-memory copy of the remembered list and skip families
+                // already found missing; a maintenance round (hourly, and any
+                // explicit request) re-reads the store, re-probes missing
+                // families and refreshes `last_seen_at` for the present ones so
+                // an idle-but-present repository is never pruned as unseen.
+                let maintenance = !matches!(
+                    trigger,
+                    UntracedScanTrigger::Tick {
+                        maintenance: false,
+                        ..
+                    }
+                );
+                if maintenance {
+                    // Config edits (new globs, flag flips) apply from here on.
+                    *self.untraced_fixup_ignore.lock().map_err(|_| {
+                        GitAiError::Generic("untraced fixup ignore lock poisoned".to_string())
+                    })? = crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore::from_config(
+                        &config::Config::fresh(),
+                    );
+                }
+                let ignore = self.untraced_fixup_ignore()?;
+                let mut families = self.coordinator.family_keys().await;
+                families.extend(self.remembered_families(maintenance).await?);
+                families.sort();
+                families.dedup();
+                if let UntracedScanTrigger::Tick {
+                    rotation,
+                    maintenance: false,
+                } = trigger
+                    && families.len() > UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK
+                {
+                    // A routine tick looks at a rotating window of families so
+                    // its filesystem work stays bounded however many the daemon
+                    // has heard of; every family comes up within a few ticks. A
+                    // maintenance round (hourly) looks at all of them, so every
+                    // present family is marked seen before pruning runs.
+                    let start =
+                        (rotation as usize * UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK) % families.len();
+                    families.rotate_left(start);
+                    families.truncate(UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK);
+                }
+                let known_missing = if maintenance {
+                    self.lock_untraced_missing_families()?.clear();
+                    HashSet::new()
+                } else {
+                    self.lock_untraced_missing_families()?.clone()
+                };
+                for family in families {
+                    if known_missing.contains(&family) {
+                        continue;
+                    }
+                    // Scratch repositories (temp roots, configured globs) are
+                    // dropped before the stat and before any store write.
+                    if ignore.ignores(&family) {
+                        ignored += 1;
+                        continue;
+                    }
+                    let common_dir = Path::new(&family);
+                    if !common_dir.is_dir() {
+                        self.lock_untraced_missing_families()?
+                            .insert(family.clone());
+                        self.with_repo_family_store(move |store| {
+                            store.record_family_missing(&family, now_secs)
+                        })
+                        .await?;
+                        continue;
+                    }
+                    // Present families the store already remembers stay
+                    // fresh; a family is first remembered only by a completed
+                    // pass, together with its cursor.
+                    if maintenance {
+                        let family = family.clone();
+                        self.with_repo_family_store(move |store| {
+                            store.refresh_family_seen(&family, now_secs)
+                        })
+                        .await?;
+                    }
+                    for (git_dir, worktree) in self.family_worktrees(&family).await? {
+                        targets.push((family.clone(), git_dir, worktree));
+                    }
+                }
+            }
+        }
+        if let UntracedScanTrigger::Tick { rotation, .. } = trigger
+            && !targets.is_empty()
+        {
+            // Later worktrees are not starved when more than a tick's worth
+            // of them changed at once.
+            let len = targets.len();
+            targets.rotate_left((rotation as usize) % len);
+        }
+        let mut schedule = UntracedScanSchedule {
+            ignored,
+            ..UntracedScanSchedule::default()
+        };
+        let mut families = HashSet::new();
+        for (family, git_dir, worktree) in targets {
+            if self.family_has_pending_untraced_scan(&family, &git_dir)? {
+                continue;
+            }
+            let max_offset = head_reflog_len(&git_dir);
+            // A pass that runs records the family and its cursor when it
+            // completes; ticks only read, and only the first time they see a
+            // worktree (the cache mirrors every later write).
+            let git_dir_key = git_dir.to_string_lossy().to_string();
+            let cached = match self.cached_untraced_cursor(&git_dir_key) {
+                Some(cached) => cached,
+                None => {
+                    let key = git_dir_key.clone();
+                    let cached = CachedUntracedCursor {
+                        cursor: self
+                            .with_repo_family_store(move |store| store.cursor(&key))
+                            .await?
+                            .flatten(),
+                        reflog_seen: None,
+                    };
+                    self.cache_untraced_cursor(&git_dir_key, cached.clone());
+                    cached
+                }
+            };
+            let seed = cached.cursor;
+            if matches!(trigger, UntracedScanTrigger::Tick { .. }) {
+                if head_reflog_unchanged_since(&git_dir, seed.as_ref(), cached.reflog_seen.as_ref())
+                {
+                    schedule.unchanged += 1;
+                    continue;
+                }
+                if schedule.worktrees >= UNTRACED_FIXUP_MAX_SCANS_PER_TICK
+                    || self.family_has_open_mutating_root(&family)?
+                {
+                    schedule.deferred += 1;
+                    continue;
+                }
+            }
+            self.append_family_sequencer_entry(
+                &family,
+                now_unix_nanos(),
+                FamilySequencerEntry::UntracedCommitScan {
+                    git_dir,
+                    worktree,
+                    seed,
+                    max_offset,
+                },
+            )?;
+            schedule.worktrees += 1;
+            if families.insert(family.clone()) {
+                self.schedule_family_drain(family);
+            }
+        }
+        schedule.families = families.len();
+        Ok(schedule)
+    }
+
+    /// Families remembered in the store: re-read on a maintenance round (and
+    /// then including families last seen missing), otherwise the copy taken at
+    /// the last round plus every family a pass has recorded since.
+    async fn remembered_families(&self, maintenance: bool) -> Result<Vec<String>, GitAiError> {
+        if !maintenance && let Some(cached) = self.lock_untraced_known_families()?.clone() {
+            return Ok(cached);
+        }
+        let ignore = self.untraced_fixup_ignore()?;
+        let remembered: Vec<String> = self
+            .with_repo_family_store(move |store| store.known_families(maintenance))
+            .await?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|family| !ignore.ignores(family))
+            .collect();
+        *self.lock_untraced_known_families()? = Some(remembered.clone());
+        Ok(remembered)
+    }
+
+    fn lock_untraced_known_families(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Vec<String>>>, GitAiError> {
+        self.untraced_known_families
+            .lock()
+            .map_err(|_| GitAiError::Generic("untraced known families lock poisoned".to_string()))
+    }
+
+    fn lock_untraced_missing_families(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashSet<String>>, GitAiError> {
+        self.untraced_missing_families
+            .lock()
+            .map_err(|_| GitAiError::Generic("untraced missing families lock poisoned".to_string()))
+    }
+
+    /// `Some` when this worktree's persisted cursor has been read or written
+    /// since the daemon started.
+    fn cached_untraced_cursor(&self, git_dir_key: &str) -> Option<CachedUntracedCursor> {
+        self.untraced_cursor_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(git_dir_key).cloned())
+    }
+
+    fn cache_untraced_cursor(&self, git_dir_key: &str, cached: CachedUntracedCursor) {
+        if let Ok(mut cache) = self.untraced_cursor_cache.lock() {
+            cache.insert(git_dir_key.to_string(), cached);
+        }
+    }
+
+    /// Whether a fixup pass for this worktree is already queued (a pass held
+    /// behind an open root must not pile up duplicates every tick).
+    fn family_has_pending_untraced_scan(
+        &self,
+        family: &str,
+        git_dir: &Path,
+    ) -> Result<bool, GitAiError> {
+        let sequencers = self
+            .family_sequencers_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("family sequencer map lock poisoned".to_string()))?;
+        Ok(sequencers.get(family).is_some_and(|state| {
+            state.entries.values().any(|slot| {
+                matches!(
+                    &slot.entry,
+                    FamilySequencerEntry::UntracedCommitScan { git_dir: pending, .. }
+                        if pending == git_dir
+                )
+            })
+        }))
+    }
+
+    /// A snapshot of the fixup's ignore rules (cheap: a few paths and globs).
+    fn untraced_fixup_ignore(
+        &self,
+    ) -> Result<crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore, GitAiError> {
+        self.untraced_fixup_ignore
+            .lock()
+            .map(|ignore| ignore.clone())
+            .map_err(|_| GitAiError::Generic("untraced fixup ignore lock poisoned".to_string()))
+    }
+
+    fn untraced_persistence_blocked(&self, git_dir_key: &str) -> Result<bool, GitAiError> {
+        Ok(self
+            .lock_untraced_persistence_blocked()?
+            .contains(git_dir_key))
+    }
+
+    fn lock_untraced_persistence_blocked(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashSet<String>>, GitAiError> {
+        self.untraced_persistence_blocked.lock().map_err(|_| {
+            GitAiError::Generic("untraced persistence block set lock poisoned".to_string())
+        })
+    }
+
+    /// A family's worktrees: what the filesystem shows under its common dir,
+    /// plus worktrees remembered from earlier passes (the only way back to a
+    /// `--separate-git-dir` main worktree) that still exist.
+    async fn family_worktrees(&self, family: &str) -> Result<Vec<(PathBuf, PathBuf)>, GitAiError> {
+        let mut worktrees = worktrees_for_common_dir(Path::new(family));
+        let common_dir = family.to_string();
+        // A store problem must not take the whole tick down: the filesystem
+        // enumeration still covers every worktree the filesystem can lead to.
+        let remembered = self
+            .with_repo_family_store(move |store| store.known_worktrees(&common_dir))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, %family, "could not read remembered worktrees");
+                None
+            })
+            .unwrap_or_default();
+        for (git_dir, worktree) in remembered {
+            let (git_dir, worktree) = (PathBuf::from(git_dir), PathBuf::from(worktree));
+            // Either path may have been reused by an unrelated repository since;
+            // the worktree must still resolve to this git dir.
+            if worktree_belongs_to_git_dir(&worktree, &git_dir)
+                && !worktrees.iter().any(|(known, _)| *known == git_dir)
+            {
+                worktrees.push((git_dir, worktree));
+            }
+        }
+        Ok(worktrees)
+    }
+
+    /// Runs a store operation off the async runtime; `Ok(None)` when no store
+    /// is open.
+    async fn with_repo_family_store<T, F>(&self, operation: F) -> Result<Option<T>, GitAiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&crate::daemon::repo_family_store::RepoFamilyStore) -> Result<T, GitAiError>
+            + Send
+            + 'static,
+    {
+        let Some(store) = self.repo_family_store.clone() else {
+            return Ok(None);
+        };
+        crate::tokio_runtime::spawn_blocking_result(move || operation(&store))
+            .await
+            .map(Some)
     }
 
     fn side_effect_exec_lock(&self, family: &str) -> Result<Arc<AsyncMutex<()>>, GitAiError> {
@@ -4612,52 +6041,45 @@ impl ActorDaemonCoordinator {
     async fn drain_ready_family_sequencer_entries_locked(
         &self,
         family: &str,
-    ) -> Result<(), GitAiError> {
+    ) -> Result<Option<Duration>, GitAiError> {
+        // Register the in-flight pass BEFORE popping entries: completion
+        // fences must never observe an empty sequencer with no registered
+        // pass while popped entries are about to execute (#2252).
+        let _family_effect = self.begin_family_effect_guarded(family);
         let mut ready: Vec<(u64, FamilySequencerEntry)> = Vec::new();
-        let mut progressed = false;
+        let mut fenced = None;
         {
             let mut map = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
             })?;
             if self.unadmitted_checkpoints.load(Ordering::Acquire) > 0 {
-                return Ok(());
+                return Ok(None);
             }
             let Some(state) = map.get_mut(family) else {
-                return Ok(());
+                return Ok(None);
             };
             while let Some(first_entry) = state.entries.first_entry() {
-                if matches!(first_entry.get(), FamilySequencerEntry::PendingRoot) {
-                    break;
-                }
-                let entry_root_sid = match first_entry.get() {
-                    FamilySequencerEntry::ReadyCommand(command) => Some(command.root_sid.as_str()),
-                    _ => None,
-                };
-                if self.family_entry_blocked_by_prior_open_trace_root(
+                let slot = first_entry.get();
+                let (entry_root_sid, entry_kind) = Self::sequencer_entry_identity(&slot.entry);
+                fenced = self.family_entry_blocked_by_prior_open_trace_root(
                     family,
                     first_entry.key().started_at_ns,
                     entry_root_sid,
-                )? {
+                    slot.enqueued_at.elapsed(),
+                    entry_kind,
+                )?;
+                if fenced.is_some() {
                     break;
                 }
-                let (order, entry) = first_entry.remove_entry();
-                match entry {
-                    FamilySequencerEntry::PendingRoot => {
-                        unreachable!("pending root should not be removed from sequencer front");
-                    }
-                    other => {
-                        ready.push((order.ordinal, other));
-                        progressed = true;
-                    }
-                }
+                let (order, slot) = first_entry.remove_entry();
+                ready.push((order.ordinal, slot.entry));
             }
         }
 
         if ready.is_empty() {
-            return Ok(());
+            return Ok(fenced);
         }
 
-        let _ = self.begin_family_effect(family);
         for (order, ready_entry) in ready {
             // Per-family drains must be strictly serialized; overlapping or
             // order-regressing exec windows in a wltrace capture indicate a
@@ -4668,15 +6090,32 @@ impl ActorDaemonCoordinator {
                         "command:{}",
                         command.primary_command.as_deref().unwrap_or("unknown")
                     ),
+                    FamilySequencerEntry::AppliedSideEffects { applied, .. } => format!(
+                        "applied:{}",
+                        applied
+                            .command
+                            .primary_command
+                            .as_deref()
+                            .unwrap_or("unknown")
+                    ),
                     FamilySequencerEntry::Checkpoint { receipt_seq, .. } => {
                         format!("checkpoint:seq={receipt_seq}")
                     }
-                    _ => "other".to_string(),
+                    FamilySequencerEntry::UntracedCommitScan { worktree, .. } => {
+                        format!("untraced_scan:{}", worktree.display())
+                    }
                 };
                 format!("order={order} entry={entry}")
             });
             match ready_entry {
                 FamilySequencerEntry::ReadyCommand(command) => {
+                    let _side_effect_permit = self
+                        .command_side_effect_semaphore
+                        .acquire()
+                        .await
+                        .map_err(|_| {
+                            GitAiError::Generic("command side-effect semaphore closed".to_string())
+                        })?;
                     // Wrap the entire command + side-effect pipeline in catch_unwind
                     // so that a panic (e.g. from UTF-8 boundary issues in diff parsing)
                     // does not kill the daemon process.
@@ -4734,14 +6173,7 @@ impl ActorDaemonCoordinator {
                             );
                         }
                         Err(panic_payload) => {
-                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
-                            {
-                                s.clone()
-                            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                                s.to_string()
-                            } else {
-                                "unknown panic".to_string()
-                            };
+                            let panic_msg = panic_payload_message(panic_payload.as_ref());
                             let error = GitAiError::Generic(format!(
                                 "daemon command side effect panic: {}",
                                 panic_msg
@@ -4757,6 +6189,150 @@ impl ActorDaemonCoordinator {
                                 "command side effect panic"
                             );
                         }
+                    }
+                }
+                FamilySequencerEntry::AppliedSideEffects {
+                    applied,
+                    mut commit_file_timestamp_snapshots,
+                } => {
+                    let _side_effect_permit = self
+                        .command_side_effect_semaphore
+                        .acquire()
+                        .await
+                        .map_err(|_| {
+                            GitAiError::Generic("command side-effect semaphore closed".to_string())
+                        })?;
+                    let side_effect_result = {
+                        let future = self.maybe_apply_side_effects_for_applied_command(
+                            Some(family),
+                            &applied,
+                            &mut commit_file_timestamp_snapshots,
+                        );
+                        let caught = std::panic::AssertUnwindSafe(future);
+                        match futures::FutureExt::catch_unwind(caught).await {
+                            Ok(result) => result,
+                            Err(panic_payload) => {
+                                let panic_msg = panic_payload_message(panic_payload.as_ref());
+                                Err(GitAiError::Generic(format!(
+                                    "daemon command side effect panic: {}",
+                                    panic_msg
+                                )))
+                            }
+                        }
+                    };
+                    if let Err(error) = &side_effect_result {
+                        let _ = self.record_side_effect_error(family, order, error);
+                        tracing::error!(
+                            %error,
+                            %family,
+                            seq = applied.seq,
+                            "command side effect failed"
+                        );
+                    }
+                    if let Err(error) = self.append_command_completion_log(
+                        family,
+                        &applied,
+                        &side_effect_result,
+                        order,
+                    ) {
+                        let _ = self.record_side_effect_error(family, order, &error);
+                        tracing::error!(
+                            %error,
+                            %family,
+                            order,
+                            "command completion log write failed"
+                        );
+                    }
+                }
+                FamilySequencerEntry::UntracedCommitScan {
+                    git_dir,
+                    worktree,
+                    seed,
+                    max_offset,
+                } => {
+                    let _side_effect_permit = self
+                        .command_side_effect_semaphore
+                        .acquire()
+                        .await
+                        .map_err(|_| {
+                            GitAiError::Generic("command side-effect semaphore closed".to_string())
+                        })?;
+                    // The rules may have started ignoring this family after the
+                    // pass was queued (a config change, a maintenance refresh).
+                    if self.untraced_fixup_ignore()?.ignores(family) {
+                        tracing::debug!(%family, "untraced fixup pass skipped: family is ignored");
+                        continue;
+                    }
+                    let git_dir_key = git_dir.to_string_lossy().to_string();
+                    let worktree_key = worktree.to_string_lossy().to_string();
+                    let scan = self
+                        .run_untraced_commit_scan(
+                            family, git_dir, worktree, seed, max_offset, order,
+                        )
+                        .await;
+                    let persisted = match scan {
+                        Ok(Some(cursor))
+                            if !self.untraced_persistence_blocked(&git_dir_key)?
+                                && !self.untraced_fixup_ignore()?.ignores(family) =>
+                        {
+                            let family = family.to_string();
+                            self.cache_untraced_cursor(
+                                &git_dir_key,
+                                CachedUntracedCursor {
+                                    cursor: Some(cursor.clone()),
+                                    reflog_seen: Some(observe_head_reflog(Path::new(&git_dir_key))),
+                                },
+                            );
+                            if let Ok(mut known) = self.untraced_known_families.lock()
+                                && let Some(known) = known.as_mut()
+                                && !known.contains(&family)
+                            {
+                                known.push(family.clone());
+                            }
+                            let known = self
+                                .with_repo_family_store(move |store| {
+                                    store.record_pass_completed(
+                                        &family,
+                                        &git_dir_key,
+                                        &worktree_key,
+                                        &cursor,
+                                        crate::utils::unix_timestamp_now(),
+                                    )?;
+                                    store.family_count()
+                                })
+                                .await;
+                            known.map(|count| {
+                                if let Some(count) = count {
+                                    self.known_repo_families
+                                        .store(count as u64, Ordering::Relaxed);
+                                }
+                            })
+                        }
+                        // A side effect failed in this or an earlier pass: the
+                        // durable cursor stays behind that commit for the rest
+                        // of this daemon lifetime, so the next one retries it
+                        // (commits that did get their note are skipped then).
+                        // The in-memory position still moves so ticks keep
+                        // gating on it.
+                        Ok(Some(cursor)) => {
+                            self.cache_untraced_cursor(
+                                &git_dir_key,
+                                CachedUntracedCursor {
+                                    cursor: Some(cursor),
+                                    reflog_seen: Some(observe_head_reflog(Path::new(&git_dir_key))),
+                                },
+                            );
+                            Ok(())
+                        }
+                        Ok(None) => self.lock_untraced_persistence_blocked().map(|mut blocked| {
+                            blocked.insert(git_dir_key);
+                        }),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = persisted {
+                        self.untraced_scan_errors.fetch_add(1, Ordering::Relaxed);
+                        let _ = self.record_side_effect_error(family, order, &error);
+                        tracing::error!(%error, %family, order, "untraced commit scan failed");
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
@@ -4883,14 +6459,7 @@ impl ActorDaemonCoordinator {
                     let result = match checkpoint_request {
                         Ok(inner) => inner,
                         Err(panic_payload) => {
-                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
-                            {
-                                s.clone()
-                            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                                s.to_string()
-                            } else {
-                                "unknown panic".to_string()
-                            };
+                            let panic_msg = panic_payload_message(panic_payload.as_ref());
                             tracing::error!(
                                 component = "daemon",
                                 phase = "checkpoint_side_effect",
@@ -5031,14 +6600,10 @@ impl ActorDaemonCoordinator {
                         "checkpoint processing completed"
                     );
                 }
-                FamilySequencerEntry::Canceled => {}
-                FamilySequencerEntry::PendingRoot => {}
             }
         }
-        let _ = self.end_family_effect(family);
 
-        let _ = progressed;
-        Ok(())
+        Ok(fenced)
     }
 
     fn worktree_state_key(worktree: &Path) -> String {
@@ -5716,6 +7281,9 @@ impl ActorDaemonCoordinator {
                     && let Ok(delay_ms) = delay_ms.parse::<u64>()
                     && delay_ms > 0
                 {
+                    // Lets tests poll for the grind having actually started
+                    // instead of guessing with fixed sleeps.
+                    tracing::info!(op = primary, delay_ms, "test side-effect delay started");
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     break;
                 }
@@ -6268,6 +7836,9 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.effective_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
+                            let commit_source = is_untraced_root_sid(&cmd.root_sid).then_some(
+                                crate::authorship::post_commit::UNTRACED_FIXUP_COMMIT_SOURCE,
+                            );
                             crate::wltrace::wltrace(
                                 "commit.post_commit",
                                 Path::new(cmd.worktree.as_deref().unwrap_or(Path::new(""))),
@@ -6301,7 +7872,7 @@ impl ActorDaemonCoordinator {
                                     base_opt.clone(),
                                     new_head.clone(),
                                     author,
-                                    true,
+                                    crate::authorship::post_commit::PostCommitOptions::with_recovery(commit_source),
                                     recovery_file_timestamps.as_ref(),
                                     Some(&recovery_preflight),
                                 )
@@ -6537,10 +8108,25 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    /// Whether `payload` is the last frame the daemon will see for its root:
+    /// the root's own `atexit`, or the synthetic close marker.
+    fn trace_payload_is_root_final_frame(payload: &Value) -> bool {
+        let event = payload
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let sid = payload
+            .get("sid")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        event == TRACE_CONNECTION_CLOSED_EVENT
+            || is_terminal_root_trace_event(event, sid, trace_root_sid(sid))
+    }
+
     async fn apply_trace_payload_to_state(
-        &self,
+        self: &Arc<Self>,
         payload: Value,
-    ) -> Result<TracePayloadApplyOutcome, GitAiError> {
+    ) -> Result<(), GitAiError> {
         let payload_root_sid = Self::trace_payload_root_sid(&payload);
         let event = payload
             .get("event")
@@ -6549,133 +8135,111 @@ impl ActorDaemonCoordinator {
             .to_string();
         if event == TRACE_CONNECTION_CLOSED_EVENT {
             let Some(root_sid) = payload_root_sid.as_deref() else {
-                return Ok(TracePayloadApplyOutcome::None);
+                return Ok(());
             };
             {
                 let mut normalizer = self.normalizer.lock().await;
                 let _ = normalizer.sweep_orphans_for_roots(&[root_sid.to_string()]);
             }
-            let replaced_family = self
-                .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
-                .await?;
-            let outcome = if replaced_family.is_some() {
-                TracePayloadApplyOutcome::QueuedFamily
-            } else {
-                TracePayloadApplyOutcome::None
-            };
-            self.clear_trace_root_tracking(root_sid)?;
-            self.drain_ready_family_sequencers_after_root_cleared(replaced_family)
-                .await?;
-            return Ok(outcome);
+            let fenced = self.clear_trace_root_tracking(root_sid)?;
+            self.schedule_ready_family_drains_after_root_cleared(fenced);
+            return Ok(());
+        }
+        if trace_payload_worktree_hint(&payload).is_some() {
+            // Until a root's worktree is known it fences every family; now
+            // that its scope has narrowed to one, the others may proceed.
+            self.schedule_all_ready_family_drains();
         }
 
-        self.maybe_append_pending_root_from_trace_payload(&payload)?;
+        let terminal = is_terminal_root_trace_event(
+            &event,
+            payload
+                .get("sid")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            payload_root_sid.as_deref().unwrap_or_default(),
+        );
         let emitted = {
             let mut normalizer = self.normalizer.lock().await;
-            normalizer.ingest_payload(&payload)?
+            normalizer.ingest_payload(&payload)
         };
-        let Some(command) = emitted else {
-            if is_terminal_root_trace_event(
-                &event,
-                payload
-                    .get("sid")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                payload_root_sid.as_deref().unwrap_or_default(),
-            ) && let Some(root_sid) = payload_root_sid.as_deref()
-                && let Some(family) = self
-                    .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
-                    .await?
-            {
-                self.clear_trace_root_tracking(root_sid)?;
-                self.drain_ready_family_sequencers_after_root_cleared(Some(family))
-                    .await?;
-                return Ok(TracePayloadApplyOutcome::QueuedFamily);
+        let command = match emitted {
+            Ok(Some(command)) => command,
+            // A root's final frame always lifts its fence, whether or not the
+            // normalizer could turn the root into a command.
+            Ok(None) | Err(_) if terminal => {
+                if let Some(root_sid) = payload_root_sid.as_deref() {
+                    let fenced = self.clear_trace_root_tracking(root_sid)?;
+                    self.schedule_ready_family_drains_after_root_cleared(fenced);
+                }
+                return emitted.map(|_| ());
             }
-            return Ok(TracePayloadApplyOutcome::None);
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(error),
         };
         let root_sid = command.root_sid.clone();
 
-        let mut family_to_drain_after_clear = None;
-        let outcome = if let Some(family) = self
-            .replace_pending_root_entry(
-                &root_sid,
-                FamilySequencerEntry::ReadyCommand(Box::new(command.clone())),
-            )
-            .await?
-        {
-            self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
-            family_to_drain_after_clear = Some(family);
-            TracePayloadApplyOutcome::QueuedFamily
-        } else if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
+        let sequenced = self.sequence_emitted_command(command).await;
+        let fenced = self.clear_trace_root_tracking(&root_sid)?;
+        self.schedule_ready_family_drains_after_root_cleared(fenced);
+        // The family that gained the entry (coalesced: a drain already
+        // scheduled for it above is not doubled).
+        if let Some(family) = sequenced.as_ref().ok().and_then(|family| family.clone()) {
+            self.schedule_family_drain(family);
+        }
+        sequenced.map(|_| ())
+    }
+
+    /// Queues an emitted command for its family sequencer, or — for commands
+    /// outside the sequencer — applies it to family state and queues its
+    /// side-effect pass. Returns the family whose sequencer gained an entry.
+    async fn sequence_emitted_command(
+        self: &Arc<Self>,
+        command: crate::daemon::domain::NormalizedCommand,
+    ) -> Result<Option<String>, GitAiError> {
+        if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
             && Self::trace_invocation_participates_in_family_sequencer(
                 command.primary_command.as_deref(),
                 &command.raw_argv,
             )
         {
             self.cache_commit_file_timestamp_snapshots_for_command(&command)?;
-            self.append_ready_command_entry(&family, command).await?;
-            family_to_drain_after_clear = Some(family);
-            TracePayloadApplyOutcome::QueuedFamily
-        } else {
-            match self.coordinator.route_command(command).await {
-                Ok(applied) => TracePayloadApplyOutcome::Applied(Box::new(applied)),
-                Err(error) => {
-                    let _ = self.clear_trace_root_tracking(&root_sid);
-                    return Err(error);
-                }
-            }
+            let started_at_ns = command.started_at_ns;
+            self.append_family_sequencer_entry(
+                &family,
+                started_at_ns,
+                FamilySequencerEntry::ReadyCommand(Box::new(command)),
+            )?;
+            return Ok(Some(family));
+        }
+
+        let applied = self.coordinator.route_command(command).await?;
+        let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) else {
+            return Ok(None);
         };
-        self.clear_trace_root_tracking(&root_sid)?;
-        self.drain_ready_family_sequencers_after_root_cleared(family_to_drain_after_clear)
-            .await?;
-        Ok(outcome)
+        // The command is applied to family state, but its side-effect pass is
+        // unbounded git work: sequence it so drains execute it off-worker,
+        // ordered by the command's start time and serialized with the
+        // family's other passes (#2252).
+        let commit_file_timestamp_snapshots =
+            Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
+        let started_at_ns = applied.command.started_at_ns;
+        self.append_family_sequencer_entry(
+            &family,
+            started_at_ns,
+            FamilySequencerEntry::AppliedSideEffects {
+                applied: Box::new(applied),
+                commit_file_timestamp_snapshots,
+            },
+        )?;
+        Ok(Some(family))
     }
 
     async fn ingest_trace_payload_fast(self: Arc<Self>, payload: Value) -> Result<(), GitAiError> {
         if !is_trace_payload(&payload) {
             return Ok(());
         }
-        match self.apply_trace_payload_to_state(payload).await? {
-            TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
-            TracePayloadApplyOutcome::Applied(applied) => {
-                if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
-                    self.begin_family_effect(&family)?;
-                    let mut commit_file_timestamp_snapshots =
-                        Self::start_commit_file_timestamp_snapshots_for_command(&applied.command);
-                    let result = self
-                        .maybe_apply_side_effects_for_applied_command(
-                            Some(&family),
-                            &applied,
-                            &mut commit_file_timestamp_snapshots,
-                        )
-                        .await;
-                    let _ = self.end_family_effect(&family);
-                    if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(&family, applied.seq, error);
-                        tracing::error!(
-                            %error,
-                            %family,
-                            seq = applied.seq,
-                            "async side-effect error"
-                        );
-                    }
-                    if let Err(error) =
-                        self.append_command_completion_log(&family, &applied, &result, applied.seq)
-                    {
-                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
-                        tracing::error!(
-                            %error,
-                            %family,
-                            seq = applied.seq,
-                            "async completion log write failed"
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        self.apply_trace_payload_to_state(payload).await
     }
 
     async fn watermarks_for_family(
@@ -6743,7 +8307,10 @@ impl ActorDaemonCoordinator {
         }
     }
 
-    async fn sync_family(&self, repo_working_dir: String) -> Result<FamilyStatus, GitAiError> {
+    async fn sync_family(
+        self: &Arc<Self>,
+        repo_working_dir: String,
+    ) -> Result<FamilyStatus, GitAiError> {
         let checkpoint_target = self.next_checkpoint_receipt_seq.load(Ordering::Acquire) as u64;
         self.wait_for_checkpoint_admission_through(checkpoint_target)
             .await;
@@ -6752,23 +8319,32 @@ impl ActorDaemonCoordinator {
         self.wait_for_trace_ingest_processed_through_family(&family.0)
             .await;
 
-        let exec_lock = self.side_effect_exec_lock(&family.0)?;
         loop {
             self.wait_for_no_unadmitted_checkpoints().await;
-            let guard = exec_lock.lock().await;
-            self.drain_ready_family_sequencer_entries_locked(&family.0)
-                .await?;
-            if self.unadmitted_checkpoints.load(Ordering::Acquire) == 0 {
-                drop(guard);
+            // Drain every family, not just the synced one: side-effect
+            // passes can write into other repositories (`git push <path>`
+            // pushes authorship notes into the destination repo), and before
+            // side effects ran detached the global ingest watermark implied
+            // all already-ingested passes had completed. Ready entries are
+            // executed here or by their detached drains (serialized per
+            // family by the exec lock); passes already handed off are
+            // visible via the effect registrations they take before the
+            // watermark advances (#2252). Entries fail-closed behind a
+            // still-open trace root stay queued without blocking this loop,
+            // exactly as they did pre-detachment.
+            self.drain_all_ready_family_sequencers().await?;
+            if self.unadmitted_checkpoints.load(Ordering::Acquire) == 0
+                && !self.has_inflight_family_effects()
+            {
                 break;
             }
-            drop(guard);
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
         self.status_for_family(repo_working_dir).await
     }
 
-    async fn drain_accepted_checkpoints(&self) -> Result<(), GitAiError> {
+    async fn drain_accepted_checkpoints(self: &Arc<Self>) -> Result<(), GitAiError> {
         loop {
             let checkpoint_target = self.next_checkpoint_receipt_seq.load(Ordering::Acquire) as u64;
             self.wait_for_checkpoint_admission_through(checkpoint_target)
@@ -6777,7 +8353,11 @@ impl ActorDaemonCoordinator {
             self.wait_for_trace_ingest_processed_through().await;
             self.drain_all_ready_family_sequencers().await?;
 
-            if self.outstanding_checkpoint_state().0 == 0 {
+            // Detached side-effect passes (drains and non-sequencer
+            // commands) are invisible to the sequencer map once their
+            // entries are popped; exiting while one is in flight would let
+            // process teardown kill it mid-write (#2252).
+            if self.outstanding_checkpoint_state().0 == 0 && !self.has_inflight_family_effects() {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -6789,7 +8369,7 @@ impl ActorDaemonCoordinator {
     /// Progress is logged every few seconds. Returns an `AwaitResult` describing
     /// whether the daemon was idle before the timeout and how much telemetry
     /// (if any) is still pending.
-    async fn await_completion(&self, timeout_secs: u64) -> AwaitResult {
+    async fn await_completion(self: &Arc<Self>, timeout_secs: u64) -> AwaitResult {
         use tokio::time::{Duration, Instant, timeout};
 
         let start = Instant::now();
@@ -6883,6 +8463,29 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        // Phase 2b: drain the token-usage worker. It is fed by stream-worker
+        // completions, so this must run after the transcript drain above.
+        if !result.timed_out
+            && let Some(worker) = &self.token_usage_worker
+        {
+            let now = Instant::now();
+            if now < deadline {
+                let remaining = deadline - now;
+                maybe_log("token-usage processing");
+                match timeout(remaining, worker.drain()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "await: token-usage drain failed");
+                    }
+                    Err(_) => {
+                        result.timed_out = true;
+                    }
+                }
+            } else {
+                result.timed_out = true;
+            }
+        }
+
         // Phase 3: flush telemetry and wait for the worker to finish.
         if !result.timed_out
             && let Some(worker) = &self.telemetry_worker
@@ -6927,7 +8530,7 @@ impl ActorDaemonCoordinator {
         {
             return true;
         }
-        if self.has_open_trace_roots_that_may_mutate_refs() {
+        if self.has_open_mutating_roots_holding_fence() {
             return true;
         }
         if let Ok(map) = self.inflight_effects_by_family.lock()
@@ -6959,9 +8562,14 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
+    async fn handle_control_request(self: &Arc<Self>, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::Ping => Ok(ControlResponse::ok(None, None)),
+            ControlRequest::StatusDaemon => {
+                serde_json::to_value(crate::daemon::health::DaemonHealthSnapshot::capture(self))
+                    .map(|v| ControlResponse::ok(None, Some(v)))
+                    .map_err(GitAiError::from)
+            }
             ControlRequest::CheckpointRun { .. } => Err(GitAiError::Generic(
                 "checkpoint.run requires the framed checkpoint transport".to_string(),
             )),
@@ -7006,13 +8614,42 @@ impl ActorDaemonCoordinator {
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::FlushNotes => {
-                // Trigger an immediate notes flush in a blocking task.
-                // Fire-and-forget: the periodic flush loop is the safety net.
-                tokio::task::spawn_blocking(|| {
-                    crate::daemon::telemetry_worker::flush_notes();
-                });
+                // Fire-and-forget trigger routed through the serialized flush
+                // loop (the periodic loop is the safety net); see
+                // `request_flush` for why a bare concurrent `flush_notes`
+                // here would let `await` certify mid-upload.
+                if let Some(worker) = &self.telemetry_worker {
+                    worker.request_flush();
+                }
                 Ok(ControlResponse::ok(None, None))
             }
+            ControlRequest::ReingestMetrics { from_ts, to_ts } => {
+                if let Some(worker) = &self.telemetry_worker {
+                    worker
+                        .reingest_metrics(from_ts, to_ts)
+                        .await
+                        .and_then(|reset| {
+                            serde_json::to_value(json!({ "reset": reset }))
+                                .map(|value| ControlResponse::ok(None, Some(value)))
+                                .map_err(GitAiError::from)
+                        })
+                } else {
+                    Err(GitAiError::Generic(
+                        "telemetry worker is not available".to_string(),
+                    ))
+                }
+            }
+            ControlRequest::StatsIngest => serde_json::to_value(IngestLossSnapshot::capture(self))
+                .map(|v| ControlResponse::ok(None, Some(v)))
+                .map_err(GitAiError::from),
+            ControlRequest::UntracedFixupScan { repo_working_dir } => self
+                .schedule_untraced_commit_scans(repo_working_dir, UntracedScanTrigger::Request)
+                .await
+                .and_then(|scheduled| {
+                    serde_json::to_value(scheduled)
+                        .map(|v| ControlResponse::ok(None, Some(v)))
+                        .map_err(GitAiError::from)
+                }),
             ControlRequest::Await { timeout_secs } => {
                 let result = self.await_completion(timeout_secs).await;
                 serde_json::to_value(result)
@@ -7309,13 +8946,7 @@ fn control_listener_loop_actor(
             if std::thread::Builder::new()
                 .spawn(move || {
                     if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
-                        tracing::error!(
-                            component = "daemon",
-                            phase = "control_receive",
-                            reason = "connection_error",
-                            error = %e,
-                            "daemon control connection failed"
-                        );
+                        log_control_connection_failure(&e);
                     }
                 })
                 .is_err()
@@ -7480,13 +9111,7 @@ fn handle_windows_control_pipe_connection(
     let mut reader = BufReader::new(server);
     if let Err(e) = handle_control_connection_actor_reader(&mut reader, coordinator, runtime_handle)
     {
-        tracing::error!(
-            component = "daemon",
-            phase = "control_receive",
-            reason = "connection_error",
-            error = %e,
-            "daemon control connection failed"
-        );
+        log_control_connection_failure(&e);
     }
 }
 
@@ -7505,11 +9130,10 @@ impl ControlConnection for WindowsPipeServer {
 #[cfg(not(windows))]
 impl ControlConnection for LocalSocketStream {
     fn set_receive_timeout(&mut self, timeout: Option<Duration>) -> Result<(), GitAiError> {
-        self.set_recv_timeout(timeout).map_err(|error| {
-            GitAiError::Generic(format!(
-                "failed setting daemon control receive timeout: {error}"
-            ))
-        })
+        // Preserve the io::ErrorKind: callers classify peer-gone failures
+        // (e.g. macOS EINVAL on a peer-closed socket) apart from systemic
+        // ones, which a stringified Generic error would erase.
+        self.set_recv_timeout(timeout).map_err(GitAiError::IoError)
     }
 }
 
@@ -7524,6 +9148,49 @@ fn control_receive_timed_out(error: &GitAiError) -> bool {
     )
 }
 
+/// A control connection failing because the peer went away (client timed out
+/// and closed, process died mid-request) is routine under load — the
+/// connection is simply dropped. Only unexpected failures deserve ERROR.
+fn connection_error_is_peer_disconnect(error: &GitAiError) -> bool {
+    // Composes with the read-timeout classifier: TimedOut/WouldBlock are the
+    // same "peer stopped participating" family. InvalidInput covers macOS
+    // EINVAL from setsockopt on a socket whose peer already shut down.
+    control_receive_timed_out(error)
+        || matches!(
+            error,
+            GitAiError::IoError(io_error)
+                if matches!(
+                    io_error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::InvalidInput
+                )
+        )
+}
+
+/// Log a failed control connection at a severity matching its cause.
+fn log_control_connection_failure(error: &GitAiError) {
+    if connection_error_is_peer_disconnect(error) {
+        tracing::warn!(
+            component = "daemon",
+            phase = "control_receive",
+            reason = "peer_gone",
+            error = %error,
+            "daemon control connection dropped by peer"
+        );
+    } else {
+        tracing::error!(
+            component = "daemon",
+            phase = "control_receive",
+            reason = "connection_error",
+            error = %error,
+            "daemon control connection failed"
+        );
+    }
+}
+
 #[cfg(not(windows))]
 fn handle_control_connection_actor(
     stream: LocalSocketStream,
@@ -7534,14 +9201,49 @@ fn handle_control_connection_actor(
     handle_control_connection_actor_reader(&mut reader, coordinator, runtime_handle)
 }
 
+/// Apply a receive timeout to a control connection, treating failure as a
+/// routine peer-gone drop rather than a daemon error: macOS `setsockopt`
+/// returns EINVAL once the peer has already shut the socket down, which
+/// happens whenever a client times out and abandons its connection under
+/// load. Returns false when the connection should simply be dropped.
+fn apply_control_receive_timeout<R: ControlConnection>(
+    reader: &mut BufReader<R>,
+    timeout: Duration,
+) -> bool {
+    if let Err(error) = reader.get_mut().set_receive_timeout(Some(timeout)) {
+        // The connection is dropped either way; only the severity differs. A
+        // peer that vanished (or macOS EINVAL on its dead socket) is routine,
+        // while a systemic setsockopt failure deserves attention.
+        if connection_error_is_peer_disconnect(&error) {
+            tracing::warn!(
+                component = "daemon",
+                phase = "control_receive",
+                reason = "receive_timeout_setup_failed",
+                %error,
+                "dropping control connection; peer likely already disconnected"
+            );
+        } else {
+            tracing::error!(
+                component = "daemon",
+                phase = "control_receive",
+                reason = "receive_timeout_setup_failed",
+                %error,
+                "dropping control connection; receive timeout could not be applied"
+            );
+        }
+        return false;
+    }
+    true
+}
+
 fn handle_control_connection_actor_reader<R: ControlConnection>(
     reader: &mut BufReader<R>,
     coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
-    reader
-        .get_mut()
-        .set_receive_timeout(Some(DAEMON_CONTROL_RECEIVE_TIMEOUT))?;
+    if !apply_control_receive_timeout(reader, DAEMON_CONTROL_RECEIVE_TIMEOUT) {
+        return Ok(());
+    }
     let mut uses_idle_timeout = false;
     loop {
         let line = match read_json_line(reader) {
@@ -7561,9 +9263,9 @@ fn handle_control_connection_actor_reader<R: ControlConnection>(
                 Ok(request) if !matches!(request, ControlRequest::CheckpointRun { .. })
             )
         {
-            reader
-                .get_mut()
-                .set_receive_timeout(Some(DAEMON_CONTROL_IDLE_TIMEOUT))?;
+            if !apply_control_receive_timeout(reader, DAEMON_CONTROL_IDLE_TIMEOUT) {
+                return Ok(());
+            }
             uses_idle_timeout = true;
         }
         let mut shutdown_after_response = false;
@@ -7648,29 +9350,40 @@ fn handle_control_connection_actor_reader<R: ControlConnection>(
                     return Err(error);
                 }
 
-                if uses_idle_timeout {
-                    reader
-                        .get_mut()
-                        .set_receive_timeout(Some(DAEMON_CONTROL_RECEIVE_TIMEOUT))?;
+                if uses_idle_timeout
+                    && !apply_control_receive_timeout(reader, DAEMON_CONTROL_RECEIVE_TIMEOUT)
+                {
+                    return Ok(());
                 }
                 let body = match read_checkpoint_body(reader, reservation.body_bytes()) {
                     Ok(body) => body,
                     Err(error) => {
-                        tracing::error!(
-                            component = "daemon",
-                            phase = "checkpoint_receive",
-                            reason = "body_receive_failed",
-                            body_bytes,
-                            %error,
-                            "failed receiving checkpoint body"
-                        );
+                        if connection_error_is_peer_disconnect(&error) {
+                            tracing::warn!(
+                                component = "daemon",
+                                phase = "checkpoint_receive",
+                                reason = "body_receive_failed",
+                                body_bytes,
+                                %error,
+                                "checkpoint sender disconnected mid-body"
+                            );
+                        } else {
+                            tracing::error!(
+                                component = "daemon",
+                                phase = "checkpoint_receive",
+                                reason = "body_receive_failed",
+                                body_bytes,
+                                %error,
+                                "failed receiving checkpoint body"
+                            );
+                        }
                         return Err(error);
                     }
                 };
-                if uses_idle_timeout {
-                    reader
-                        .get_mut()
-                        .set_receive_timeout(Some(DAEMON_CONTROL_IDLE_TIMEOUT))?;
+                if uses_idle_timeout
+                    && !apply_control_receive_timeout(reader, DAEMON_CONTROL_IDLE_TIMEOUT)
+                {
+                    return Ok(());
                 }
                 let Some(checkpoint_tx) = coordinator.checkpoint_ingress_tx.get().cloned() else {
                     tracing::error!(
@@ -7737,6 +9450,7 @@ fn handle_control_connection_actor_reader<R: ControlConnection>(
                             as u64
                             + 1;
                         let received_at_ns = now_unix_nanos();
+                        let received_at = std::time::Instant::now();
                         let trace_ingest_target =
                             coordinator.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
                         coordinator
@@ -7745,6 +9459,7 @@ fn handle_control_connection_actor_reader<R: ControlConnection>(
                         permit.send(AcceptedCheckpoint {
                             receipt_seq,
                             received_at_ns,
+                            received_at,
                             trace_ingest_target,
                             body,
                             reservation,
@@ -7821,7 +9536,10 @@ fn write_control_response<W: Write>(
 fn trace_listener_loop_actor(
     trace_socket_path: PathBuf,
     coordinator: Arc<ActorDaemonCoordinator>,
+    restart_history_path: PathBuf,
 ) -> Result<(), GitAiError> {
+    #[cfg(windows)]
+    let _ = restart_history_path;
     #[cfg(not(windows))]
     {
         remove_socket_if_exists(&trace_socket_path)?;
@@ -7830,6 +9548,11 @@ fn trace_listener_loop_actor(
             .create_sync()
             .map_err(|e| GitAiError::Generic(format!("failed binding trace socket: {}", e)))?;
         set_socket_owner_only(&trace_socket_path)?;
+        // The accept loop must never do per-connection work: any read, lock,
+        // or filesystem access here lets one slow or silent peer stall every
+        // other traced git process behind the listen backlog (git writes
+        // trace2 synchronously and blocks in write() until we drain it).
+        let mut consecutive_spawn_failures = 0usize;
         for stream in listener.incoming() {
             if coordinator.is_shutting_down() {
                 break;
@@ -7837,98 +9560,28 @@ fn trace_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
-            // Raise the receive buffer on each accepted connection. Unlike TCP,
-            // a Unix-domain listener's SO_RCVBUF is not inherited by accepted
-            // connections, so this per-connection call is what takes effect.
-            if let Err(error) = set_trace_socket_recv_buffer(&stream) {
-                tracing::debug!(%error, "trace connection recv buffer setup failed");
-            }
-            if let Err(error) = coordinator.trace_unidentified_connection_opened() {
-                tracing::debug!(%error, "trace connection open bookkeeping error");
-                continue;
-            }
-            if let Err(error) =
-                stream.set_recv_timeout(Some(TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT))
-            {
-                tracing::debug!(%error, "trace connection bootstrap timeout setup failed");
-            }
-            let mut reader = BufReader::new(stream);
-            let mut observed_roots = std::collections::BTreeSet::new();
-            match bootstrap_trace_connection_actor_reader(
-                &mut reader,
-                coordinator.clone(),
-                &mut observed_roots,
-            ) {
-                Ok(TraceConnectionBootstrap::Eof) => {
-                    if let Err(error) =
-                        finalize_trace_connection_roots(coordinator.clone(), observed_roots)
-                    {
-                        tracing::debug!(
-                            %error,
-                            "trace connection close bookkeeping error"
-                        );
-                    }
-                    continue;
-                }
-                Ok(TraceConnectionBootstrap::Stop) => {
-                    if let Err(error) =
-                        finalize_trace_connection_roots(coordinator.clone(), observed_roots)
-                    {
-                        tracing::debug!(
-                            %error,
-                            "trace connection close bookkeeping error"
-                        );
-                    }
-                    continue;
-                }
-                Ok(TraceConnectionBootstrap::Continue) => {}
-                Err(error) => {
-                    tracing::debug!(%error, "trace connection bootstrap error");
-                    if let Err(error) =
-                        finalize_trace_connection_roots(coordinator.clone(), observed_roots)
-                    {
-                        tracing::debug!(
-                            %error,
-                            "trace connection close bookkeeping error"
-                        );
-                    }
-                    continue;
-                }
-            }
-            if let Err(error) = reader.get_ref().set_recv_timeout(None) {
-                tracing::debug!(%error, "trace connection bootstrap timeout clear failed");
-            }
             #[cfg(feature = "test-support")]
-            if let Ok(raw_delay_ms) =
-                std::env::var("GIT_AI_TEST_TRACE_LISTENER_WORKER_SPAWN_DELAY_MS")
-                && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
-                && delay_ms > 0
-            {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            }
-            let coord = coordinator.clone();
-            let observed_roots_on_spawn_failure = observed_roots.clone();
-            if std::thread::Builder::new()
-                .spawn(move || {
-                    if let Err(e) =
-                        handle_trace_connection_actor_reader(reader, coord, observed_roots)
-                    {
-                        tracing::debug!(%e, "trace connection error");
-                    }
-                })
-                .is_err()
-            {
-                tracing::error!("trace listener: failed to spawn handler thread");
-                if let Err(error) = finalize_trace_connection_roots(
-                    coordinator.clone(),
-                    observed_roots_on_spawn_failure,
-                ) {
-                    tracing::debug!(
-                        %error,
-                        "trace connection close bookkeeping error"
-                    );
+            maybe_stall_trace_accept_loop_for_test();
+            match spawn_trace_connection_reader(stream, coordinator.clone()) {
+                Ok(()) => {
+                    consecutive_spawn_failures = 0;
                 }
-                break;
+                Err(error) => {
+                    // The stream is dropped with the failed spawn, closing the
+                    // fd: the writing git process sees EPIPE, disables its
+                    // trace2 target, and completes instead of blocking.
+                    coordinator
+                        .trace_connections_dropped
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(%error, "trace listener: failed to spawn handler thread; dropping connection (attribution for its roots is lost)");
+                    consecutive_spawn_failures += 1;
+                    if consecutive_spawn_failures >= TRACE_SPAWN_FAILURE_SHUTDOWN_THRESHOLD {
+                        if let Err(error) = spawn_self_restart(&restart_history_path) {
+                            tracing::error!("failed to spawn self-restart: {}", error);
+                        }
+                        break;
+                    }
+                }
             }
         }
         Ok(())
@@ -8027,7 +9680,10 @@ fn handle_windows_trace_pipe_connection(
     coordinator: Arc<ActorDaemonCoordinator>,
 ) {
     if let Err(e) = coordinator.trace_unidentified_connection_opened() {
-        tracing::debug!(%e, "trace connection open bookkeeping error");
+        coordinator
+            .trace_connections_dropped
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(%e, "trace connection open bookkeeping error; dropping connection");
         return;
     }
     let reader = BufReader::new(&mut server);
@@ -8038,73 +9694,162 @@ fn handle_windows_trace_pipe_connection(
     }
 }
 
+/// Number of consecutive reader-thread spawn failures after which the daemon
+/// gives up and hands off to a fresh instance via self-restart. A single
+/// failure only drops that connection; persistent failure means the process
+/// can no longer serve trace connections at all.
 #[cfg(not(windows))]
-#[allow(dead_code)]
-fn handle_trace_connection_actor(
+const TRACE_SPAWN_FAILURE_SHUTDOWN_THRESHOLD: usize = 16;
+
+/// Spawn the dedicated reader thread for an accepted trace connection. On
+/// spawn failure the stream is dropped (fd closed) so the writing git process
+/// is released instead of blocking on an unread socket.
+#[cfg(not(windows))]
+fn spawn_trace_connection_reader(
     stream: LocalSocketStream,
     coordinator: Arc<ActorDaemonCoordinator>,
-) -> Result<(), GitAiError> {
-    coordinator.trace_unidentified_connection_opened()?;
-    let reader = BufReader::new(stream);
-    handle_trace_connection_actor_reader(reader, coordinator, std::collections::BTreeSet::new())
+) -> std::io::Result<()> {
+    #[cfg(feature = "test-support")]
+    if test_trace_connection_spawn_failure_injected() {
+        return Err(std::io::Error::other(
+            "injected trace connection spawn failure",
+        ));
+    }
+    std::thread::Builder::new()
+        .name("git-ai-trace-conn".to_string())
+        .spawn(move || run_trace_connection_reader(stream, coordinator))
+        .map(|_| ())
+}
+
+/// Test hook: simulate a hung filesystem during family resolution, but only
+/// for worktree paths carrying the `git-ai-family-resolve-stall` marker so
+/// test-infrastructure traffic is unaffected.
+#[cfg(feature = "test-support")]
+fn maybe_stall_family_resolution_for_test(worktree: &Path) {
+    if let Ok(raw_delay_ms) = std::env::var("GIT_AI_TEST_FAMILY_RESOLVE_DELAY_MS")
+        && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
+        && delay_ms > 0
+        && worktree
+            .to_string_lossy()
+            .contains("git-ai-family-resolve-stall")
+    {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    }
+}
+
+/// Test hook: wedge the accept loop on the first accepted connection, the way
+/// a production stall does (the listening socket keeps queueing connects into
+/// the backlog while nothing drains them).
+#[cfg(all(not(windows), feature = "test-support"))]
+fn maybe_stall_trace_accept_loop_for_test() {
+    use std::sync::atomic::AtomicBool;
+
+    static STALLED: AtomicBool = AtomicBool::new(false);
+    if let Ok(raw_secs) = std::env::var("GIT_AI_TEST_TRACE_ACCEPT_STALL_SECS")
+        && let Ok(secs) = raw_secs.parse::<u64>()
+        && secs > 0
+        && !STALLED.swap(true, Ordering::SeqCst)
+    {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+    }
+}
+
+#[cfg(all(not(windows), feature = "test-support"))]
+fn test_trace_connection_spawn_failure_injected() -> bool {
+    use std::sync::atomic::AtomicUsize;
+
+    static REMAINING: std::sync::OnceLock<AtomicUsize> = std::sync::OnceLock::new();
+    let remaining = REMAINING.get_or_init(|| {
+        let configured = std::env::var("GIT_AI_TEST_TRACE_CONNECTION_SPAWN_FAILURES")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(0);
+        AtomicUsize::new(configured)
+    });
+    remaining
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            value.checked_sub(1)
+        })
+        .is_ok()
 }
 
 #[cfg(not(windows))]
-enum TraceConnectionBootstrap {
-    Continue,
-    Stop,
-    Eof,
+fn run_trace_connection_reader(
+    stream: LocalSocketStream,
+    coordinator: Arc<ActorDaemonCoordinator>,
+) {
+    // Register before anything that can delay this thread, so a shutdown can
+    // sever the connection even while the reader is still starting up.
+    let _registration = TraceConnectionRegistration::register(&stream, coordinator.clone());
+    #[cfg(feature = "test-support")]
+    if let Ok(raw_delay_ms) = std::env::var("GIT_AI_TEST_TRACE_READER_START_DELAY_MS")
+        && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
+        && delay_ms > 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    }
+    // Raise the receive buffer on each accepted connection. Unlike TCP,
+    // a Unix-domain listener's SO_RCVBUF is not inherited by accepted
+    // connections, so this per-connection call is what takes effect.
+    if let Err(error) = set_trace_socket_recv_buffer(&stream) {
+        tracing::debug!(%error, "trace connection recv buffer setup failed");
+    }
+    if let Err(error) = coordinator.trace_unidentified_connection_opened() {
+        coordinator
+            .trace_connections_dropped
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(%error, "trace connection open bookkeeping error; dropping connection");
+        return;
+    }
+    // A shutdown requested before registration completed has already swept
+    // the registry; close this connection ourselves instead of parking in
+    // read until process exit.
+    if coordinator.is_shutting_down() {
+        let _ = finalize_trace_connection_roots(coordinator, std::collections::BTreeSet::new());
+        return;
+    }
+    let reader = BufReader::new(stream);
+    if let Err(error) =
+        handle_trace_connection_actor_reader(reader, coordinator, std::collections::BTreeSet::new())
+    {
+        tracing::debug!(%error, "trace connection error");
+    }
+}
+
+/// Keeps a duplicated fd of an accepted trace connection in the coordinator's
+/// registry for the lifetime of its reader thread, so shutdown can actively
+/// close the socket out from under a blocked reader/writer.
+#[cfg(not(windows))]
+struct TraceConnectionRegistration {
+    coordinator: Arc<ActorDaemonCoordinator>,
+    id: Option<u64>,
+}
+
+#[cfg(not(windows))]
+impl TraceConnectionRegistration {
+    fn register(stream: &LocalSocketStream, coordinator: Arc<ActorDaemonCoordinator>) -> Self {
+        let id = match stream {
+            LocalSocketStream::UdSocket(inner) => inner
+                .as_fd()
+                .try_clone_to_owned()
+                .ok()
+                .and_then(|fd| coordinator.register_trace_connection(fd)),
+        };
+        Self { coordinator, id }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for TraceConnectionRegistration {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.coordinator.deregister_trace_connection(id);
+        }
+    }
 }
 
 struct TraceLineOutcome {
     continue_reading: bool,
-    #[cfg(not(windows))]
-    bootstrap_complete: bool,
-}
-
-#[cfg(not(windows))]
-const TRACE_CONNECTION_BOOTSTRAP_MAX_LINES: usize = 8;
-
-#[cfg(not(windows))]
-fn bootstrap_trace_connection_actor_reader<R: Read>(
-    reader: &mut BufReader<R>,
-    coordinator: Arc<ActorDaemonCoordinator>,
-    observed_roots: &mut std::collections::BTreeSet<String>,
-) -> Result<TraceConnectionBootstrap, GitAiError> {
-    for _ in 0..TRACE_CONNECTION_BOOTSTRAP_MAX_LINES {
-        let line = match read_json_line(reader) {
-            Ok(Some(line)) => line,
-            Ok(None) => return Ok(TraceConnectionBootstrap::Eof),
-            Err(error) if trace_bootstrap_read_timed_out(&error) => {
-                return Ok(TraceConnectionBootstrap::Continue);
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(outcome) =
-            process_trace_connection_line(&line, coordinator.clone(), observed_roots)?
-        else {
-            continue;
-        };
-        if !outcome.continue_reading {
-            return Ok(TraceConnectionBootstrap::Stop);
-        }
-        if outcome.bootstrap_complete {
-            return Ok(TraceConnectionBootstrap::Continue);
-        }
-    }
-    Ok(TraceConnectionBootstrap::Continue)
-}
-
-#[cfg(not(windows))]
-fn trace_bootstrap_read_timed_out(error: &GitAiError) -> bool {
-    matches!(
-        error,
-        GitAiError::IoError(io_error)
-            if matches!(
-                io_error.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            )
-    )
 }
 
 fn handle_trace_connection_actor_reader<R: Read>(
@@ -8112,15 +9857,45 @@ fn handle_trace_connection_actor_reader<R: Read>(
     coordinator: Arc<ActorDaemonCoordinator>,
     mut observed_roots: std::collections::BTreeSet<String>,
 ) -> Result<(), GitAiError> {
-    while let Some(line) = read_json_line(&mut reader)? {
-        if process_trace_connection_line(&line, coordinator.clone(), &mut observed_roots)?
-            .is_some_and(|outcome| !outcome.continue_reading)
-        {
-            break;
+    let read_result = (|| {
+        while let Some(line) = read_json_line(&mut reader)? {
+            if process_trace_connection_line(&line, coordinator.clone(), &mut observed_roots)?
+                .is_some_and(|outcome| !outcome.continue_reading)
+            {
+                break;
+            }
         }
-    }
+        Ok(())
+    })();
 
-    finalize_trace_connection_roots(coordinator, observed_roots)
+    // Close bookkeeping must run no matter how the read loop ended (EOF,
+    // invalid UTF-8, connection reset): a root left registered as open blocks
+    // this family's sequencer and checkpoint fences forever.
+    let finalize_result = finalize_trace_connection_roots(coordinator, observed_roots);
+    read_result.and(finalize_result)
+}
+
+/// Whether the trace readers keep a frame of this event type. Only the
+/// normalizer's consumed events (plus the daemon's own drain probe) ever
+/// leave the reader thread; everything else — the large majority of what a
+/// git process emits — is dropped here, before bookkeeping, sequence
+/// allocation, or an ingest-queue slot. Internally synthesized payloads
+/// (close markers) bypass the readers entirely and are unaffected.
+fn reader_should_ingest_trace_event(event: &str) -> bool {
+    event == TRACE_DRAIN_PROBE_EVENT
+        || crate::daemon::trace_normalizer::INGESTED_TRACE_EVENTS.contains(&event)
+}
+
+/// Extract the event type without a full JSON parse. Only trusted when the
+/// event key is the line's first field — git's trace2 writer always emits it
+/// first, and requiring the prefix means user-controlled content (e.g. a
+/// commit message containing `"event":"…"`) can never be mistaken for the
+/// event key. Any other shape returns None and falls through to the parsed
+/// check.
+fn raw_trace_event_type(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("{\"event\":\"")?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 fn process_trace_connection_line(
@@ -8132,29 +9907,39 @@ fn process_trace_connection_line(
     if trimmed.is_empty() {
         return Ok(None);
     }
+    // Fast path: reject unconsumed frames before paying for the JSON parse.
+    if let Some(event) = raw_trace_event_type(trimmed)
+        && !reader_should_ingest_trace_event(event)
+    {
+        return Ok(None);
+    }
     let mut parsed: Value = match serde_json::from_str(trimmed) {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
-    #[cfg(not(windows))]
     let event = parsed
         .get("event")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    #[cfg(not(windows))]
-    let mut bootstrap_complete = false;
+        .unwrap_or_default();
+    if event == TRACE_DRAIN_PROBE_EVENT {
+        if let Some(probe_id) = parsed
+            .get(TRACE_DRAIN_PROBE_ID_FIELD)
+            .and_then(Value::as_u64)
+        {
+            coordinator.record_trace_drain_probe(probe_id);
+        }
+        return Ok(Some(TraceLineOutcome {
+            continue_reading: true,
+        }));
+    }
+    // Covers frames the raw prefix couldn't classify (unusual key order or
+    // whitespace).
+    if !reader_should_ingest_trace_event(event) {
+        return Ok(None);
+    }
     if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
         let was_unidentified = observed_roots.is_empty();
         let root_sid = trace_root_sid(sid).to_string();
-        // `start` carries argv but not the worktree. Keep bootstrapping on the
-        // listener thread until the root `def_repo` event has been processed;
-        // that is the first point where trace augmentation can capture reflog
-        // start offsets with a concrete worktree.
-        #[cfg(not(windows))]
-        if event == "def_repo" && sid == root_sid {
-            bootstrap_complete = true;
-        }
         if observed_roots.insert(root_sid.clone()) {
             let _ = coordinator.trace_root_connection_opened(&root_sid);
         }
@@ -8169,11 +9954,7 @@ fn process_trace_connection_line(
     // issue dozens of read-only git commands per second.
     let continue_reading = !(coordinator.prepare_trace_payload_for_ingest(&mut parsed)
         && coordinator.enqueue_trace_payload(parsed).is_err());
-    Ok(Some(TraceLineOutcome {
-        continue_reading,
-        #[cfg(not(windows))]
-        bootstrap_complete,
-    }))
+    Ok(Some(TraceLineOutcome { continue_reading }))
 }
 
 fn finalize_trace_connection_roots(
@@ -8265,6 +10046,80 @@ fn daemon_max_uptime_ns() -> u128 {
 
 const DAEMON_SOCKET_HEALTH_CHECK_SECS: u64 = 30;
 
+/// A positive millisecond duration override from the environment, else
+/// `default`.
+fn env_duration_ms(var: &str, default: Duration) -> Duration {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+fn family_causal_grace() -> Duration {
+    env_duration_ms("GIT_AI_DAEMON_CAUSAL_GRACE_MS", FAMILY_CAUSAL_GRACE)
+}
+
+/// Reflog records younger than this are left for a later untraced-commit
+/// fixup pass: the trace2 frames of the command that wrote them may still be
+/// on their way to the daemon.
+const UNTRACED_FIXUP_MIN_AGE: Duration = Duration::from_secs(5);
+
+/// Commits one untraced-commit fixup pass attributes before yielding the
+/// family; the rest wait for the next pass.
+const UNTRACED_FIXUP_MAX_COMMITS_PER_PASS: usize = 10;
+
+/// Worktrees one periodic tick schedules passes for; more change than this
+/// only during a burst, and the rest follow next tick.
+const UNTRACED_FIXUP_MAX_SCANS_PER_TICK: usize = 32;
+
+/// Families one periodic tick examines (a directory listing and a `stat` per
+/// worktree each); with more, ticks rotate through them.
+const UNTRACED_FIXUP_MAX_FAMILIES_PER_TICK: usize = 256;
+
+/// How often a tick prunes the repo-family store and re-probes families whose
+/// common dir was missing (retention is measured in days, so hourly is plenty).
+const UNTRACED_STORE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+fn untraced_fixup_interval() -> Duration {
+    env_duration_ms(
+        "GIT_AI_DAEMON_UNTRACED_FIXUP_INTERVAL_MS",
+        crate::daemon::untraced_commit_fixup::DEFAULT_INTERVAL,
+    )
+}
+
+fn untraced_fixup_min_age() -> Duration {
+    // Zero is meaningful here (tests claim records at once), unlike the
+    // positive-only overrides `env_duration_ms` accepts.
+    std::env::var("GIT_AI_DAEMON_UNTRACED_FIXUP_MIN_AGE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(UNTRACED_FIXUP_MIN_AGE)
+}
+
+/// Current length of a worktree's `HEAD` reflog (`None` when it has none):
+/// the upper bound a fixup pass scheduled now may claim up to.
+fn head_reflog_len(git_dir: &Path) -> Option<u64> {
+    fs::metadata(git_dir.join("logs").join("HEAD"))
+        .ok()
+        .map(|metadata| metadata.len())
+}
+
+fn commit_created_new_head(applied: &crate::daemon::domain::AppliedCommand) -> Option<&str> {
+    applied
+        .analysis
+        .events
+        .iter()
+        .find_map(|event| match event {
+            crate::daemon::domain::SemanticEvent::CommitCreated { new_head, .. } => {
+                Some(new_head.as_str())
+            }
+            _ => None,
+        })
+}
+
 fn daemon_socket_health_check_interval() -> u64 {
     std::env::var("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS")
         .ok()
@@ -8277,7 +10132,22 @@ fn daemon_socket_health_check_interval() -> u64 {
 /// daemon env vars (GIT_AI_DAEMON_HOME, etc.) so it targets the same
 /// instance.  Returns Ok if the process was spawned; the caller should
 /// still request_shutdown so the current daemon exits promptly.
-fn spawn_self_restart() -> Result<(), String> {
+///
+/// Every failure-driven restart is gated by the sliding-window budget here,
+/// so no caller can bypass crash-loop protection. The budget is consumed
+/// before spawning (fail-closed on unwritable storage) and refunded when the
+/// replacement process could not actually be started, so failed launch
+/// attempts do not burn the allowance a later stall needs to self-heal.
+fn spawn_self_restart(restart_history_path: &Path) -> Result<(), String> {
+    if !consume_self_restart_budget(restart_history_path) {
+        return Err("self-restart budget exhausted; not restarting".to_string());
+    }
+    spawn_self_restart_process().inspect_err(|_| {
+        refund_self_restart_budget(restart_history_path);
+    })
+}
+
+fn spawn_self_restart_process() -> Result<(), String> {
     let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
     tracing::info!(?exe, "spawning detached restart process");
 
@@ -8305,34 +10175,132 @@ fn spawn_self_restart() -> Result<(), String> {
         .map_err(|e| format!("failed to spawn restart process: {}", e))
 }
 
-const DAEMON_MIN_UPTIME_FOR_SELF_RESTART_SECS: u64 = 60;
+/// Best-effort removal of the most recently recorded budget entry after a
+/// spawn that produced no replacement process.
+fn refund_self_restart_budget(history_path: &Path) {
+    let Ok(contents) = fs::read_to_string(history_path) else {
+        return;
+    };
+    let Ok(mut history) = serde_json::from_str::<Vec<u64>>(&contents) else {
+        return;
+    };
+    history.pop();
+    if let Ok(serialized) = serde_json::to_string(&history) {
+        let _ = crate::mdm::utils::write_atomic(history_path, serialized.as_bytes());
+    }
+}
 
-fn daemon_min_uptime_for_self_restart() -> u64 {
-    std::env::var("GIT_AI_DAEMON_MIN_UPTIME_FOR_RESTART_SECS")
+const DAEMON_SELF_RESTART_BUDGET_MAX: usize = 5;
+const DAEMON_SELF_RESTART_BUDGET_WINDOW_SECS: u64 = 3600;
+/// Consecutive health-check failures that may be deferred for outstanding
+/// checkpoints before restarting anyway. Checkpoints drain through the same
+/// congested machinery a stalled daemon cannot run, so deferring forever
+/// would leave blocked git writers hanging.
+const SOCKET_HEALTH_MAX_CONSECUTIVE_DEFERRALS: usize = 4;
+/// Consecutive health intervals with payloads queued but the processed
+/// watermark frozen before the ingest pipeline is declared wedged. The ingest
+/// worker runs side effects inline, and a single legitimate side effect is
+/// granted up to `DAEMON_CHECKPOINT_RESPONSE_TIMEOUT` (300s) elsewhere — the
+/// stall window (~6 minutes at the default 30s interval) must comfortably
+/// exceed that so a long-but-healthy operation is never mistaken for a wedge.
+const SOCKET_HEALTH_MAX_PROCESSING_STALL_INTERVALS: usize = 12;
+
+fn daemon_self_restart_budget_max() -> usize {
+    std::env::var("GIT_AI_DAEMON_SELF_RESTART_BUDGET_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DAEMON_SELF_RESTART_BUDGET_MAX)
+}
+
+fn daemon_self_restart_budget_window_secs() -> u64 {
+    std::env::var("GIT_AI_DAEMON_SELF_RESTART_BUDGET_WINDOW_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DAEMON_MIN_UPTIME_FOR_SELF_RESTART_SECS)
+        .unwrap_or(DAEMON_SELF_RESTART_BUDGET_WINDOW_SECS)
+}
+
+/// Sliding-window self-restart budget, persisted across daemon generations in
+/// the daemon home. Returns true (and records the restart) while the window
+/// has budget left; returns false once exhausted, which is the crash-loop
+/// guard: a systemic failure (broken paths, filesystem permissions) stops
+/// producing new daemons instead of looping forever.
+///
+/// Fails closed: a history file that cannot be read (other than not existing
+/// yet), parsed, or persisted denies the restart. The budget exists to stop
+/// crash loops from systemic breakage (full/read-only disk, broken paths) —
+/// exactly the situations in which this file becomes unreadable or
+/// unwritable, so treating those as an empty budget would disable the guard
+/// when it matters most.
+fn consume_self_restart_budget(history_path: &Path) -> bool {
+    let now_secs = (now_unix_nanos() / 1_000_000_000) as u64;
+    let window_secs = daemon_self_restart_budget_window_secs();
+    let mut history: Vec<u64> = match fs::read_to_string(history_path) {
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(history) => history,
+            Err(error) => {
+                // Deny this restart, but remove the corrupt file so a future
+                // daemon generation starts with a fresh budget instead of
+                // being permanently unable to self-heal.
+                tracing::error!(%error, "self-restart history is corrupt; denying restart");
+                let _ = fs::remove_file(history_path);
+                return false;
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            tracing::error!(%error, "failed reading self-restart history; denying restart");
+            return false;
+        }
+    };
+    // Future timestamps (clock skew that has since been corrected — NTP
+    // step, VM restore) are pruned too: keeping them would deny every
+    // self-restart until wall clock catches up.
+    history.retain(|ts| *ts <= now_secs && now_secs - *ts < window_secs);
+
+    if history.len() >= daemon_self_restart_budget_max() {
+        // Persist the pruned view so stale/future entries don't linger.
+        if let Ok(serialized) = serde_json::to_string(&history) {
+            let _ = crate::mdm::utils::write_atomic(history_path, serialized.as_bytes());
+        }
+        return false;
+    }
+
+    history.push(now_secs);
+    let serialized = match serde_json::to_string(&history) {
+        Ok(serialized) => serialized,
+        Err(_) => return false,
+    };
+    // Atomic replace: a daemon hard-killed mid-write must not leave a
+    // truncated file behind (which would deny all future restarts).
+    if let Err(error) = crate::mdm::utils::write_atomic(history_path, serialized.as_bytes()) {
+        tracing::error!(%error, "failed persisting self-restart history; denying restart");
+        return false;
+    }
+    true
 }
 
 /// Background loop that verifies the daemon's sockets are reachable. The
 /// control probe performs a bounded Ping request so it also proves a handler
-/// can receive and respond, while the write-only trace2 socket is verified by
-/// connecting to its listener. If either probe fails (deleted file, stale
-/// socket, hung listener), the daemon spawns a detached restart process and
-/// shuts down.
-///
-/// To prevent restart loops when the underlying issue is systemic (e.g.
-/// filesystem permissions, broken paths), the daemon only self-restarts if
-/// it has been up for at least 60 seconds.  If sockets fail before that,
-/// it shuts down without restart — the next wrapper invocation will attempt
-/// to start a fresh daemon.
+/// can receive and respond. The trace2 socket is verified end-to-end with a
+/// drain probe: a synthetic frame must round-trip through accept, reader
+/// spawn, read, and parse within a deadline — a connect-only check cannot see
+/// a wedged accept loop, because the listen backlog keeps accepting connects
+/// while blocked git writers pile up behind it. On failure the daemon spawns
+/// a detached restart process (subject to the sliding-window restart budget)
+/// and shuts down.
 fn daemon_socket_health_check_loop(
     coordinator: Arc<ActorDaemonCoordinator>,
     control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
+    restart_history_path: PathBuf,
 ) {
-    let started = std::time::Instant::now();
     let interval = daemon_socket_health_check_interval().max(1);
+    let mut consecutive_deferrals = 0usize;
+    // Processing-stall detection: payloads queued but the processed watermark
+    // not advancing means the ingest worker (or a side effect it runs, e.g. a
+    // hung git child) is wedged even though the socket legs look healthy.
+    let mut last_processed_seq = 0usize;
+    let mut stalled_intervals = 0usize;
     tracing::info!(
         interval,
         control = %control_socket_path.display(),
@@ -8373,48 +10341,218 @@ fn daemon_socket_health_check_loop(
                 })))
             }
         });
-        let trace_ok =
-            local_socket_connects_with_timeout(&trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
+        let trace_ok = trace_drain_probe_round_trip(&coordinator, &trace_socket_path);
 
-        if control_ok.is_err() || trace_ok.is_err() {
+        let queued_payloads = coordinator.queued_trace_payloads.load(Ordering::Relaxed);
+        let processed_seq = coordinator
+            .processed_trace_ingest_seq
+            .load(Ordering::Acquire);
+        if queued_payloads > 0 && processed_seq == last_processed_seq {
+            stalled_intervals += 1;
+        } else {
+            stalled_intervals = 0;
+        }
+        last_processed_seq = processed_seq;
+        let processing_stalled = stalled_intervals >= SOCKET_HEALTH_MAX_PROCESSING_STALL_INTERVALS;
+
+        report_ingest_losses(&coordinator);
+
+        if control_ok.is_err() || trace_ok.is_err() || processing_stalled {
+            // A probe failure caused by a shutdown that started mid-check
+            // (readers severed, teardown underway) must not consume budget
+            // or resurrect a daemon the user just stopped.
+            if coordinator.is_shutting_down() {
+                return;
+            }
             let (outstanding_checkpoints, retained_checkpoint_bytes) =
                 coordinator.outstanding_checkpoint_state();
-            if outstanding_checkpoints > 0 {
+            if should_defer_restart_for_checkpoints(outstanding_checkpoints, consecutive_deferrals)
+            {
+                consecutive_deferrals += 1;
                 tracing::error!(
                     component = "daemon",
                     phase = "socket_health",
                     reason = "restart_deferred_for_checkpoints",
                     outstanding_checkpoints,
                     retained_checkpoint_bytes,
+                    consecutive_deferrals,
                     control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
                     trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
                     "socket health restart deferred while accepted checkpoints remain"
                 );
                 continue;
             }
-            let uptime = started.elapsed();
-            let min_uptime = std::time::Duration::from_secs(daemon_min_uptime_for_self_restart());
 
-            if uptime >= min_uptime {
-                tracing::warn!(
-                    control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                    trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                    "socket health check failed, spawning restart and shutting down"
-                );
-                if let Err(e) = spawn_self_restart() {
-                    tracing::error!("failed to spawn self-restart: {}", e);
+            match spawn_self_restart(&restart_history_path) {
+                Ok(()) => {
+                    tracing::warn!(
+                        control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                        trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                        processing_stalled,
+                        queued_payloads,
+                        stalled_intervals,
+                        outstanding_checkpoints,
+                        "daemon health check failed, spawning restart and shutting down"
+                    );
                 }
-            } else {
-                tracing::warn!(
-                    control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                    trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                    uptime_secs = uptime.as_secs(),
-                    "socket health check failed within minimum uptime, shutting down without restart"
-                );
+                Err(e) => {
+                    tracing::error!(
+                        component = "daemon",
+                        phase = "socket_health",
+                        reason = "restart_not_spawned",
+                        control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                        trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                        processing_stalled,
+                        queued_payloads,
+                        stalled_intervals,
+                        "daemon health check failed; shutting down without restart: {}",
+                        e
+                    );
+                }
             }
             coordinator.request_shutdown();
             return;
         }
+        consecutive_deferrals = 0;
+    }
+}
+
+/// Whether a failed health check should be deferred because accepted
+/// checkpoints are still retained. Deferral is bounded: checkpoints drain
+/// through the same machinery a stalled daemon cannot run, so unbounded
+/// deferral would leave blocked git writers hanging forever.
+fn should_defer_restart_for_checkpoints(
+    outstanding_checkpoints: usize,
+    consecutive_deferrals: usize,
+) -> bool {
+    outstanding_checkpoints > 0 && consecutive_deferrals < SOCKET_HEALTH_MAX_CONSECUTIVE_DEFERRALS
+}
+
+/// Snapshot of the ingest-loss counters, for delta reporting and for the
+/// `stats.ingest` / `status.daemon` responses (field names are the wire keys).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct IngestLossSnapshot {
+    trace_payloads_dropped_queue_full: u64,
+    trace_connections_dropped: u64,
+    telemetry_metric_batches_dropped: u64,
+    checkpoints_dropped: u64,
+}
+
+impl IngestLossSnapshot {
+    fn capture(coordinator: &ActorDaemonCoordinator) -> Self {
+        Self {
+            trace_payloads_dropped_queue_full: coordinator
+                .trace_payloads_dropped_queue_full
+                .load(Ordering::Relaxed),
+            trace_connections_dropped: coordinator
+                .trace_connections_dropped
+                .load(Ordering::Relaxed),
+            telemetry_metric_batches_dropped:
+                crate::daemon::telemetry_worker::metric_batches_dropped(),
+            checkpoints_dropped: coordinator.checkpoints_dropped.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Persist a DaemonIngestAnomaly metric with the loss deltas since the
+/// previous report, so silent attribution loss becomes visible in fleet
+/// telemetry. Called from the health loop, from graceful teardown (so a
+/// queue-full shutdown still reports its loss), and from the shutdown
+/// enforcer.
+///
+/// Unlike sibling emitters this stores straight to the metrics DB instead of
+/// going through `crate::metrics::record`: the persistence queue is exactly
+/// the lossy component whose drops are being reported, and the snapshot must
+/// only advance when the write was actually accepted (otherwise a dropped
+/// emission permanently unreports its window).
+fn report_ingest_losses(coordinator: &Arc<ActorDaemonCoordinator>) {
+    use crate::metrics::pos_encoded::PosEncoded as _;
+
+    // try_lock: the shutdown enforcer calls this right before a forced exit
+    // and must never block; a contended lock just means another reporter is
+    // already delivering the same deltas.
+    let mut last_reported = match coordinator.last_reported_ingest_losses.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    let current = IngestLossSnapshot::capture(coordinator);
+    if current == *last_reported {
+        return;
+    }
+    let values = crate::metrics::events::DaemonIngestAnomalyValues::new(
+        current
+            .trace_payloads_dropped_queue_full
+            .saturating_sub(last_reported.trace_payloads_dropped_queue_full),
+        current
+            .trace_connections_dropped
+            .saturating_sub(last_reported.trace_connections_dropped),
+        current
+            .telemetry_metric_batches_dropped
+            .saturating_sub(last_reported.telemetry_metric_batches_dropped),
+        current
+            .checkpoints_dropped
+            .saturating_sub(last_reported.checkpoints_dropped),
+    );
+    let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
+    let event = crate::metrics::MetricEvent::from_values(values, attrs.to_sparse());
+    match crate::daemon::telemetry_worker::persist_metrics_now(&[event]) {
+        Ok(()) => *last_reported = current,
+        Err(error) => {
+            tracing::warn!(%error, "failed persisting ingest-loss metric; will retry next report");
+        }
+    }
+}
+
+const TRACE_DRAIN_PROBE_DEADLINE: Duration = Duration::from_secs(5);
+
+fn daemon_trace_drain_probe_deadline() -> Duration {
+    env_duration_ms(
+        "GIT_AI_DAEMON_TRACE_DRAIN_PROBE_DEADLINE_MS",
+        TRACE_DRAIN_PROBE_DEADLINE,
+    )
+}
+
+/// End-to-end trace drain health probe: connect to the trace socket, write
+/// one synthetic probe frame, and require a reader thread to have parsed it
+/// within the deadline. Proves the daemon is actually draining trace2 input,
+/// not merely holding a connectable listening socket.
+fn trace_drain_probe_round_trip(
+    coordinator: &Arc<ActorDaemonCoordinator>,
+    trace_socket_path: &Path,
+) -> Result<(), GitAiError> {
+    let deadline = daemon_trace_drain_probe_deadline();
+    let probe_id = coordinator.issue_trace_drain_probe_id();
+    let mut stream =
+        open_local_socket_stream_with_timeout(trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT)?;
+    let payload = serde_json::json!({
+        "event": TRACE_DRAIN_PROBE_EVENT,
+        TRACE_DRAIN_PROBE_ID_FIELD: probe_id,
+    });
+    let line = format!("{}\n", payload);
+    write_all_daemon_client_stream(&mut stream, trace_socket_path, line.as_bytes())?;
+    drop(stream);
+
+    let started = std::time::Instant::now();
+    loop {
+        if coordinator.trace_drain_probe_watermark() >= probe_id {
+            return Ok(());
+        }
+        // A shutdown severs reader connections, so the probe can no longer
+        // complete; bail out instead of burning the rest of the deadline.
+        if coordinator.is_shutting_down() {
+            return Err(GitAiError::Generic(
+                "daemon began shutting down during trace drain probe".to_string(),
+            ));
+        }
+        if started.elapsed() >= deadline {
+            return Err(GitAiError::Generic(format!(
+                "trace drain probe {} not observed within {}ms",
+                probe_id,
+                deadline.as_millis()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -8452,11 +10590,13 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
                 let (outstanding_checkpoints, retained_checkpoint_bytes) =
                     coordinator.outstanding_checkpoint_state();
-                if outstanding_checkpoints > 0 {
+                // Also defer while queued or executing attribution work
+                // remains: process teardown would abandon it (#2252).
+                if coordinator.has_pending_attribution_work() {
                     tracing::info!(
                         outstanding_checkpoints,
                         retained_checkpoint_bytes,
-                        "update restart deferred while accepted checkpoints remain"
+                        "update restart deferred while attribution work remains"
                     );
                 } else {
                     tracing::info!("update check: newer version available, requesting shutdown");
@@ -8476,11 +10616,13 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
         if uptime_ns >= daemon_max_uptime_ns() {
             let (outstanding_checkpoints, retained_checkpoint_bytes) =
                 coordinator.outstanding_checkpoint_state();
-            if outstanding_checkpoints > 0 {
+            // Also defer while queued or executing attribution work
+            // remains: process teardown would abandon it (#2252).
+            if coordinator.has_pending_attribution_work() {
                 tracing::info!(
                     outstanding_checkpoints,
                     retained_checkpoint_bytes,
-                    "uptime restart deferred while accepted checkpoints remain"
+                    "uptime restart deferred while attribution work remains"
                 );
             } else {
                 tracing::info!("uptime exceeded max, requesting restart");
@@ -8572,6 +10714,32 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
 
+    coordinator_inner.untraced_fixup_ignore = Mutex::new(
+        crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore::from_config(
+            config::Config::get(),
+        ),
+    );
+    let repo_family_store_path = config.internal_dir.join("repo-families-db");
+    match crate::daemon::repo_family_store::RepoFamilyStore::open(&repo_family_store_path) {
+        Ok(store) => coordinator_inner.repo_family_store = Some(Arc::new(store)),
+        Err(error) => tracing::error!(
+            %error,
+            path = %repo_family_store_path.display(),
+            "failed to open repo-families database; untraced commit fixup will not survive restarts"
+        ),
+    }
+
+    // With the token-usage flag off, previously collected data is deleted
+    // regardless of the streaming gate below (the spec's "no collected data
+    // is retained" holds even when transcript_streaming is also off).
+    let token_usage_db_path = config.internal_dir.join("token-usage-db");
+    let token_usage_enabled = config::Config::get()
+        .get_feature_flags()
+        .token_usage_metrics;
+    if !token_usage_enabled {
+        crate::token_usage::db::TokenUsageDatabase::remove_database_files(&token_usage_db_path);
+    }
+
     // Spawn the transcript worker BEFORE wrapping coordinator in Arc
     if config::Config::get()
         .get_feature_flags()
@@ -8584,16 +10752,48 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
             Ok(streams_db) => {
                 let streams_db = std::sync::Arc::new(streams_db);
                 let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+                // Each worker needs its own shutdown Notify: request_shutdown
+                // uses notify_one, which wakes exactly one waiter.
+                let token_usage_shutdown_notify = Arc::new(tokio::sync::Notify::new());
+                // The token-usage worker is fed by stream-worker completions,
+                // so it lives inside the transcript_streaming gate, behind
+                // its own startup flag (like transcript_streaming itself).
+                // When the flag is off, nothing runs and no database is
+                // created (deletion of old data happens above, outside this
+                // gate).
+                let token_usage_handle = if token_usage_enabled {
+                    match crate::token_usage::db::TokenUsageDatabase::open(&token_usage_db_path) {
+                        Ok(token_db) => {
+                            Some(crate::daemon::token_usage_worker::spawn_token_usage_worker(
+                                streams_db.clone(),
+                                std::sync::Arc::new(token_db),
+                                telemetry_handle.clone(),
+                                token_usage_shutdown_notify.clone(),
+                            ))
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to open token-usage database, token-usage worker not started");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let transcript_handle = crate::daemon::stream_worker::spawn_stream_worker(
                     streams_db.clone(),
                     telemetry_handle.clone(),
                     shutdown_notify.clone(),
+                    token_usage_handle.clone(),
                 );
                 coordinator_inner.streams_db = Some(streams_db);
                 coordinator_inner.stream_worker = Some(transcript_handle);
+                coordinator_inner.token_usage_worker = token_usage_handle;
                 let _ = coordinator_inner
                     .transcript_shutdown_notify
                     .set(shutdown_notify);
+                let _ = coordinator_inner
+                    .token_usage_shutdown_notify
+                    .set(token_usage_shutdown_notify);
                 tracing::info!("transcript worker spawned");
             }
             Err(e) => {
@@ -8603,8 +10803,34 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     }
 
     let coordinator = Arc::new(coordinator_inner);
+    // Heartbeats carry the pipeline health snapshot. The provider holds a Weak
+    // reference so the telemetry worker never extends the coordinator's life.
+    let heartbeat_coordinator = Arc::downgrade(&coordinator);
+    crate::daemon::telemetry_worker::set_daemon_heartbeat_fields_provider(Arc::new(move || {
+        heartbeat_coordinator
+            .upgrade()
+            .map(|coordinator| {
+                crate::daemon::health::DaemonHealthSnapshot::capture(&coordinator)
+                    .heartbeat_fields()
+            })
+            .unwrap_or_default()
+    }));
     coordinator.start_trace_ingest_worker()?;
     coordinator.start_checkpoint_ingress_worker()?;
+    if config::Config::get()
+        .get_feature_flags()
+        .untraced_commit_fixup
+    {
+        let untraced_fixup_shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let _ = coordinator
+            .untraced_fixup_shutdown_notify
+            .set(untraced_fixup_shutdown_notify.clone());
+        crate::daemon::untraced_commit_fixup::spawn_untraced_fixup_worker(
+            Arc::downgrade(&coordinator),
+            untraced_fixup_interval(),
+            untraced_fixup_shutdown_notify,
+        );
+    }
     if let Some(limit_mb) = config::Config::get().daemon_memory_limit_mb()
         && let Some(limit_bytes) = limit_mb.checked_mul(config::MEBIBYTE_BYTES)
     {
@@ -8636,9 +10862,10 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
 
     let trace_coord = coordinator.clone();
     let trace_shutdown_coord = coordinator.clone();
+    let trace_restart_history = self_restart_history_path(&config);
     let trace_thread = std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            trace_listener_loop_actor(trace_socket_path, trace_coord)
+            trace_listener_loop_actor(trace_socket_path, trace_coord, trace_restart_history)
         }));
         match result {
             Ok(Ok(())) => {}
@@ -8662,11 +10889,44 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     let health_coord = coordinator.clone();
     let health_control = config.control_socket_path.clone();
     let health_trace = config.trace_socket_path.clone();
+    let health_restart_history = self_restart_history_path(&config);
     let health_thread = std::thread::spawn(move || {
-        daemon_socket_health_check_loop(health_coord, health_control, health_trace);
+        daemon_socket_health_check_loop(
+            health_coord,
+            health_control,
+            health_trace,
+            health_restart_history,
+        );
     });
 
+    spawn_shutdown_deadline_enforcer(coordinator.clone(), self_restart_history_path(&config));
+
     coordinator.wait_for_shutdown().await;
+
+    #[cfg(feature = "test-support")]
+    if let Ok(raw_hang_secs) = std::env::var("GIT_AI_TEST_SHUTDOWN_HANG_SECS")
+        && let Ok(hang_secs) = raw_hang_secs.parse::<u64>()
+        && hang_secs > 0
+    {
+        std::thread::sleep(std::time::Duration::from_secs(hang_secs));
+    }
+
+    // Metric batches still sitting in the persistence queue must reach SQLite
+    // before this process exits, or a restart silently loses them.
+    if let Some(worker) = &coordinator.telemetry_worker
+        && !worker
+            .drain_metrics_persist_queue(std::time::Duration::from_secs(2))
+            .await
+    {
+        tracing::warn!("telemetry metrics persist queue was not fully drained at shutdown");
+    }
+
+    // Final loss report: a shutdown caused by a full ingest queue is the
+    // severest attribution-loss event; persisting the deltas here lets the
+    // next daemon generation upload them. Checkpoints still retained at this
+    // point will never be processed — count them (once) before reporting.
+    coordinator.count_abandoned_checkpoints_once();
+    report_ingest_losses(&coordinator);
 
     // Best-effort wake listeners to allow clean process exit.
     // Connect to each socket to unblock `accept()`.  If the socket files
@@ -8715,9 +10975,88 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     remove_pid_metadata(&config)?;
 
     let action = coordinator.shutdown_action();
+    // Tells the shutdown deadline enforcer that teardown finished: whatever
+    // runs after this (restart spawn, pending self-update) must not be killed.
+    coordinator.teardown_complete.store(true, Ordering::Release);
     tracing::info!(?action, "daemon shutdown complete");
 
     Ok(action)
+}
+
+const DAEMON_SHUTDOWN_DEADLINE_SECS: u64 = 5;
+
+fn daemon_shutdown_deadline() -> Duration {
+    std::env::var("GIT_AI_DAEMON_SHUTDOWN_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DAEMON_SHUTDOWN_DEADLINE_SECS))
+}
+
+/// Terminal backstop for invariant "git is never blocked": once shutdown is
+/// requested, the process must actually exit so the OS closes every socket fd
+/// and releases any git process still blocked writing trace2. If graceful
+/// teardown wedges past the deadline, force the exit (spawning the restart
+/// the wedged teardown would have performed).
+fn spawn_shutdown_deadline_enforcer(
+    coordinator: Arc<ActorDaemonCoordinator>,
+    restart_history_path: PathBuf,
+) {
+    let _ = std::thread::Builder::new()
+        .name("git-ai-shutdown-enforcer".to_string())
+        .spawn(move || {
+            {
+                let mut guard = coordinator
+                    .shutdown_condvar_mutex
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                while !coordinator.is_shutting_down() {
+                    guard = coordinator
+                        .shutdown_condvar
+                        .wait(guard)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
+            }
+            std::thread::sleep(daemon_shutdown_deadline());
+            if coordinator.teardown_complete.load(Ordering::Acquire) {
+                return;
+            }
+            let (outstanding_checkpoints, retained_checkpoint_bytes) =
+                coordinator.outstanding_checkpoint_state();
+            coordinator.count_abandoned_checkpoints_once();
+            tracing::error!(
+                component = "daemon",
+                phase = "shutdown",
+                outstanding_checkpoints,
+                retained_checkpoint_bytes,
+                "daemon teardown exceeded its deadline; forcing process exit (retained checkpoints are lost)"
+            );
+            // Best-effort, bounded: the loss report does a synchronous SQLite
+            // write that must not postpone the forced exit this thread exists
+            // to guarantee (the DB's busy_timeout alone is 5s).
+            let report_coordinator = coordinator.clone();
+            let report = std::thread::spawn(move || report_ingest_losses(&report_coordinator));
+            let report_deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while !report.is_finished() && std::time::Instant::now() < report_deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if matches!(
+                coordinator.shutdown_action(),
+                DaemonExitAction::Restart | DaemonExitAction::RestartAfterUpdate
+            ) && let Err(e) = spawn_self_restart(&restart_history_path)
+            {
+                tracing::error!("failed to spawn self-restart: {}", e);
+            }
+            std::process::exit(70);
+        });
+}
+
+fn self_restart_history_path(config: &DaemonConfig) -> PathBuf {
+    config
+        .lock_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("self_restart_history.json")
 }
 
 fn checkpoint_control_timeout_uses_ci_or_test_budget() -> bool {
@@ -8751,6 +11090,7 @@ fn checkpoint_control_response_timeout(
         ControlRequest::Await { timeout_secs } => {
             Duration::from_secs(timeout_secs.saturating_add(5))
         }
+        ControlRequest::ReingestMetrics { .. } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
         ControlRequest::Shutdown => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
@@ -9174,6 +11514,34 @@ mod stream_worker_tests;
 
 #[cfg(test)]
 mod tests {
+    impl ActorDaemonCoordinator {
+        // Test-only views of the fence's candidate roots; production paths go
+        // through `evaluate_fence`.
+        fn has_open_trace_roots_that_may_mutate_refs(&self) -> bool {
+            let Ok(ingress) = self.trace_ingress_state.lock() else {
+                return false;
+            };
+            ingress
+                .root_open_connections
+                .keys()
+                .any(|root| Self::open_root_may_mutate_family(&ingress, root, None))
+        }
+
+        /// As [`Self::has_open_trace_roots_that_may_mutate_refs`], but scoped to
+        /// one family: roots already attributed to a DIFFERENT family (via their
+        /// `def_repo` worktree) cannot mutate this family's refs and are ignored.
+        /// Roots with no family attribution yet fail closed and block everyone.
+        fn has_open_trace_roots_that_may_mutate_family(&self, family: &str) -> bool {
+            let Ok(ingress) = self.trace_ingress_state.lock() else {
+                return false;
+            };
+            ingress
+                .root_open_connections
+                .keys()
+                .any(|root| Self::open_root_may_mutate_family(&ingress, root, Some(family)))
+        }
+    }
+
     use super::*;
     use serial_test::serial;
     use std::ffi::OsString;
@@ -9438,6 +11806,65 @@ mod tests {
         assert!(
             !map.contains_key("family-idle"),
             "GC should evict idle exec locks to bound the map"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_attribution_work_ignores_open_trace_roots() {
+        let coord = ActorDaemonCoordinator::new();
+        assert!(
+            !coord.has_pending_attribution_work(),
+            "an idle daemon must not defer automatic restarts"
+        );
+
+        // A still-running interactive command (an open mutating trace root,
+        // e.g. a rebase waiting on an editor) is not daemon work.
+        let sid = "20260411T120000.000000-Popen-root";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "rebase", "-i", "HEAD~3"],
+            "time_ns": 10u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+        assert!(coord.has_open_trace_roots_that_may_mutate_refs());
+        assert!(
+            !coord.has_pending_attribution_work(),
+            "an open trace root alone must not defer restarts"
+        );
+
+        // Queued sequencer entries must defer: a restart would abandon the
+        // attribution pass before its drain registers an effect.
+        coord
+            .append_family_sequencer_entry(
+                "family-b",
+                20,
+                FamilySequencerEntry::ReadyCommand(Box::new(test_rebase_command(&[], Vec::new()))),
+            )
+            .expect("append actionable entry");
+        assert!(
+            coord.has_pending_attribution_work(),
+            "queued sequencer entries must defer restarts"
+        );
+        coord
+            .family_sequencers_by_family
+            .lock()
+            .unwrap()
+            .remove("family-b");
+        assert!(!coord.has_pending_attribution_work());
+
+        // Executing side-effect passes must defer too.
+        {
+            let _effect = coord.begin_family_effect_guarded("family-c");
+            assert!(
+                coord.has_pending_attribution_work(),
+                "in-flight side-effect passes must defer restarts"
+            );
+        }
+        assert!(
+            !coord.has_pending_attribution_work(),
+            "the effect guard must release the fence on drop"
         );
     }
 
@@ -9944,25 +12371,30 @@ mod tests {
         coord.request_shutdown();
     }
 
-    #[tokio::test]
-    async fn mutating_pending_root_is_created_when_repo_and_argv_arrive_on_different_events() {
-        let coord = ActorDaemonCoordinator::new();
-        let temp = tempfile::tempdir().unwrap();
+    /// `git init`s a repository under `temp` and returns its worktree and the
+    /// family key the daemon resolves for it.
+    fn init_test_family(
+        coord: &ActorDaemonCoordinator,
+        temp: &tempfile::TempDir,
+    ) -> (PathBuf, String) {
+        run_git_for_test(temp.path(), &["init", "repo"]);
         let repo = temp.path().join("repo");
-        let init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(temp.path())
-            .arg("init")
-            .arg("repo")
-            .output()
-            .expect("git init should run");
-        assert!(
-            init.status.success(),
-            "git init failed: {}",
-            String::from_utf8_lossy(&init.stderr)
-        );
+        let family = coord
+            .backend
+            .resolve_family(&repo)
+            .expect("resolve family")
+            .0;
+        (repo, family)
+    }
+
+    #[tokio::test]
+    async fn open_mutating_root_fences_family_when_repo_and_argv_arrive_on_different_events() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
 
         let sid = "20260411T120000.000000-Psid-split-metadata";
+        coord.trace_root_connection_opened(sid).unwrap();
         let mut def_repo = serde_json::json!({
             "event": "def_repo",
             "sid": sid,
@@ -9975,12 +12407,30 @@ mod tests {
             .await
             .expect("def_repo should ingest");
         assert!(
-            !coord
-                .pending_root_slots_by_root
-                .lock()
+            coord
+                .family_entry_blocked_by_prior_open_trace_root(
+                    &family,
+                    now_unix_nanos(),
+                    None,
+                    Duration::ZERO,
+                    "test",
+                )
                 .unwrap()
-                .contains_key(sid),
-            "repo-only metadata is not enough to sequence a command"
+                .is_some(),
+            "an open root whose command is still unknown fails closed and fences its family"
+        );
+        assert!(
+            coord
+                .family_entry_blocked_by_prior_open_trace_root(
+                    "/some/other/family/.git",
+                    now_unix_nanos(),
+                    None,
+                    Duration::ZERO,
+                    "test",
+                )
+                .unwrap()
+                .is_none(),
+            "a root attributed to one family must not fence other families"
         );
 
         let mut start = serde_json::json!({
@@ -9997,11 +12447,249 @@ mod tests {
 
         assert!(
             coord
-                .pending_root_slots_by_root
+                .family_entry_blocked_by_prior_open_trace_root(
+                    &family,
+                    now_unix_nanos(),
+                    None,
+                    Duration::ZERO,
+                    "test",
+                )
+                .unwrap()
+                .is_some(),
+            "a running mutating root fences its family once argv and repo metadata are both known, even when they arrive on different events"
+        );
+        assert!(
+            coord
+                .family_sequencers_by_family
                 .lock()
                 .unwrap()
+                .values()
+                .all(|state| state.entries.is_empty()),
+            "a running root is tracked in trace ingress state, never as a sequencer entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_root_keeps_fence_until_worker_clears_it() {
+        let coord = ActorDaemonCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+
+        let sid = "20260411T120000.000000-Psid-finishing";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "commit", "-m", "done"],
+            "worktree": repo,
+            "time_ns": 1u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+        let mut atexit = serde_json::json!({
+            "event": "atexit",
+            "sid": sid,
+            "code": 0,
+            "time_ns": 2u64,
+        });
+        assert!(
+            coord.prepare_trace_payload_for_ingest(&mut atexit),
+            "a mutating root's atexit is queued for the worker"
+        );
+
+        // The reader has consumed the final frame but the worker has not
+        // processed it: the root still fences its family, and only its family.
+        assert!(coord.has_open_trace_roots_that_may_mutate_family(&family));
+        assert!(!coord.has_open_trace_roots_that_may_mutate_family("/some/other/family/.git"));
+
+        // Socket EOF in that window must not drop the fence either.
+        assert!(
+            coord
+                .record_trace_connection_close(std::slice::from_ref(&sid.to_string()))
+                .unwrap()
+                .is_empty(),
+            "no close marker is needed: the queued atexit clears the root"
+        );
+        assert!(coord.has_open_trace_roots_that_may_mutate_family(&family));
+
+        // The worker processing the final frame clears the root and reports
+        // the family it fenced so exactly that family is re-drained.
+        let fenced = coord
+            .clear_trace_root_tracking(sid)
+            .unwrap()
+            .expect("the root was fencing its family");
+        assert_eq!(fenced, FenceScope::Family(family.clone()));
+        assert!(!coord.has_open_trace_roots_that_may_mutate_refs());
+        assert!(
+            coord.clear_trace_root_tracking(sid).unwrap().is_none(),
+            "clearing a root that fences nothing reports nothing to re-drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_lifts_fence_when_it_processes_the_atexit() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.start_trace_ingest_worker().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+
+        // A normal root: start then atexit.
+        let sid = "20260411T120000.000000-Psid-worker-atexit";
+        coord.trace_root_connection_opened(sid).unwrap();
+        for mut frame in [
+            serde_json::json!({
+                "event": "start",
+                "sid": sid,
+                "argv": ["git", "commit", "-m", "done"],
+                "worktree": repo,
+                "time_ns": 1u64,
+            }),
+            serde_json::json!({ "event": "atexit", "sid": sid, "code": 0, "time_ns": 2u64 }),
+        ] {
+            assert!(coord.prepare_trace_payload_for_ingest(&mut frame));
+            coord.enqueue_trace_payload(frame).unwrap();
+        }
+        coord.wait_for_trace_ingest_processed_through().await;
+        assert!(
+            !coord.has_open_trace_roots_that_may_mutate_family(&family),
+            "processing the atexit clears the root and lifts its fence"
+        );
+
+        // An atexit whose start the daemon never saw (no command can be
+        // emitted) must lift the fence just the same.
+        let orphan = "20260411T120000.000000-Psid-orphan-atexit";
+        coord.trace_root_connection_opened(orphan).unwrap();
+        let mut atexit = serde_json::json!({
+            "event": "atexit",
+            "sid": orphan,
+            "code": 0,
+            "time_ns": 3u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut atexit));
+        coord.enqueue_trace_payload(atexit).unwrap();
+        coord.wait_for_trace_ingest_processed_through().await;
+        assert!(
+            !coord.has_open_trace_roots_that_may_mutate_refs(),
+            "a root whose atexit yields no command still clears"
+        );
+        coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn child_frames_do_not_reclassify_their_root() {
+        let coord = ActorDaemonCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+        // A commit so the parent repository has a HEAD reflog to capture.
+        run_git_for_test(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let other = tempfile::tempdir().unwrap();
+        run_git_for_test(other.path(), &["init", "other"]);
+
+        let sid = "20260411T120000.000000-Psid-parent";
+        coord.trace_root_connection_opened(sid).unwrap();
+        // A hook's mutating `git commit` in another repository reports first.
+        let mut child_start = serde_json::json!({
+            "event": "start",
+            "sid": format!("{sid}/20260411T120000.500000-Psid-child"),
+            "argv": ["git", "commit", "-m", "hook side effect"],
+            "worktree": other.path().join("other"),
+            "time_ns": 2u64,
+        });
+        coord.prepare_trace_payload_for_ingest(&mut child_start);
+        assert!(
+            !coord
+                .trace_ingress_state
+                .lock()
+                .unwrap()
+                .root_reflog_start_offsets
                 .contains_key(sid),
-            "mutating roots must be sequenced once argv and repo metadata are both known, even when they arrive on different events"
+            "a child's repository must not be captured as the root's reflog start"
+        );
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "commit", "-m", "parent"],
+            "worktree": repo,
+            "time_ns": 1u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+
+        assert!(
+            coord.has_open_trace_roots_that_may_mutate_family(&family),
+            "the root is classified by its own start frame: a mutating commit in its own family"
+        );
+        let other_family = coord
+            .backend
+            .resolve_family(&other.path().join("other"))
+            .unwrap()
+            .0;
+        assert!(
+            !coord.has_open_trace_roots_that_may_mutate_family(&other_family),
+            "a child's worktree must not retarget the root's family"
+        );
+        let offsets = coord
+            .trace_ingress_state
+            .lock()
+            .unwrap()
+            .root_reflog_start_offsets
+            .get(sid)
+            .cloned()
+            .expect("the root's own start captures its reflog offsets");
+        let repo_git_dir = repo.join(".git").canonicalize().unwrap();
+        assert!(
+            offsets
+                .keys()
+                .any(|key| key.contains(&repo_git_dir.to_string_lossy().to_string())),
+            "offsets belong to the root's repository: {offsets:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_root_never_becomes_a_finishing_fence() {
+        let coord = ActorDaemonCoordinator::new();
+        let sid = "20260411T120000.000000-Psid-readonly";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "status", "--porcelain"],
+            "time_ns": 1u64,
+        });
+        assert!(!coord.prepare_trace_payload_for_ingest(&mut start));
+        let mut atexit = serde_json::json!({
+            "event": "atexit",
+            "sid": sid,
+            "code": 0,
+            "time_ns": 2u64,
+        });
+        assert!(!coord.prepare_trace_payload_for_ingest(&mut atexit));
+        assert!(!coord.has_open_trace_roots_that_may_mutate_refs());
+
+        assert!(
+            coord
+                .record_trace_connection_close(std::slice::from_ref(&sid.to_string()))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !coord
+                .trace_ingress_state
+                .lock()
+                .unwrap()
+                .root_open_connections
+                .contains_key(sid),
+            "a read-only root is cleared inline at socket close"
         );
     }
 
@@ -10081,12 +12769,26 @@ mod tests {
         coord
             .record_trace_connection_close(&[sid.to_string()])
             .unwrap();
+        // The reader-side close keeps a mutating root registered until the
+        // ingest worker processes its queued frames and close marker, so the
+        // fence must still hold across the reader/worker gap (#2252).
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through()
+            )
+            .await
+            .is_err(),
+            "checkpoint fence must hold until the worker processes the root's close marker"
+        );
+
+        coord.clear_trace_root_tracking(sid).unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             coord.wait_for_trace_ingest_processed_through(),
         )
         .await
-        .expect("checkpoint fence should pass once the mutating trace root closes");
+        .expect("checkpoint fence should pass once the worker has processed the root's close");
     }
 
     #[tokio::test]
@@ -10149,16 +12851,80 @@ mod tests {
         coord
             .record_trace_connection_close(&[sid.to_string()])
             .unwrap();
+        // The reader-side close keeps a mutating root registered until the
+        // ingest worker processes its queued frames and close marker, so the
+        // fence must still hold across the reader/worker gap (#2252).
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through_family(&own_family)
+            )
+            .await
+            .is_err(),
+            "own family fence must hold until the worker processes the root's close marker"
+        );
+
+        coord.clear_trace_root_tracking(sid).unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             coord.wait_for_trace_ingest_processed_through_family(&own_family),
         )
         .await
-        .expect("own family fence should pass once the root closes");
+        .expect("own family fence should pass once the worker has processed the root's close");
     }
 
     #[tokio::test]
-    async fn trace_connection_close_without_atexit_cancels_pending_root() {
+    async fn untraced_fixup_tick_leaves_a_family_alone_while_its_git_command_is_in_flight() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        // Outside the OS temp dir, which the fixup ignores by default.
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("untraced-tick-tests");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::tempdir_in(&scratch).unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        coord
+            .status_for_family(repo.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let family = coord.backend.resolve_family(&repo).unwrap().0;
+        // Not a maintenance round (those re-read the config).
+        coord
+            .untraced_store_last_maintenance_secs
+            .store(crate::utils::unix_timestamp_now(), Ordering::Relaxed);
+
+        // A `git commit` of this family is still running.
+        let sid = "20260411T120000.000000-Psid1";
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress.root_open_connections.insert(sid.to_string(), 1);
+            ingress.root_mutating.insert(sid.to_string(), true);
+            ingress
+                .root_families
+                .insert(sid.to_string(), family.clone());
+        }
+        let busy = coord.run_untraced_fixup_tick().await.unwrap();
+        assert_eq!(
+            (busy.worktrees, busy.deferred),
+            (0, 1),
+            "a scan must not queue behind an in-flight command: {busy:?}"
+        );
+
+        // Once the command is gone the next tick scans the worktree.
+        {
+            let mut ingress = coord.trace_ingress_state.lock().unwrap();
+            ingress.root_open_connections.remove(sid);
+            ingress.root_mutating.remove(sid);
+            ingress.root_families.remove(sid);
+        }
+        let quiet = coord.run_untraced_fixup_tick().await.unwrap();
+        assert_eq!((quiet.worktrees, quiet.deferred), (1, 0), "{quiet:?}");
+    }
+
+    #[tokio::test]
+    async fn trace_connection_close_without_atexit_releases_family_fence() {
         let coord = Arc::new(ActorDaemonCoordinator::new());
         coord.start_trace_ingest_worker().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -10177,20 +12943,766 @@ mod tests {
         });
         assert!(coord.prepare_trace_payload_for_ingest(&mut start));
         coord.enqueue_trace_payload(start).unwrap();
+        assert!(coord.has_open_trace_roots_that_may_mutate_refs());
 
         finalize_trace_connection_roots(coord.clone(), [sid.to_string()].into_iter().collect())
             .unwrap();
         coord.wait_for_trace_ingest_processed_through().await;
 
         assert!(
-            !coord
-                .pending_root_slots_by_root
+            !coord.has_open_trace_roots_that_may_mutate_refs(),
+            "closing the trace stream without root atexit must release the family fence"
+        );
+        assert!(
+            coord
+                .family_sequencers_by_family
                 .lock()
                 .unwrap()
-                .contains_key(sid),
-            "closing the trace stream without root atexit must not leave the family sequencer wedged"
+                .values()
+                .all(|state| state.entries.is_empty()),
+            "an abandoned root must not leave a sequencer entry behind"
         );
         coord.request_shutdown();
+    }
+
+    #[test]
+    fn trace_sid_pid_parses_real_trace2_sid() {
+        assert_eq!(
+            trace_sid_pid("20260903T230057.647295Z-H68dbce90-P001cc228"),
+            Some(0x001c_c228)
+        );
+        assert_eq!(
+            trace_sid_pid(
+                "20260903T230057.647295Z-H68dbce90-P001cc228/20260903T230058.100000Z-H68dbce90-P001cc2f0"
+            ),
+            Some(0x001c_c228),
+            "child sids resolve to the root process"
+        );
+        assert_eq!(
+            trace_sid_pid("20260411T120000.000000-Punfinished-root"),
+            None
+        );
+        assert_eq!(trace_sid_pid("no-pid-here"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_distinguishes_live_reaped_and_foreign_processes() {
+        assert!(process_alive(std::process::id()), "this process is alive");
+        assert!(
+            process_alive(1),
+            "a process we may not signal (EPERM) is still alive"
+        );
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived process");
+        child.wait().expect("reap the short-lived process");
+        assert!(!process_alive(child.id()), "a reaped process is gone");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_alive_distinguishes_live_and_reaped_processes() {
+        assert!(process_alive(std::process::id()), "this process is alive");
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn a short-lived process");
+        child.wait().expect("reap the short-lived process");
+        assert!(!process_alive(child.id()), "a reaped process is gone");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_alive_treats_zombies_as_gone() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived process");
+        let started = std::time::Instant::now();
+        while !process_is_zombie(child.id()) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "child never exited"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !process_alive(child.id()),
+            "an exited but unreaped process has finished writing: it is gone"
+        );
+        child.wait().unwrap();
+    }
+
+    /// A root sid whose pid is this test process: alive for as long as the
+    /// test runs, standing in for a git command blocked in an editor or hook.
+    fn alive_root_sid(tag: &str) -> String {
+        format!("20260411T120000.000000-H{tag}-P{:x}", std::process::id())
+    }
+
+    /// Opens a mutating `git commit` root on the reader side only (no ingest
+    /// worker needed). Without a worktree it is unattributed and fences
+    /// every family.
+    fn open_unattributed_commit_root(coord: &ActorDaemonCoordinator, sid: &str) {
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "commit", "-m", "blocked"],
+            "time_ns": 1u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+    }
+
+    /// The reader consumes the root's `atexit` frame: the process is done and
+    /// its final frame is queued for the worker.
+    fn read_root_atexit(coord: &ActorDaemonCoordinator, sid: &str) {
+        let mut atexit = serde_json::json!({
+            "event": "atexit",
+            "sid": sid,
+            "code": 0,
+            "time_ns": 2u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut atexit));
+    }
+
+    /// Opens a mutating root running `argv` attributed to `repo`, so the
+    /// reader records its family and its reflog start offsets.
+    fn open_attributed_root(coord: &ActorDaemonCoordinator, sid: &str, repo: &Path, argv: &[&str]) {
+        open_attributed_root_started_at(coord, sid, repo, argv, now_unix_nanos());
+    }
+
+    /// Like `open_attributed_root`, with the root's `start` frame stamped at
+    /// `started_at_ns` on git's clock.
+    fn open_attributed_root_started_at(
+        coord: &ActorDaemonCoordinator,
+        sid: &str,
+        repo: &Path,
+        argv: &[&str],
+        started_at_ns: u128,
+    ) {
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": argv,
+            "worktree": repo,
+            "time_ns": started_at_ns as u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+    }
+
+    fn open_attributed_commit_root(coord: &ActorDaemonCoordinator, sid: &str, repo: &Path) {
+        open_attributed_root(coord, sid, repo, &["git", "commit", "-m", "running"]);
+    }
+
+    /// A ref write in `repo` that bypasses trace2, standing in for the write
+    /// a still-running root performs.
+    fn commit_untraced(repo: &Path) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "write",
+            ])
+            .env("GIT_TRACE2_EVENT", "0")
+            .output()
+            .expect("git commit should run");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Appends a completed rebase keyed at the current clock, so it follows
+    /// every root opened earlier in the test.
+    fn append_ready_rebase(coord: &ActorDaemonCoordinator, family: &str) {
+        coord
+            .append_family_sequencer_entry(
+                family,
+                now_unix_nanos(),
+                FamilySequencerEntry::ReadyCommand(Box::new(test_rebase_command(&[], Vec::new()))),
+            )
+            .unwrap();
+    }
+
+    fn is_fenced(disposition: FamilyFrontDisposition) -> bool {
+        matches!(disposition, FamilyFrontDisposition::Fenced { .. })
+    }
+
+    #[tokio::test]
+    async fn family_fence_releases_after_grace_when_root_process_is_alive() {
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("alive");
+        open_unattributed_commit_root(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+        assert!(
+            is_fenced(coord.family_front_entry_disposition("family-a")),
+            "a completed entry waits for an older open root within the causal grace"
+        );
+
+        tokio::time::sleep(grace * 3).await;
+        assert_eq!(
+            coord.family_front_entry_disposition("family-a"),
+            FamilyFrontDisposition::Ready,
+            "with no reflog to consult, a root whose process is alive past the grace is judged still running, not in flight"
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 1);
+
+        // Later work waits its own grace, but the heuristic release is
+        // reported once per root.
+        append_ready_rebase(&coord, "family-b");
+        assert!(is_fenced(coord.family_front_entry_disposition("family-b")));
+        tokio::time::sleep(grace * 3).await;
+        assert_eq!(
+            coord.family_front_entry_disposition("family-b"),
+            FamilyFrontDisposition::Ready
+        );
+        assert_eq!(
+            coord.causal_grace_expirations.load(Ordering::Relaxed),
+            1,
+            "a release is counted once per root"
+        );
+
+        // A root that closes before the grace expires releases without a count.
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("closed");
+        open_unattributed_commit_root(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+        assert!(is_fenced(coord.family_front_entry_disposition("family-a")));
+        coord.clear_trace_root_tracking(&sid).unwrap();
+        assert_eq!(
+            coord.family_front_entry_disposition("family-a"),
+            FamilyFrontDisposition::Ready
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn family_fence_holds_past_grace_when_root_process_is_dead() {
+        let grace = Duration::from_millis(20);
+        let hard_cap = grace * FAMILY_CAUSAL_FENCE_HARD_CAP_MULTIPLIER;
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived process");
+        child.wait().expect("reap the short-lived process");
+        let sid = format!("20260411T120000.000000-Hdead-P{:x}", child.id());
+        open_unattributed_commit_root(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+
+        tokio::time::sleep(grace * 4).await;
+        assert!(
+            is_fenced(coord.family_front_entry_disposition("family-a")),
+            "a root whose process is gone may still have frames in flight: keep holding past the grace"
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 0);
+
+        tokio::time::sleep(hard_cap).await;
+        assert_eq!(
+            coord.family_front_entry_disposition("family-a"),
+            FamilyFrontDisposition::Ready,
+            "the hard cap bounds the wait for a root that never finishes"
+        );
+        assert_eq!(
+            coord.causal_fence_hard_cap_releases.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_root_holds_fence_until_cleared() {
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("exiting");
+        open_unattributed_commit_root(&coord, &sid);
+        read_root_atexit(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+        tokio::time::sleep(grace * 3).await;
+        assert!(
+            is_fenced(coord.family_front_entry_disposition("family-a")),
+            "a finishing root holds the fence until the worker processes its frames, regardless of grace or liveness"
+        );
+        coord.clear_trace_root_tracking(&sid).unwrap();
+        assert_eq!(
+            coord.family_front_entry_disposition("family-a"),
+            FamilyFrontDisposition::Ready
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 0);
+
+        // A finishing root's final frame is queued and the worker clears it,
+        // even if that frame fails to ingest; only the hard cap, a safety net
+        // against a root the worker somehow never clears, releases it by time.
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("stuck");
+        open_unattributed_commit_root(&coord, &sid);
+        read_root_atexit(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+        tokio::time::sleep(grace * (FAMILY_CAUSAL_FENCE_HARD_CAP_MULTIPLIER / 2)).await;
+        assert!(is_fenced(coord.family_front_entry_disposition("family-a")));
+        tokio::time::sleep(grace * (FAMILY_CAUSAL_FENCE_HARD_CAP_MULTIPLIER / 2) + grace).await;
+        assert_eq!(
+            coord.family_front_entry_disposition("family-a"),
+            FamilyFrontDisposition::Ready
+        );
+        assert_eq!(
+            coord.causal_fence_hard_cap_releases.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn root_with_a_reflog_fences_only_once_it_has_written() {
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+        commit_untraced(&repo); // so the worktree HEAD reflog exists
+        let sid = alive_root_sid("attributed");
+        open_attributed_commit_root(&coord, &sid, &repo);
+
+        append_ready_rebase(&coord, &family);
+        assert_eq!(
+            coord.family_front_entry_disposition(&family),
+            FamilyFrontDisposition::Ready,
+            "an open root whose worktree HEAD reflog has not grown has changed nothing: no wait at all"
+        );
+
+        // The root writes refs (say, then runs a post-commit hook).
+        commit_untraced(&repo);
+        append_ready_rebase(&coord, &family);
+        assert!(
+            is_fenced(coord.family_front_entry_disposition(&family)),
+            "once its worktree HEAD reflog has grown, the root holds the fence"
+        );
+        tokio::time::sleep(grace * 3).await;
+        assert!(
+            is_fenced(coord.family_front_entry_disposition(&family)),
+            "...for as long as it runs, even though its process is alive"
+        );
+        read_root_atexit(&coord, &sid);
+        assert!(is_fenced(coord.family_front_entry_disposition(&family)));
+        coord.clear_trace_root_tracking(&sid).unwrap();
+        assert_eq!(
+            coord.family_front_entry_disposition(&family),
+            FamilyFrontDisposition::Ready
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            coord.causal_fence_hard_cap_releases.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn root_that_wrote_before_its_reflog_length_was_recorded_counts_as_written() {
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+        commit_untraced(&repo);
+        // The root started, wrote, and only then did the reader get to record
+        // its reflog length: the length shows no growth, but the reflog was
+        // modified after the root's start.
+        let started_at_ns = now_unix_nanos();
+        std::thread::sleep(Duration::from_millis(20));
+        commit_untraced(&repo);
+        let sid = alive_root_sid("late-capture");
+        open_attributed_root_started_at(
+            &coord,
+            &sid,
+            &repo,
+            &["git", "commit", "-m", "already written"],
+            started_at_ns,
+        );
+        append_ready_rebase(&coord, &family);
+        tokio::time::sleep(grace * 3).await;
+        assert!(
+            is_fenced(coord.family_front_entry_disposition(&family)),
+            "a late-recorded reflog length must not hide a write that already happened"
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn root_writing_refs_other_than_head_falls_back_to_grace_and_liveness() {
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+        commit_untraced(&repo);
+        let sid = alive_root_sid("branch");
+        open_attributed_root(
+            &coord,
+            &sid,
+            &repo,
+            &["git", "branch", "-f", "other", "HEAD"],
+        );
+        append_ready_rebase(&coord, &family);
+
+        assert!(
+            is_fenced(coord.family_front_entry_disposition(&family)),
+            "the HEAD reflog cannot reveal a branch update: hold for the grace"
+        );
+        tokio::time::sleep(grace * 3).await;
+        assert_eq!(
+            coord.family_front_entry_disposition(&family),
+            FamilyFrontDisposition::Ready,
+            "past the grace an alive process is judged still running"
+        );
+        assert_eq!(coord.causal_grace_expirations.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fence_waits_for_open_mutating_trace_root_until_causal_grace_expires() {
+        let grace = Duration::from_millis(50);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("sync");
+        open_unattributed_commit_root(&coord, &sid);
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                coord.wait_for_trace_ingest_processed_through()
+            )
+            .await
+            .is_err(),
+            "the fence holds within the causal grace"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("the fence releases once the grace expires and the root's process is alive");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            coord.wait_for_trace_ingest_processed_through_family("/any/family/.git"),
+        )
+        .await
+        .expect("the family-scoped fence sees the same sticky release");
+        assert!(
+            coord.has_open_trace_roots_that_may_mutate_refs(),
+            "releasing the fence does not forget the root: it is still open"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_pending_work_ignores_idle_open_roots_but_counts_finishing_ones() {
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("idle");
+        open_unattributed_commit_root(&coord, &sid);
+        assert!(
+            coord.has_pending_daemon_work(),
+            "a fresh open root without a reflog to consult is pending within the grace"
+        );
+        tokio::time::sleep(grace * 3).await;
+        assert!(
+            !coord.has_pending_daemon_work(),
+            "an open root judged still running (a human at an editor) is not daemon work"
+        );
+
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("finishing");
+        open_unattributed_commit_root(&coord, &sid);
+        read_root_atexit(&coord, &sid);
+        assert!(
+            tokio::time::timeout(grace * 3, coord.wait_for_trace_ingest_processed_through())
+                .await
+                .is_err(),
+            "a finishing root's frames are queued: waits hold and await keeps it pending"
+        );
+        assert!(coord.has_pending_daemon_work());
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_counts_sequencer_entries_by_kind_and_reports_fence() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(Duration::from_secs(10));
+        let idle = DaemonHealthSnapshot::capture(&coord);
+        assert!(!idle.snapshot_partial);
+        assert_eq!(idle.sequencer_families, 0);
+        assert_eq!(idle.trace_roots_open_mutating, 0);
+        assert!(idle.families.is_empty());
+
+        let sid = alive_root_sid("health");
+        open_unattributed_commit_root(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+
+        let fenced = DaemonHealthSnapshot::capture(&coord);
+        assert!(!fenced.snapshot_partial);
+        assert_eq!(fenced.trace_roots_open_mutating, 1);
+        assert_eq!(fenced.trace_roots_finishing, 0);
+        assert_eq!(fenced.trace_roots_written, 0);
+        assert_eq!(fenced.sequencer_families, 1);
+        assert_eq!(fenced.sequencer_entries_total, 1);
+        assert_eq!(fenced.sequencer_entries_commands, 1);
+        assert_eq!(fenced.sequencer_entries_checkpoints, 0);
+        assert_eq!(fenced.sequencer_fenced_families, 1);
+        assert!(
+            !fenced.sequencer_stalled,
+            "a fence within its bound is not a stall"
+        );
+        assert_eq!(fenced.families.len(), 1);
+        let family = &fenced.families[0];
+        assert_eq!(family.key, "family-a");
+        assert_eq!(family.entries, 1);
+        assert_eq!(family.entries_commands, 1);
+        assert_eq!(family.front_kind, Some("command"));
+        assert!(family.fenced, "the front entry waits for the open root");
+        assert_eq!(family.inflight_effects, 0);
+        assert_eq!(family.side_effect_errors, 0);
+
+        read_root_atexit(&coord, &sid);
+        assert_eq!(
+            DaemonHealthSnapshot::capture(&coord).trace_roots_finishing,
+            1
+        );
+
+        coord.clear_trace_root_tracking(&sid).unwrap();
+        let released = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(released.trace_roots_open_mutating, 0);
+        assert_eq!(released.sequencer_fenced_families, 0);
+        assert!(!released.families[0].fenced);
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_reports_roots_that_have_written() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(Duration::from_secs(10));
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+        commit_untraced(&repo);
+        let sid = alive_root_sid("health-written");
+        open_attributed_commit_root(&coord, &sid, &repo);
+        append_ready_rebase(&coord, &family);
+
+        let unwritten = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(unwritten.trace_roots_written, 0);
+        assert!(
+            !unwritten.families[0].fenced,
+            "a root that has written nothing fences nothing"
+        );
+
+        commit_untraced(&repo);
+        let written = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(written.trace_roots_written, 1);
+        assert!(
+            written.families[0].fenced,
+            "a root that wrote refs holds the fence"
+        );
+
+        // The reader has read its atexit; the worker has not processed it yet.
+        let mut atexit = serde_json::json!({
+            "event": "atexit",
+            "sid": sid,
+            "code": 0,
+            "time_ns": now_unix_nanos() as u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut atexit));
+        let finishing = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(finishing.trace_roots_finishing, 1);
+        assert_eq!(
+            finishing.trace_roots_written, 0,
+            "a finishing root is reported as finishing, not re-judged as written"
+        );
+        assert!(finishing.families[0].fenced);
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_lists_families_with_only_side_effect_errors() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        let coord = ActorDaemonCoordinator::new();
+        coord
+            .record_side_effect_error(
+                "family-errors",
+                7,
+                &GitAiError::Generic("notes push rejected".to_string()),
+            )
+            .unwrap();
+        let snapshot = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(snapshot.side_effect_error_families, 1);
+        assert_eq!(snapshot.side_effect_errors_total, 1);
+        let family = snapshot
+            .families
+            .iter()
+            .find(|f| f.key == "family-errors")
+            .expect("a family with retained errors is listed even without pending work");
+        assert_eq!(family.side_effect_errors, 1);
+        assert_eq!(family.entries, 0);
+        assert_eq!(snapshot.sequencer_families, 0);
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_stall_bound_follows_the_fencing_root() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        // A tiny grace makes both caps (30x and 600x) shorter than the floor
+        // irrelevant: use a grace large enough that 30x < floor < 600x.
+        let grace = Duration::from_millis(500);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, family) = init_test_family(&coord, &temp);
+        commit_untraced(&repo);
+        let sid = alive_root_sid("stall");
+        open_attributed_commit_root(&coord, &sid, &repo);
+        commit_untraced(&repo); // the root has written: it may hold for 600x grace
+        append_ready_rebase(&coord, &family);
+        {
+            // Backdate the entry past the hard cap (30x grace = 15 s) and floor (10 s).
+            let mut sequencers = coord.family_sequencers_by_family.lock().unwrap();
+            let state = sequencers.get_mut(&family).unwrap();
+            for slot in state.entries.values_mut() {
+                slot.enqueued_at = Instant::now() - Duration::from_secs(20);
+            }
+        }
+        let snapshot = DaemonHealthSnapshot::capture(&coord);
+        assert!(snapshot.families[0].fenced);
+        assert!(
+            !snapshot.sequencer_stalled,
+            "work fenced by a root that wrote refs is bounded by the written-root cap, not the hard cap"
+        );
+
+        coord.clear_trace_root_tracking(&sid).unwrap();
+        let snapshot = DaemonHealthSnapshot::capture(&coord);
+        assert!(!snapshot.families[0].fenced);
+        assert!(
+            snapshot.sequencer_stalled,
+            "unfenced work older than the hard cap is a stall"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_observes_fences_without_releasing_them() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        let grace = Duration::from_millis(20);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        let sid = alive_root_sid("probe");
+        open_unattributed_commit_root(&coord, &sid);
+        append_ready_rebase(&coord, "family-a");
+        tokio::time::sleep(grace * 3).await;
+
+        let snapshot = DaemonHealthSnapshot::capture(&coord);
+        assert!(
+            !snapshot.families[0].fenced,
+            "past the grace an alive, unwritten root no longer fences (the next drain releases it)"
+        );
+        assert_eq!(
+            coord.causal_grace_expirations.load(Ordering::Relaxed),
+            0,
+            "a status probe must not perform the release itself"
+        );
+        assert!(
+            !coord
+                .trace_ingress_state
+                .lock()
+                .unwrap()
+                .root_fence_release_logged
+                .contains(&sid),
+            "a status probe must not log the release either"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_observes_a_bounded_number_of_open_roots() {
+        use crate::daemon::health::{DaemonHealthSnapshot, HEALTH_ROOT_OBSERVE_LIMIT};
+
+        // Past a tiny grace, an observed live root without a reflog releases,
+        // so the fence below is held only by roots the peek could not observe.
+        let grace = Duration::from_millis(1);
+        let coord = ActorDaemonCoordinator::new_with_causal_grace(grace);
+        for i in 0..HEALTH_ROOT_OBSERVE_LIMIT {
+            open_unattributed_commit_root(&coord, &alive_root_sid(&format!("many-{i}")));
+        }
+        append_ready_rebase(&coord, "family-a");
+        tokio::time::sleep(grace * 5).await;
+        let full = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(full.trace_roots_open_mutating, HEALTH_ROOT_OBSERVE_LIMIT);
+        assert!(!full.snapshot_partial);
+        assert!(!full.families[0].fenced, "every root was observed alive");
+
+        open_unattributed_commit_root(&coord, &alive_root_sid("one-too-many"));
+        let capped = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(
+            capped.trace_roots_open_mutating,
+            HEALTH_ROOT_OBSERVE_LIMIT + 1
+        );
+        assert!(
+            capped.snapshot_partial,
+            "roots beyond the observation limit are counted but not observed"
+        );
+        assert!(
+            capped.families[0].fenced,
+            "an unobserved root is reported as holding, never as released early"
+        );
+        assert!(!capped.sequencer_stalled);
+
+        // The drain releases even a written root at the written-root cap, so
+        // an unobserved root is not reported as holding past it.
+        tokio::time::sleep(grace * FAMILY_WRITTEN_ROOT_FENCE_CAP_MULTIPLIER).await;
+        assert!(!DaemonHealthSnapshot::capture(&coord).families[0].fenced);
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_does_not_call_a_busy_family_stalled() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        let coord = ActorDaemonCoordinator::new();
+        append_ready_rebase(&coord, "family-a");
+        // The entry has waited far past every fence bound and the stall floor.
+        {
+            let mut sequencers = coord.family_sequencers_by_family.lock().unwrap();
+            let slot = sequencers
+                .get_mut("family-a")
+                .and_then(|state| state.entries.values_mut().next())
+                .unwrap();
+            slot.enqueued_at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+        }
+        assert!(
+            DaemonHealthSnapshot::capture(&coord).sequencer_stalled,
+            "an old unfenced entry nobody is draining is a stall"
+        );
+
+        let busy = coord.begin_family_effect_guarded("family-a");
+        let snapshot = DaemonHealthSnapshot::capture(&coord);
+        assert_eq!(snapshot.families[0].inflight_effects, 1);
+        assert!(
+            !snapshot.sequencer_stalled,
+            "entries queued behind a running side-effect pass are busy, not stuck"
+        );
+        drop(busy);
+        assert!(DaemonHealthSnapshot::capture(&coord).sequencer_stalled);
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_is_partial_when_sequencer_lock_is_held() {
+        use crate::daemon::health::DaemonHealthSnapshot;
+
+        let coord = ActorDaemonCoordinator::new();
+        append_ready_rebase(&coord, "family-a");
+        let guard = coord.family_sequencers_by_family.lock().unwrap();
+        let snapshot = DaemonHealthSnapshot::capture(&coord);
+        drop(guard);
+        assert!(
+            snapshot.snapshot_partial,
+            "a contended lock must be reported, never waited on"
+        );
+        assert_eq!(snapshot.sequencer_families, 0);
+        assert!(!DaemonHealthSnapshot::capture(&coord).snapshot_partial);
     }
 
     #[tokio::test]
@@ -10214,6 +13726,392 @@ mod tests {
         assert!(!ingress.root_argv.contains_key(sid));
         assert!(!ingress.root_definitely_read_only.contains(sid));
         assert!(!ingress.root_open_connections.contains_key(sid));
+    }
+
+    #[test]
+    fn raw_trace_event_type_only_trusts_the_prefix_position() {
+        assert_eq!(
+            raw_trace_event_type(r#"{"event":"start","sid":"s1"}"#),
+            Some("start")
+        );
+        // User-controlled content can embed the pattern; only the prefix is
+        // the real event key.
+        assert_eq!(
+            raw_trace_event_type(
+                r#"{"event":"start","argv":["git","commit","-m","\"event\":\"data\""]}"#
+            ),
+            Some("start")
+        );
+        // Non-prefix shapes are not classified here (fall through to the
+        // parsed check).
+        assert_eq!(raw_trace_event_type(r#"{"sid":"s1","event":"data"}"#), None);
+        assert_eq!(raw_trace_event_type(r#"{ "event":"data"}"#), None);
+        assert_eq!(raw_trace_event_type("not json"), None);
+    }
+
+    #[test]
+    fn reader_ingests_only_consumed_events_and_probes() {
+        for event in [
+            "start",
+            "def_repo",
+            "cmd_name",
+            "def_param",
+            "exit",
+            "atexit",
+        ] {
+            assert!(
+                reader_should_ingest_trace_event(event),
+                "{event} is consumed by the normalizer and must be ingested"
+            );
+        }
+        assert!(reader_should_ingest_trace_event(TRACE_DRAIN_PROBE_EVENT));
+        for event in [
+            "version",
+            "cmd_path",
+            "cmd_ancestry",
+            "cmd_mode",
+            "child_start",
+            "child_exit",
+            "region_enter",
+            "region_leave",
+            "data",
+            "data_json",
+            "thread_start",
+            "error",
+            "signal",
+            "exec",
+            "",
+            // Close markers are synthesized internally and bypass the
+            // readers; one arriving over the socket is not ours.
+            TRACE_CONNECTION_CLOSED_EVENT,
+        ] {
+            assert!(
+                !reader_should_ingest_trace_event(event),
+                "{event:?} is not consumed and must be dropped at ingestion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn noise_frame_is_dropped_before_any_bookkeeping() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let mut observed_roots = std::collections::BTreeSet::new();
+
+        let outcome = process_trace_connection_line(
+            r#"{"event":"data","sid":"noise-root","category":"index","label":"x"}"#,
+            coord.clone(),
+            &mut observed_roots,
+        )
+        .unwrap();
+
+        assert!(outcome.is_none(), "noise frames are skipped lines");
+        assert!(
+            observed_roots.is_empty(),
+            "noise frames must not register roots"
+        );
+        let ingress = coord.trace_ingress_state.lock().unwrap();
+        assert!(
+            ingress.root_last_activity_ns.is_empty(),
+            "noise frames must not touch ingress bookkeeping"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_probe_frame_advances_watermark_without_root_bookkeeping() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let mut observed_roots = std::collections::BTreeSet::new();
+
+        // A forged probe id that was never issued must not advance the
+        // watermark (it would permanently satisfy future health probes).
+        coord.record_trace_drain_probe(999);
+        assert_eq!(coord.trace_drain_probe_watermark(), 0);
+
+        for _ in 0..7 {
+            coord.issue_trace_drain_probe_id();
+        }
+        let outcome = process_trace_connection_line(
+            r#"{"event":"git_ai_drain_probe","git_ai_probe_id":7}"#,
+            coord.clone(),
+            &mut observed_roots,
+        )
+        .unwrap()
+        .expect("probe frame should produce an outcome");
+
+        assert!(outcome.continue_reading);
+        assert_eq!(coord.trace_drain_probe_watermark(), 7);
+        assert!(
+            observed_roots.is_empty(),
+            "probe frames must not register roots"
+        );
+        {
+            let ingress = coord.trace_ingress_state.lock().unwrap();
+            assert!(ingress.root_last_activity_ns.is_empty());
+            assert!(ingress.root_argv.is_empty());
+        }
+
+        // The watermark is monotonic: a stale probe id cannot move it back.
+        coord.record_trace_drain_probe(5);
+        assert_eq!(coord.trace_drain_probe_watermark(), 7);
+    }
+
+    #[test]
+    fn self_restart_budget_allows_within_window_then_denies() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("self_restart_history.json");
+
+        for _ in 0..DAEMON_SELF_RESTART_BUDGET_MAX {
+            assert!(consume_self_restart_budget(&history_path));
+        }
+        assert!(
+            !consume_self_restart_budget(&history_path),
+            "restart budget should be exhausted after {} restarts",
+            DAEMON_SELF_RESTART_BUDGET_MAX
+        );
+
+        // Entries older than the window are pruned, freeing budget again.
+        let stale_ts =
+            (now_unix_nanos() / 1_000_000_000) as u64 - DAEMON_SELF_RESTART_BUDGET_WINDOW_SECS - 1;
+        let stale = vec![stale_ts; DAEMON_SELF_RESTART_BUDGET_MAX];
+        fs::write(&history_path, serde_json::to_string(&stale).unwrap()).unwrap();
+        assert!(consume_self_restart_budget(&history_path));
+    }
+
+    #[test]
+    fn self_restart_budget_prunes_future_timestamps_from_clock_skew() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("self_restart_history.json");
+
+        // A skewed-ahead clock that was later corrected leaves future
+        // timestamps behind; they must not deny restarts until wall clock
+        // catches up.
+        let future_ts = (now_unix_nanos() / 1_000_000_000) as u64 + 86_400;
+        let skewed = vec![future_ts; DAEMON_SELF_RESTART_BUDGET_MAX];
+        fs::write(&history_path, serde_json::to_string(&skewed).unwrap()).unwrap();
+
+        assert!(
+            consume_self_restart_budget(&history_path),
+            "future timestamps must be pruned, not counted against the budget"
+        );
+        let rewritten: Vec<u64> = serde_json::from_str(
+            &fs::read_to_string(&history_path).expect("history should be rewritten"),
+        )
+        .unwrap();
+        assert!(
+            rewritten.iter().all(|ts| *ts <= future_ts - 86_400 + 60),
+            "rewritten history must not retain future timestamps: {rewritten:?}"
+        );
+        assert_eq!(rewritten.len(), 1, "only the new entry should remain");
+    }
+
+    #[tokio::test]
+    async fn abandoned_checkpoints_are_counted_exactly_once() {
+        let coord = ActorDaemonCoordinator::new();
+        let _reservation = coord
+            .checkpoint_ingress_quota
+            .reserve(128)
+            .expect("reservation should be granted");
+
+        // Teardown and the shutdown enforcer can both reach the abandonment
+        // point; only the first may count the retained checkpoints.
+        coord.count_abandoned_checkpoints_once();
+        coord.count_abandoned_checkpoints_once();
+        assert_eq!(
+            coord.checkpoints_dropped.load(Ordering::Relaxed),
+            1,
+            "retained checkpoints must be counted exactly once"
+        );
+    }
+
+    #[test]
+    fn connection_error_classifier_separates_peer_gone_from_systemic() {
+        use std::io::ErrorKind;
+
+        let peer_kinds = [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::TimedOut,
+            ErrorKind::WouldBlock,
+            // macOS setsockopt EINVAL on a peer-closed socket.
+            ErrorKind::InvalidInput,
+        ];
+        for kind in peer_kinds {
+            assert!(
+                connection_error_is_peer_disconnect(&GitAiError::IoError(std::io::Error::new(
+                    kind, "peer"
+                ))),
+                "{kind:?} should classify as peer-gone"
+            );
+        }
+
+        let systemic = [
+            GitAiError::IoError(std::io::Error::other("EBADF-ish")),
+            GitAiError::IoError(std::io::Error::new(ErrorKind::PermissionDenied, "denied")),
+            GitAiError::Generic("stringified".to_string()),
+        ];
+        for error in systemic {
+            assert!(
+                !connection_error_is_peer_disconnect(&error),
+                "{error} should not classify as peer-gone"
+            );
+        }
+    }
+
+    struct MockControlConnection {
+        timeout_error: Option<std::io::ErrorKind>,
+    }
+
+    impl std::io::Read for MockControlConnection {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl std::io::Write for MockControlConnection {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ControlConnection for MockControlConnection {
+        fn set_receive_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), GitAiError> {
+            match self.timeout_error {
+                Some(kind) => Err(GitAiError::IoError(std::io::Error::new(kind, "mock"))),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn receive_timeout_failure_drops_the_connection() {
+        let mut healthy = BufReader::new(MockControlConnection {
+            timeout_error: None,
+        });
+        assert!(apply_control_receive_timeout(
+            &mut healthy,
+            Duration::from_secs(2)
+        ));
+
+        for kind in [
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let mut failing = BufReader::new(MockControlConnection {
+                timeout_error: Some(kind),
+            });
+            assert!(
+                !apply_control_receive_timeout(&mut failing, Duration::from_secs(2)),
+                "a {kind:?} setsockopt failure must drop the connection"
+            );
+        }
+    }
+
+    #[test]
+    fn deferral_for_checkpoints_is_bounded() {
+        assert!(!should_defer_restart_for_checkpoints(0, 0));
+        assert!(should_defer_restart_for_checkpoints(1, 0));
+        assert!(should_defer_restart_for_checkpoints(
+            1,
+            SOCKET_HEALTH_MAX_CONSECUTIVE_DEFERRALS - 1
+        ));
+        assert!(!should_defer_restart_for_checkpoints(
+            1,
+            SOCKET_HEALTH_MAX_CONSECUTIVE_DEFERRALS
+        ));
+    }
+
+    #[test]
+    fn refunded_self_restart_budget_entry_frees_the_allowance() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("self_restart_history.json");
+
+        for _ in 0..DAEMON_SELF_RESTART_BUDGET_MAX {
+            assert!(consume_self_restart_budget(&history_path));
+        }
+        assert!(!consume_self_restart_budget(&history_path));
+
+        // A consumed entry whose spawn produced no replacement process is
+        // refunded, so it does not count against the window.
+        refund_self_restart_budget(&history_path);
+        assert!(
+            consume_self_restart_budget(&history_path),
+            "a refunded entry must free budget for a later restart"
+        );
+    }
+
+    #[test]
+    fn self_restart_budget_fails_closed_when_history_is_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Corrupt history: deny rather than treating it as an empty budget,
+        // but clear the file so a future generation can self-heal again.
+        let corrupt_path = dir.path().join("self_restart_history.json");
+        fs::write(&corrupt_path, "not json").unwrap();
+        assert!(
+            !consume_self_restart_budget(&corrupt_path),
+            "a corrupt history must deny the restart"
+        );
+        assert!(
+            !corrupt_path.exists(),
+            "a corrupt history must be cleared so self-healing is not bricked forever"
+        );
+        assert!(
+            consume_self_restart_budget(&corrupt_path),
+            "after clearing the corrupt history the budget must be fresh"
+        );
+
+        // Unpersistable history (path is a directory): deny as well.
+        let unwritable_path = dir.path().join("history-as-dir");
+        fs::create_dir(&unwritable_path).unwrap();
+        assert!(
+            !consume_self_restart_budget(&unwritable_path),
+            "an unpersistable history must deny the restart"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn late_reflog_capture_after_terminal_event_does_not_leak_root_state() {
+        // The reflog start-offset capture runs with the ingress lock released.
+        // If the root's terminal event is processed during that window, the
+        // late capture must not re-insert offsets for the closed root.
+        let _delay_guard = EnvVarGuard::set("GIT_AI_TEST_REFLOG_CAPTURE_DELAY_MS", "200");
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Plateoffsets";
+        coord.trace_root_connection_opened(sid).unwrap();
+
+        let mut start = make_start_payload(&["git", "commit", "-m", "late capture"]);
+        start["sid"] = serde_json::json!(sid);
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+
+        let capture_coord = coord.clone();
+        let capture_sid = sid.to_string();
+        let capture_thread = std::thread::spawn(move || {
+            let mut def_repo = serde_json::json!({
+                "event": "def_repo",
+                "sid": capture_sid,
+                "worktree": std::env::temp_dir().join("late-offsets-worktree"),
+            });
+            capture_coord.prepare_trace_payload_for_ingest(&mut def_repo);
+        });
+        // Let the capture thread enter the unlocked capture window, then
+        // process the root's terminal event.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut atexit = make_atexit_payload(sid);
+        assert!(coord.prepare_trace_payload_for_ingest(&mut atexit));
+        capture_thread.join().unwrap();
+
+        let ingress = coord.trace_ingress_state.lock().unwrap();
+        assert!(
+            !ingress.root_reflog_start_offsets.contains_key(sid),
+            "late reflog capture must not leak offsets for a closed root"
+        );
+        assert!(!ingress.root_worktrees.contains_key(sid));
+        assert!(!ingress.root_last_activity_ns.contains_key(sid));
     }
 
     #[tokio::test]
@@ -10263,12 +14161,26 @@ mod tests {
         coord
             .record_trace_connection_close(&[sid.to_string()])
             .unwrap();
+        // The reader-side close keeps a mutating root registered until the
+        // ingest worker processes its queued frames and close marker, so the
+        // fence must still hold across the reader/worker gap (#2252).
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through()
+            )
+            .await
+            .is_err(),
+            "checkpoint fence must hold until the worker processes the root's close marker"
+        );
+
+        coord.clear_trace_root_tracking(sid).unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             coord.wait_for_trace_ingest_processed_through(),
         )
         .await
-        .expect("checkpoint fence should pass once the branch mutation root closes");
+        .expect("checkpoint fence should pass once the worker has processed the root's close");
     }
 
     #[tokio::test]

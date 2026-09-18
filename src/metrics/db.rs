@@ -24,6 +24,7 @@ const SCHEMA_VERSION: usize = 5;
 const MAX_METRIC_UPLOAD_ATTEMPTS: u32 = 6;
 const METRIC_PROCESSING_LOCK_TIMEOUT_SECS: u64 = 10 * 60;
 pub(crate) const METADATA_BACKFILL_BATCH_SIZE: usize = 1000;
+const EVENT_METADATA_BACKFILL_COMPLETED_KEY: &str = "event_metadata_backfill_completed";
 const NS_PER_SECOND: u128 = 1_000_000_000;
 
 const RETRYABLE_METRIC_IDS_SQL: &str = "SELECT id FROM metrics \
@@ -759,6 +760,52 @@ impl MetricsDatabase {
         Ok(count as usize)
     }
 
+    /// Reset matching metric rows so the telemetry worker can deliver them again.
+    ///
+    /// Bounds are event timestamps and form a half-open `[from_ts, to_ts)` range.
+    /// Passing no bounds resets all rows, including malformed legacy rows that do
+    /// not have cached event metadata.
+    pub fn reingest_metrics(
+        &mut self,
+        from_ts: Option<u32>,
+        to_ts: Option<u32>,
+    ) -> Result<usize, GitAiError> {
+        match (from_ts, to_ts) {
+            (Some(from_ts), Some(to_ts)) if from_ts < to_ts => {
+                // Legacy rows predate cached event metadata. Reuse the existing
+                // bounded-batch backfill before applying an event-time filter so
+                // valid historical events are not silently missed.
+                if !self.event_metadata_backfill_completed()? {
+                    self.backfill_event_metadata()?;
+                }
+            }
+            (None, None) => {}
+            _ => Err(GitAiError::Generic(
+                "metrics reingestion requires no bounds or an ordered from/to pair".to_string(),
+            ))?,
+        };
+
+        self.conn
+            .execute(
+                r#"
+                UPDATE metrics
+                SET delivered_ts = NULL,
+                    attempts = 0,
+                    last_sync_error = NULL,
+                    last_sync_at = NULL,
+                    next_retry_at = 0,
+                    processing_started_at = NULL
+                WHERE processing_started_at IS NULL
+                  AND (
+                    (?1 IS NULL AND ?2 IS NULL)
+                    OR (event_ts >= ?1 AND event_ts < ?2 AND event_kind IS NOT NULL)
+                  )
+                "#,
+                params![from_ts.map(i64::from), to_ts.map(i64::from)],
+            )
+            .map_err(Into::into)
+    }
+
     /// Summarize local metrics delivery state for user-facing diagnostics.
     pub fn status(&self) -> Result<MetricsStatus, GitAiError> {
         let now = current_unix_ts();
@@ -1197,6 +1244,39 @@ impl MetricsDatabase {
             .map(|(summary, _)| summary)
     }
 
+    pub(crate) fn event_metadata_backfill_completed(&self) -> Result<bool, GitAiError> {
+        let completed: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = ?1",
+                params![EVENT_METADATA_BACKFILL_COMPLETED_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(completed.as_deref() == Some("1"))
+    }
+
+    /// Backfill one bounded batch, permanently marking the one-time migration complete
+    /// after a successful scan reaches the end of the table.
+    pub(crate) fn backfill_event_metadata_batch_once(
+        &mut self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<(MetricMetadataBackfillSummary, Option<i64>), GitAiError> {
+        if limit == 0 || self.event_metadata_backfill_completed()? {
+            return Ok((MetricMetadataBackfillSummary::default(), None));
+        }
+
+        let result = self.backfill_event_metadata_batch_after(after_id, limit)?;
+        if result.0.scanned < limit {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES (?1, '1')",
+                params![EVENT_METADATA_BACKFILL_COMPLETED_KEY],
+            )?;
+        }
+        Ok(result)
+    }
+
     /// Backfill cached event metadata for all currently eligible legacy rows.
     pub fn backfill_event_metadata(&mut self) -> Result<MetricMetadataBackfillSummary, GitAiError> {
         let mut total = MetricMetadataBackfillSummary::default();
@@ -1204,7 +1284,7 @@ impl MetricsDatabase {
 
         loop {
             let (summary, last_id) =
-                self.backfill_event_metadata_batch_after(after_id, METADATA_BACKFILL_BATCH_SIZE)?;
+                self.backfill_event_metadata_batch_once(after_id, METADATA_BACKFILL_BATCH_SIZE)?;
             total.scanned += summary.scanned;
             total.updated += summary.updated;
 
@@ -2469,6 +2549,55 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_event_metadata_batch_once_marks_completion() {
+        let (mut db, temp_dir) = create_test_db();
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1), (?2)",
+                params![event_json(days_ago(2)), event_json(days_ago(1))],
+            )
+            .unwrap();
+
+        let (first_summary, last_id) = db.backfill_event_metadata_batch_once(0, 1).unwrap();
+        assert_eq!(first_summary.scanned, 1);
+        assert!(!db.event_metadata_backfill_completed().unwrap());
+
+        let (second_summary, _) = db
+            .backfill_event_metadata_batch_once(last_id.unwrap(), 2)
+            .unwrap();
+        assert_eq!(second_summary.scanned, 1);
+        assert!(db.event_metadata_backfill_completed().unwrap());
+
+        drop(db);
+        let conn = crate::sqlite::open_with_memory_limits(temp_dir.path().join("test-metrics.db"))
+            .unwrap();
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+        assert!(db.event_metadata_backfill_completed().unwrap());
+
+        db.conn
+            .execute(
+                "INSERT INTO metrics (event_json) VALUES (?1)",
+                params![event_json(days_ago(0))],
+            )
+            .unwrap();
+        let inserted_after_completion = db.conn.last_insert_rowid();
+
+        let skipped = db.backfill_event_metadata_batch_once(0, 100).unwrap();
+        assert_eq!(skipped, (MetricMetadataBackfillSummary::default(), None));
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT event_ts FROM metrics WHERE id = ?1",
+                    params![inserted_after_completion],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn test_dequeue_pending_batch_locks_rows() {
         let (mut db, _temp_dir) = create_test_db();
         let events = vec![event_json(days_ago(2)), event_json(days_ago(1))];
@@ -2723,6 +2852,148 @@ mod tests {
         assert!(delivered_ts.is_none());
         assert_eq!(attempts, MAX_METRIC_UPLOAD_ATTEMPTS as i64);
         assert_eq!(last_sync_error.as_deref(), Some("validation failed"));
+    }
+
+    #[test]
+    fn test_reingest_metrics_resets_delivery_state_in_half_open_event_time_range() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        let from_ts = seconds_ago(200);
+        let to_ts = seconds_ago(100);
+        let event_jsons = [
+            event_json(from_ts - 1),
+            event_json(from_ts),
+            event_json(from_ts + 50),
+            event_json(to_ts - 1),
+            event_json(to_ts),
+            "not-json".to_string(),
+        ];
+        let ids = db
+            .insert_events_with_delivered_ts(&event_jsons, Some(now))
+            .unwrap();
+
+        db.conn
+            .execute(
+                "UPDATE metrics \
+                 SET attempts = 6, last_sync_error = 'stopped', last_sync_at = ?1, \
+                     next_retry_at = ?1",
+                params![now as i64],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET processing_started_at = ?1 WHERE id = ?2",
+                params![now as i64, ids[1]],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET event_ts = NULL, event_kind = NULL WHERE id = ?1",
+                params![ids[2]],
+            )
+            .unwrap();
+
+        let reset = db.reingest_metrics(Some(from_ts), Some(to_ts)).unwrap();
+
+        assert_eq!(reset, 2);
+        struct DeliveryState {
+            id: i64,
+            delivered_ts: Option<i64>,
+            attempts: i64,
+            last_sync_error: Option<String>,
+            last_sync_at: Option<i64>,
+            next_retry_at: i64,
+            processing_started_at: Option<i64>,
+        }
+        let rows: Vec<DeliveryState> = db
+            .conn
+            .prepare(
+                "SELECT id, delivered_ts, attempts, last_sync_error, last_sync_at, \
+                        next_retry_at, processing_started_at \
+                 FROM metrics ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok(DeliveryState {
+                    id: row.get(0)?,
+                    delivered_ts: row.get(1)?,
+                    attempts: row.get(2)?,
+                    last_sync_error: row.get(3)?,
+                    last_sync_at: row.get(4)?,
+                    next_retry_at: row.get(5)?,
+                    processing_started_at: row.get(6)?,
+                })
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        for (index, row) in rows.iter().enumerate() {
+            let in_range = matches!(index, 2..=3);
+            if in_range {
+                assert_eq!(row.delivered_ts, None, "row {} should be pending", row.id);
+                assert_eq!(row.attempts, 0);
+                assert_eq!(row.last_sync_error, None);
+                assert_eq!(row.last_sync_at, None);
+                assert_eq!(row.next_retry_at, 0);
+                assert_eq!(row.processing_started_at, None);
+            } else {
+                assert_eq!(row.delivered_ts, Some(now as i64), "row {} changed", row.id);
+                assert_eq!(row.attempts, 6);
+                assert_eq!(row.last_sync_error.as_deref(), Some("stopped"));
+                assert_eq!(row.last_sync_at, Some(now as i64));
+                assert_eq!(row.next_retry_at, now as i64);
+                assert_eq!(
+                    row.processing_started_at,
+                    (index == 1).then_some(now as i64)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_reingest_metrics_skips_completed_metadata_backfill() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_ts = seconds_ago(100);
+        let ids = db
+            .insert_events_with_delivered_ts(&[event_json(event_ts)], Some(unix_now()))
+            .unwrap();
+
+        db.backfill_event_metadata_batch_once(0, 100).unwrap();
+        assert!(db.event_metadata_backfill_completed().unwrap());
+        db.conn
+            .execute(
+                "UPDATE metrics SET event_ts = NULL, event_kind = NULL WHERE id = ?1",
+                params![ids[0]],
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.reingest_metrics(Some(event_ts - 1), Some(event_ts + 1))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_reingest_all_resets_rows_without_event_metadata() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        let ids = db
+            .insert_events_with_delivered_ts(
+                &[event_json(seconds_ago(100)), "not-json".to_string()],
+                Some(now),
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE metrics SET processing_started_at = ?1 WHERE id = ?2",
+                params![now as i64, ids[0]],
+            )
+            .unwrap();
+
+        assert_eq!(db.reingest_metrics(None, None).unwrap(), 1);
+        assert_eq!(db.status().unwrap().pending_retryable, 1);
     }
 
     #[test]

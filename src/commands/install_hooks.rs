@@ -22,6 +22,8 @@ struct InstallOptions {
     verbose: bool,
     install_skills: bool,
     include_visual_studio_extension: bool,
+    configure_env: bool,
+    configure_wsl: bool,
     api_base: Option<String>,
     api_key: Option<String>,
 }
@@ -312,6 +314,42 @@ fn ensure_daemon(dry_run: bool) {
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let options = parse_install_options(args)?;
+    let result = run_hooks_install(&options);
+
+    // The install scripts previously applied shell/PATH config even when
+    // install-hooks failed, so --env must run regardless of the hooks result.
+    if options.configure_env {
+        if options.dry_run {
+            println!("Dry-run: skipping shell environment configuration.");
+        } else {
+            crate::commands::install_env::configure_shell_env();
+        }
+    }
+
+    if options.configure_wsl {
+        let api_base = options.api_base.clone().or_else(|| {
+            std::env::var("API_BASE")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
+        let api_key = options.api_key.clone().or_else(|| {
+            std::env::var("API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
+        crate::commands::install_wsl::install(
+            crate::commands::install_wsl::InstallConfig {
+                api_base: api_base.as_deref(),
+                api_key: api_key.as_deref(),
+            },
+            options.dry_run,
+        );
+    }
+
+    result
+}
+
+fn run_hooks_install(options: &InstallOptions) -> Result<HashMap<String, String>, GitAiError> {
     let install_config = InstallConfig {
         api_base: options.api_base.clone().or_else(|| {
             std::env::var("API_BASE")
@@ -344,7 +382,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let params = HookInstallerParams { binary_path };
 
     // Run async operations and convert result.
-    let statuses = crate::tokio_runtime::block_on(async_run_install(&params, &options))?;
+    let statuses = crate::tokio_runtime::block_on(async_run_install(&params, options))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
@@ -365,6 +403,8 @@ fn parse_install_options(args: &[String]) -> Result<InstallOptions, GitAiError> 
             "--verbose" | "-v" => options.verbose = true,
             "--skills" => options.install_skills = true,
             "--visual-studio-extension" => options.include_visual_studio_extension = true,
+            "--env" | "--env=true" => options.configure_env = true,
+            "--wsl" | "--wsl=true" => options.configure_wsl = true,
             value if value.starts_with("--api-base=") => {
                 options.api_base = non_empty_value(&value[11..]);
             }
@@ -716,9 +756,13 @@ async fn async_run_install(
     if !any_checked {
         println!("No compatible IDEs or agent configurations detected. Nothing to install.");
     } else if has_changes && options.dry_run {
+        // Keep optional setup flags in the suggested re-run so the requested
+        // configuration is not silently dropped when the user applies changes.
+        let env_flag = if options.configure_env { " --env" } else { "" };
+        let wsl_flag = if options.configure_wsl { " --wsl" } else { "" };
         println!("\n\x1b[33m⚠ Dry-run mode (default). No changes were made.\x1b[0m");
         println!("To apply these changes, run:");
-        println!("\x1b[1m  git-ai install-hooks --dry-run=false\x1b[0m");
+        println!("\x1b[1m  git-ai install-hooks --dry-run=false{env_flag}{wsl_flag}\x1b[0m");
     }
 
     // Check for running agents that had hooks updated and warn about restart
@@ -1103,6 +1147,66 @@ mod tests {
             VISUAL_STUDIO_INSTALLER_ID,
             &options
         ));
+    }
+
+    #[test]
+    fn parse_install_options_defaults_env_to_disabled() {
+        let options = parse_install_options(&[]).unwrap();
+
+        assert!(!options.configure_env);
+    }
+
+    #[test]
+    fn parse_install_options_enables_env_flag() {
+        let args = vec!["--dry-run".to_string(), "--env".to_string()];
+        let options = parse_install_options(&args).unwrap();
+
+        assert!(options.dry_run);
+        assert!(options.configure_env);
+    }
+
+    #[test]
+    fn parse_install_options_accepts_env_value_form_like_dry_run() {
+        let options = parse_install_options(&["--env=true".to_string()]).unwrap();
+
+        assert!(options.configure_env);
+    }
+
+    #[test]
+    fn parse_install_options_defaults_wsl_to_disabled() {
+        let options = parse_install_options(&[]).unwrap();
+
+        assert!(!options.configure_wsl);
+    }
+
+    #[test]
+    fn parse_install_options_enables_wsl_flag() {
+        let options = parse_install_options(&["--wsl".to_string()]).unwrap();
+
+        assert!(options.configure_wsl);
+    }
+
+    #[test]
+    fn parse_install_options_accepts_wsl_value_form() {
+        let options = parse_install_options(&["--wsl=true".to_string()]).unwrap();
+
+        assert!(options.configure_wsl);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    #[serial]
+    fn install_with_env_and_dry_run_touches_nothing() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".zshrc"), "# zshrc\n").unwrap();
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+
+        let _ = run(&["--env".to_string(), "--dry-run".to_string()]);
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".zshrc")).unwrap(),
+            "# zshrc\n"
+        );
     }
 
     #[test]

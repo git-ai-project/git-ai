@@ -51,6 +51,12 @@ struct FlushRequest {
     completion: tokio::sync::oneshot::Sender<FlushStatus>,
 }
 
+struct MetricsReingestRequest {
+    from_ts: Option<u32>,
+    to_ts: Option<u32>,
+    completion: tokio::sync::oneshot::Sender<Result<usize, String>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FlushMode {
     Periodic,
@@ -195,21 +201,124 @@ impl TelemetryBuffer {
     }
 }
 
+/// Capacity of the bounded metrics-persistence queue. A telemetry burst past
+/// this bound drops metric batches (loudly) instead of creating unbounded
+/// blocking tasks or back-pressuring core daemon processing.
+const METRICS_PERSIST_QUEUE_CAPACITY: usize = 256;
+
+/// Metric batches dropped because the persistence queue was full. Telemetry
+/// is best-effort by design; the counter keeps the loss observable.
+static METRIC_BATCHES_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn metric_batches_dropped() -> u64 {
+    METRIC_BATCHES_DROPPED.load(Ordering::Relaxed)
+}
+
+/// Persist metric events straight to SQLite, bypassing the persistence
+/// queue. For reporters that must know the write was accepted and must not
+/// depend on the queue whose loss they report (DaemonIngestAnomaly). Mirrors
+/// the test gating of `observability::log_metrics`.
+pub(crate) fn persist_metrics_now(events: &[MetricEvent]) -> Result<(), GitAiError> {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        if std::env::var_os("GIT_AI_TEST_METRICS_DB_PATH").is_none() {
+            return Ok(());
+        }
+    }
+
+    store_metrics_in_db(events).map(|_| ())
+}
+
+/// Budget for waiting on the persist worker to catch up when an `await` or
+/// teardown needs the queue's contents to be visible in SQLite.
+const METRICS_PERSIST_DRAIN_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Work items for the metrics persistence worker.
+enum MetricsPersistRequest {
+    Store(Vec<MetricEvent>),
+    /// Flush marker: when the ack fires, every `Store` enqueued before this
+    /// marker has been written to SQLite.
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
+/// Send a flush marker through the persist queue and wait for its ack, so
+/// callers that read pending metrics from SQLite (await status, uploads,
+/// teardown) observe every batch enqueued before the call. Bounded by
+/// `deadline` in case the persist worker is wedged. Returns true when the
+/// queue was drained.
+async fn drain_metrics_persist_requests(
+    persist_tx: &tokio::sync::mpsc::Sender<MetricsPersistRequest>,
+    deadline: Duration,
+) -> bool {
+    let drain = async {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if persist_tx
+            .send(MetricsPersistRequest::Flush(ack_tx))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        ack_rx.await.is_ok()
+    };
+    tokio::time::timeout(deadline, drain).await.unwrap_or(false)
+}
+
 /// Handle for submitting telemetry directly within the daemon process.
 #[derive(Clone)]
 pub struct DaemonTelemetryWorkerHandle {
     buffer: Arc<Mutex<TelemetryBuffer>>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<FlushRequest>,
+    metrics_reingest_tx: tokio::sync::mpsc::UnboundedSender<MetricsReingestRequest>,
+    metrics_persist_tx: tokio::sync::mpsc::Sender<MetricsPersistRequest>,
 }
 
 impl DaemonTelemetryWorkerHandle {
     #[cfg(test)]
     pub fn new_noop() -> Self {
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (metrics_reingest_tx, _metrics_reingest_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (metrics_persist_tx, persist_rx) =
+            tokio::sync::mpsc::channel(METRICS_PERSIST_QUEUE_CAPACITY);
+        // Keep the receiver alive so noop submissions look like a full-but-
+        // healthy queue instead of a dead persist worker.
+        std::mem::forget(persist_rx);
         Self {
             buffer: Arc::new(Mutex::new(TelemetryBuffer::new())),
             flush_tx,
+            metrics_reingest_tx,
+            metrics_persist_tx,
         }
+    }
+
+    /// Queue a metric batch for persistence on the telemetry runtime. Never
+    /// blocks the caller: core daemon paths submit metrics from latency-
+    /// sensitive contexts, so a full queue drops the batch and counts it.
+    fn enqueue_metrics_persist(&self, metric_events: Vec<MetricEvent>) {
+        if metric_events.is_empty() {
+            return;
+        }
+        match self
+            .metrics_persist_tx
+            .try_send(MetricsPersistRequest::Store(metric_events))
+        {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                METRIC_BATCHES_DROPPED.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("telemetry: metrics persistence queue full; dropping batch");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                METRIC_BATCHES_DROPPED.fetch_add(1, Ordering::Relaxed);
+                tracing::error!("telemetry: metrics persistence worker is gone; dropping batch");
+            }
+        }
+    }
+
+    /// Wait until every metric batch enqueued before this call is persisted
+    /// to SQLite (bounded). Used at daemon teardown so queued batches are not
+    /// lost across a restart.
+    pub async fn drain_metrics_persist_queue(&self, deadline: Duration) -> bool {
+        drain_metrics_persist_requests(&self.metrics_persist_tx, deadline).await
     }
 
     /// Submit telemetry envelopes for batched processing.
@@ -222,13 +331,7 @@ impl DaemonTelemetryWorkerHandle {
                 .ingest_envelopes(buffered_envelopes);
         }
 
-        if !metric_events.is_empty() {
-            std::mem::drop(tokio::task::spawn_blocking(move || {
-                if let Err(e) = store_metrics_in_db(&metric_events) {
-                    tracing::warn!(%e, "telemetry: failed to persist metrics locally");
-                }
-            }));
-        }
+        self.enqueue_metrics_persist(metric_events);
     }
 
     /// Submit CAS records for batched upload.
@@ -244,6 +347,20 @@ impl DaemonTelemetryWorkerHandle {
         self.buffer.lock().await.ingest_daemon_logs(events);
     }
 
+    /// Fire-and-forget flush trigger through the serialized flush loop.
+    ///
+    /// Callers that just want "flush soon" (e.g. `notes.flush`) must go
+    /// through here rather than calling `flush_notes` directly: a concurrent
+    /// flusher dequeue-locks note rows out from under an awaited flush, whose
+    /// pending count excludes locked rows — letting `await` certify while the
+    /// triggered upload is still in flight.
+    pub fn request_flush(&self) {
+        let (completion_tx, _completion_rx) = tokio::sync::oneshot::channel();
+        let _ = self.flush_tx.send(FlushRequest {
+            completion: completion_tx,
+        });
+    }
+
     /// Request an immediate telemetry flush and wait for the worker to complete.
     pub async fn flush_and_wait(&self) -> Result<FlushStatus, GitAiError> {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
@@ -255,6 +372,26 @@ impl DaemonTelemetryWorkerHandle {
         completion_rx
             .await
             .map_err(|_| GitAiError::Generic("telemetry flush was cancelled".to_string()))
+    }
+
+    /// Reset matching local metrics in the serialized telemetry loop.
+    pub async fn reingest_metrics(
+        &self,
+        from_ts: Option<u32>,
+        to_ts: Option<u32>,
+    ) -> Result<usize, GitAiError> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.metrics_reingest_tx
+            .send(MetricsReingestRequest {
+                from_ts,
+                to_ts,
+                completion: completion_tx,
+            })
+            .map_err(|_| GitAiError::Generic("telemetry worker has stopped".to_string()))?;
+        completion_rx
+            .await
+            .map_err(|_| GitAiError::Generic("metrics reingestion was cancelled".to_string()))?
+            .map_err(GitAiError::Generic)
     }
 
     /// Returns the current number of metrics waiting for upload.
@@ -311,11 +448,7 @@ impl DaemonTelemetryWorkerHandle {
             buf.ingest_envelopes(buffered_envelopes);
         }
 
-        if !metric_events.is_empty()
-            && let Err(e) = store_metrics_in_db(&metric_events)
-        {
-            tracing::warn!(%e, "telemetry: failed to persist daemon metrics locally");
-        }
+        self.enqueue_metrics_persist(metric_events);
     }
 
     /// Submit CAS records synchronously (best-effort, non-blocking).
@@ -351,6 +484,26 @@ static DAEMON_INTERNAL_TELEMETRY: std::sync::OnceLock<DaemonTelemetryWorkerHandl
 /// Called once during daemon startup after `spawn_telemetry_worker()`.
 pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
     let _ = DAEMON_INTERNAL_TELEMETRY.set(handle);
+}
+
+/// Supplies the pipeline-health fields folded into each heartbeat.
+pub type HeartbeatFieldsProvider =
+    Arc<dyn Fn() -> BTreeMap<String, DaemonLogFieldValue> + Send + Sync>;
+
+/// Registered once at daemon startup by the coordinator, so the worker
+/// carries no coordinator dependency and the 15-minute cadence stays here.
+static DAEMON_HEARTBEAT_FIELDS_PROVIDER: std::sync::OnceLock<HeartbeatFieldsProvider> =
+    std::sync::OnceLock::new();
+
+pub fn set_daemon_heartbeat_fields_provider(provider: HeartbeatFieldsProvider) {
+    let _ = DAEMON_HEARTBEAT_FIELDS_PROVIDER.set(provider);
+}
+
+fn daemon_heartbeat_health_fields() -> BTreeMap<String, DaemonLogFieldValue> {
+    DAEMON_HEARTBEAT_FIELDS_PROVIDER
+        .get()
+        .map(|provider| provider())
+        .unwrap_or_default()
 }
 
 /// Submit telemetry from within the daemon process.
@@ -433,30 +586,81 @@ pub fn submit_daemon_internal_daemon_logs(events: Vec<DaemonLogEvent>) -> bool {
 ///
 /// The worker runs a flush loop every 3 seconds, sending accumulated events
 /// to their respective destinations (Sentry, PostHog, metrics API, CAS API).
+///
+/// Everything spawned here — the flush loop, its synchronous upload jobs, the
+/// metrics persistence worker, and the metadata backfill — runs on the
+/// dedicated telemetry runtime, so slow uploads or a contended metrics DB can
+/// never occupy the daemon runtime that command/checkpoint processing uses.
 pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
     let buffer = Arc::new(Mutex::new(TelemetryBuffer::new()));
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (metrics_reingest_tx, metrics_reingest_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (metrics_persist_tx, metrics_persist_rx) =
+        tokio::sync::mpsc::channel(METRICS_PERSIST_QUEUE_CAPACITY);
     let handle = DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
         flush_tx,
+        metrics_reingest_tx,
+        metrics_persist_tx: metrics_persist_tx.clone(),
     };
     let daemon_id = daemon_run_id().to_string();
+    let telemetry_runtime = crate::tokio_runtime::telemetry_runtime();
 
-    spawn_metrics_metadata_backfill();
+    spawn_metrics_metadata_backfill(telemetry_runtime);
 
-    tokio::spawn(async move {
-        telemetry_flush_loop(buffer, daemon_id, flush_rx).await;
+    telemetry_runtime.spawn(metrics_persist_loop(metrics_persist_rx));
+    telemetry_runtime.spawn(async move {
+        telemetry_flush_loop(
+            buffer,
+            daemon_id,
+            flush_rx,
+            metrics_reingest_rx,
+            metrics_persist_tx,
+        )
+        .await;
     });
 
     handle
 }
 
-fn spawn_metrics_metadata_backfill() {
+/// Drains the bounded metrics-persistence queue: one SQLite write at a time,
+/// on the telemetry runtime's blocking pool.
+async fn metrics_persist_loop(mut rx: tokio::sync::mpsc::Receiver<MetricsPersistRequest>) {
+    while let Some(request) = rx.recv().await {
+        match request {
+            MetricsPersistRequest::Store(metric_events) => {
+                #[cfg(feature = "test-support")]
+                if let Ok(raw_delay_ms) = std::env::var("GIT_AI_TEST_METRICS_PERSIST_DELAY_MS")
+                    && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
+                    && delay_ms > 0
+                {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                let result =
+                    tokio::task::spawn_blocking(move || store_metrics_in_db(&metric_events))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(GitAiError::Generic(format!(
+                                "metrics persistence task panicked: {e}"
+                            )))
+                        });
+                if let Err(e) = result {
+                    tracing::warn!(%e, "telemetry: failed to persist metrics locally");
+                }
+            }
+            MetricsPersistRequest::Flush(ack) => {
+                let _ = ack.send(());
+            }
+        }
+    }
+}
+
+fn spawn_metrics_metadata_backfill(telemetry_runtime: &tokio::runtime::Runtime) {
     if METRICS_METADATA_BACKFILL_STARTED.swap(true, Ordering::Relaxed) {
         return;
     }
 
-    std::mem::drop(tokio::task::spawn_blocking(|| {
+    std::mem::drop(telemetry_runtime.spawn_blocking(|| {
         if let Err(e) = backfill_metrics_event_metadata() {
             tracing::warn!(%e, "telemetry: failed to backfill metrics event metadata");
         }
@@ -472,7 +676,7 @@ fn backfill_metrics_event_metadata() -> Result<(), GitAiError> {
             let mut db_lock = db
                 .lock()
                 .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-            db_lock.backfill_event_metadata_batch_after(after_id, METADATA_BACKFILL_BATCH_SIZE)?
+            db_lock.backfill_event_metadata_batch_once(after_id, METADATA_BACKFILL_BATCH_SIZE)?
         };
 
         let Some(id) = last_id else {
@@ -492,16 +696,41 @@ async fn telemetry_flush_loop(
     buffer: Arc<Mutex<TelemetryBuffer>>,
     daemon_id: String,
     mut flush_rx: tokio::sync::mpsc::UnboundedReceiver<FlushRequest>,
+    mut metrics_reingest_rx: tokio::sync::mpsc::UnboundedReceiver<MetricsReingestRequest>,
+    metrics_persist_tx: tokio::sync::mpsc::Sender<MetricsPersistRequest>,
 ) {
     let started_at = std::time::Instant::now();
     let mut next_heartbeat_at = started_at + DAEMON_LOG_HEARTBEAT_INTERVAL;
     let mut flush_requests: Vec<FlushRequest> = Vec::new();
+    let mut metrics_reingest_requests: Vec<MetricsReingestRequest> = Vec::new();
 
     loop {
         tokio::select! {
             _ = sleep_until(next_telemetry_flush_at(Instant::now())) => {}
             Some(request) = flush_rx.recv() => {
                 flush_requests.push(request);
+            }
+            Some(request) = metrics_reingest_rx.recv() => {
+                metrics_reingest_requests.push(request);
+            }
+        }
+
+        if !metrics_reingest_requests.is_empty() {
+            let persist_queue_drained =
+                drain_metrics_persist_requests(&metrics_persist_tx, METRICS_PERSIST_DRAIN_DEADLINE)
+                    .await;
+            for request in metrics_reingest_requests.drain(..) {
+                let result = if persist_queue_drained {
+                    tokio::task::spawn_blocking(move || {
+                        reingest_metrics_in_db(request.from_ts, request.to_ts)
+                    })
+                    .await
+                    .map_err(|error| format!("metrics reingestion task panicked: {error}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()))
+                } else {
+                    Err("timed out waiting for queued metrics to persist".to_string())
+                };
+                let _ = request.completion.send(result);
             }
         }
 
@@ -510,16 +739,25 @@ async fn telemetry_flush_loop(
             while next_heartbeat_at <= now {
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
             }
-            Some(daemon_heartbeat_event(started_at.elapsed()))
+            Some(daemon_heartbeat_event(
+                started_at.elapsed(),
+                daemon_heartbeat_health_fields(),
+            ))
         } else {
             None
         };
 
-        let flush_mode = if flush_requests.is_empty() {
-            FlushMode::Periodic
-        } else {
-            FlushMode::Await
-        };
+        let flush_mode = flush_mode_for_requests(!flush_requests.is_empty());
+        // An awaited flush certifies "everything submitted so far is flushed
+        // or counted as pending": batches still sitting in the persist queue
+        // must reach SQLite first, or the DB-based pending count under-reports
+        // and a restart loses them after `await` reported success.
+        if flush_mode == FlushMode::Await
+            && !drain_metrics_persist_requests(&metrics_persist_tx, METRICS_PERSIST_DRAIN_DEADLINE)
+                .await
+        {
+            tracing::warn!("telemetry: awaited flush proceeding without a full persist drain");
+        }
         let snapshot = {
             let mut buf = buffer.lock().await;
             if let Some(event) = heartbeat {
@@ -532,10 +770,17 @@ async fn telemetry_flush_loop(
         let daemon_id_for_flush = daemon_id.clone();
         let flush_started_at = std::time::Instant::now();
         let flush_result = tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "test-support")]
+            maybe_stall_telemetry_upload_for_test();
+            // Periodic flushes pace their metrics work against the shared
+            // background-work ledger (the token sweep charges the same one),
+            // so a backfill's emission volume cannot saturate cores; awaited
+            // flushes drain at full speed for the `git-ai await` barrier.
+            let pace = flush_mode == FlushMode::Periodic;
             let requeue_daemon_logs = if let Some(snapshot) = snapshot {
-                flush_telemetry_batch(snapshot, &daemon_id_for_flush)
+                flush_telemetry_batch(snapshot, &daemon_id_for_flush, pace)
             } else {
-                flush_pending_metrics();
+                flush_pending_metrics(pace);
                 Vec::new()
             };
             let await_status = collect_await_flush_status(flush_mode);
@@ -570,6 +815,14 @@ async fn telemetry_flush_loop(
     }
 }
 
+fn reingest_metrics_in_db(from_ts: Option<u32>, to_ts: Option<u32>) -> Result<usize, GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.reingest_metrics(from_ts, to_ts)
+}
+
 fn take_telemetry_flush_snapshot(
     buffer: &mut TelemetryBuffer,
     flush_mode: FlushMode,
@@ -581,17 +834,41 @@ fn take_telemetry_flush_snapshot(
     }
 }
 
+fn flush_mode_for_requests(has_flush_requests: bool) -> FlushMode {
+    if has_flush_requests {
+        FlushMode::Await
+    } else {
+        FlushMode::Periodic
+    }
+}
+
 fn next_telemetry_flush_at(completed_at: Instant) -> Instant {
     completed_at + FLUSH_INTERVAL
 }
 
-fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
+/// Test hook: simulate a hung upload backend inside the flush cycle.
+#[cfg(feature = "test-support")]
+fn maybe_stall_telemetry_upload_for_test() {
+    if let Ok(raw_stall_ms) = std::env::var("GIT_AI_TEST_TELEMETRY_UPLOAD_STALL_MS")
+        && let Ok(stall_ms) = raw_stall_ms.parse::<u64>()
+        && stall_ms > 0
+    {
+        tracing::warn!("test telemetry upload stall engaged");
+        std::thread::sleep(std::time::Duration::from_millis(stall_ms));
+    }
+}
+
+fn flush_telemetry_batch(
+    batch: TelemetryBuffer,
+    daemon_id: &str,
+    pace: bool,
+) -> Vec<DaemonLogEvent> {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
 
     // Flush metrics (always processed — uploaded or stored in SQLite)
     if !batch.metrics.is_empty() {
-        flush_metrics(&batch.metrics);
+        flush_metrics(&batch.metrics, pace);
     }
 
     // Flush Sentry events (errors, performance, messages)
@@ -616,7 +893,7 @@ fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonL
     // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
     flush_notes();
 
-    flush_pending_metrics();
+    flush_pending_metrics(pace);
 
     if batch.daemon_logs.is_empty() {
         Vec::new()
@@ -666,7 +943,7 @@ fn count_pending_metrics_for_await() -> usize {
         .unwrap_or(0)
 }
 
-fn flush_metrics(events: &[MetricEvent]) {
+fn flush_metrics(events: &[MetricEvent], pace: bool) {
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -678,13 +955,17 @@ fn flush_metrics(events: &[MetricEvent]) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let store_started = std::time::Instant::now();
         if let Err(e) = store_metrics_in_db(chunk) {
             tracing::warn!(%e, "telemetry: failed to persist metrics before upload");
             continue;
         }
+        // Only the store is charged here: the drain below paces itself, and
+        // wrapping it would bill its own pauses as fresh work.
+        pace_background_flush(pace, store_started.elapsed());
 
         if should_upload && !upload_failed && std::time::Instant::now() < deadline {
-            match flush_pending_metrics_from_db(&client, deadline) {
+            match flush_pending_metrics_from_db(&client, deadline, pace) {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(%e, "telemetry: failed to upload pending metrics");
@@ -695,7 +976,7 @@ fn flush_metrics(events: &[MetricEvent]) {
     }
 }
 
-fn flush_pending_metrics() {
+fn flush_pending_metrics(pace: bool) {
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -703,12 +984,31 @@ fn flush_pending_metrics() {
     let should_upload = metrics_upload_allowed(&api_base_url, &client);
     METRICS_UPLOAD_AVAILABLE.store(should_upload, Ordering::Relaxed);
     if !should_upload {
+        // Debug: the flush loop lands here every 3 seconds while
+        // unauthenticated, so anything louder floods the daemon log.
+        tracing::debug!("metrics: skipping pending upload, not authenticated");
         return;
     }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    if let Err(e) = flush_pending_metrics_from_db(&client, deadline) {
+    if let Err(e) = flush_pending_metrics_from_db(&client, deadline, pace) {
         tracing::warn!(%e, "telemetry: failed to upload pending metrics");
+    }
+}
+
+/// Sleep out a paced flush segment's pause: the same shared ledger and duty
+/// cycle as the token sweep. The sleep is capped so an awaited flush
+/// arriving behind a paced drain is not held long; the capped remainder is
+/// not forgiven — the ledger reservation stands and the next background
+/// segment (either pipeline) waits it out.
+fn pace_background_flush(pace: bool, work: std::time::Duration) {
+    const MAX_FLUSH_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+    if !pace {
+        return;
+    }
+    let pause = crate::daemon::token_usage_worker::background_work_pause(work).min(MAX_FLUSH_PAUSE);
+    if !pause.is_zero() {
+        std::thread::sleep(pause);
     }
 }
 
@@ -733,6 +1033,14 @@ fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
     db_lock.insert_events(&event_jsons)
 }
 
+/// How much of the pending backlog one flush invocation may drain, and
+/// whether it paces itself against the shared background-work ledger.
+struct PendingFlushBudget {
+    deadline: std::time::Instant,
+    max_batch_size: usize,
+    paced: bool,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PendingMetricsFlushResult {
     uploaded_events: usize,
@@ -743,6 +1051,7 @@ struct PendingMetricsFlushResult {
 fn flush_pending_metrics_from_db(
     client: &ApiClient,
     deadline: std::time::Instant,
+    pace: bool,
 ) -> Result<PendingMetricsFlushResult, GitAiError> {
     flush_pending_metric_records_with(
         read_pending_metrics_batch,
@@ -750,8 +1059,11 @@ fn flush_pending_metrics_from_db(
         mark_metric_records_failed,
         mark_metric_records_undeliverable,
         |batch| client.upload_metrics(batch),
-        deadline,
-        MAX_METRICS_PER_ENVELOPE,
+        PendingFlushBudget {
+            deadline,
+            max_batch_size: MAX_METRICS_PER_ENVELOPE,
+            paced: pace,
+        },
     )
 }
 
@@ -800,8 +1112,7 @@ fn flush_pending_metric_records_with<
     mut mark_failed: MarkFailed,
     mut mark_undeliverable: MarkUndeliverable,
     mut upload_batch: UploadBatch,
-    deadline: std::time::Instant,
-    max_batch_size: usize,
+    budget: PendingFlushBudget,
 ) -> Result<PendingMetricsFlushResult, GitAiError>
 where
     DequeueBatch: FnMut(usize) -> Result<Vec<MetricRecord>, GitAiError>,
@@ -813,8 +1124,31 @@ where
     let mut result = PendingMetricsFlushResult::default();
     let config = Config::fresh();
 
-    while std::time::Instant::now() < deadline {
-        let batch = dequeue_batch(max_batch_size)?;
+    // A paced (periodic, background) drain processes a bounded slice of the
+    // backlog per flush cycle: pending rows are durable, the next tick (3s)
+    // resumes, and an awaited flush never queues behind a long paced drain.
+    // The cap counts iterations, not uploads — a backlog of filtered or
+    // malformed records must not loop unpaced to the deadline. Paced batches
+    // are also smaller: each iteration's live set (dequeued rows, parsed
+    // events, serialized envelope) sets the process's RSS high-water mark,
+    // which a background drain must keep low — an awaited flush keeps the
+    // full envelope size.
+    const MAX_PACED_BATCHES_PER_CYCLE: usize = 16;
+    const PACED_BATCH_SIZE: usize = 250;
+    let mut iterations = 0usize;
+
+    while std::time::Instant::now() < budget.deadline {
+        if budget.paced && iterations >= MAX_PACED_BATCHES_PER_CYCLE {
+            break;
+        }
+        iterations += 1;
+        let batch_started = std::time::Instant::now();
+        let batch_size = if budget.paced {
+            budget.max_batch_size.min(PACED_BATCH_SIZE)
+        } else {
+            budget.max_batch_size
+        };
+        let batch = dequeue_batch(batch_size)?;
         if batch.is_empty() {
             break;
         }
@@ -849,6 +1183,7 @@ where
         }
 
         if events.is_empty() {
+            pace_background_flush(budget.paced, batch_started.elapsed());
             continue;
         }
 
@@ -913,13 +1248,18 @@ where
 
         result.uploaded_events += successful_ids.len();
         result.uploaded_batches += 1;
+        pace_background_flush(budget.paced, batch_started.elapsed());
     }
 
     Ok(result)
 }
 
 fn should_deliver_metric_event(config: &Config, event: &MetricEvent) -> bool {
-    if event.event_id != MetricEventId::SessionEvent as u16 {
+    // Transcript-derived events keep flowing for sessions tracked before a
+    // repo was excluded, so they get the same upload-time repo gate.
+    let transcript_derived = event.event_id == MetricEventId::SessionEvent as u16
+        || event.event_id == MetricEventId::TokenUsage as u16;
+    if !transcript_derived {
         return true;
     }
 
@@ -944,8 +1284,12 @@ fn daemon_run_id() -> &'static str {
     DAEMON_RUN_ID.get_or_init(crate::uuid::generate_v4).as_str()
 }
 
-fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
-    let mut fields = BTreeMap::new();
+/// Builds the heartbeat from the daemon's health `fields`; the contract fields
+/// (`uptime_seconds`, `os`, `arch`) are set last and always win.
+fn daemon_heartbeat_event(
+    uptime: std::time::Duration,
+    mut fields: BTreeMap<String, DaemonLogFieldValue>,
+) -> DaemonLogEvent {
     fields.insert(
         "uptime_seconds".to_string(),
         DaemonLogFieldValue::from(uptime.as_secs()),
@@ -1342,6 +1686,9 @@ pub fn flush_notes() {
     use crate::api::types::{NoteEntry, NotesUploadRequest};
     use crate::config::NotesBackendKind;
 
+    // Skip reasons log at debug: the flush loop lands here every 3 seconds
+    // for daemons whose notes backend never uploads (GitNotes default,
+    // missing URL, unauthenticated), so anything louder floods the log.
     let cfg = Config::fresh();
     if cfg.notes_backend_kind() != NotesBackendKind::Http {
         tracing::debug!("notes: skipping flush, backend is not Http");
@@ -1388,6 +1735,18 @@ pub fn flush_notes() {
         return;
     }
 
+    // Test hook: simulate a slow notes upload while the dequeued rows are
+    // locked (`processing_started_at`), the window an awaited flush must not
+    // certify across.
+    #[cfg(feature = "test-support")]
+    if let Ok(raw_stall_ms) = std::env::var("GIT_AI_TEST_NOTES_UPLOAD_STALL_MS")
+        && let Ok(stall_ms) = raw_stall_ms.parse::<u64>()
+        && stall_ms > 0
+    {
+        tracing::warn!("test notes upload stall engaged");
+        std::thread::sleep(std::time::Duration::from_millis(stall_ms));
+    }
+
     let commit_shas: Vec<String> = pending.iter().map(|p| p.commit_sha.clone()).collect();
 
     let entries: Vec<NoteEntry> = pending
@@ -1402,7 +1761,8 @@ pub fn flush_notes() {
 
     match client.upload_notes(request) {
         Ok(resp) => {
-            tracing::debug!(
+            tracing::info!(
+                batch = commit_shas.len(),
                 success = resp.success_count,
                 failure = resp.failure_count,
                 "notes: uploaded batch"
@@ -1608,6 +1968,34 @@ mod tests {
             .as_secs()
     }
 
+    #[tokio::test]
+    async fn metrics_persist_queue_drops_loudly_when_full() {
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (metrics_reingest_tx, _metrics_reingest_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (metrics_persist_tx, _persist_rx) = tokio::sync::mpsc::channel(1);
+        let handle = DaemonTelemetryWorkerHandle {
+            buffer: Arc::new(Mutex::new(TelemetryBuffer::new())),
+            flush_tx,
+            metrics_reingest_tx,
+            metrics_persist_tx,
+        };
+        let event: MetricEvent = serde_json::from_str(&event_json(1)).unwrap();
+
+        let before = metric_batches_dropped();
+        handle.enqueue_metrics_persist(vec![event.clone()]);
+        assert_eq!(
+            metric_batches_dropped(),
+            before,
+            "a batch within capacity must not be dropped"
+        );
+        handle.enqueue_metrics_persist(vec![event]);
+        assert_eq!(
+            metric_batches_dropped(),
+            before + 1,
+            "a batch past capacity must be dropped and counted"
+        );
+    }
+
     #[test]
     fn telemetry_flush_schedule_is_measured_from_completion() {
         let completed_at = tokio::time::Instant::now();
@@ -1630,6 +2018,24 @@ mod tests {
         let mut buffer = TelemetryBuffer::new();
 
         assert!(take_telemetry_flush_snapshot(&mut buffer, FlushMode::Await).is_some());
+    }
+
+    #[test]
+    fn reingest_without_flush_request_uses_periodic_flush_mode() {
+        assert_eq!(flush_mode_for_requests(false), FlushMode::Periodic);
+        assert_eq!(flush_mode_for_requests(true), FlushMode::Await);
+    }
+
+    #[tokio::test]
+    async fn noop_worker_reingest_fails_instead_of_hanging() {
+        let handle = DaemonTelemetryWorkerHandle::new_noop();
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), handle.reingest_metrics(None, None))
+                .await
+                .expect("noop reingest should return promptly");
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1751,8 +2157,11 @@ mod tests {
                     Ok(MetricsUploadResponse { errors: vec![] })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            1,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -1769,6 +2178,113 @@ mod tests {
         assert_eq!(
             db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
             2
+        );
+    }
+
+    #[test]
+    fn paced_flush_drains_a_bounded_slice_per_cycle() {
+        // A paced (periodic background) drain must stop after its per-cycle
+        // batch cap: pending rows are durable and resume next tick, and an
+        // awaited flush never queues behind a long paced drain. An unpaced
+        // (awaited) drain with the same backlog runs it dry.
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
+        let events: Vec<String> = (0..20).map(|i| event_json(now_ts() - 30 + i)).collect();
+        db.borrow_mut().insert_events(&events).unwrap();
+
+        let run = |pace: bool| {
+            flush_pending_metric_records_with(
+                {
+                    let db = Rc::clone(&db);
+                    move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+                },
+                {
+                    let db = Rc::clone(&db);
+                    move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+                },
+                {
+                    let db = Rc::clone(&db);
+                    move |ids, err| {
+                        let now = unix_now();
+                        db.borrow_mut()
+                            .mark_records_failed(ids, &err.to_string(), now)
+                    }
+                },
+                {
+                    let db = Rc::clone(&db);
+                    move |records| {
+                        db.borrow_mut()
+                            .mark_records_undeliverable(records, unix_now())
+                    }
+                },
+                |_batch| Ok(MetricsUploadResponse { errors: vec![] }),
+                PendingFlushBudget {
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    max_batch_size: 1,
+                    paced: pace,
+                },
+            )
+            .unwrap()
+        };
+
+        let paced = run(true);
+        assert_eq!(paced.uploaded_batches, 16, "paced cycle stops at its cap");
+        assert_eq!(db.borrow().count().unwrap(), 4, "the rest stays pending");
+
+        let drained = run(false);
+        assert_eq!(drained.uploaded_batches, 4, "unpaced drain runs dry");
+        assert_eq!(db.borrow().count().unwrap(), 0);
+    }
+
+    #[test]
+    fn paced_flush_caps_iterations_even_when_nothing_uploads() {
+        // A backlog of malformed records uploads nothing, so a cap counted
+        // in uploaded batches would never trip and the drain would loop
+        // unpaced to its 30s deadline. The cap counts iterations.
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
+        let rows: Vec<String> = (0..20).map(|_| "not json".to_string()).collect();
+        db.borrow_mut().insert_events(&rows).unwrap();
+
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            |_batch| Ok(MetricsUploadResponse { errors: vec![] }),
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.uploaded_batches, 0);
+        assert_eq!(result.invalid_records, 16, "one invalid row per iteration");
+        assert_eq!(
+            db.borrow().count().unwrap(),
+            4,
+            "the rest waits for the next cycle"
         );
     }
 
@@ -1815,8 +2331,11 @@ mod tests {
                     Ok(MetricsUploadResponse { errors: vec![] })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -1886,8 +2405,11 @@ mod tests {
                     })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -1962,8 +2484,11 @@ mod tests {
                     ],
                 })
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2029,8 +2554,11 @@ mod tests {
                     }],
                 })
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         );
 
         assert!(result.is_err());
@@ -2074,8 +2602,11 @@ mod tests {
                 }
             },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         );
 
         assert!(result.is_err());
@@ -2117,8 +2648,11 @@ mod tests {
                 }
             },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            1,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: false,
+            },
         );
         assert!(failed.is_err());
         assert_eq!(db.borrow().count_retryable().unwrap(), 0);
@@ -2163,8 +2697,11 @@ mod tests {
                     Ok(MetricsUploadResponse { errors: vec![] })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            1,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2352,7 +2889,7 @@ mod tests {
 
     #[test]
     fn daemon_heartbeat_event_uses_upload_contract_shape() {
-        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900));
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), BTreeMap::new());
 
         assert!(event.id.is_some());
         assert_eq!(event.kind, DaemonLogKind::Heartbeat);
@@ -2362,6 +2899,43 @@ mod tests {
         assert_eq!(
             event.fields.get("uptime_seconds"),
             Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert!(event.fields.contains_key("os"));
+        assert!(event.fields.contains_key("arch"));
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_merges_health_fields_and_keeps_contract_fields() {
+        let mut health = BTreeMap::new();
+        health.insert(
+            "sequencer_stalled".to_string(),
+            DaemonLogFieldValue::from(false),
+        );
+        health.insert(
+            "trace_roots_open_mutating".to_string(),
+            DaemonLogFieldValue::from(2_u64),
+        );
+        // A provider must not be able to shadow the contract fields.
+        health.insert(
+            "uptime_seconds".to_string(),
+            DaemonLogFieldValue::from(1_u64),
+        );
+
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), health);
+
+        assert_eq!(event.kind, DaemonLogKind::Heartbeat);
+        assert_eq!(event.message, "alive");
+        assert_eq!(
+            event.fields.get("uptime_seconds"),
+            Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert_eq!(
+            event.fields.get("sequencer_stalled"),
+            Some(&DaemonLogFieldValue::from(false))
+        );
+        assert_eq!(
+            event.fields.get("trace_roots_open_mutating"),
+            Some(&DaemonLogFieldValue::from(2_u64))
         );
         assert!(event.fields.contains_key("os"));
         assert!(event.fields.contains_key("arch"));

@@ -312,6 +312,9 @@ struct StreamWorker {
     sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
     drain_rx: tokio::sync::mpsc::UnboundedReceiver<DrainRequest>,
     sweep_trigger_gate: SweepTriggerGate,
+    /// Pinged after a transcript task succeeds so token usage can be
+    /// recomputed for that session (cheap non-blocking send).
+    token_usage_worker: Option<crate::daemon::token_usage_worker::TokenUsageWorkerHandle>,
 }
 
 impl StreamWorker {
@@ -326,6 +329,7 @@ impl StreamWorker {
         sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepRequest>,
         drain_rx: tokio::sync::mpsc::UnboundedReceiver<DrainRequest>,
         sweep_trigger_gate: SweepTriggerGate,
+        token_usage_worker: Option<crate::daemon::token_usage_worker::TokenUsageWorkerHandle>,
     ) -> Self {
         let sweep_coordinator =
             crate::daemon::sweep_coordinator::SweepCoordinator::new(streams_db.clone());
@@ -343,6 +347,7 @@ impl StreamWorker {
             sweep_rx,
             drain_rx,
             sweep_trigger_gate,
+            token_usage_worker,
         }
     }
 
@@ -375,13 +380,9 @@ impl StreamWorker {
             } else {
                 self.next_delayed_task_at()
             };
-            let retry_sleep = async {
-                if let Some(at) = next_retry_at {
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            };
+            let retry_sleep = crate::daemon::sleep_until_or_pending(
+                next_retry_at.map(tokio::time::Instant::from_std),
+            );
 
             tokio::select! {
                 _ = self.shutdown_notify.notified() => {
@@ -984,7 +985,8 @@ impl StreamWorker {
         // Handle result
         match result {
             Ok(Ok(())) => {
-                // Success - task is done
+                // Success - task is done.
+                self.notify_token_usage(&task);
             }
             Ok(Err(e)) => {
                 // Error - handle retry logic
@@ -1342,8 +1344,22 @@ impl StreamWorker {
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, session_id = %task.session_id, "drain task processing error");
                 }
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    self.notify_token_usage(&task);
+                }
             }
+        }
+    }
+
+    /// On transcript success, let the token-usage worker pick up the freshly
+    /// ingested bytes (cheap non-blocking send). Called from every task
+    /// success arm — including the drain path — so the await barrier, which
+    /// drains token usage right after transcripts, always sees the ping.
+    fn notify_token_usage(&self, task: &ProcessingTask) {
+        if task.stream_kind == "transcript"
+            && let Some(token_usage) = &self.token_usage_worker
+        {
+            token_usage.notify_stream_processed(&task.session_id, &task.tool, &task.canonical_path);
         }
     }
 
@@ -1379,6 +1395,7 @@ pub fn spawn_stream_worker(
     streams_db: Arc<StreamsDatabase>,
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_notify: Arc<Notify>,
+    token_usage_worker: Option<crate::daemon::token_usage_worker::TokenUsageWorkerHandle>,
 ) -> StreamWorkerHandle {
     let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
     let (sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1395,6 +1412,7 @@ pub fn spawn_stream_worker(
         sweep_rx,
         drain_rx,
         sweep_trigger_gate.clone(),
+        token_usage_worker,
     );
 
     tokio::spawn(async move {
@@ -1492,6 +1510,7 @@ mod scheduling_tests {
             sweep_rx,
             drain_rx,
             sweep_trigger_gate,
+            None,
         );
         (temp, worker, shutdown, checkpoint_tx)
     }
@@ -1669,6 +1688,7 @@ mod subagent_sweep_tests {
             sweep_rx,
             drain_rx,
             SweepTriggerGate::new(),
+            None,
         )
     }
 

@@ -167,6 +167,11 @@ pub struct Config {
     allow_repositories: Vec<Pattern>,
     #[serde(serialize_with = "serialize_patterns")]
     exclude_repositories: Vec<Pattern>,
+    /// Path globs (POSIX form of a repository's canonical common dir) the
+    /// untraced-commit fixup leaves alone, on top of the OS temp roots. Only
+    /// the fixup consults this; it is not a global repository exclusion.
+    #[serde(serialize_with = "serialize_patterns")]
+    untraced_fixup_ignored_paths: Vec<Pattern>,
     telemetry_oss_disabled: bool,
     telemetry_enterprise_dsn: Option<String>,
     disable_version_checks: bool,
@@ -235,6 +240,8 @@ pub struct FileConfig {
     pub allow_repositories: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_repositories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untraced_fixup_ignored_paths: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_oss: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,6 +327,8 @@ pub struct ConfigPatch {
     pub git_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_prompts_in_repositories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untraced_fixup_ignored_paths: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_oss_disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,6 +421,12 @@ impl Config {
     /// Returns the command to invoke git.
     pub fn git_cmd(&self) -> &str {
         &self.git_path
+    }
+
+    /// Path globs the untraced-commit fixup ignores (see
+    /// `daemon::untraced_fixup_ignore`); not a global repository exclusion.
+    pub fn untraced_fixup_ignored_paths(&self) -> &[Pattern] {
+        &self.untraced_fixup_ignored_paths
     }
 
     pub fn has_repository_filters(&self) -> bool {
@@ -637,10 +652,9 @@ impl Config {
         self.notes_backend.kind
     }
 
-    /// Returns the configured notes backend URL, or `None` if unset.
+    /// Returns the notes backend URL.
     ///
-    /// Callers must handle `None` explicitly — typically by skipping the operation when the HTTP backend
-    /// is enabled but no URL has been configured.
+    /// When no dedicated URL is configured, this falls back to `api_base_url`.
     pub fn notes_backend_url(&self) -> Option<&str> {
         self.notes_backend.backend_url.as_deref()
     }
@@ -1026,6 +1040,13 @@ fn build_config() -> Config {
                 .ok()
         })
         .collect();
+    let untraced_fixup_ignored_paths = parse_path_patterns(
+        "untraced_fixup_ignored_paths",
+        file_cfg
+            .as_ref()
+            .and_then(|c| c.untraced_fixup_ignored_paths.clone())
+            .unwrap_or_default(),
+    );
     let telemetry_oss_disabled = file_cfg
         .as_ref()
         .and_then(|c| c.telemetry_oss.clone())
@@ -1177,13 +1198,24 @@ fn build_config() -> Config {
             _ => None,
         });
     let url_from_env = env::var("GIT_AI_NOTES_BACKEND_URL").ok();
+    let notes_backend_is_configured =
+        kind_from_env.is_some() || url_from_env.is_some() || file_backend.is_some();
+
+    let default_kind = if api_key.is_some() && !notes_backend_is_configured {
+        NotesBackendKind::Http
+    } else {
+        NotesBackendKind::GitNotes
+    };
 
     let notes_backend = NotesBackendConfig {
         kind: kind_from_env
             .or_else(|| file_backend.as_ref().map(|b| b.kind))
-            .unwrap_or(NotesBackendKind::GitNotes),
-        backend_url: url_from_env
-            .or_else(|| file_backend.as_ref().and_then(|b| b.backend_url.clone())),
+            .unwrap_or(default_kind),
+        backend_url: Some(resolve_notes_backend_url(
+            url_from_env,
+            file_backend.as_ref(),
+            &api_base_url,
+        )),
     };
 
     // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
@@ -1238,6 +1270,7 @@ fn build_config() -> Config {
             include_prompts_in_repositories,
             allow_repositories,
             exclude_repositories,
+            untraced_fixup_ignored_paths,
             telemetry_oss_disabled,
             telemetry_enterprise_dsn,
             disable_version_checks,
@@ -1272,6 +1305,7 @@ fn build_config() -> Config {
         include_prompts_in_repositories,
         allow_repositories,
         exclude_repositories,
+        untraced_fixup_ignored_paths,
         telemetry_oss_disabled,
         telemetry_enterprise_dsn,
         disable_version_checks,
@@ -1295,6 +1329,16 @@ fn build_config() -> Config {
         max_checkpoint_total_lines,
         daemon_memory_limit_mb,
     }
+}
+
+fn resolve_notes_backend_url(
+    url_from_env: Option<String>,
+    file_backend: Option<&NotesBackendConfig>,
+    api_base_url: &str,
+) -> String {
+    url_from_env
+        .or_else(|| file_backend.and_then(|backend| backend.backend_url.clone()))
+        .unwrap_or_else(|| api_base_url.to_string())
 }
 
 fn normalize_daemon_memory_limit_mb(limit_mb: u64) -> Option<u64> {
@@ -1677,6 +1721,23 @@ pub fn is_real_git_candidate(p: &Path) -> bool {
     is_executable(p) && !path_is_git_ai_binary(p)
 }
 
+/// Glob patterns from a config list, warning about and dropping invalid ones.
+fn parse_path_patterns(key: &str, patterns: Vec<String>) -> Vec<Pattern> {
+    patterns
+        .into_iter()
+        .filter_map(|pattern_str| {
+            Pattern::new(&pattern_str)
+                .map_err(|e| {
+                    eprintln!(
+                        "Warning: Invalid glob pattern in {key} '{}': {}",
+                        pattern_str, e
+                    );
+                })
+                .ok()
+        })
+        .collect()
+}
+
 /// Apply test config patch from environment variable (test-only)
 /// Reads GIT_AI_TEST_CONFIG_PATCH env var containing JSON and applies patches to config
 #[cfg(any(test, feature = "test-support"))]
@@ -1701,6 +1762,10 @@ fn apply_test_config_patch(config: &mut Config) {
                             .ok()
                     })
                     .collect();
+        }
+        if let Some(patterns) = patch.untraced_fixup_ignored_paths {
+            config.untraced_fixup_ignored_paths =
+                parse_path_patterns("untraced_fixup_ignored_paths", patterns);
         }
         if let Some(telemetry_oss_disabled) = patch.telemetry_oss_disabled {
             config.telemetry_oss_disabled = telemetry_oss_disabled;
@@ -1792,6 +1857,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|s| Pattern::new(&s).ok())
                 .collect(),
+            untraced_fixup_ignored_paths: vec![],
             telemetry_oss_disabled: false,
             telemetry_enterprise_dsn: None,
             disable_version_checks: false,
@@ -2028,6 +2094,27 @@ mod tests {
 
     // Tests for exclude_prompts_in_repositories (blacklist)
 
+    #[test]
+    fn untraced_fixup_ignored_paths_parse_from_file_config_and_drop_invalid_globs() {
+        let parsed = parse_path_patterns(
+            "untraced_fixup_ignored_paths",
+            vec![
+                "*/agent-scratch-*/.git".to_string(),
+                "[unclosed".to_string(),
+            ],
+        );
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].matches("/home/me/work/agent-scratch-1/.git"));
+        assert!(!parsed[0].matches("/home/me/work/real/.git"));
+
+        let file: FileConfig =
+            serde_json::from_str(r#"{"untraced_fixup_ignored_paths": ["*/scratch/**"]}"#).unwrap();
+        assert_eq!(
+            file.untraced_fixup_ignored_paths,
+            Some(vec!["*/scratch/**".to_string()])
+        );
+    }
+
     fn create_test_config_with_exclude_prompts(exclude_prompts_patterns: Vec<String>) -> Config {
         Config {
             git_path: "/usr/bin/git".to_string(),
@@ -2038,6 +2125,7 @@ mod tests {
             include_prompts_in_repositories: vec![],
             allow_repositories: vec![],
             exclude_repositories: vec![],
+            untraced_fixup_ignored_paths: vec![],
             telemetry_oss_disabled: false,
             telemetry_enterprise_dsn: None,
             disable_version_checks: false,
@@ -2187,6 +2275,7 @@ mod tests {
                 .collect(),
             allow_repositories: vec![],
             exclude_repositories: vec![],
+            untraced_fixup_ignored_paths: vec![],
             telemetry_oss_disabled: false,
             telemetry_enterprise_dsn: None,
             disable_version_checks: false,
@@ -2645,10 +2734,11 @@ mod tests {
     }
 
     #[test]
-    fn test_notes_backend_url_unset_returns_none() {
-        // When backend_url is absent, notes_backend_url() is None. Callers must handle the unconfigured case explicitly.
-        let config = create_test_config(vec![], vec![]);
-        assert_eq!(config.notes_backend_url(), None);
+    fn test_notes_backend_url_unset_falls_back_to_api_base_url() {
+        assert_eq!(
+            resolve_notes_backend_url(None, None, DEFAULT_API_BASE_URL),
+            DEFAULT_API_BASE_URL
+        );
     }
 
     #[test]

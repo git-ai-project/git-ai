@@ -1,9 +1,9 @@
 //! Event-specific value structs for metrics.
 
 use super::pos_encoded::{
-    PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
-    vec_u32_to_json,
+    PosEncoded, PosField, f64_to_json, sparse_get_f64, sparse_get_string, sparse_get_u32,
+    sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32, sparse_set, string_to_json,
+    u32_to_json, u64_to_json, vec_string_to_json, vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -32,6 +32,7 @@ pub mod committed_pos {
     pub const AUTHOR_TS: usize = 15; // u64 (git author timestamp, %at)
     pub const COMMIT_TS: usize = 16; // u64 (git committer timestamp, %ct)
     pub const PATCH_ID: usize = 17; // String (git patch-id --stable)
+    pub const COMMIT_SOURCE: usize = 18; // String (nullable; how the commit reached attribution)
 }
 
 /// Values for Event ID 1: committed
@@ -63,6 +64,7 @@ pub mod committed_pos {
 /// | 15 | author_ts | u64 |
 /// | 16 | commit_ts | u64 |
 /// | 17 | patch_id | String |
+/// | 18 | commit_source | String (nullable; e.g. `untraced_fixup`, null for traced commits) |
 #[derive(Debug, Clone, Default)]
 pub struct CommittedValues {
     // Scalar fields
@@ -84,6 +86,7 @@ pub struct CommittedValues {
     pub author_ts: PosField<u64>,
     pub commit_ts: PosField<u64>,
     pub patch_id: PosField<String>,
+    pub commit_source: PosField<String>,
 }
 
 impl CommittedValues {
@@ -242,6 +245,16 @@ impl CommittedValues {
         self.patch_id = Some(None);
         self
     }
+
+    pub fn commit_source(mut self, value: impl Into<String>) -> Self {
+        self.commit_source = Some(Some(value.into()));
+        self
+    }
+
+    pub fn commit_source_null(mut self) -> Self {
+        self.commit_source = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CommittedValues {
@@ -319,6 +332,11 @@ impl PosEncoded for CommittedValues {
             committed_pos::PATCH_ID,
             string_to_json(&self.patch_id),
         );
+        sparse_set(
+            &mut map,
+            committed_pos::COMMIT_SOURCE,
+            string_to_json(&self.commit_source),
+        );
 
         map
     }
@@ -344,6 +362,7 @@ impl PosEncoded for CommittedValues {
             author_ts: sparse_get_u64(arr, committed_pos::AUTHOR_TS),
             commit_ts: sparse_get_u64(arr, committed_pos::COMMIT_TS),
             patch_id: sparse_get_string(arr, committed_pos::PATCH_ID),
+            commit_source: sparse_get_string(arr, committed_pos::COMMIT_SOURCE),
         }
     }
 }
@@ -1047,10 +1066,134 @@ impl EventValues for CheckpointValues {
     }
 }
 
+/// Value positions for "daemon_ingest_anomaly" event.
+pub mod daemon_ingest_anomaly_pos {
+    pub const TRACE_PAYLOADS_DROPPED_QUEUE_FULL: usize = 0; // u64 - delta since last report
+    pub const TRACE_CONNECTIONS_DROPPED: usize = 1; // u64 - delta since last report
+    pub const TELEMETRY_METRIC_BATCHES_DROPPED: usize = 2; // u64 - delta since last report
+    pub const CHECKPOINTS_DROPPED: usize = 3; // u64 - delta since last report
+}
+
+/// Values for Event ID 8: daemon_ingest_anomaly
+///
+/// Emitted by the daemon's socket-health loop whenever trace payloads,
+/// trace connections, or telemetry metric batches were dropped since the
+/// previous report. Attribution loss must be loud, never silent.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | trace_payloads_dropped_queue_full | u64 |
+/// | 1 | trace_connections_dropped | u64 |
+/// | 2 | telemetry_metric_batches_dropped | u64 |
+/// | 3 | checkpoints_dropped | u64 |
+#[derive(Debug, Clone, Default)]
+pub struct DaemonIngestAnomalyValues {
+    pub trace_payloads_dropped_queue_full: PosField<u64>,
+    pub trace_connections_dropped: PosField<u64>,
+    pub telemetry_metric_batches_dropped: PosField<u64>,
+    pub checkpoints_dropped: PosField<u64>,
+}
+
+impl DaemonIngestAnomalyValues {
+    pub fn new(
+        trace_payloads_dropped_queue_full: u64,
+        trace_connections_dropped: u64,
+        telemetry_metric_batches_dropped: u64,
+        checkpoints_dropped: u64,
+    ) -> Self {
+        Self {
+            trace_payloads_dropped_queue_full: Some(Some(trace_payloads_dropped_queue_full)),
+            trace_connections_dropped: Some(Some(trace_connections_dropped)),
+            telemetry_metric_batches_dropped: Some(Some(telemetry_metric_batches_dropped)),
+            checkpoints_dropped: Some(Some(checkpoints_dropped)),
+        }
+    }
+}
+
+impl PosEncoded for DaemonIngestAnomalyValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+
+        sparse_set(
+            &mut map,
+            daemon_ingest_anomaly_pos::TRACE_PAYLOADS_DROPPED_QUEUE_FULL,
+            u64_to_json(&self.trace_payloads_dropped_queue_full),
+        );
+        sparse_set(
+            &mut map,
+            daemon_ingest_anomaly_pos::TRACE_CONNECTIONS_DROPPED,
+            u64_to_json(&self.trace_connections_dropped),
+        );
+        sparse_set(
+            &mut map,
+            daemon_ingest_anomaly_pos::TELEMETRY_METRIC_BATCHES_DROPPED,
+            u64_to_json(&self.telemetry_metric_batches_dropped),
+        );
+        sparse_set(
+            &mut map,
+            daemon_ingest_anomaly_pos::CHECKPOINTS_DROPPED,
+            u64_to_json(&self.checkpoints_dropped),
+        );
+
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            trace_payloads_dropped_queue_full: sparse_get_u64(
+                arr,
+                daemon_ingest_anomaly_pos::TRACE_PAYLOADS_DROPPED_QUEUE_FULL,
+            ),
+            trace_connections_dropped: sparse_get_u64(
+                arr,
+                daemon_ingest_anomaly_pos::TRACE_CONNECTIONS_DROPPED,
+            ),
+            telemetry_metric_batches_dropped: sparse_get_u64(
+                arr,
+                daemon_ingest_anomaly_pos::TELEMETRY_METRIC_BATCHES_DROPPED,
+            ),
+            checkpoints_dropped: sparse_get_u64(
+                arr,
+                daemon_ingest_anomaly_pos::CHECKPOINTS_DROPPED,
+            ),
+        }
+    }
+}
+
+impl EventValues for DaemonIngestAnomalyValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::DaemonIngestAnomaly
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn daemon_ingest_anomaly_values_round_trip() {
+        use super::PosEncoded;
+
+        let values = DaemonIngestAnomalyValues::new(3, 1, 7, 2);
+        let sparse = PosEncoded::to_sparse(&values);
+        let decoded = <DaemonIngestAnomalyValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(decoded.trace_payloads_dropped_queue_full, Some(Some(3)));
+        assert_eq!(decoded.trace_connections_dropped, Some(Some(1)));
+        assert_eq!(decoded.telemetry_metric_batches_dropped, Some(Some(7)));
+        assert_eq!(decoded.checkpoints_dropped, Some(Some(2)));
+        assert_eq!(DaemonIngestAnomalyValues::event_id() as u16, 8);
+    }
 
     #[test]
     fn test_committed_values_builder() {
@@ -1253,10 +1396,19 @@ mod tests {
             .commit_body_null()
             .author_ts(1700000100)
             .commit_ts(1700000200)
-            .patch_id("stable-patch-id");
+            .patch_id("stable-patch-id")
+            .commit_source("untraced_fixup");
 
         let sparse = PosEncoded::to_sparse(&original);
+        assert_eq!(
+            sparse.get("18"),
+            Some(&Value::String("untraced_fixup".to_string()))
+        );
         let restored = <CommittedValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(
+            restored.commit_source,
+            Some(Some("untraced_fixup".to_string()))
+        );
 
         assert_eq!(restored.human_additions, Some(Some(25)));
         assert_eq!(restored.first_checkpoint_ts, Some(Some(1700000000)));
@@ -1268,6 +1420,19 @@ mod tests {
         assert_eq!(restored.author_ts, Some(Some(1700000100)));
         assert_eq!(restored.commit_ts, Some(Some(1700000200)));
         assert_eq!(restored.patch_id, Some(Some("stable-patch-id".to_string())));
+    }
+
+    #[test]
+    fn test_committed_values_commit_source_null_for_traced_commits() {
+        use super::PosEncoded;
+
+        let unset = PosEncoded::to_sparse(&CommittedValues::new());
+        assert_eq!(unset.get("18"), None);
+
+        let traced = PosEncoded::to_sparse(&CommittedValues::new().commit_source_null());
+        assert_eq!(traced.get("18"), Some(&Value::Null));
+        let restored = <CommittedValues as PosEncoded>::from_sparse(&traced);
+        assert_eq!(restored.commit_source, Some(None));
     }
 
     #[test]
@@ -2218,5 +2383,451 @@ mod session_event_tests {
     fn test_otel_trace_values_event_id() {
         assert_eq!(OtelTraceValues::event_id(), MetricEventId::OtelTrace);
         assert_eq!(OtelTraceValues::event_id() as u16, 6);
+    }
+}
+
+/// Value positions for "token_usage" event.
+pub mod token_usage_pos {
+    pub const BUCKET_TS: usize = 0; // u64 - 5-minute UTC bucket start (unix seconds)
+    pub const INPUT_TOKENS: usize = 1; // u64
+    pub const OUTPUT_TOKENS: usize = 2; // u64
+    pub const CACHE_READ_TOKENS: usize = 3; // u64
+    pub const CACHE_WRITE_TOKENS: usize = 4; // u64
+    pub const TOTAL_TOKENS: usize = 5; // u64
+    pub const REASONING_OUTPUT_TOKENS: usize = 6; // u64 - subset of output, agents that report it
+    pub const EST_COST_MICRO_USD: usize = 7; // u64 - estimated cost in 1e-6 USD
+    pub const CREDITS: usize = 8; // f64 - reserved for credit-based agents
+    pub const MESSAGE_COUNT: usize = 9; // u32 - deduplicated entries in the bucket
+    pub const EMITTED_SEQ: usize = 10; // u64 - per-bucket emission revision
+    pub const SPEED: usize = 11; // u32 - bucket key dimension: 0 standard, 1 fast
+    pub const SPEED_INFERRED: usize = 12; // u32 0/1 - any entry's tier unrecorded (config/default)
+    pub const CACHE_WRITE_1H_TOKENS: usize = 13; // u64 - 1h-TTL portion of cache_write_tokens
+    pub const LONG_CONTEXT_INPUT_TOKENS: usize = 14; // u64 - portion billed at long-context rates
+    pub const LONG_CONTEXT_OUTPUT_TOKENS: usize = 15; // u64
+    pub const LONG_CONTEXT_CACHE_READ_TOKENS: usize = 16; // u64
+    pub const LONG_CONTEXT_CACHE_WRITE_TOKENS: usize = 17; // u64
+    pub const LONG_CONTEXT_CACHE_WRITE_1H_TOKENS: usize = 18; // u64
+    pub const TRANSCRIPT_COST_MICRO_USD: usize = 19; // u64 - portion of cost from transcript costUSD
+}
+
+/// Values for Event ID 9: token_usage
+///
+/// One event per (session_id, model, speed, bucket_ts): the deduplicated
+/// token usage and estimated cost of a 5-minute UTC bucket. The server
+/// upserts on that key keeping the highest emitted_seq (a strictly
+/// increasing per-bucket revision), so a bucket is re-emitted whenever its
+/// aggregate changes (including corrections downward and drops to zero) and
+/// same-second re-emissions cannot tie on the u32-second event_ts. Uses
+/// EventAttributes for standard metadata (repo_url, tool, model, session
+/// ids, etc.); the model attribute is the bucket's model, and the pricing
+/// catalog id rides its dedicated `pricing_catalog` attribute.
+///
+/// Positions 11-19 carry what a different pricing sheet needs to recompute
+/// the cost: the speed dimension and inference flag, the 1h cache-write
+/// split, the long-context token splits (tokens of requests that selected
+/// their model's long-context tier — whole-request selection happens client
+/// side; base-tier tokens are the totals minus these), and the
+/// non-recomputable transcript-priced portion of the cost.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | bucket_ts | u64 |
+/// | 1 | input_tokens | u64 |
+/// | 2 | output_tokens | u64 |
+/// | 3 | cache_read_tokens | u64 |
+/// | 4 | cache_write_tokens | u64 |
+/// | 5 | total_tokens | u64 |
+/// | 6 | reasoning_output_tokens | u64 (unset when the agent reports none) |
+/// | 7 | est_cost_micro_usd | u64 |
+/// | 8 | credits | f64 (reserved, unset) |
+/// | 9 | message_count | u32 |
+/// | 10 | emitted_seq | u64 |
+/// | 11 | speed | u32 (0 standard, 1 fast; part of the bucket key) |
+/// | 12 | speed_inferred | u32 (0/1) |
+/// | 13 | cache_write_1h_tokens | u64 |
+/// | 14 | long_context_input_tokens | u64 |
+/// | 15 | long_context_output_tokens | u64 |
+/// | 16 | long_context_cache_read_tokens | u64 |
+/// | 17 | long_context_cache_write_tokens | u64 |
+/// | 18 | long_context_cache_write_1h_tokens | u64 |
+/// | 19 | transcript_cost_micro_usd | u64 |
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsageValues {
+    pub bucket_ts: PosField<u64>,
+    pub input_tokens: PosField<u64>,
+    pub output_tokens: PosField<u64>,
+    pub cache_read_tokens: PosField<u64>,
+    pub cache_write_tokens: PosField<u64>,
+    pub total_tokens: PosField<u64>,
+    pub reasoning_output_tokens: PosField<u64>,
+    pub est_cost_micro_usd: PosField<u64>,
+    pub credits: PosField<f64>,
+    pub message_count: PosField<u32>,
+    pub emitted_seq: PosField<u64>,
+    pub speed: PosField<u32>,
+    pub speed_inferred: PosField<u32>,
+    pub cache_write_1h_tokens: PosField<u64>,
+    pub long_context_input_tokens: PosField<u64>,
+    pub long_context_output_tokens: PosField<u64>,
+    pub long_context_cache_read_tokens: PosField<u64>,
+    pub long_context_cache_write_tokens: PosField<u64>,
+    pub long_context_cache_write_1h_tokens: PosField<u64>,
+    pub transcript_cost_micro_usd: PosField<u64>,
+}
+
+impl TokenUsageValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bucket_ts(mut self, value: u64) -> Self {
+        self.bucket_ts = Some(Some(value));
+        self
+    }
+
+    pub fn input_tokens(mut self, value: u64) -> Self {
+        self.input_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn output_tokens(mut self, value: u64) -> Self {
+        self.output_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn cache_read_tokens(mut self, value: u64) -> Self {
+        self.cache_read_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn cache_write_tokens(mut self, value: u64) -> Self {
+        self.cache_write_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn total_tokens(mut self, value: u64) -> Self {
+        self.total_tokens = Some(Some(value));
+        self
+    }
+
+    /// Left unset (not zero) when the agent reports no reasoning tokens.
+    pub fn reasoning_output_tokens_opt(mut self, value: Option<u64>) -> Self {
+        if let Some(value) = value {
+            self.reasoning_output_tokens = Some(Some(value));
+        }
+        self
+    }
+
+    pub fn est_cost_micro_usd(mut self, value: u64) -> Self {
+        self.est_cost_micro_usd = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn credits(mut self, value: f64) -> Self {
+        self.credits = Some(Some(value));
+        self
+    }
+
+    pub fn message_count(mut self, value: u32) -> Self {
+        self.message_count = Some(Some(value));
+        self
+    }
+
+    pub fn emitted_seq(mut self, value: u64) -> Self {
+        self.emitted_seq = Some(Some(value));
+        self
+    }
+
+    pub fn speed(mut self, value: u32) -> Self {
+        self.speed = Some(Some(value));
+        self
+    }
+
+    pub fn speed_inferred(mut self, value: bool) -> Self {
+        self.speed_inferred = Some(Some(value as u32));
+        self
+    }
+
+    pub fn cache_write_1h_tokens(mut self, value: u64) -> Self {
+        self.cache_write_1h_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn long_context_input_tokens(mut self, value: u64) -> Self {
+        self.long_context_input_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn long_context_output_tokens(mut self, value: u64) -> Self {
+        self.long_context_output_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn long_context_cache_read_tokens(mut self, value: u64) -> Self {
+        self.long_context_cache_read_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn long_context_cache_write_tokens(mut self, value: u64) -> Self {
+        self.long_context_cache_write_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn long_context_cache_write_1h_tokens(mut self, value: u64) -> Self {
+        self.long_context_cache_write_1h_tokens = Some(Some(value));
+        self
+    }
+
+    pub fn transcript_cost_micro_usd(mut self, value: u64) -> Self {
+        self.transcript_cost_micro_usd = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for TokenUsageValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            token_usage_pos::BUCKET_TS,
+            u64_to_json(&self.bucket_ts),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::INPUT_TOKENS,
+            u64_to_json(&self.input_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::OUTPUT_TOKENS,
+            u64_to_json(&self.output_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::CACHE_READ_TOKENS,
+            u64_to_json(&self.cache_read_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::CACHE_WRITE_TOKENS,
+            u64_to_json(&self.cache_write_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::TOTAL_TOKENS,
+            u64_to_json(&self.total_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::REASONING_OUTPUT_TOKENS,
+            u64_to_json(&self.reasoning_output_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::EST_COST_MICRO_USD,
+            u64_to_json(&self.est_cost_micro_usd),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::CREDITS,
+            f64_to_json(&self.credits),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::MESSAGE_COUNT,
+            u32_to_json(&self.message_count),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::EMITTED_SEQ,
+            u64_to_json(&self.emitted_seq),
+        );
+        sparse_set(&mut map, token_usage_pos::SPEED, u32_to_json(&self.speed));
+        sparse_set(
+            &mut map,
+            token_usage_pos::SPEED_INFERRED,
+            u32_to_json(&self.speed_inferred),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::CACHE_WRITE_1H_TOKENS,
+            u64_to_json(&self.cache_write_1h_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::LONG_CONTEXT_INPUT_TOKENS,
+            u64_to_json(&self.long_context_input_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::LONG_CONTEXT_OUTPUT_TOKENS,
+            u64_to_json(&self.long_context_output_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::LONG_CONTEXT_CACHE_READ_TOKENS,
+            u64_to_json(&self.long_context_cache_read_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::LONG_CONTEXT_CACHE_WRITE_TOKENS,
+            u64_to_json(&self.long_context_cache_write_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::LONG_CONTEXT_CACHE_WRITE_1H_TOKENS,
+            u64_to_json(&self.long_context_cache_write_1h_tokens),
+        );
+        sparse_set(
+            &mut map,
+            token_usage_pos::TRANSCRIPT_COST_MICRO_USD,
+            u64_to_json(&self.transcript_cost_micro_usd),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            bucket_ts: sparse_get_u64(arr, token_usage_pos::BUCKET_TS),
+            input_tokens: sparse_get_u64(arr, token_usage_pos::INPUT_TOKENS),
+            output_tokens: sparse_get_u64(arr, token_usage_pos::OUTPUT_TOKENS),
+            cache_read_tokens: sparse_get_u64(arr, token_usage_pos::CACHE_READ_TOKENS),
+            cache_write_tokens: sparse_get_u64(arr, token_usage_pos::CACHE_WRITE_TOKENS),
+            total_tokens: sparse_get_u64(arr, token_usage_pos::TOTAL_TOKENS),
+            reasoning_output_tokens: sparse_get_u64(arr, token_usage_pos::REASONING_OUTPUT_TOKENS),
+            est_cost_micro_usd: sparse_get_u64(arr, token_usage_pos::EST_COST_MICRO_USD),
+            credits: sparse_get_f64(arr, token_usage_pos::CREDITS),
+            message_count: sparse_get_u32(arr, token_usage_pos::MESSAGE_COUNT),
+            emitted_seq: sparse_get_u64(arr, token_usage_pos::EMITTED_SEQ),
+            speed: sparse_get_u32(arr, token_usage_pos::SPEED),
+            speed_inferred: sparse_get_u32(arr, token_usage_pos::SPEED_INFERRED),
+            cache_write_1h_tokens: sparse_get_u64(arr, token_usage_pos::CACHE_WRITE_1H_TOKENS),
+            long_context_input_tokens: sparse_get_u64(
+                arr,
+                token_usage_pos::LONG_CONTEXT_INPUT_TOKENS,
+            ),
+            long_context_output_tokens: sparse_get_u64(
+                arr,
+                token_usage_pos::LONG_CONTEXT_OUTPUT_TOKENS,
+            ),
+            long_context_cache_read_tokens: sparse_get_u64(
+                arr,
+                token_usage_pos::LONG_CONTEXT_CACHE_READ_TOKENS,
+            ),
+            long_context_cache_write_tokens: sparse_get_u64(
+                arr,
+                token_usage_pos::LONG_CONTEXT_CACHE_WRITE_TOKENS,
+            ),
+            long_context_cache_write_1h_tokens: sparse_get_u64(
+                arr,
+                token_usage_pos::LONG_CONTEXT_CACHE_WRITE_1H_TOKENS,
+            ),
+            transcript_cost_micro_usd: sparse_get_u64(
+                arr,
+                token_usage_pos::TRANSCRIPT_COST_MICRO_USD,
+            ),
+        }
+    }
+}
+
+impl EventValues for TokenUsageValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::TokenUsage
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+#[cfg(test)]
+mod token_usage_tests {
+    use super::*;
+
+    #[test]
+    fn test_token_usage_values_event_id() {
+        assert_eq!(TokenUsageValues::event_id(), MetricEventId::TokenUsage);
+        assert_eq!(TokenUsageValues::event_id() as u16, 9);
+    }
+
+    #[test]
+    fn test_token_usage_values_sparse_roundtrip() {
+        let values = TokenUsageValues::new()
+            .bucket_ts(1_700_000_100)
+            .input_tokens(100)
+            .output_tokens(50)
+            .cache_read_tokens(200)
+            .cache_write_tokens(30)
+            .total_tokens(380)
+            .reasoning_output_tokens_opt(Some(12))
+            .est_cost_micro_usd(4_567)
+            .message_count(3)
+            .emitted_seq(7);
+
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <TokenUsageValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.bucket_ts, Some(Some(1_700_000_100)));
+        assert_eq!(restored.input_tokens, Some(Some(100)));
+        assert_eq!(restored.output_tokens, Some(Some(50)));
+        assert_eq!(restored.cache_read_tokens, Some(Some(200)));
+        assert_eq!(restored.cache_write_tokens, Some(Some(30)));
+        assert_eq!(restored.total_tokens, Some(Some(380)));
+        assert_eq!(restored.reasoning_output_tokens, Some(Some(12)));
+        assert_eq!(restored.est_cost_micro_usd, Some(Some(4_567)));
+        assert_eq!(restored.credits, None);
+        assert_eq!(restored.message_count, Some(Some(3)));
+        assert_eq!(restored.emitted_seq, Some(Some(7)));
+    }
+
+    #[test]
+    fn test_token_usage_wire_encoding_is_pinned() {
+        // The sparse positions are the server's decoding contract: a silent
+        // renumbering would corrupt field decoding for every uploaded event.
+        let values = TokenUsageValues::new()
+            .bucket_ts(1_767_225_600)
+            .input_tokens(1)
+            .output_tokens(2)
+            .cache_read_tokens(3)
+            .cache_write_tokens(4)
+            .total_tokens(10)
+            .reasoning_output_tokens_opt(Some(5))
+            .est_cost_micro_usd(6)
+            .credits(7.5)
+            .message_count(8)
+            .emitted_seq(9)
+            .speed(1)
+            .speed_inferred(true)
+            .cache_write_1h_tokens(11)
+            .long_context_input_tokens(12)
+            .long_context_output_tokens(13)
+            .long_context_cache_read_tokens(14)
+            .long_context_cache_write_tokens(15)
+            .long_context_cache_write_1h_tokens(16)
+            .transcript_cost_micro_usd(17);
+        let sparse = PosEncoded::to_sparse(&values);
+        let ordered: std::collections::BTreeMap<usize, &serde_json::Value> = sparse
+            .iter()
+            .map(|(k, v)| (k.parse::<usize>().unwrap(), v))
+            .collect();
+        insta::assert_snapshot!(
+            serde_json::to_string(&ordered).unwrap(),
+            @r#"{"0":1767225600,"1":1,"2":2,"3":3,"4":4,"5":10,"6":5,"7":6,"8":7.5,"9":8,"10":9,"11":1,"12":1,"13":11,"14":12,"15":13,"16":14,"17":15,"18":16,"19":17}"#
+        );
+    }
+
+    #[test]
+    fn test_reasoning_tokens_omitted_when_absent() {
+        let values = TokenUsageValues::new()
+            .bucket_ts(300)
+            .reasoning_output_tokens_opt(None);
+        let sparse = PosEncoded::to_sparse(&values);
+        assert!(!sparse.contains_key(&token_usage_pos::REASONING_OUTPUT_TOKENS.to_string()));
+        assert!(!sparse.contains_key(&token_usage_pos::CREDITS.to_string()));
     }
 }

@@ -1,5 +1,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::extract_json_object;
 use git_ai::authorship::stats::CommitStats;
 use insta::assert_debug_snapshot;
 use std::fs;
@@ -11,16 +12,22 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Extract the first complete JSON object from mixed stdout/stderr output.
-fn extract_json_object(output: &str) -> String {
-    let start = output.find('{').unwrap_or(0);
-    let end = output.rfind('}').unwrap_or(output.len().saturating_sub(1));
-    output[start..=end].to_string()
-}
-
 fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
     let raw = repo.git_ai(args).expect("git-ai stats should succeed");
     let json = extract_json_object(&raw);
     serde_json::from_str(&json).expect("valid stats json")
+}
+
+fn range_stats_from_args_with_env(
+    repo: &TestRepo,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> git_ai::authorship::range_authorship::RangeAuthorshipStats {
+    let raw = repo
+        .git_ai_with_env(args, envs)
+        .expect("git-ai stats range should succeed");
+    let json = extract_json_object(&raw);
+    serde_json::from_str(&json).expect("valid range stats json")
 }
 
 fn stats_while_restoring_authorship_note(
@@ -835,6 +842,35 @@ fn test_stats_range_uses_default_ignores() {
 }
 
 #[test]
+fn test_stats_range_non_c_locale_ignores_non_ascii_numstat_path() {
+    let repo = TestRepo::new();
+
+    fs::write(repo.path().join(".git-ai-ignore"), "café.txt\n").unwrap();
+    fs::write(repo.path().join("café.txt"), "ignored\n").unwrap();
+    fs::write(repo.path().join("app.txt"), "kept\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "café.txt", "app.txt"])
+        .unwrap();
+    let first = repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(repo.path().join("café.txt"), "ignored\nignored addition\n").unwrap();
+    fs::write(repo.path().join("app.txt"), "kept\nkept addition\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "café.txt", "app.txt"])
+        .unwrap();
+    let second = repo.stage_all_and_commit("add lines").unwrap();
+
+    let range = format!("{}..{}", first.commit_sha, second.commit_sha);
+    let stats = range_stats_from_args_with_env(
+        &repo,
+        &["stats", &range, "--json"],
+        &[("LC_ALL", "en_US.UTF-8"), ("LANG", "en_US.UTF-8")],
+    );
+
+    assert_eq!(stats.range_stats.git_diff_added_lines, 1);
+    assert_eq!(stats.range_stats.git_diff_deleted_lines, 0);
+    assert_eq!(stats.range_stats.ai_additions, 1);
+}
+
+#[test]
 fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     let repo = TestRepo::new();
     repo.filename("README.md")
@@ -943,6 +979,7 @@ crate::reuse_tests_in_worktree!(
     test_stats_in_bare_clone_uses_root_gitattributes_linguist_generated,
     test_stats_ignore_flag_is_additive_to_defaults,
     test_stats_range_uses_default_ignores,
+    test_stats_range_non_c_locale_ignores_non_ascii_numstat_path,
     test_post_commit_large_ignored_files_do_not_trigger_skip_warning,
     test_stats_ignores_renamed_files,
 );

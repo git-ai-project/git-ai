@@ -69,11 +69,41 @@ pub fn handle_daemon(args: &[String]) {
     }
 }
 
+/// Pause between `bg start --retry-secs` attempts.
+const START_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
 fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
+    let retry_window = start_retry_window(args)?;
+    let deadline = Instant::now()
+        .checked_add(retry_window)
+        .ok_or_else(|| "--retry-secs is too large".to_string())?;
+    loop {
+        match ensure_daemon_running_attached(daemon_startup_timeout()) {
+            Ok(_) => return Ok(()),
+            // A daemon that is still releasing its lock (logout/login,
+            // self-update) blocks the first attempt; login launchers pass a
+            // retry window so that race does not leave the daemon down.
+            Err(err) if Instant::now() + START_RETRY_INTERVAL < deadline => {
+                eprintln!("Daemon not started yet ({}); retrying", err);
+                thread::sleep(START_RETRY_INTERVAL);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// `--retry-secs <n>`: keep retrying failed starts for up to `n` seconds.
+/// Absent flag means a single attempt.
+fn start_retry_window(args: &[String]) -> Result<Duration, String> {
+    if !has_flag(args, "--retry-secs") {
+        return Ok(Duration::ZERO);
+    }
+    parse_number_arg(args, "--retry-secs")
+        .map(|secs| Duration::from_secs(secs as u64))
+        .ok_or_else(|| "--retry-secs requires a whole number of seconds".to_string())
 }
 
 fn daemon_startup_timeout() -> Duration {
@@ -458,11 +488,14 @@ fn handle_status(repo_working_dir: String) -> Result<(), String> {
     // family-level status query which requires a valid repo.
     if crate::git::find_repository_in_path(&repo_working_dir).is_err() {
         let daemon_running = daemon_is_up(&config);
-        let response = serde_json::json!({
+        let mut response = serde_json::json!({
             "ok": true,
             "git_repo": false,
             "daemon_running": daemon_running,
         });
+        if daemon_running {
+            attach_daemon_health(&config, &mut response);
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
@@ -473,11 +506,36 @@ fn handle_status(repo_working_dir: String) -> Result<(), String> {
     let request = ControlRequest::StatusFamily { repo_working_dir };
     let response =
         send_control_request(&config.control_socket_path, &request).map_err(|e| e.to_string())?;
+    let mut output = serde_json::to_value(&response).map_err(|e| e.to_string())?;
+    attach_daemon_health(&config, &mut output);
     println!(
         "{}",
-        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
+        serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?
     );
     Ok(())
+}
+
+/// Adds the daemon-wide pipeline health (`status.daemon`) under `daemon`, or
+/// the reason it is unavailable under `daemon_error`; family status prints
+/// either way.
+fn attach_daemon_health(config: &DaemonConfig, output: &mut serde_json::Value) {
+    match send_control_request(&config.control_socket_path, &ControlRequest::StatusDaemon) {
+        Ok(response) if response.ok => {
+            output["daemon"] = response.data.unwrap_or(serde_json::Value::Null);
+        }
+        Ok(response) => {
+            let error = response.error.unwrap_or_default();
+            let message =
+                if error.contains("invalid control request") && error.contains("status.daemon") {
+                    "the running background service predates status.daemon; run `git-ai bg restart`"
+                        .to_string()
+                } else {
+                    error
+                };
+            output["daemon_error"] = serde_json::Value::String(message);
+        }
+        Err(error) => output["daemon_error"] = serde_json::Value::String(error.to_string()),
+    }
 }
 
 fn handle_tail(args: &[String]) -> Result<(), String> {
@@ -791,7 +849,7 @@ fn print_help() {
     eprintln!("git-ai bg - run and control git-ai background service");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  git-ai bg start");
+    eprintln!("  git-ai bg start [--retry-secs <n>]");
     eprintln!("  git-ai bg run");
     eprintln!("  git-ai bg status [--repo <path>]");
     eprintln!("  git-ai bg shutdown [--hard]");
