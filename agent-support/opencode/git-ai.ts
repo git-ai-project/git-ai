@@ -2,8 +2,14 @@
  * git-ai plugin for OpenCode
  *
  * This plugin integrates git-ai with OpenCode to track AI-generated code.
- * It uses the tool.execute.before and tool.execute.after events to create
- * checkpoints that mark code changes as human or AI-authored.
+ * It uses the tool execute before/after hooks to create checkpoints that mark
+ * code changes as human or AI-authored.
+ *
+ * Supports both plugin APIs from a single default export:
+ *   - OpenCode V2 (`@opencode/plugin`): `setup(ctx)` registers the hooks through
+ *     `ctx.tool.hook("execute.before" | "execute.after", ...)`.
+ *   - OpenCode V1 (`@opencode-ai/plugin`, >= 1.18.29): `server()` returns the
+ *     legacy `"tool.execute.before" | "tool.execute.after"` hook object.
  *
  * Installation:
  *   - Automatically installed by `git-ai install-hooks`
@@ -14,10 +20,10 @@
  *   - git-ai must be installed (path is injected at install time)
  *
  * @see https://github.com/git-ai-project/git-ai
- * @see https://opencode.ai/docs/plugins/
+ * @see https://opencode.ai/v2/docs/build/plugins
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 import { spawn } from "child_process"
 import { readFile, stat } from "fs/promises"
 import { dirname, isAbsolute, join, resolve } from "path"
@@ -143,11 +149,16 @@ const extractFilePaths = (args: unknown, cwd?: string): string[] => {
   return [...normalizedPaths]
 }
 
-type ToolHookInput = {
+/**
+ * Normalized checkpoint event used by the shared core. Both plugin APIs map
+ * their own hook payload into this shape.
+ */
+type CheckpointEvent = {
   tool?: unknown
   sessionID?: unknown
   callID?: unknown
-  args?: unknown
+  toolInput?: unknown
+  metadata?: unknown
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined => {
@@ -258,19 +269,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
   })
 }
 
-export const GitAiPlugin: Plugin = async (ctx) => {
-  try {
-    return createGitAiPlugin(ctx)
-  } catch (error) {
-    debugLog("failed to initialize plugin", error)
-    return {}
-  }
-}
-
-const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugin>> => {
-  const { worktree, directory } = ctx
-  const defaultCwd = worktree || directory || process.cwd()
-
+const createGitAiCheckpoints = (defaultCwd: string) => {
   // Track pending calls by callID so we can reference them in the after hook
   const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
 
@@ -442,74 +441,158 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
     }
   }
 
+  const before = swallowHookErrors(
+    "pre-tool checkpoint failed",
+    async (event: CheckpointEvent) => {
+      const toolName = hookString(event.tool)
+      const isTrackedEdit = isEditTool(toolName)
+      const isTrackedBash = isBashTool(toolName)
+      if (!isTrackedEdit && !isTrackedBash) {
+        return
+      }
+
+      const callID = hookString(event.callID)
+      const sessionID = hookString(event.sessionID)
+      const toolInput = event.toolInput
+      const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
+      const filePaths = isTrackedEdit ? extractFilePaths(toolInput, toolCwd) : []
+      const repoDir = await resolveRepoDir(filePaths, toolCwd)
+      if (!repoDir) {
+        return
+      }
+
+      pendingCalls.set(callID, { repoDir, sessionID, toolInput })
+
+      const hookInput = JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: sessionID,
+        tool_use_id: callID,
+        cwd: repoDir,
+        tool_name: toolName,
+        tool_input: toolInput,
+      })
+      await runCheckpoint(hookInput)
+    },
+  )
+
+  const after = swallowHookErrors(
+    "post-tool checkpoint failed",
+    async (event: CheckpointEvent) => {
+      const toolName = hookString(event.tool)
+      if (!isEditTool(toolName) && !isBashTool(toolName)) {
+        return
+      }
+
+      const callID = hookString(event.callID)
+      const callInfo = pendingCalls.get(callID)
+      pendingCalls.delete(callID)
+
+      if (!callInfo) {
+        debugLog(`skipping post-tool checkpoint without matching pre-tool call for ${callID}`)
+        return
+      }
+
+      const toolCwd = resolveCwd(extractToolCwd(asRecord(event.toolInput)))
+      const metadataFilePaths = extractMetadataFilePaths(event.metadata, toolCwd)
+      const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths)
+
+      const hookInput = JSON.stringify({
+        hook_event_name: "PostToolUse",
+        session_id: callInfo.sessionID,
+        tool_use_id: callID,
+        cwd: callInfo.repoDir,
+        tool_name: toolName,
+        tool_input: toolInput,
+      })
+      await runCheckpoint(hookInput)
+    },
+  )
+
+  return { before, after }
+}
+
+/**
+ * OpenCode V2 plugin definition (`@opencode/plugin`).
+ *
+ * Hooks are registered on the tool domain; the callback receives a single event
+ * (`id`, `input`, `tool`, `sessionID`, and `status`/`result` after execution).
+ */
+export const GitAiPlugin = Plugin.define({
+  id: "git-ai",
+  async setup(ctx) {
+    try {
+      const defaultCwd =
+        ctx.location?.project?.directory ?? ctx.location?.directory ?? process.cwd()
+      const { before, after } = createGitAiCheckpoints(defaultCwd)
+
+      await ctx.tool.hook("execute.before", (event) => {
+        return before({
+          tool: event.tool,
+          sessionID: event.sessionID,
+          callID: event.id,
+          toolInput: event.input,
+        })
+      })
+
+      await ctx.tool.hook("execute.after", (event) => {
+        return after({
+          tool: event.tool,
+          sessionID: event.sessionID,
+          callID: event.id,
+          toolInput: event.input,
+          metadata: event.status === "completed" ? event.result?.metadata : undefined,
+        })
+      })
+    } catch (error) {
+      debugLog("failed to initialize plugin", error)
+    }
+  },
+})
+
+/**
+ * OpenCode V1 plugin implementation (`@opencode-ai/plugin`).
+ *
+ * V1 calls `server(ctx)` and expects the returned hook object. Kept so the same
+ * package keeps working on OpenCode 1.18.x while V2 support is live.
+ */
+type V1PluginContext = {
+  worktree?: string
+  directory?: string
+}
+
+type V1ToolHookInput = {
+  tool?: unknown
+  sessionID?: unknown
+  callID?: unknown
+  args?: unknown
+}
+
+export const GitAiPluginV1 = (ctx?: V1PluginContext) => {
+  const defaultCwd = ctx?.worktree || ctx?.directory || process.cwd()
+  const { before, after } = createGitAiCheckpoints(defaultCwd)
+
   return {
-    "tool.execute.before": swallowHookErrors(
-      "pre-tool checkpoint failed",
-      async (input: ToolHookInput, output?: { args?: unknown }) => {
-        const toolName = hookString(input.tool)
-        const isTrackedEdit = isEditTool(toolName)
-        const isTrackedBash = isBashTool(toolName)
-        if (!isTrackedEdit && !isTrackedBash) {
-          return
-        }
-
-        const callID = hookString(input.callID)
-        const sessionID = hookString(input.sessionID)
-        const toolInput = output?.args ?? input.args
-        const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
-        const filePaths = isTrackedEdit ? extractFilePaths(toolInput, toolCwd) : []
-        const repoDir = await resolveRepoDir(filePaths, toolCwd)
-        if (!repoDir) {
-          return
-        }
-
-        pendingCalls.set(callID, { repoDir, sessionID, toolInput })
-
-        const hookInput = JSON.stringify({
-          hook_event_name: "PreToolUse",
-          session_id: sessionID,
-          tool_use_id: callID,
-          cwd: repoDir,
-          tool_name: toolName,
-          tool_input: toolInput,
-        })
-        await runCheckpoint(hookInput)
-      },
-    ),
-
-    "tool.execute.after": swallowHookErrors(
-      "post-tool checkpoint failed",
-      async (input: ToolHookInput, output?: { metadata?: unknown }) => {
-        const toolName = hookString(input.tool)
-        if (!isEditTool(toolName) && !isBashTool(toolName)) {
-          return
-        }
-
-        const callID = hookString(input.callID)
-        const callInfo = pendingCalls.get(callID)
-        pendingCalls.delete(callID)
-
-        if (!callInfo) {
-          debugLog(`skipping post-tool checkpoint without matching pre-tool call for ${callID}`)
-          return
-        }
-
-        const toolCwd = resolveCwd(extractToolCwd(asRecord(input.args)))
-        const metadataFilePaths = extractMetadataFilePaths(output?.metadata, toolCwd)
-        const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths)
-
-        const hookInput = JSON.stringify({
-          hook_event_name: "PostToolUse",
-          session_id: callInfo.sessionID,
-          tool_use_id: callID,
-          cwd: callInfo.repoDir,
-          tool_name: toolName,
-          tool_input: toolInput,
-        })
-        await runCheckpoint(hookInput)
-      },
-    ),
+    "tool.execute.before": (input: V1ToolHookInput, output?: { args?: unknown }) =>
+      before({
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        toolInput: output?.args ?? input.args,
+      }),
+    "tool.execute.after": (input: V1ToolHookInput, output?: { metadata?: unknown }) =>
+      after({
+        tool: input.tool,
+        sessionID: input.sessionID,
+        callID: input.callID,
+        toolInput: input.args,
+        metadata: output?.metadata,
+      }),
   }
 }
 
-export default GitAiPlugin
+export default {
+  ...GitAiPlugin,
+  async server(ctx?: V1PluginContext) {
+    return GitAiPluginV1(ctx)
+  },
+}
