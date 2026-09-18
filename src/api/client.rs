@@ -1,10 +1,13 @@
 use crate::auth::{CredentialStore, OAuthClient};
 use crate::config;
 use crate::error::GitAiError;
-use crate::git::repository::{current_git_committer_identity_resolution, parse_git_var_identity};
+use crate::git::repository::{
+    GitAuthorIdentity, current_git_committer_identity_resolution, parse_git_var_identity,
+};
 use crate::http;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Global mutex to prevent multiple threads from refreshing simultaneously.
@@ -61,22 +64,81 @@ fn try_load_auth_token() -> Option<String> {
     // Mutex guard is automatically released when _guard is dropped
 }
 
+/// TTL for the process-local git identity caches below. Long-lived daemon
+/// processes construct an `ApiContext` on every telemetry flush tick (~3s),
+/// and resolving the identity spawns `git var` (or `hostname` for the
+/// fallback); the cache bounds those spawns to once per TTL.
+const GIT_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+static GIT_IDENTITY_CACHE: Mutex<Option<(Instant, GitAuthorIdentity)>> = Mutex::new(None);
+static FALLBACK_IDENTITY_CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+
+/// Return the cached value while it is younger than `ttl`, otherwise resolve
+/// and cache a fresh one. On a poisoned lock, resolves without caching.
+fn cached_with_ttl<T: Clone>(
+    cache: &Mutex<Option<(Instant, T)>>,
+    ttl: Duration,
+    resolve: impl FnOnce() -> T,
+) -> T {
+    let Ok(mut guard) = cache.lock() else {
+        return resolve();
+    };
+    let now = Instant::now();
+    if let Some((cached_at, value)) = guard.as_ref()
+        && now.duration_since(*cached_at) < ttl
+    {
+        return value.clone();
+    }
+
+    let value = resolve();
+    *guard = Some((now, value.clone()));
+    value
+}
+
+/// Git committer identity (`git var GIT_COMMITTER_IDENT`) with a process-local TTL cache.
+fn cached_git_committer_identity() -> GitAuthorIdentity {
+    cached_with_ttl(&GIT_IDENTITY_CACHE, GIT_IDENTITY_CACHE_TTL, || {
+        current_git_committer_identity_resolution().identity
+    })
+}
+
+/// Fallback username/hostname identity with a process-local TTL cache.
+fn cached_fallback_identity() -> Option<String> {
+    cached_with_ttl(
+        &FALLBACK_IDENTITY_CACHE,
+        GIT_IDENTITY_CACHE_TTL,
+        resolve_fallback_identity,
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_git_identity_cache_for_tests() {
+    if let Ok(mut guard) = GIT_IDENTITY_CACHE.lock() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = FALLBACK_IDENTITY_CACHE.lock() {
+        *guard = None;
+    }
+}
+
 /// Resolve the git-ai effective author identity without requiring a Repository instance.
 ///
 /// Uses the shared git identity helper to get the current user's identity,
 /// respecting the full git precedence chain (env vars > config > system defaults),
 /// then overlays any configured git-ai author fields.
 /// Falls back to the system hostname if git identity is unavailable.
+///
+/// The underlying git/fallback identity is cached for [`GIT_IDENTITY_CACHE_TTL`];
+/// the git-ai author config overlay is re-applied on every call so config
+/// overrides keep propagating quickly.
 fn resolve_git_identity() -> Option<String> {
     let author_config = config::Config::fresh_author_cached();
-    let identity = current_git_committer_identity_resolution()
-        .identity
-        .with_author_config(&author_config);
+    let identity = cached_git_committer_identity().with_author_config(&author_config);
     if let Some(formatted) = identity.formatted() {
         return Some(encode_for_header(&formatted));
     }
 
-    resolve_fallback_identity()
+    cached_fallback_identity()
         .map(|id| parse_git_var_identity(&id).with_author_config(&author_config))
         .and_then(|identity| identity.formatted())
         .map(|id| encode_for_header(&id))
@@ -575,6 +637,202 @@ mod tests {
                 .all(|b| b == b' ' || b == b'\t' || (0x21..=0x7E).contains(&b)),
             "encoded value contains invalid header bytes: {:?}",
             encoded
+        );
+    }
+
+    // ============= Git Identity Cache Tests =============
+
+    /// Set env vars for the duration of `f`, restoring previous values after
+    /// (even on panic). `None` removes the var.
+    fn with_env_vars(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        for (key, value) in saved {
+            match value {
+                Some(v) => unsafe { std::env::set_var(&key, v) },
+                None => unsafe { std::env::remove_var(&key) },
+            }
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    fn reset_identity_caches() {
+        clear_git_identity_cache_for_tests();
+        config::Config::clear_author_config_cache_for_tests();
+    }
+
+    /// Neutralizes any developer-machine git-ai author config for the test.
+    const EMPTY_AUTHOR_PATCH: (&str, Option<&str>) =
+        ("GIT_AI_TEST_CONFIG_PATCH", Some(r#"{"author": {}}"#));
+
+    #[test]
+    fn test_cached_with_ttl_resolves_once_within_ttl() {
+        let cache: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let first = cached_with_ttl(&cache, Duration::from_secs(3600), || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            42
+        });
+        let second = cached_with_ttl(&cache, Duration::from_secs(3600), || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            7
+        });
+        assert_eq!(first, 42);
+        assert_eq!(
+            second, 42,
+            "second call within TTL must return cached value"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "resolve must run only once"
+        );
+    }
+
+    #[test]
+    fn test_cached_with_ttl_recomputes_after_expiry() {
+        let cache: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+        assert_eq!(cached_with_ttl(&cache, Duration::ZERO, || 1), 1);
+        assert_eq!(
+            cached_with_ttl(&cache, Duration::ZERO, || 2),
+            2,
+            "expired entry must be re-resolved"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_resolve_git_identity_caches_git_identity_within_ttl() {
+        with_env_vars(
+            &[
+                EMPTY_AUTHOR_PATCH,
+                ("GIT_COMMITTER_NAME", Some("Alice")),
+                ("GIT_COMMITTER_EMAIL", Some("alice@example.com")),
+            ],
+            || {
+                reset_identity_caches();
+                assert_eq!(
+                    resolve_git_identity().as_deref(),
+                    Some("Alice <alice@example.com>")
+                );
+
+                unsafe {
+                    std::env::set_var("GIT_COMMITTER_NAME", "Bob");
+                    std::env::set_var("GIT_COMMITTER_EMAIL", "bob@example.com");
+                }
+                assert_eq!(
+                    resolve_git_identity().as_deref(),
+                    Some("Alice <alice@example.com>"),
+                    "identity change within the TTL must not be re-resolved"
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_clear_git_identity_cache_picks_up_new_identity() {
+        with_env_vars(
+            &[
+                EMPTY_AUTHOR_PATCH,
+                ("GIT_COMMITTER_NAME", Some("Alice")),
+                ("GIT_COMMITTER_EMAIL", Some("alice@example.com")),
+            ],
+            || {
+                reset_identity_caches();
+                assert_eq!(
+                    resolve_git_identity().as_deref(),
+                    Some("Alice <alice@example.com>")
+                );
+
+                unsafe {
+                    std::env::set_var("GIT_COMMITTER_NAME", "Bob");
+                    std::env::set_var("GIT_COMMITTER_EMAIL", "bob@example.com");
+                }
+                clear_git_identity_cache_for_tests();
+                assert_eq!(
+                    resolve_git_identity().as_deref(),
+                    Some("Bob <bob@example.com>")
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_author_config_overlay_applies_over_cached_identity() {
+        with_env_vars(
+            &[
+                EMPTY_AUTHOR_PATCH,
+                ("GIT_COMMITTER_NAME", Some("Alice")),
+                ("GIT_COMMITTER_EMAIL", Some("alice@example.com")),
+            ],
+            || {
+                reset_identity_caches();
+                assert_eq!(
+                    resolve_git_identity().as_deref(),
+                    Some("Alice <alice@example.com>")
+                );
+
+                // The base git identity stays cached (env change invisible), but
+                // a git-ai author config override must apply immediately.
+                unsafe {
+                    std::env::set_var("GIT_COMMITTER_NAME", "Bob");
+                    std::env::set_var("GIT_COMMITTER_EMAIL", "bob@example.com");
+                    std::env::set_var(
+                        "GIT_AI_TEST_CONFIG_PATCH",
+                        r#"{"author": {"name": "Config User"}}"#,
+                    );
+                }
+                assert_eq!(
+                    resolve_git_identity().as_deref(),
+                    Some("Config User <alice@example.com>")
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_fallback_identity_is_cached() {
+        #[cfg(windows)]
+        const USER_VAR: &str = "USERNAME";
+        #[cfg(not(windows))]
+        const USER_VAR: &str = "USER";
+        #[cfg(windows)]
+        const HOST_VAR: &str = "COMPUTERNAME";
+        #[cfg(not(windows))]
+        const HOST_VAR: &str = "HOSTNAME";
+
+        with_env_vars(
+            &[(USER_VAR, Some("alice")), (HOST_VAR, Some("testhost"))],
+            || {
+                clear_git_identity_cache_for_tests();
+                assert_eq!(
+                    cached_fallback_identity().as_deref(),
+                    Some("alice <alice@testhost>")
+                );
+
+                unsafe { std::env::set_var(USER_VAR, "bob") };
+                assert_eq!(
+                    cached_fallback_identity().as_deref(),
+                    Some("alice <alice@testhost>"),
+                    "fallback change within the TTL must not be re-resolved"
+                );
+            },
         );
     }
 }
