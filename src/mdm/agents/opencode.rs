@@ -299,10 +299,15 @@ mod tests {
     fn test_opencode_plugin_content_is_valid_typescript() {
         let content = OPENCODE_PLUGIN_CONTENT;
 
-        assert!(content.contains("import type { Plugin }"));
-        assert!(content.contains("@opencode-ai/plugin"));
-        assert!(content.contains("export const GitAiPlugin: Plugin"));
-        assert!(content.contains("export default GitAiPlugin"));
+        assert!(content.contains("import { Plugin } from \"@opencode/plugin\""));
+        assert!(content.contains("@opencode/plugin"));
+        assert!(content.contains("export const GitAiPlugin = Plugin.define("));
+        assert!(content.contains("export default {"));
+        // V1 compatibility entrypoint (OpenCode 1.18.x calls `server()`)
+        assert!(content.contains("async server("));
+        // V2 registers hooks through the tool domain
+        assert!(content.contains("ctx.tool.hook(\"execute.before\""));
+        assert!(content.contains("ctx.tool.hook(\"execute.after\""));
         assert!(content.contains("child_process"));
         assert!(content.contains("\"tool.execute.before\""));
         assert!(content.contains("\"tool.execute.after\""));
