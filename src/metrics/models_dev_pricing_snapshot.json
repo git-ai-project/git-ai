@@ -5,6 +5,12 @@
     "cache_read": 1.0,
     "cache_write": 12.5
   },
+  "claude-fable-5-1": {
+    "input": 10.0,
+    "output": 50.0,
+    "cache_read": 0.25,
+    "cache_write": 12.5
+  },
   "claude-haiku-4-5": {
     "input": 1.0,
     "output": 5.0,
@@ -99,15 +105,20 @@
     "output_above": 18.0,
     "cache_read_above": 0.4
   },
+  "deepseek-flash": {
+    "input": 0.15,
+    "output": 0.6,
+    "cache_read": 0.003
+  },
   "deepseek-v4-flash": {
-    "input": 0.14,
-    "output": 0.28,
-    "cache_read": 0.0028
+    "input": 0.15,
+    "output": 0.6,
+    "cache_read": 0.003
   },
   "deepseek-v4-flash-vision-exp": {
-    "input": 0.14,
-    "output": 0.28,
-    "cache_read": 0.0028
+    "input": 0.15,
+    "output": 0.6,
+    "cache_read": 0.003
   },
   "deepseek-v4-pro": {
     "input": 0.435,
@@ -262,6 +273,11 @@
     "output": 3.75,
     "cache_read": 0.075
   },
+  "gemini-3.8-flash": {
+    "input": 0.75,
+    "output": 3.75,
+    "cache_read": 0.075
+  },
   "gemini-embedding-001": {
     "input": 0.15,
     "output": 0.0
@@ -283,10 +299,6 @@
   "gemini-omni-flash-preview": {
     "input": 1.5,
     "output": 17.5
-  },
-  "gemini-robotics-er-1.6-preview": {
-    "input": 1.0,
-    "output": 5.0
   },
   "glm-4.5": {
     "input": 0.6,
@@ -369,9 +381,15 @@
     "cache_write": 0.0
   },
   "glm-5.3-flash": {
-    "input": 0.075,
-    "output": 0.25,
-    "cache_read": 0.015,
+    "input": 0.15,
+    "output": 0.5,
+    "cache_read": 0.03,
+    "cache_write": 0.0
+  },
+  "glm-5.3-flashx": {
+    "input": 0.37,
+    "output": 1.25,
+    "cache_read": 0.075,
     "cache_write": 0.0
   },
   "glm-5v-turbo": {
@@ -571,6 +589,17 @@
     "cache_read_above": 0.4,
     "cache_write_above": 5.0
   },
+  "gpt-6-astra": {
+    "input": 10.0,
+    "output": 50.0,
+    "cache_read": 1.0,
+    "cache_write": 12.5,
+    "long_context_threshold": 272000,
+    "input_above": 20.0,
+    "output_above": 75.0,
+    "cache_read_above": 2.0,
+    "cache_write_above": 25.0
+  },
   "gpt-image-2": {
     "input": 5.0,
     "output": 30.0,
@@ -643,36 +672,6 @@
     "input_above": 2.0,
     "output_above": 4.0,
     "cache_read_above": 0.4
-  },
-  "kimi-k2-0711-preview": {
-    "input": 0.6,
-    "output": 2.5,
-    "cache_read": 0.15
-  },
-  "kimi-k2-0905-preview": {
-    "input": 0.6,
-    "output": 2.5,
-    "cache_read": 0.15
-  },
-  "kimi-k2-thinking": {
-    "input": 0.6,
-    "output": 2.5,
-    "cache_read": 0.15
-  },
-  "kimi-k2-thinking-turbo": {
-    "input": 1.15,
-    "output": 8.0,
-    "cache_read": 0.15
-  },
-  "kimi-k2-turbo-preview": {
-    "input": 2.4,
-    "output": 10.0,
-    "cache_read": 0.6
-  },
-  "kimi-k2.5": {
-    "input": 0.6,
-    "output": 3.0,
-    "cache_read": 0.1
   },
   "kimi-k2.6": {
     "input": 0.95,
@@ -839,6 +838,11 @@
     "output": 0.3
   },
   "zai-glm-5-2": {
+    "input": 1.4,
+    "output": 4.4,
+    "cache_read": 0.14
+  },
+  "zai-glm-5-3": {
     "input": 1.4,
     "output": 4.4,
     "cache_read": 0.14
