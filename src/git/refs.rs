@@ -1036,13 +1036,17 @@ pub(in crate::git) fn grep_ai_notes(
 fn repo_has_promisor_remote(repo: &Repository) -> bool {
     let mut args = repo.global_args_for_exec();
     args.push("config".to_string());
+    args.push("--bool".to_string());
     args.push("--get-regexp".to_string());
     args.push(r"^remote\..*\.promisor$".to_string());
 
-    matches!(
-        exec_git_allow_nonzero(&args),
-        Ok(output) if output.status.success()
-    )
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.split_whitespace().next_back() == Some("true"))
 }
 
 /// Sort commit SHAs by commit date, newest first, using a single `git log
