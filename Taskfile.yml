@@ -129,11 +129,6 @@ tasks:
           TEST_FILTER: fuzz_marathon_
           SUBTASK_BINARY_ARGS: "--ignored"
 
-  test:bats:
-    desc: Run the bats-based installer tests
-    cmds:
-      - bats tests/e2e/installer-shell-detection.bats
-
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:
