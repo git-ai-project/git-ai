@@ -389,7 +389,15 @@ where
                         .collect()
                 })
         };
-        if let Some(committed_hunks) = committed_hunks {
+        if let Some(mut committed_hunks) = committed_hunks {
+            // Filter out files matching .git-ai-ignore patterns so that
+            // tool-generated files (e.g. i18n) are not incorrectly attributed
+            // to the background agent.
+            let bg_ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+            let bg_ignore_matcher = build_ignore_matcher(&bg_ignore_patterns);
+            committed_hunks.retain(|path, _| {
+                !should_ignore_file_with_matcher(path, &bg_ignore_matcher)
+            });
             crate::authorship::background_agent::fill_unattributed_lines(
                 &mut authorship_log,
                 &committed_hunks,
@@ -616,26 +624,33 @@ fn recovery_committed_hunks(
     commit_sha: &str,
     precomputed_parent_diff: Option<&crate::authorship::rewrite::DiffTreeResult>,
 ) -> Result<HashMap<String, Vec<crate::authorship::authorship_log::LineRange>>, GitAiError> {
-    if let Some(diff) = precomputed_parent_diff {
-        return Ok(
-            crate::authorship::virtual_attribution::committed_hunks_from_diff_result(diff, None),
-        );
-    }
+    let mut hunks = if let Some(diff) = precomputed_parent_diff {
+        crate::authorship::virtual_attribution::committed_hunks_from_diff_result(diff, None)
+    } else {
+        // Recovery only attributes lines added by the commit being finalized, so the
+        // diff must be bounded to that single commit (see `single_commit_diff_base`).
+        let diff_base = single_commit_diff_base(parent_sha, commit_sha);
+        let added_lines = repo.diff_added_lines(&diff_base, commit_sha, None)?;
+        added_lines
+            .into_iter()
+            .filter(|(_, lines)| !lines.is_empty())
+            .map(|(path, lines)| {
+                (
+                    path,
+                    crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                )
+            })
+            .collect()
+    };
 
-    // Recovery only attributes lines added by the commit being finalized, so the
-    // diff must be bounded to that single commit (see `single_commit_diff_base`).
-    let diff_base = single_commit_diff_base(parent_sha, commit_sha);
-    let added_lines = repo.diff_added_lines(&diff_base, commit_sha, None)?;
-    Ok(added_lines
-        .into_iter()
-        .filter(|(_, lines)| !lines.is_empty())
-        .map(|(path, lines)| {
-            (
-                path,
-                crate::authorship::authorship_log::LineRange::compress_lines(&lines),
-            )
-        })
-        .collect())
+    // Filter out files matching .git-ai-ignore / default / linguist-generated
+    // patterns so that tool-generated files are not fed into attribution
+    // recovery, which would otherwise incorrectly attribute them.
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
+    hunks.retain(|path, _| !should_ignore_file_with_matcher(path, &ignore_matcher));
+
+    Ok(hunks)
 }
 
 /// Amend-specific post-commit that merges blame-sourced attributions from the
@@ -769,12 +784,20 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
             &parent_sha
         };
         if let Ok(added_lines) = repo.diff_added_lines(diff_base, amended_commit, None) {
+            let amend_ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+            let amend_ignore_matcher = build_ignore_matcher(&amend_ignore_patterns);
             let committed_hunks: HashMap<
                 String,
                 Vec<crate::authorship::authorship_log::LineRange>,
             > = added_lines
                 .into_iter()
                 .filter(|(_, lines)| !lines.is_empty())
+                // Filter out files matching .git-ai-ignore patterns so that
+                // tool-generated files are not incorrectly attributed to the
+                // background agent during amend.
+                .filter(|(path, _)| {
+                    !should_ignore_file_with_matcher(path, &amend_ignore_matcher)
+                })
                 .map(|(path, lines)| {
                     (
                         path,
