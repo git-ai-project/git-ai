@@ -988,6 +988,18 @@ pub(in crate::git) fn grep_ai_notes(
     repo: &Repository,
     pattern: &str,
 ) -> Result<Vec<String>, GitAiError> {
+    // `git grep <pattern> refs/notes/ai` reads every note blob in the tree.
+    // On a partial-clone checkout (any remote marked as a git "promisor"
+    // remote, e.g. cloned/fetched with `--filter=blob:none`), blobs that
+    // aren't already local are fetched lazily, one missing object at a time.
+    // A repo's notes history can hold thousands of entries, so this can turn
+    // a single search into an unbounded number of network round trips. Skip
+    // the search rather than risk that -- callers already treat a failed
+    // lookup as best-effort and degrade gracefully.
+    if repo_has_promisor_remote(repo) {
+        return Ok(Vec::new());
+    }
+
     let mut args = repo.global_args_for_exec();
     args.push("--no-pager".to_string());
     args.push("grep".to_string());
@@ -1015,6 +1027,22 @@ pub(in crate::git) fn grep_ai_notes(
 
     // If we have multiple results, sort by commit date (newest first)
     sort_commit_shas_by_date_desc(repo, shas)
+}
+
+/// Returns true if any configured remote is a git partial-clone "promisor"
+/// remote, i.e. this checkout may be missing objects that git would fetch
+/// lazily on first access. A single `git config --get-regexp` call, so this
+/// stays constant-time regardless of how many remotes are configured.
+fn repo_has_promisor_remote(repo: &Repository) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.push("config".to_string());
+    args.push("--get-regexp".to_string());
+    args.push(r"^remote\..*\.promisor$".to_string());
+
+    matches!(
+        exec_git_allow_nonzero(&args),
+        Ok(output) if output.status.success()
+    )
 }
 
 /// Sort commit SHAs by commit date, newest first, using a single `git log

@@ -605,6 +605,45 @@ fn test_grep_ai_notes_no_notes() {
 }
 
 #[test]
+fn test_grep_ai_notes_skips_search_on_promisor_remote() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("test.txt"), "content\n").unwrap();
+    repo.stage_all_and_commit("Commit").expect("commit");
+    let commit_sha = head_sha(&repo);
+
+    let note = "{\"tool\":\"cursor\"}";
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
+
+    // Sanity check: without a promisor remote, the note is found normally.
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(results, vec![commit_sha]);
+
+    // A partial-clone checkout marks its remote as a "promisor" remote so
+    // git knows to lazily fetch missing blobs on demand. `git grep` over
+    // refs/notes/ai walks every note blob, and on a repo with a large note
+    // history most of those blobs are typically absent locally, so it would
+    // trigger one lazy network fetch per missing blob. Skip the search
+    // entirely in that case rather than risk an unbounded number of fetches.
+    repo.git_og(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/repo.git",
+    ])
+    .expect("add remote");
+    repo.git_og(&["config", "remote.origin.promisor", "true"])
+        .expect("mark remote as promisor");
+
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(
+        results,
+        Vec::<String>::new(),
+        "grep_ai_notes should skip the search when a promisor remote is configured"
+    );
+}
+
+#[test]
 fn test_get_commits_with_notes_from_list() {
     let (repo, gitai_repo) = repo_with_handle();
 
