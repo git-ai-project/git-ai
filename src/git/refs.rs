@@ -1034,9 +1034,13 @@ pub(in crate::git) fn grep_ai_notes(
 /// lazily on first access. A single `git config --get-regexp` call, so this
 /// stays constant-time regardless of how many remotes are configured.
 fn repo_has_promisor_remote(repo: &Repository) -> bool {
+    // Deliberately not `--bool`: that normalizes every matched value, but
+    // fails the whole command (and thus the whole lookup) if even one
+    // matched entry is malformed -- which would hide a perfectly valid
+    // `true` on another remote. Parse each value ourselves instead, so a
+    // malformed entry elsewhere can't suppress a real match.
     let mut args = repo.global_args_for_exec();
     args.push("config".to_string());
-    args.push("--bool".to_string());
     args.push("--get-regexp".to_string());
     args.push(r"^remote\..*\.promisor$".to_string());
 
@@ -1046,7 +1050,20 @@ fn repo_has_promisor_remote(repo: &Repository) -> bool {
     output.status.success()
         && String::from_utf8_lossy(&output.stdout)
             .lines()
-            .any(|line| line.split_whitespace().next_back() == Some("true"))
+            .any(is_git_config_line_value_true)
+}
+
+/// Parses a `git config --get-regexp` output line (`<key>[ <value>]`) using
+/// git's own accepted boolean spellings, case-insensitively. A valueless
+/// key (e.g. `[remote "origin"]\n\tpromisor`) is boolean `true` per git's
+/// own config semantics. Anything unrecognized (including a malformed
+/// value) is simply not a match, rather than invalidating other lines.
+fn is_git_config_line_value_true(line: &str) -> bool {
+    let value = line.split_once(' ').map_or("", |(_, value)| value);
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "true" | "yes" | "on" | "1"
+    )
 }
 
 /// Sort commit SHAs by commit date, newest first, using a single `git log

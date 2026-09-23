@@ -677,6 +677,49 @@ fn test_grep_ai_notes_runs_search_when_promisor_remote_is_disabled() {
 }
 
 #[test]
+fn test_grep_ai_notes_skips_search_despite_malformed_promisor_value_on_other_remote() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("test.txt"), "content\n").unwrap();
+    repo.stage_all_and_commit("Commit").expect("commit");
+    let commit_sha = head_sha(&repo);
+
+    let note = "{\"tool\":\"cursor\"}";
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
+
+    // `git config --bool --get-regexp` fails the whole command (nonzero
+    // exit) if ANY matched value is not a valid git boolean, even when
+    // another matched value is a perfectly valid `true`. A malformed value
+    // on one remote must not hide a real promisor remote elsewhere.
+    repo.git_og(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/repo.git",
+    ])
+    .expect("add origin remote");
+    repo.git_og(&["config", "remote.origin.promisor", "true"])
+        .expect("mark origin as promisor");
+
+    repo.git_og(&[
+        "remote",
+        "add",
+        "legacy",
+        "https://example.invalid/legacy.git",
+    ])
+    .expect("add legacy remote");
+    repo.git_og(&["config", "remote.legacy.promisor", "nonsense"])
+        .expect("set malformed promisor value on legacy remote");
+
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(
+        results,
+        Vec::<String>::new(),
+        "a malformed promisor value on one remote must not suppress detection of a real promisor remote"
+    );
+}
+
+#[test]
 fn test_get_commits_with_notes_from_list() {
     let (repo, gitai_repo) = repo_with_handle();
 
