@@ -988,6 +988,18 @@ pub(in crate::git) fn grep_ai_notes(
     repo: &Repository,
     pattern: &str,
 ) -> Result<Vec<String>, GitAiError> {
+    // `git grep <pattern> refs/notes/ai` reads every note blob in the tree.
+    // On a partial-clone checkout (any remote marked as a git "promisor"
+    // remote, e.g. cloned/fetched with `--filter=blob:none`), blobs that
+    // aren't already local are fetched lazily, one missing object at a time.
+    // A repo's notes history can hold thousands of entries, so this can turn
+    // a single search into an unbounded number of network round trips. Skip
+    // the search rather than risk that -- callers already treat a failed
+    // lookup as best-effort and degrade gracefully.
+    if repo_has_promisor_remote(repo) {
+        return Ok(Vec::new());
+    }
+
     let mut args = repo.global_args_for_exec();
     args.push("--no-pager".to_string());
     args.push("grep".to_string());
@@ -1015,6 +1027,79 @@ pub(in crate::git) fn grep_ai_notes(
 
     // If we have multiple results, sort by commit date (newest first)
     sort_commit_shas_by_date_desc(repo, shas)
+}
+
+/// Returns true if any configured remote is a git partial-clone "promisor"
+/// remote, i.e. this checkout may be missing objects that git would fetch
+/// lazily on first access. A single `git config --get-regexp` call, so this
+/// stays constant-time regardless of how many remotes are configured.
+fn repo_has_promisor_remote(repo: &Repository) -> bool {
+    // Deliberately not `--bool`: that normalizes every matched value, but
+    // fails the whole command (and thus the whole lookup) if even one
+    // matched entry is malformed -- which would hide a perfectly valid
+    // `true` on another remote. Parse each value ourselves instead, so a
+    // malformed entry elsewhere can't suppress a real match.
+    let mut args = repo.global_args_for_exec();
+    args.push("config".to_string());
+    args.push("--get-regexp".to_string());
+    args.push(r"^remote\..*\.promisor$".to_string());
+
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(is_git_config_line_value_true)
+}
+
+/// Parses a `git config --get-regexp` output line (`<key>[ <value>]`) using
+/// git's own accepted boolean spellings. A valueless key (e.g.
+/// `[remote "origin"]\n\tpromisor`, printed with no trailing space) is
+/// `true`; an explicit empty value (`promisor =`, printed with a trailing
+/// space and nothing after it) is `false` -- these are different config
+/// forms with different meanings, so they must not collapse to the same
+/// thing. Anything unrecognized (including a malformed value) is simply
+/// not a match, rather than invalidating other lines.
+fn is_git_config_line_value_true(line: &str) -> bool {
+    match line.split_once(' ') {
+        None => true,
+        Some((_, value)) => parse_git_config_bool(value).unwrap_or(false),
+    }
+}
+
+/// Parses a git config value using git's own boolean semantics (see `git
+/// help config`, "boolean"): the case-insensitive text forms true/yes/on
+/// and false/no/off, or -- for anything else -- a decimal integer
+/// (optionally with a k/m/g size suffix, also case-insensitive) where zero
+/// is false and any other value is true. Returns `None` if the value is
+/// none of those, i.e. not a valid git boolean at all.
+fn parse_git_config_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => return Some(true),
+        "false" | "no" | "off" => return Some(false),
+        _ => {}
+    }
+
+    let (digits, unit) = match value
+        .strip_suffix(['k', 'K'])
+        .zip(Some(1024i64))
+        .or_else(|| value.strip_suffix(['m', 'M']).zip(Some(1024 * 1024)))
+        .or_else(|| value.strip_suffix(['g', 'G']).zip(Some(1024 * 1024 * 1024)))
+    {
+        Some(stripped_and_unit) => stripped_and_unit,
+        None => (value, 1),
+    };
+
+    let magnitude: i64 = digits.parse().ok()?;
+    // `checked_mul`, not `saturating_mul`: git itself rejects a suffixed
+    // value that overflows as a malformed boolean rather than clamping it,
+    // so an overflow here must also produce `None` rather than `Some(true)`.
+    let product = magnitude.checked_mul(unit)?;
+    // Git's numeric-boolean fallback parses into a 32-bit signed int, not a
+    // 64-bit one: a product outside that range is malformed too, even
+    // though it fits comfortably in an i64 and wouldn't overflow above.
+    i32::try_from(product).ok().map(|value| value != 0)
 }
 
 /// Sort commit SHAs by commit date, newest first, using a single `git log
@@ -1155,6 +1240,80 @@ mod tests {
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
         );
         assert_eq!(parse_batch_check_blob_oid(invalid), None);
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_text_forms() {
+        for truthy in ["true", "TRUE", "yes", "Yes", "on", "ON"] {
+            assert_eq!(parse_git_config_bool(truthy), Some(true), "{truthy}");
+        }
+        for falsy in ["false", "FALSE", "no", "No", "off", "OFF"] {
+            assert_eq!(parse_git_config_bool(falsy), Some(false), "{falsy}");
+        }
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_numeric_forms() {
+        assert_eq!(parse_git_config_bool("0"), Some(false));
+        assert_eq!(parse_git_config_bool("1"), Some(true));
+        assert_eq!(parse_git_config_bool("2"), Some(true));
+        assert_eq!(parse_git_config_bool("-1"), Some(true));
+        assert_eq!(parse_git_config_bool("0k"), Some(false));
+        assert_eq!(parse_git_config_bool("1k"), Some(true));
+        assert_eq!(parse_git_config_bool("1K"), Some(true));
+        assert_eq!(parse_git_config_bool("1m"), Some(true));
+        assert_eq!(parse_git_config_bool("1g"), Some(true));
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_rejects_malformed_values() {
+        assert_eq!(parse_git_config_bool("banana"), None);
+        assert_eq!(parse_git_config_bool(""), None);
+        assert_eq!(parse_git_config_bool(" "), None);
+        assert_eq!(parse_git_config_bool("1x"), None);
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_rejects_overflowing_suffixed_values() {
+        // git itself rejects this as a malformed boolean (the suffix
+        // multiplication overflows its integer parser) rather than
+        // clamping it to a truthy value.
+        assert_eq!(parse_git_config_bool("9223372036854775807k"), None);
+        assert_eq!(parse_git_config_bool("9223372036854775807g"), None);
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_enforces_git_i32_range() {
+        // Git's numeric-boolean fallback parses into a 32-bit signed int
+        // (confirmed against real `git config --bool` output), not a
+        // 64-bit one -- a product that fits an i64 without overflowing can
+        // still be outside that narrower range and thus malformed.
+        assert_eq!(parse_git_config_bool("2147483647"), Some(true));
+        assert_eq!(parse_git_config_bool("2147483648"), None);
+        assert_eq!(parse_git_config_bool("2097151k"), Some(true));
+        assert_eq!(parse_git_config_bool("2097152k"), None);
+        assert_eq!(parse_git_config_bool("-2147483648"), Some(true));
+        assert_eq!(parse_git_config_bool("-2147483649"), None);
+    }
+
+    #[test]
+    fn test_is_git_config_line_value_true_distinguishes_valueless_from_empty() {
+        // A valueless key (`git config --get-regexp` prints it with no
+        // trailing space) is true...
+        assert!(is_git_config_line_value_true("remote.origin.promisor"));
+        // ...but an explicit empty value (printed with a trailing space and
+        // nothing after it) is false. Both must not collapse to the same
+        // result.
+        assert!(!is_git_config_line_value_true("remote.origin.promisor "));
+    }
+
+    #[test]
+    fn test_is_git_config_line_value_true_numeric_and_malformed() {
+        assert!(is_git_config_line_value_true("remote.origin.promisor 2"));
+        assert!(!is_git_config_line_value_true("remote.origin.promisor 0"));
+        assert!(!is_git_config_line_value_true(
+            "remote.legacy.promisor nonsense"
+        ));
     }
 
     #[test]
