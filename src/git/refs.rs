@@ -1092,7 +1092,10 @@ fn parse_git_config_bool(value: &str) -> Option<bool> {
     };
 
     let magnitude: i64 = digits.parse().ok()?;
-    Some(magnitude.saturating_mul(unit) != 0)
+    // `checked_mul`, not `saturating_mul`: git itself rejects a suffixed
+    // value that overflows as a malformed boolean rather than clamping it,
+    // so an overflow here must also produce `None` rather than `Some(true)`.
+    magnitude.checked_mul(unit).map(|value| value != 0)
 }
 
 /// Sort commit SHAs by commit date, newest first, using a single `git log
@@ -1264,6 +1267,15 @@ mod tests {
         assert_eq!(parse_git_config_bool(""), None);
         assert_eq!(parse_git_config_bool(" "), None);
         assert_eq!(parse_git_config_bool("1x"), None);
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_rejects_overflowing_suffixed_values() {
+        // git itself rejects this as a malformed boolean (the suffix
+        // multiplication overflows its integer parser) rather than
+        // clamping it to a truthy value.
+        assert_eq!(parse_git_config_bool("9223372036854775807k"), None);
+        assert_eq!(parse_git_config_bool("9223372036854775807g"), None);
     }
 
     #[test]
