@@ -1095,7 +1095,11 @@ fn parse_git_config_bool(value: &str) -> Option<bool> {
     // `checked_mul`, not `saturating_mul`: git itself rejects a suffixed
     // value that overflows as a malformed boolean rather than clamping it,
     // so an overflow here must also produce `None` rather than `Some(true)`.
-    magnitude.checked_mul(unit).map(|value| value != 0)
+    let product = magnitude.checked_mul(unit)?;
+    // Git's numeric-boolean fallback parses into a 32-bit signed int, not a
+    // 64-bit one: a product outside that range is malformed too, even
+    // though it fits comfortably in an i64 and wouldn't overflow above.
+    i32::try_from(product).ok().map(|value| value != 0)
 }
 
 /// Sort commit SHAs by commit date, newest first, using a single `git log
@@ -1276,6 +1280,20 @@ mod tests {
         // clamping it to a truthy value.
         assert_eq!(parse_git_config_bool("9223372036854775807k"), None);
         assert_eq!(parse_git_config_bool("9223372036854775807g"), None);
+    }
+
+    #[test]
+    fn test_parse_git_config_bool_enforces_git_i32_range() {
+        // Git's numeric-boolean fallback parses into a 32-bit signed int
+        // (confirmed against real `git config --bool` output), not a
+        // 64-bit one -- a product that fits an i64 without overflowing can
+        // still be outside that narrower range and thus malformed.
+        assert_eq!(parse_git_config_bool("2147483647"), Some(true));
+        assert_eq!(parse_git_config_bool("2147483648"), None);
+        assert_eq!(parse_git_config_bool("2097151k"), Some(true));
+        assert_eq!(parse_git_config_bool("2097152k"), None);
+        assert_eq!(parse_git_config_bool("-2147483648"), Some(true));
+        assert_eq!(parse_git_config_bool("-2147483649"), None);
     }
 
     #[test]
