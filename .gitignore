@@ -40,4 +40,5 @@ fuzz/corpus/
 # Worktrees
 .worktrees/
 .claude/worktrees/
+.git-ai-ignore
 
