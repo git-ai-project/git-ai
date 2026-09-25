@@ -247,6 +247,7 @@ async function runCheckpoint(payload: CheckpointPayload): Promise<void> {
   await new Promise<void>((resolvePromise) => {
     const child = spawn(GIT_AI_BIN, ['checkpoint', 'pi', '--hook-input', 'stdin'], {
       stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
     });
 
     child.on('error', () => resolvePromise());

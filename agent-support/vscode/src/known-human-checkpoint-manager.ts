@@ -122,6 +122,7 @@ export class KnownHumanCheckpointManager {
 
     const proc = spawn(getGitAiBinary(), ["checkpoint", "known_human", "--hook-input", "stdin"], {
       cwd: repoRoot,
+      windowsHide: true,
     });
 
     let stdout = "";
