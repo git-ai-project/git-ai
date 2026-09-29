@@ -1764,4 +1764,216 @@ crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_with_manual_changes_standard_human,
     test_ci_rebase_merge_multiple_commits_standard_human,
     test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main,
+    test_merge_after_unsynced_rebase_loses_attribution,
+    test_sync_before_merge_preserves_attribution_across_rebase,
+    test_chained_rebases_carry_attribution_to_the_merge,
 );
+
+/// Reproduces the GitLab "Rebase" button pressed on an open MR: the source
+/// branch is rewritten server-side with no git-ai in the loop, so the rebased
+/// commits carry no notes. The merge-time CI job walks `base..head`, which by
+/// then only contains those note-less rebased commits, so attribution is lost.
+#[test]
+fn test_merge_after_unsynced_rebase_loses_attribution() {
+    let repo = direct_test_repo();
+    setup_main(&repo);
+
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["ai content".ai()]);
+    let original_head = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
+    assert!(
+        repo.read_authorship_note(&original_head).is_some(),
+        "precondition: the pre-rebase commit has an authorship note"
+    );
+
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // git_og bypasses the git-ai proxy, standing in for GitLab's server-side rebase.
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let rebased_head = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_ne!(rebased_head, original_head);
+
+    let squash_sha = squash_feature_with_raw_git(&repo, "Squash merge feature");
+    let output = run_ci_local_merge(&repo, &squash_sha, &rebased_head, &base_sha);
+
+    assert!(
+        output.contains("no AI authorship to track"),
+        "an un-synced rebase should leave the merge with nothing to carry forward, got: {output}"
+    );
+    assert!(
+        repo.read_authorship_note(&squash_sha).is_none(),
+        "squash commit should have no authorship note when the rebase was never synced"
+    );
+}
+
+/// The fix: replaying the sync event for the rewrite re-anchors the notes onto
+/// the rebased commits, so the later merge has something to carry forward.
+/// `ci gitlab run` replays these hops from the MR's diff-version history.
+#[test]
+fn test_sync_before_merge_preserves_attribution_across_rebase() {
+    let repo = direct_test_repo();
+    setup_main(&repo);
+
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["ai content".ai()]);
+    let original_head = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
+
+    repo.git_og(&["checkout", "main"]).unwrap();
+    let mut main_file = repo.filename("main_only.txt");
+    main_file.set_contents(crate::lines!["main-only content"]);
+    repo.git_og(&["add", "main_only.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "Advance main"]).unwrap();
+    let base_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let rebased_head = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let sync_output = repo
+        .git_ai(&[
+            "ci",
+            "local",
+            "sync",
+            "--previous-head-sha",
+            original_head.as_str(),
+            "--head-sha",
+            rebased_head.as_str(),
+            "--base-ref",
+            "main",
+            "--base-sha",
+            base_sha.as_str(),
+            "--skip-fetch-notes",
+            "--skip-push",
+        ])
+        .expect("ci local sync should succeed");
+    assert!(
+        sync_output.contains("authorship rewritten successfully"),
+        "sync should re-anchor the note onto the rebased commit, got: {sync_output}"
+    );
+
+    let squash_sha = squash_feature_with_raw_git(&repo, "Squash merge feature");
+    let output = run_ci_local_merge(&repo, &squash_sha, &rebased_head, &base_sha);
+    assert_ci_rewrite_succeeded(&output);
+
+    let files = authorship_files(&repo, &squash_sha);
+    assert!(
+        files.iter().any(|file| file.contains("feature.txt")),
+        "squash commit should carry the AI attribution across the rebase, got: {files:?}"
+    );
+    feature_file.assert_lines_and_blame(crate::lines!["ai content".ai()]);
+}
+
+/// An MR rebased more than once before merging. Recovery has to walk every hop:
+/// the notes only ever existed on the first version's commits, so each rewrite
+/// must be replayed in order for the merge to have anything to carry forward.
+#[test]
+fn test_chained_rebases_carry_attribution_to_the_merge() {
+    let repo = direct_test_repo();
+    setup_main(&repo);
+
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["ai content".ai()]);
+    let head_v1 = repo.stage_all_and_commit("Add feature").unwrap().commit_sha;
+
+    let advance_main = |name: &str, message: &str| {
+        repo.git_og(&["checkout", "main"]).unwrap();
+        let mut file = repo.filename(name);
+        file.set_contents(crate::lines!["main-only content"]);
+        repo.git_og(&["add", name]).unwrap();
+        repo.git_og(&["commit", "-m", message]).unwrap();
+        repo.git_og(&["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+
+    // First UI rebase (git_og bypasses the proxy, as the server-side rebase does).
+    let base_v2 = advance_main("main_one.txt", "Advance main once");
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let head_v2 = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Second UI rebase.
+    let base_v3 = advance_main("main_two.txt", "Advance main twice");
+    repo.git_og(&["checkout", "feature"]).unwrap();
+    repo.git_og(&["rebase", "main"]).unwrap();
+    let head_v3 = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    assert_ne!(head_v1, head_v2);
+    assert_ne!(head_v2, head_v3);
+    assert!(
+        repo.read_authorship_note(&head_v3).is_none(),
+        "precondition: the twice-rebased commit has no note"
+    );
+
+    let run_hop = |previous: &str, head: &str, base: &str| {
+        repo.git_ai(&[
+            "ci",
+            "local",
+            "sync",
+            "--previous-head-sha",
+            previous,
+            "--head-sha",
+            head,
+            "--base-ref",
+            "main",
+            "--base-sha",
+            base,
+            "--skip-fetch-notes",
+            "--skip-push",
+        ])
+        .expect("ci local sync hop should succeed")
+    };
+
+    run_hop(&head_v1, &head_v2, &base_v2);
+    run_hop(&head_v2, &head_v3, &base_v3);
+
+    assert!(
+        repo.read_authorship_note(&head_v3).is_some(),
+        "replaying both hops should land a note on the final rebased commit"
+    );
+
+    let squash_sha = squash_feature_with_raw_git(&repo, "Squash merge feature");
+    let output = run_ci_local_merge(&repo, &squash_sha, &head_v3, &base_v3);
+    assert_ci_rewrite_succeeded(&output);
+
+    let files = authorship_files(&repo, &squash_sha);
+    assert!(
+        files.iter().any(|file| file.contains("feature.txt")),
+        "attribution should survive two rebases into the merge, got: {files:?}"
+    );
+    feature_file.assert_lines_and_blame(crate::lines!["ai content".ai()]);
+}

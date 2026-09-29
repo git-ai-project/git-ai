@@ -574,7 +574,7 @@ impl CiContext {
     /// Fetch authorship notes from a fork repository URL into the fork tracking ref.
     /// Returns Ok(true) if notes were found and fetched,
     /// Ok(false) if no notes exist on the fork.
-    fn fetch_fork_notes(repo: &Repository, fork_url: &str) -> Result<bool, GitAiError> {
+    pub(super) fn fetch_fork_notes(repo: &Repository, fork_url: &str) -> Result<bool, GitAiError> {
         let tracking_ref = AI_AUTHORSHIP_FORK_TRACKING_REF;
 
         // Check if the fork has notes
