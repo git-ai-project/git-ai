@@ -62,6 +62,20 @@ pub fn handle_notes_migrate(args: &[String]) {
         }
     };
 
+    // Repository filters: an excluded repository's notes never reach the
+    // backend, so neither does a bulk upload of them.
+    if let Some(rejection) = cfg.tracking_rejection(&repo) {
+        eprintln!(
+            "Skipped migrating notes: the repository filters reject this repository ({}).",
+            rejection.reason()
+        );
+        eprintln!(
+            "To migrate them anyway, {} and run the command again.",
+            rejection.how_to_change_filters()
+        );
+        return;
+    }
+
     // 3. Build the API client.
     let backend_url = match cfg.notes_backend_url() {
         Some(url) => url.to_string(),
@@ -415,6 +429,9 @@ fn print_help() {
     eprintln!("    git-ai config set notes_backend.kind http");
     eprintln!();
     eprintln!("  You must be logged in or have an API key configured.");
+    eprintln!();
+    eprintln!("  Nothing is uploaded for a repository that allow_repositories /");
+    eprintln!("  exclude_repositories reject; the command says which rule matched.");
 }
 
 // --- Tests ---

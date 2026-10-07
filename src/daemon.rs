@@ -1377,7 +1377,15 @@ fn apply_pull_notes_sync_side_effect(
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
     let remote = fetch_remote_from_args(&repo, &parsed)?;
-    let notes_backend = crate::config::Config::fresh().notes_backend_kind();
+    let config = crate::config::Config::fresh();
+    if !config.may_sync_notes_with_remote(&repo, &remote) {
+        tracing::debug!(
+            remote = %remote,
+            "pull notes sync: skipping, remote rejected by repository filters"
+        );
+        return Ok(());
+    }
+    let notes_backend = config.notes_backend_kind();
 
     tracing::info!(
         command = command.unwrap_or("pull"),
@@ -1400,7 +1408,15 @@ fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> 
 
     let repo = find_repository_in_path(worktree)?;
     let remote = "origin";
-    let notes_backend = crate::config::Config::fresh().notes_backend_kind();
+    let config = crate::config::Config::fresh();
+    if !config.may_sync_notes_with_remote(&repo, remote) {
+        tracing::debug!(
+            remote = %remote,
+            "clone notes sync: skipping, remote rejected by repository filters"
+        );
+        return Ok(());
+    }
+    let notes_backend = config.notes_backend_kind();
 
     tracing::info!(
         command = "clone",

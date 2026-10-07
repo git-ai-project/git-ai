@@ -524,12 +524,13 @@ fn handle_checkpoint(args: &[String]) {
             let mut checked_repos = std::collections::HashSet::new();
             for request in &requests {
                 for file in &request.files {
+                    // Fail closed: a repository that cannot be resolved cannot
+                    // be checked against the filters.
                     if checked_repos.insert(file.repo_work_dir.clone())
-                        && let Ok(repo) =
-                            crate::git::repository::discover_repository_in_path_no_git_exec(
-                                &file.repo_work_dir,
-                            )
-                        && !config.is_allowed_repository(&Some(repo))
+                        && !crate::git::repository::discover_repository_in_path_no_git_exec(
+                            &file.repo_work_dir,
+                        )
+                        .is_ok_and(|repo| config.tracks_repository(&repo))
                     {
                         eprintln!(
                             "Skipping checkpoint because repository is excluded or not in allow_repositories list"
@@ -782,6 +783,7 @@ fn notes_existence_label(existence: NotesExistence) -> &'static str {
     match existence {
         NotesExistence::Found => "found",
         NotesExistence::NotFound => "not_found",
+        NotesExistence::Skipped => "skipped",
     }
 }
 

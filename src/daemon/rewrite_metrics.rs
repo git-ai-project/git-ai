@@ -94,6 +94,13 @@ fn build_rewrite_metric_events(
     repo: &Repository,
     metric_commits: &[RewriteMetricCommit],
 ) -> Vec<MetricEvent> {
+    // Rewrites carry the shifted note even when the note write was skipped, so
+    // a repository the filters reject gets no rewrite metrics either. Fresh
+    // config: the daemon must see filter changes without a restart.
+    if !Config::fresh().tracks_repository(repo) {
+        tracing::debug!("repository filters exclude this repository; rewrite metrics not recorded");
+        return Vec::new();
+    }
     let mut metric_commits = dedupe_metric_commits(metric_commits.to_vec());
     hydrate_missing_parent_shas(repo, &mut metric_commits);
     hydrate_missing_parent_diffs(repo, &mut metric_commits);

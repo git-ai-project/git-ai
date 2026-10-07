@@ -1,4 +1,4 @@
-use crate::config::NotesBackendKind;
+use crate::config::{NotesBackendKind, RepositoryFilterRejection};
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes};
@@ -86,6 +86,16 @@ pub fn handle_fetch_notes(args: &[String]) {
         },
     };
 
+    let config = crate::config::Config::get();
+    if let Some(rejection) = config.notes_sync_rejection(&repo, &remote_name) {
+        if json_output {
+            print_skipped_json(remote_name);
+        } else {
+            print_filter_skip_hint(&remote_name, &rejection, config.notes_backend_kind());
+        }
+        return;
+    }
+
     if !json_output {
         eprint!("Fetching authorship notes from '{}'...", remote_name);
     }
@@ -132,6 +142,7 @@ pub fn handle_fetch_notes(args: &[String]) {
                 let status = match notes_existence {
                     NotesExistence::Found => "found".to_string(),
                     NotesExistence::NotFound => "not_found".to_string(),
+                    NotesExistence::Skipped => "skipped".to_string(),
                 };
                 let output = FetchNotesJsonOutput {
                     remote: remote_name,
@@ -150,6 +161,9 @@ pub fn handle_fetch_notes(args: &[String]) {
                     NotesExistence::NotFound => {
                         eprintln!(" no notes found on remote ({:.2}s).", elapsed.as_secs_f64());
                     }
+                    NotesExistence::Skipped => {
+                        eprintln!(" skipped, rejected by repository filters.");
+                    }
                 }
             }
         }
@@ -163,6 +177,43 @@ pub fn handle_fetch_notes(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+fn print_skipped_json(remote: String) {
+    let output = FetchNotesJsonOutput {
+        remote,
+        status: "skipped".to_string(),
+        error: None,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&output).expect("failed to serialize JSON")
+    );
+}
+
+/// Explain a fetch the repository filters rejected, and the two ways around
+/// it: change the filters, or fetch with plain git outside git-ai.
+fn print_filter_skip_hint(
+    remote: &str,
+    rejection: &RepositoryFilterRejection,
+    backend: NotesBackendKind,
+) {
+    let reason = rejection.reason();
+    let change_filters = rejection.how_to_change_filters();
+    eprintln!(
+        "Skipped fetching authorship notes from '{}': the repository filters reject it ({}).",
+        remote, reason
+    );
+    if backend == NotesBackendKind::Http {
+        eprintln!("To fetch them anyway, {}.", change_filters);
+        return;
+    }
+    eprintln!("To fetch them anyway, either:");
+    eprintln!("  - {}, or", change_filters);
+    eprintln!(
+        "  - fetch them with plain git, outside git-ai: git fetch {} refs/notes/ai:refs/notes/ai",
+        remote
+    );
 }
 
 fn resolve_default_remote(repo: &crate::git::repository::Repository) -> Result<String, GitAiError> {
@@ -200,6 +251,9 @@ fn print_fetch_notes_help() {
     eprintln!("  --remote <name>    Explicit remote name");
     eprintln!("  --json             Output result as JSON");
     eprintln!("  -h, --help         Show this help message");
+    eprintln!();
+    eprintln!("Notes are not fetched from a remote that allow_repositories /");
+    eprintln!("exclude_repositories reject; the command says which rule matched.");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  git ai fetch-notes              Fetch from default remote");
