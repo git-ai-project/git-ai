@@ -54,6 +54,8 @@ pub fn handle_git_ai(args: &[String]) {
             | "uninstall"
             | "uninstall-hooks"
             | "usage"
+            | "completions"
+            | "completion"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -82,6 +84,9 @@ pub fn handle_git_ai(args: &[String]) {
     match args[0].as_str() {
         "help" | "--help" | "-h" => {
             print_help();
+        }
+        "completions" | "completion" => {
+            commands::completions::handle_completions(&args[1..]);
         }
         "version" | "--version" | "-v" => {
             if cfg!(debug_assertions) {
@@ -399,6 +404,7 @@ fn print_help() {
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
+    eprintln!("  completions <bash|zsh|fish>  Print a static shell completion script");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();
