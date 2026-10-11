@@ -18,6 +18,8 @@ struct Command {
     name: &'static str,
     description: &'static str,
     flags: &'static [&'static str],
+    /// Advertised subcommands offered after the command name. Empty for most.
+    subcommands: &'static [&'static str],
 }
 
 /// Single source of truth for the completion command surface.
@@ -29,151 +31,187 @@ const COMMANDS: &[Command] = &[
         name: "checkpoint",
         description: "Checkpoint working changes and attribute authorship",
         flags: &["--hook-input"],
+        subcommands: &[],
     },
     Command {
         name: "log",
         description: "Show commit log with AI authorship stats",
         flags: &["--raw", "--notes"],
+        subcommands: &[],
     },
     Command {
         name: "blame",
         description: "Git blame with AI authorship overlay",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "diff",
         description: "Show diff with AI authorship annotations",
         flags: &["--json", "--include-stats", "--all-prompts"],
+        subcommands: &[],
     },
     Command {
         name: "stats",
         description: "Show AI authorship statistics for a commit",
         flags: &["--json"],
+        subcommands: &[],
     },
     Command {
         name: "usage",
         description: "Show local AI usage statistics",
         flags: &["--period", "--json"],
+        subcommands: &[],
     },
     Command {
         name: "analyze",
         description: "Analyze agent sessions and effectiveness",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "status",
         description: "Show uncommitted AI authorship status",
         flags: &["--json", "--diff-only"],
+        subcommands: &[],
     },
     Command {
         name: "show",
         description: "Display authorship logs for a revision or range",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "show-prompt",
         description: "Display a prompt record by its ID",
         flags: &["--commit", "--offset"],
+        subcommands: &[],
     },
     Command {
         name: "config",
         description: "View and manage git-ai configuration",
         flags: &["--add"],
+        subcommands: &[],
     },
     Command {
         name: "debug",
         description: "Print support/debug diagnostics",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "bg",
         description: "Run and control the git-ai background service",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "install",
         description: "Install hooks for AI authorship tracking",
         flags: &["--env", "--wsl", "--skills", "--visual-studio-extension"],
+        subcommands: &[],
     },
     Command {
         name: "install-hooks",
         description: "Install hooks for AI authorship tracking",
         flags: &["--env", "--wsl", "--skills", "--visual-studio-extension"],
+        subcommands: &[],
     },
     Command {
         name: "uninstall",
         description: "Remove git-ai hooks from all detected tools",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "uninstall-hooks",
         description: "Remove git-ai hooks from all detected tools",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "ci",
         description: "Continuous integration utilities",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "git-path",
         description: "Print the path to the underlying git executable",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "await",
         description: "Wait for the background service to finish all work",
         flags: &["--timeout"],
+        subcommands: &[],
     },
     Command {
         name: "reingest",
         description: "Redeliver locally stored metric events",
         flags: &["--all", "--from", "--to", "--since"],
+        subcommands: &[],
     },
     Command {
         name: "upgrade",
         description: "Check for updates and install if available",
         flags: &["--force"],
+        subcommands: &[],
     },
     Command {
         name: "fetch-notes",
         description: "Synchronously fetch AI authorship notes",
         flags: &["--remote", "--json"],
+        subcommands: &[],
+    },
+    Command {
+        name: "notes",
+        description: "Manage the notes backend",
+        flags: &[],
+        subcommands: &["migrate"],
     },
     Command {
         name: "dashboard",
         description: "Open the personal dashboard",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "login",
         description: "Authenticate with Git AI",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "logout",
         description: "Clear stored credentials",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "whoami",
         description: "Show auth state and login identity",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "exchange-nonce",
         description: "Exchange an authentication nonce",
         flags: &[],
+        subcommands: &[],
     },
     Command {
         name: "version",
         description: "Print the git-ai version",
         flags: &["-v", "--version"],
+        subcommands: &[],
     },
     Command {
         name: "help",
         description: "Show the git-ai help message",
         flags: &["-h", "--help"],
+        subcommands: &[],
     },
 ];
 
@@ -195,14 +233,19 @@ fn command_names() -> Vec<&'static str> {
 /// Effective `(name, description, flags)` rows for generators.
 ///
 /// Includes aliases so `git-ai d ...` completes the same flags as `git-ai bg`.
-fn effective_commands() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
-    let mut rows: Vec<(&'static str, &'static str, &'static [&'static str])> = COMMANDS
+fn effective_commands() -> Vec<(
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+)> {
+    let mut rows: Vec<_> = COMMANDS
         .iter()
-        .map(|c| (c.name, c.description, c.flags))
+        .map(|c| (c.name, c.description, c.flags, c.subcommands))
         .collect();
     for (alias, canonical) in ALIASES {
         if let Some(target) = find_command(canonical) {
-            rows.push((alias, target.description, target.flags));
+            rows.push((alias, target.description, target.flags, target.subcommands));
         }
     }
     rows
@@ -236,14 +279,21 @@ fn generate_bash() -> String {
     out.push('\n');
     out.push_str("    cmd=\"${COMP_WORDS[1]}\"\n");
     out.push_str("    case \"${cmd}\" in\n");
-    for (name, _description, flags) in effective_commands() {
-        if flags.is_empty() {
+    for (name, _description, flags, subcommands) in effective_commands() {
+        // Subcommands (e.g. `notes migrate`) take precedence for the first
+        // positional argument; commands that only have flags complete flags.
+        let words = if subcommands.is_empty() {
+            flags
+        } else {
+            subcommands
+        };
+        if words.is_empty() {
             continue;
         }
         out.push_str(&format!("        {name})\n"));
         out.push_str(&format!(
             "            COMPREPLY=($(compgen -W \"{}\" -- \"${{cur}}\"))\n",
-            flags.join(" ")
+            words.join(" ")
         ));
         out.push_str("            ;;\n");
     }
@@ -267,7 +317,7 @@ fn generate_zsh() -> String {
     out.push_str("_git_ai() {\n");
     out.push_str("    local -a commands\n");
     out.push_str("    commands=(\n");
-    for (name, description, _flags) in effective_commands() {
+    for (name, description, _flags, _subcommands) in effective_commands() {
         out.push_str(&format!("        '{name}:{description}'\n"));
     }
     out.push_str("    )\n");
@@ -278,7 +328,20 @@ fn generate_zsh() -> String {
     out.push_str("    fi\n");
     out.push('\n');
     out.push_str("    case \"${words[2]}\" in\n");
-    for (name, _description, flags) in effective_commands() {
+    for (name, _description, flags, subcommands) in effective_commands() {
+        if !subcommands.is_empty() {
+            // Offer the command's subcommands (e.g. `notes migrate`).
+            let var = format!("{}_subcommands", name.replace('-', "_"));
+            out.push_str(&format!("        {name})\n"));
+            out.push_str(&format!("            local -a {var}\n"));
+            let quoted: Vec<String> = subcommands.iter().map(|sub| format!("'{sub}'")).collect();
+            out.push_str(&format!("            {var}=({})\n", quoted.join(" ")));
+            out.push_str(&format!(
+                "            _describe -t commands 'git-ai {name} subcommand' {var}\n"
+            ));
+            out.push_str("            ;;\n");
+            continue;
+        }
         if flags.is_empty() {
             continue;
         }
@@ -305,13 +368,21 @@ fn generate_fish() -> String {
     out.push_str("complete -c git-ai -f\n");
     out.push('\n');
     out.push_str("# Subcommands\n");
-    for (name, description, _flags) in effective_commands() {
+    for (name, description, _flags, _subcommands) in effective_commands() {
         out.push_str(&format!(
             "complete -c git-ai -n '__fish_use_subcommand' -a {name} -d '{description}'\n"
         ));
     }
+    out.push_str("\n# Nested subcommands\n");
+    for (name, _description, _flags, subcommands) in effective_commands() {
+        for sub in subcommands {
+            out.push_str(&format!(
+                "complete -c git-ai -n '__fish_seen_subcommand_from {name}' -a {sub}\n"
+            ));
+        }
+    }
     out.push_str("\n# Flags\n");
-    for (name, _description, flags) in effective_commands() {
+    for (name, _description, flags, _subcommands) in effective_commands() {
         for flag in flags {
             let option = if let Some(long) = flag.strip_prefix("--") {
                 format!("-l {long}")
@@ -383,6 +454,79 @@ mod tests {
                 assert!(
                     out.contains(name),
                     "{shell} script missing command/alias '{name}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notes_is_a_top_level_command() {
+        let notes = find_command("notes").expect("`notes` must be in the command table");
+        assert_eq!(
+            notes.subcommands,
+            &["migrate"],
+            "`notes` advertises exactly the `migrate` subcommand"
+        );
+        assert!(
+            command_names().contains(&"notes"),
+            "`notes` must appear in the top-level word list"
+        );
+    }
+
+    #[test]
+    fn notes_and_migrate_appear_in_every_shell() {
+        for shell in SHELLS {
+            let out = script(shell);
+            assert!(out.contains("notes"), "{shell} script missing 'notes'");
+            assert!(
+                out.contains("migrate"),
+                "{shell} script missing 'migrate' subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn notes_subcommand_is_offered_per_shell() {
+        let bash = script("bash");
+        // Anchor on the arm indentation so we don't match inside `fetch-notes)`.
+        let notes_arm = bash
+            .split("\n        notes)")
+            .nth(1)
+            .expect("bash has a notes case arm");
+        assert!(notes_arm.contains("migrate"), "{bash}");
+
+        let zsh = script("zsh");
+        assert!(
+            zsh.contains("notes)") && zsh.contains("'migrate"),
+            "zsh must offer `migrate` in the notes subcommand context:\n{zsh}"
+        );
+
+        let fish = script("fish");
+        assert!(
+            fish.contains("__fish_seen_subcommand_from notes") && fish.contains("-a migrate"),
+            "fish must offer `migrate` under notes:\n{fish}"
+        );
+    }
+
+    #[test]
+    fn hidden_internal_commands_are_not_advertised() {
+        // `notes serve` is likewise hidden; the exact-subcommands assertion in
+        // `notes_is_a_top_level_command` pins that, since "serve" is a substring
+        // of the public word "service".
+        const HIDDEN: [&str; 6] = [
+            "git-hooks",
+            "flush-metrics-db",
+            "effective-ignore-patterns",
+            "blame-analysis",
+            "fetch-authorship-notes",
+            "push-authorship-notes",
+        ];
+        for shell in SHELLS {
+            let out = script(shell);
+            for hidden in HIDDEN {
+                assert!(
+                    !out.contains(hidden),
+                    "{shell} script must not advertise hidden command '{hidden}'"
                 );
             }
         }
