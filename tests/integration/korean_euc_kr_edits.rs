@@ -186,6 +186,44 @@ fn test_euc_kr_ai_adds_lines_before_and_after_korean_comment() {
         ]);
 }
 
+// TODO Lossy decoding maps different EUC-KR byte sequences to the same replacement characters, so
+// an edit that only swaps Korean text for Korean text of the same shape is invisible to the
+// checkpoint diff. Needs a lossless decoding shared by every content read in the pipeline.
+#[test]
+#[ignore]
+fn test_euc_kr_ai_rewrites_korean_comment_with_same_lossy_shape() {
+    // "// 평균" and "// 결과" in EUC-KR: different bytes, identical lossy text.
+    let comment_before: &[u8] = &[0x2F, 0x2F, 0x20, 0xC6, 0xF2, 0xB1, 0xD5];
+    let comment_after: &[u8] = &[0x2F, 0x2F, 0x20, 0xB0, 0xE1, 0xB0, 0xFA];
+    let comment_as_blamed = String::from_utf8_lossy(comment_after).into_owned();
+    assert_eq!(String::from_utf8_lossy(comment_before), comment_as_blamed);
+
+    let repo = TestRepo::new();
+    let base = euc_kr_source(&[b"int a;", comment_before, b"int b;"]);
+    fs::write(repo.path().join(FILE_NAME), base).unwrap();
+    repo.stage_all_and_commit("Add EUC-KR source file").unwrap();
+    repo.filename(FILE_NAME)
+        .assert_committed_lines(crate::lines![
+            "int a;".unattributed_human(),
+            comment_as_blamed.clone().unattributed_human(),
+            "int b;".unattributed_human(),
+        ]);
+
+    let commit = ai_edits_euc_kr_file(
+        &repo,
+        &[b"int a;", comment_after, b"int b;"],
+        "AI rewrites the Korean comment",
+    );
+
+    assert_note_ai_line_ranges(&repo, &commit, vec![LineRange::Single(2)]);
+    repo.filename(FILE_NAME)
+        .assert_committed_lines(crate::lines![
+            "int a;".unattributed_human(),
+            comment_as_blamed.ai(),
+            "int b;".unattributed_human(),
+        ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_euc_kr_ai_adds_lines_before_korean_comment,
     test_euc_kr_ai_adds_lines_after_korean_comment,

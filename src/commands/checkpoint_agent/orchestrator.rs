@@ -158,13 +158,14 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
                 continue;
             }
             // Non-UTF-8 text (e.g. EUC-KR, GBK) is decoded lossily, matching how the
-            // HEAD version is decoded for diffing. Binary files are still skipped.
+            // HEAD version is decoded for diffing. Non-UTF-8 files with NUL bytes are
+            // treated as binary and skipped.
             fs::read(path)
                 .ok()
-                .filter(|bytes| !bytes.contains(&0))
-                .map(|bytes| {
-                    String::from_utf8(bytes)
-                        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+                .and_then(|bytes| match String::from_utf8(bytes) {
+                    Ok(text) => Some(text),
+                    Err(err) => (!err.as_bytes().contains(&0))
+                        .then(|| String::from_utf8_lossy(err.as_bytes()).into_owned()),
                 })
         } else {
             Some(String::new())
