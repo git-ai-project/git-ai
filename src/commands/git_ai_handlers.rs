@@ -55,24 +55,13 @@ pub fn handle_git_ai(args: &[String]) {
             | "uninstall"
             | "uninstall-hooks"
             | "usage"
+            // checkpoint connects after it has answered a Cursor permission
+            // hook, so a background-service failure cannot leave Cursor
+            // without a reply.
+            | "checkpoint"
     );
     if needs_daemon {
-        use crate::daemon::telemetry_handle::{
-            DaemonTelemetryInitResult, init_daemon_telemetry_handle,
-        };
-        match init_daemon_telemetry_handle() {
-            DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
-            DaemonTelemetryInitResult::Failed(err) => {
-                eprintln!(
-                    "error: failed to connect to git-ai background service: {}",
-                    err
-                );
-                if args[0].as_str() == "checkpoint" {
-                    std::process::exit(0);
-                }
-                std::process::exit(1);
-            }
-        }
+        init_daemon_telemetry_or_exit(1);
     }
 
     // Start DB warmup early for commands that need database access
@@ -482,6 +471,8 @@ fn handle_checkpoint(args: &[String]) {
         println!("{{}}");
         let _ = std::io::stdout().flush();
     }
+
+    init_daemon_telemetry_or_exit(0);
 
     if perf {
         eprintln!(
@@ -1139,8 +1130,22 @@ fn handle_git_hooks(args: &[String]) {
     }
 }
 
-/// Synthesize JSON hook_input from CLI args for mock/test presets that can be
-/// invoked without --hook-input.
+fn init_daemon_telemetry_or_exit(failure_exit_code: i32) {
+    use crate::daemon::telemetry_handle::{
+        DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+    };
+    match init_daemon_telemetry_handle() {
+        DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+        DaemonTelemetryInitResult::Failed(err) => {
+            eprintln!(
+                "error: failed to connect to git-ai background service: {}",
+                err
+            );
+            std::process::exit(failure_exit_code);
+        }
+    }
+}
+
 fn is_cursor_pre_tool_use(hook_input: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(hook_input)
         .ok()
@@ -1153,6 +1158,8 @@ fn is_cursor_pre_tool_use(hook_input: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Synthesize JSON hook_input from CLI args for mock/test presets that can be
+/// invoked without --hook-input.
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
