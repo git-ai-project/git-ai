@@ -42,7 +42,17 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "blame",
         description: "Git blame with AI authorship overlay",
-        flags: &[],
+        flags: &[
+            "--json",
+            "--since",
+            "--show-stats",
+            "--ignore-rev",
+            "--ignore-revs-file",
+            "--show-prompt",
+            "--mark-unknown",
+            "--porcelain",
+            "--incremental",
+        ],
         subcommands: &[],
     },
     Command {
@@ -54,7 +64,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "stats",
         description: "Show AI authorship statistics for a commit",
-        flags: &["--json"],
+        flags: &["--json", "--ignore"],
         subcommands: &[],
     },
     Command {
@@ -67,7 +77,7 @@ const COMMANDS: &[Command] = &[
         name: "analyze",
         description: "Analyze agent sessions and effectiveness",
         flags: &[],
-        subcommands: &[],
+        subcommands: &["query", "docs", "sessions"],
     },
     Command {
         name: "status",
@@ -91,7 +101,7 @@ const COMMANDS: &[Command] = &[
         name: "config",
         description: "View and manage git-ai configuration",
         flags: &["--add"],
-        subcommands: &[],
+        subcommands: &["set", "unset"],
     },
     Command {
         name: "debug",
@@ -103,7 +113,7 @@ const COMMANDS: &[Command] = &[
         name: "bg",
         description: "Run and control the git-ai background service",
         flags: &[],
-        subcommands: &[],
+        subcommands: &["start", "run", "status", "shutdown", "restart", "tail"],
     },
     Command {
         name: "install",
@@ -133,7 +143,7 @@ const COMMANDS: &[Command] = &[
         name: "ci",
         description: "Continuous integration utilities",
         flags: &[],
-        subcommands: &[],
+        subcommands: &["github", "gitlab", "local"],
     },
     Command {
         name: "git-path",
@@ -210,13 +220,29 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "help",
         description: "Show the git-ai help message",
-        flags: &["-h", "--help"],
+        flags: &["-h"],
+        subcommands: &[],
+    },
+    Command {
+        name: "completions",
+        description: "Print a static shell completion script",
+        flags: &[],
         subcommands: &[],
     },
 ];
 
 /// Extra command names that resolve to a canonical [`COMMANDS`] entry.
-const ALIASES: &[(&str, &str)] = &[("d", "bg"), ("daemon", "bg"), ("dash", "dashboard")];
+const ALIASES: &[(&str, &str)] = &[
+    ("d", "bg"),
+    ("daemon", "bg"),
+    ("dash", "dashboard"),
+    ("completion", "completions"),
+];
+
+/// Commands whose first argument is a file path. Fish completions suppress
+/// filenames by default, so these explicitly force filename completion.
+/// `show-prompt` is deliberately absent: it takes a prompt ID, not a path.
+const FILE_TAKING: &[&str] = &["blame", "checkpoint"];
 
 /// The canonical command named `name`, if any.
 fn find_command(name: &str) -> Option<&'static Command> {
@@ -280,13 +306,10 @@ fn generate_bash() -> String {
     out.push_str("    cmd=\"${COMP_WORDS[1]}\"\n");
     out.push_str("    case \"${cmd}\" in\n");
     for (name, _description, flags, subcommands) in effective_commands() {
-        // Subcommands (e.g. `notes migrate`) take precedence for the first
-        // positional argument; commands that only have flags complete flags.
-        let words = if subcommands.is_empty() {
-            flags
-        } else {
-            subcommands
-        };
+        // Offer a command's nested actions and its flags together, so commands
+        // with both (e.g. `config set` / `config --add`) expose both. One level
+        // of nesting only.
+        let words: Vec<&str> = subcommands.iter().chain(flags).copied().collect();
         if words.is_empty() {
             continue;
         }
@@ -329,25 +352,24 @@ fn generate_zsh() -> String {
     out.push('\n');
     out.push_str("    case \"${words[2]}\" in\n");
     for (name, _description, flags, subcommands) in effective_commands() {
+        if subcommands.is_empty() && flags.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("        {name})\n"));
         if !subcommands.is_empty() {
-            // Offer the command's subcommands (e.g. `notes migrate`).
+            // Offer the command's nested actions (e.g. `notes migrate`).
             let var = format!("{}_subcommands", name.replace('-', "_"));
-            out.push_str(&format!("        {name})\n"));
             out.push_str(&format!("            local -a {var}\n"));
             let quoted: Vec<String> = subcommands.iter().map(|sub| format!("'{sub}'")).collect();
             out.push_str(&format!("            {var}=({})\n", quoted.join(" ")));
             out.push_str(&format!(
                 "            _describe -t commands 'git-ai {name} subcommand' {var}\n"
             ));
-            out.push_str("            ;;\n");
-            continue;
         }
-        if flags.is_empty() {
-            continue;
+        if !flags.is_empty() {
+            let quoted: Vec<String> = flags.iter().map(|flag| format!("'{flag}'")).collect();
+            out.push_str(&format!("            _arguments {}\n", quoted.join(" ")));
         }
-        out.push_str(&format!("        {name})\n"));
-        let quoted: Vec<String> = flags.iter().map(|flag| format!("'{flag}'")).collect();
-        out.push_str(&format!("            _arguments {}\n", quoted.join(" ")));
         out.push_str("            ;;\n");
     }
     out.push_str("    esac\n");
@@ -365,21 +387,27 @@ fn generate_fish() -> String {
         "# ponytail: hand-maintained command list; update it when the git-ai dispatch table changes.\n",
     );
     out.push('\n');
-    out.push_str("complete -c git-ai -f\n");
-    out.push('\n');
-    out.push_str("# Subcommands\n");
+    out.push_str("# No global -f: no-files is scoped to the lines below, so\n");
+    out.push_str("# file-taking commands keep filename completion.\n");
+    out.push_str("\n# Subcommands\n");
     for (name, description, _flags, _subcommands) in effective_commands() {
         out.push_str(&format!(
-            "complete -c git-ai -n '__fish_use_subcommand' -a {name} -d '{description}'\n"
+            "complete -c git-ai -f -n '__fish_use_subcommand' -a {name} -d '{description}'\n"
         ));
     }
     out.push_str("\n# Nested subcommands\n");
     for (name, _description, _flags, subcommands) in effective_commands() {
         for sub in subcommands {
             out.push_str(&format!(
-                "complete -c git-ai -n '__fish_seen_subcommand_from {name}' -a {sub}\n"
+                "complete -c git-ai -f -n '__fish_seen_subcommand_from {name}' -a {sub}\n"
             ));
         }
+    }
+    out.push_str("\n# File-taking commands re-enable filename completion.\n");
+    for cmd in FILE_TAKING {
+        out.push_str(&format!(
+            "complete -c git-ai -F -n '__fish_seen_subcommand_from {cmd}'\n"
+        ));
     }
     out.push_str("\n# Flags\n");
     for (name, _description, flags, _subcommands) in effective_commands() {
@@ -410,6 +438,11 @@ fn shell_script(shell: &str) -> Option<String> {
 }
 
 pub fn handle_completions(args: &[String]) {
+    if args.first().is_some_and(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return;
+    }
+
     let shell = match args.first() {
         Some(shell) => shell.as_str(),
         None => {
@@ -585,5 +618,209 @@ mod tests {
                 "unknown shell '{shell}' should not produce a script"
             );
         }
+    }
+
+    /// Extract the bash `case` arm body for `name` (up to its closing `;;`).
+    fn bash_arm(name: &str) -> String {
+        let bash = script("bash");
+        let after = bash
+            .split(&format!("\n        {name})"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("bash has no `{name})` arm"));
+        after.split(";;").next().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn completions_command_and_alias_appear_in_every_shell() {
+        assert!(
+            find_command("completions").is_some(),
+            "`completions` must be in the command table"
+        );
+        assert!(command_names().contains(&"completions"));
+        assert!(command_names().contains(&"completion"));
+
+        let bash = script("bash");
+        assert!(bash.contains("completions"), "{bash}");
+        assert!(
+            bash.contains("completion\""),
+            "bash top-level list missing `completion` alias:\n{bash}"
+        );
+        let zsh = script("zsh");
+        assert!(
+            zsh.contains("'completions:") && zsh.contains("'completion:"),
+            "zsh missing `completions`/`completion`:\n{zsh}"
+        );
+        let fish = script("fish");
+        assert!(
+            fish.contains("-a completions -d") && fish.contains("-a completion -d"),
+            "fish missing `completions`/`completion`:\n{fish}"
+        );
+    }
+
+    #[test]
+    fn nested_actions_are_offered_per_shell() {
+        let expected: &[(&str, &[&str])] = &[
+            (
+                "bg",
+                &["start", "run", "status", "shutdown", "restart", "tail"],
+            ),
+            ("ci", &["github", "gitlab", "local"]),
+            ("analyze", &["query", "docs", "sessions"]),
+            ("config", &["set", "unset"]),
+        ];
+
+        // The table is the single source of truth; aliases inherit its actions.
+        for (cmd, actions) in expected {
+            assert_eq!(find_command(cmd).unwrap().subcommands, *actions, "{cmd}");
+        }
+        for alias in ["d", "daemon"] {
+            let row = effective_commands()
+                .into_iter()
+                .find(|r| r.0 == alias)
+                .unwrap_or_else(|| panic!("alias {alias} present"));
+            assert_eq!(
+                row.3,
+                &["start", "run", "status", "shutdown", "restart", "tail"],
+                "alias {alias} should inherit bg actions"
+            );
+        }
+
+        let zsh = script("zsh");
+        let fish = script("fish");
+        for (cmd, actions) in expected {
+            let arm = bash_arm(cmd);
+            for action in *actions {
+                assert!(
+                    arm.contains(action),
+                    "bash {cmd} missing `{action}`:\n{arm}"
+                );
+                assert!(zsh.contains(action), "zsh missing `{action}`");
+                assert!(
+                    fish.contains(&format!("__fish_seen_subcommand_from {cmd}' -a {action}")),
+                    "fish `{cmd}` missing `{action}`:\n{fish}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn commands_with_both_flags_and_actions_offer_both() {
+        // `config` has nested actions (set/unset) and a flag (--add).
+        let arm = bash_arm("config");
+        assert!(
+            arm.contains("set") && arm.contains("unset") && arm.contains("--add"),
+            "bash config arm must offer actions and flags:\n{arm}"
+        );
+
+        let zsh = script("zsh");
+        let zarm = zsh
+            .split("\n        config)")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(
+            zarm.contains("_describe")
+                && zarm.contains("'set'")
+                && zarm.contains("_arguments '--add'"),
+            "zsh config arm must offer actions and flags:\n{zarm}"
+        );
+
+        let fish = script("fish");
+        assert!(
+            fish.contains("__fish_seen_subcommand_from config' -a set"),
+            "fish config missing `set`"
+        );
+        assert!(
+            fish.contains("__fish_seen_subcommand_from config' -l add"),
+            "fish config missing `--add`"
+        );
+    }
+
+    #[test]
+    fn stats_offers_ignore_flag() {
+        assert!(
+            find_command("stats").unwrap().flags.contains(&"--ignore"),
+            "stats must advertise --ignore"
+        );
+        assert!(
+            bash_arm("stats").contains("--ignore"),
+            "bash stats arm missing --ignore:\n{}",
+            bash_arm("stats")
+        );
+    }
+
+    #[test]
+    fn blame_offers_its_public_flags() {
+        const BLAME_FLAGS: [&str; 9] = [
+            "--json",
+            "--since",
+            "--show-stats",
+            "--ignore-rev",
+            "--ignore-revs-file",
+            "--show-prompt",
+            "--mark-unknown",
+            "--porcelain",
+            "--incremental",
+        ];
+        let blame = find_command("blame").unwrap();
+        for flag in BLAME_FLAGS {
+            assert!(blame.flags.contains(&flag), "blame missing `{flag}`");
+        }
+
+        let arm = bash_arm("blame");
+        for flag in ["--json", "--since", "--show-prompt"] {
+            assert!(
+                arm.contains(flag),
+                "bash blame arm missing `{flag}`:\n{arm}"
+            );
+        }
+        let fish = script("fish");
+        assert!(
+            fish.contains("__fish_seen_subcommand_from blame' -l json"),
+            "fish blame missing --json"
+        );
+        assert!(
+            fish.contains("__fish_seen_subcommand_from blame' -l since"),
+            "fish blame missing --since"
+        );
+    }
+
+    #[test]
+    fn help_flag_is_not_advertised_per_command() {
+        // `git-ai blame --help` / `git-ai stats --help` error at runtime, so
+        // the completion table must not pretend every command owns `--help`.
+        for cmd in COMMANDS {
+            assert!(
+                !cmd.flags.contains(&"--help"),
+                "command `{}` must not advertise --help",
+                cmd.name
+            );
+        }
+        assert!(!find_command("stats").unwrap().flags.contains(&"--help"));
+        assert!(!find_command("blame").unwrap().flags.contains(&"--help"));
+    }
+
+    #[test]
+    fn fish_does_not_globally_disable_file_completion() {
+        let fish = script("fish");
+        assert!(
+            !fish.contains("complete -c git-ai -f\n"),
+            "fish must not globally disable filename completion:\n{fish}"
+        );
+        // File-taking commands force filenames; show-prompt takes a prompt ID.
+        for cmd in ["blame", "checkpoint"] {
+            assert!(
+                fish.contains(&format!(
+                    "complete -c git-ai -F -n '__fish_seen_subcommand_from {cmd}'"
+                )),
+                "fish should re-enable filenames for `{cmd}`:\n{fish}"
+            );
+        }
+        assert!(
+            !fish.contains("complete -c git-ai -F -n '__fish_seen_subcommand_from show-prompt'"),
+            "show-prompt takes a prompt ID, not a file; it must not force filenames:\n{fish}"
+        );
     }
 }
