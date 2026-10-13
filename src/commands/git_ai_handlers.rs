@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Write;
 
 pub fn handle_git_ai(args: &[String]) {
     let perf_entry =
@@ -472,6 +473,15 @@ fn handle_checkpoint(args: &[String]) {
 
     let effective_hook_input =
         hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, file_args));
+
+    // Cursor treats preToolUse as a permission hook, and recent Cursor builds
+    // reject an exit-0 run with empty stdout as invalid JSON, blocking the tool
+    // call. An empty object is a valid reply that makes no permission
+    // decision. Write it before any work so every later exit path is covered.
+    if preset_name == "cursor" && is_cursor_pre_tool_use(&effective_hook_input) {
+        println!("{{}}");
+        let _ = std::io::stdout().flush();
+    }
 
     if perf {
         eprintln!(
@@ -1131,6 +1141,18 @@ fn handle_git_hooks(args: &[String]) {
 
 /// Synthesize JSON hook_input from CLI args for mock/test presets that can be
 /// invoked without --hook-input.
+fn is_cursor_pre_tool_use(hook_input: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(hook_input)
+        .ok()
+        .and_then(|input| {
+            input
+                .get("hook_event_name")
+                .and_then(|name| name.as_str())
+                .map(|name| name == "preToolUse")
+        })
+        .unwrap_or(false)
+}
+
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
