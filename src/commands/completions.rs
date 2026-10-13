@@ -31,7 +31,31 @@ const COMMANDS: &[Command] = &[
         name: "checkpoint",
         description: "Checkpoint working changes and attribute authorship",
         flags: &["--hook-input"],
-        subcommands: &[],
+        // Accepted presets from checkpoint_agent/presets/mod.rs `resolve_preset`.
+        // The completion contract mirrors `resolve_preset` exactly (a superset
+        // of what `print_help` advertises, e.g. cursor-background, agent-v1).
+        subcommands: &[
+            "claude",
+            "cline",
+            "codex",
+            "gemini",
+            "windsurf",
+            "continue-cli",
+            "cursor",
+            "cursor-background",
+            "github-copilot",
+            "amp",
+            "ai_tab",
+            "firebender",
+            "agent-v1",
+            "droid",
+            "opencode",
+            "pi",
+            "human",
+            "mock_ai",
+            "known_human",
+            "mock_known_human",
+        ],
     },
     Command {
         name: "log",
@@ -227,7 +251,7 @@ const COMMANDS: &[Command] = &[
         name: "completions",
         description: "Print a static shell completion script",
         flags: &[],
-        subcommands: &[],
+        subcommands: &["bash", "zsh", "fish"],
     },
 ];
 
@@ -239,10 +263,11 @@ const ALIASES: &[(&str, &str)] = &[
     ("completion", "completions"),
 ];
 
-/// Commands whose first argument is a file path. Fish completions suppress
+/// Commands whose first positional is a file path. Fish completions suppress
 /// filenames by default, so these explicitly force filename completion.
-/// `show-prompt` is deliberately absent: it takes a prompt ID, not a path.
-const FILE_TAKING: &[&str] = &["blame", "checkpoint"];
+/// `checkpoint` is handled specially (its first positional is a preset, then
+/// paths), and `show-prompt` takes a prompt ID, not a path.
+const FILE_TAKING: &[&str] = &["blame"];
 
 /// The canonical command named `name`, if any.
 fn find_command(name: &str) -> Option<&'static Command> {
@@ -387,8 +412,8 @@ fn generate_fish() -> String {
         "# ponytail: hand-maintained command list; update it when the git-ai dispatch table changes.\n",
     );
     out.push('\n');
-    out.push_str("# No global -f: no-files is scoped to the lines below, so\n");
-    out.push_str("# file-taking commands keep filename completion.\n");
+    out.push_str("# No global -f: no-files is scoped per command so file-taking\n");
+    out.push_str("# positionals keep filename completion.\n");
     out.push_str("\n# Subcommands\n");
     for (name, description, _flags, _subcommands) in effective_commands() {
         out.push_str(&format!(
@@ -399,15 +424,36 @@ fn generate_fish() -> String {
     for (name, _description, _flags, subcommands) in effective_commands() {
         for sub in subcommands {
             out.push_str(&format!(
-                "complete -c git-ai -f -n '__fish_seen_subcommand_from {name}' -a {sub}\n"
+                "complete -c git-ai -n '__fish_seen_subcommand_from {name}' -a {sub}\n"
             ));
         }
     }
-    out.push_str("\n# File-taking commands re-enable filename completion.\n");
-    for cmd in FILE_TAKING {
-        out.push_str(&format!(
-            "complete -c git-ai -F -n '__fish_seen_subcommand_from {cmd}'\n"
-        ));
+    out.push_str("\n# Per-command positional rules: suppress filenames unless the\n");
+    out.push_str("# first positional is a file.\n");
+    for (name, _description, _flags, _subcommands) in effective_commands() {
+        if name == "checkpoint" {
+            // First positional is a preset (or `--` to pick the human preset);
+            // paths only follow after a first positional exists. Suppress files
+            // until `git-ai checkpoint <TAB>` (2 tokens), then force them once
+            // `git-ai checkpoint <preset|--> <TAB>` (>= 3 tokens). Counting
+            // instead of enumerating presets also keeps the file gate anchored
+            // to checkpoint: a preset token passed to another command cannot
+            // trigger it.
+            out.push_str(&format!(
+                "complete -c git-ai -f -n '__fish_seen_subcommand_from {name}; and not test (count (commandline -opc)) -ge 3'\n"
+            ));
+            out.push_str(&format!(
+                "complete -c git-ai -F -n '__fish_seen_subcommand_from {name}; and test (count (commandline -opc)) -ge 3'\n"
+            ));
+        } else if FILE_TAKING.contains(&name) {
+            out.push_str(&format!(
+                "complete -c git-ai -F -n '__fish_seen_subcommand_from {name}'\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "complete -c git-ai -f -n '__fish_seen_subcommand_from {name}'\n"
+            ));
+        }
     }
     out.push_str("\n# Flags\n");
     for (name, _description, flags, _subcommands) in effective_commands() {
@@ -803,24 +849,160 @@ mod tests {
     }
 
     #[test]
-    fn fish_does_not_globally_disable_file_completion() {
+    fn fish_scopes_filename_completion() {
         let fish = script("fish");
         assert!(
             !fish.contains("complete -c git-ai -f\n"),
             "fish must not globally disable filename completion:\n{fish}"
         );
-        // File-taking commands force filenames; show-prompt takes a prompt ID.
-        for cmd in ["blame", "checkpoint"] {
-            assert!(
-                fish.contains(&format!(
-                    "complete -c git-ai -F -n '__fish_seen_subcommand_from {cmd}'"
-                )),
-                "fish should re-enable filenames for `{cmd}`:\n{fish}"
-            );
-        }
+        // blame's first positional is a file path -> force filenames.
+        assert!(
+            fish.contains("complete -c git-ai -F -n '__fish_seen_subcommand_from blame'"),
+            "fish should re-enable filenames for blame:\n{fish}"
+        );
+        // show-prompt takes a prompt ID -> suppress filenames, never force them.
+        assert!(
+            fish.contains("complete -c git-ai -f -n '__fish_seen_subcommand_from show-prompt'"),
+            "fish must suppress filenames for show-prompt:\n{fish}"
+        );
         assert!(
             !fish.contains("complete -c git-ai -F -n '__fish_seen_subcommand_from show-prompt'"),
-            "show-prompt takes a prompt ID, not a file; it must not force filenames:\n{fish}"
+            "show-prompt must not force filenames:\n{fish}"
+        );
+    }
+
+    #[test]
+    fn completions_command_offers_shells() {
+        assert_eq!(
+            find_command("completions").unwrap().subcommands,
+            &["bash", "zsh", "fish"]
+        );
+        // The `completion` alias inherits the shells from `completions`.
+        let row = effective_commands()
+            .into_iter()
+            .find(|r| r.0 == "completion")
+            .unwrap();
+        assert_eq!(row.3, &["bash", "zsh", "fish"][..]);
+
+        let arm = bash_arm("completions");
+        for shell in ["bash", "zsh", "fish"] {
+            assert!(
+                arm.contains(shell),
+                "bash completions missing `{shell}`:\n{arm}"
+            );
+        }
+
+        let zsh = script("zsh");
+        assert!(
+            zsh.contains("completions_subcommands=")
+                && zsh.contains("'bash'")
+                && zsh.contains("'zsh'")
+                && zsh.contains("'fish'"),
+            "zsh completions must offer shells:\n{zsh}"
+        );
+
+        let fish = script("fish");
+        for shell in ["bash", "zsh", "fish"] {
+            assert!(
+                fish.contains(&format!(
+                    "__fish_seen_subcommand_from completions' -a {shell}"
+                )),
+                "fish completions missing `{shell}`:\n{fish}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_offers_presets_not_files() {
+        const PRESETS: [&str; 20] = [
+            "claude",
+            "cline",
+            "codex",
+            "gemini",
+            "windsurf",
+            "continue-cli",
+            "cursor",
+            "cursor-background",
+            "github-copilot",
+            "amp",
+            "ai_tab",
+            "firebender",
+            "agent-v1",
+            "droid",
+            "opencode",
+            "pi",
+            "human",
+            "mock_ai",
+            "known_human",
+            "mock_known_human",
+        ];
+        let checkpoint = find_command("checkpoint").unwrap();
+        assert_eq!(checkpoint.subcommands, &PRESETS[..]);
+
+        let arm = bash_arm("checkpoint");
+        for preset in ["claude", "human", "mock_ai", "cursor-background"] {
+            assert!(
+                arm.contains(preset),
+                "bash checkpoint missing `{preset}`:\n{arm}"
+            );
+        }
+
+        let zsh = script("zsh");
+        for preset in ["claude", "mock_ai"] {
+            assert!(
+                zsh.contains(&format!("'{preset}'")),
+                "zsh checkpoint missing `{preset}`"
+            );
+        }
+
+        let fish = script("fish");
+        // Presets are offered as first-positional candidates.
+        assert!(
+            fish.contains("__fish_seen_subcommand_from checkpoint' -a claude"),
+            "fish checkpoint missing presets:\n{fish}"
+        );
+        // `commandline -opc` token counts: `git-ai checkpoint <TAB>` = 2
+        // tokens (no files yet); `git-ai checkpoint <preset|--> <TAB>` = 3
+        // tokens (files on). The two rules are mutually exclusive.
+        assert!(
+            fish.contains(
+                "complete -c git-ai -f -n '__fish_seen_subcommand_from checkpoint; and not test (count (commandline -opc)) -ge 3'"
+            ),
+            "fish must suppress filenames before a first positional:\n{fish}"
+        );
+        assert!(
+            fish.contains(
+                "complete -c git-ai -F -n '__fish_seen_subcommand_from checkpoint; and test (count (commandline -opc)) -ge 3'"
+            ),
+            "fish must enable filenames after a first positional (preset or --):\n{fish}"
+        );
+    }
+
+    #[test]
+    fn force_file_rules_are_anchored_only_to_file_commands() {
+        let fish = script("fish");
+        let force_lines: Vec<&str> = fish
+            .lines()
+            .filter(|l| l.contains(" -F -n "))
+            .map(str::trim)
+            .collect();
+        assert!(
+            !force_lines.is_empty(),
+            "expected force-files rules:\n{fish}"
+        );
+        for line in &force_lines {
+            assert!(
+                line.contains("__fish_seen_subcommand_from checkpoint")
+                    || line.contains("__fish_seen_subcommand_from blame"),
+                "force-files rule must only apply to checkpoint/blame, got: {line}"
+            );
+        }
+        // A preset-named token typed under any other command (e.g.
+        // `git-ai show-prompt claude <TAB>`) must not enable files: every
+        // force rule's condition is anchored to its own command first.
+        assert!(
+            !fish.contains("-F -n '__fish_seen_subcommand_from claude"),
+            "no preset-name-gated force rule may exist:\n{fish}"
         );
     }
 }
