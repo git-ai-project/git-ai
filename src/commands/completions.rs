@@ -331,18 +331,34 @@ fn generate_bash() -> String {
     out.push_str("    cmd=\"${COMP_WORDS[1]}\"\n");
     out.push_str("    case \"${cmd}\" in\n");
     for (name, _description, flags, subcommands) in effective_commands() {
-        // Offer a command's nested actions and its flags together, so commands
-        // with both (e.g. `config set` / `config --add`) expose both. One level
-        // of nesting only.
-        let words: Vec<&str> = subcommands.iter().chain(flags).copied().collect();
-        if words.is_empty() {
+        if flags.is_empty() && subcommands.is_empty() {
             continue;
         }
         out.push_str(&format!("        {name})\n"));
-        out.push_str(&format!(
-            "            COMPREPLY=($(compgen -W \"{}\" -- \"${{cur}}\"))\n",
-            words.join(" ")
-        ));
+        if subcommands.is_empty() {
+            out.push_str(&format!(
+                "            COMPREPLY=($(compgen -W \"{}\" -- \"${{cur}}\"))\n",
+                flags.join(" ")
+            ));
+        } else {
+            // Nested candidates belong to the FIRST positional only
+            // (`git-ai <cmd> <TAB>`, COMP_CWORD == 2). Later positions offer
+            // flags only; when nothing matches, the `-o default` compspec
+            // falls through to filename completion (e.g. `checkpoint human
+            // cl<TAB>` completes `client.rs`, not `claude`).
+            let first: Vec<&str> = subcommands.iter().chain(flags).copied().collect();
+            out.push_str("            if [[ ${COMP_CWORD} -eq 2 ]]; then\n");
+            out.push_str(&format!(
+                "                COMPREPLY=($(compgen -W \"{}\" -- \"${{cur}}\"))\n",
+                first.join(" ")
+            ));
+            out.push_str("            else\n");
+            out.push_str(&format!(
+                "                COMPREPLY=($(compgen -W \"{}\" -- \"${{cur}}\"))\n",
+                flags.join(" ")
+            ));
+            out.push_str("            fi\n");
+        }
         out.push_str("            ;;\n");
     }
     out.push_str("    esac\n");
@@ -377,24 +393,51 @@ fn generate_zsh() -> String {
     out.push('\n');
     out.push_str("    case \"${words[2]}\" in\n");
     for (name, _description, flags, subcommands) in effective_commands() {
-        if subcommands.is_empty() && flags.is_empty() {
+        let has_subs = !subcommands.is_empty();
+        let has_flags = !flags.is_empty();
+        let file_first = name == "blame";
+        let file_after_first = name == "checkpoint";
+        if !has_subs && !has_flags && !file_first && !file_after_first {
             continue;
         }
         out.push_str(&format!("        {name})\n"));
-        if !subcommands.is_empty() {
-            // Offer the command's nested actions (e.g. `notes migrate`).
-            let var = format!("{}_subcommands", name.replace('-', "_"));
-            out.push_str(&format!("            local -a {var}\n"));
-            let quoted: Vec<String> = subcommands.iter().map(|sub| format!("'{sub}'")).collect();
-            out.push_str(&format!("            {var}=({})\n", quoted.join(" ")));
-            out.push_str(&format!(
-                "            _describe -t commands 'git-ai {name} subcommand' {var}\n"
-            ));
-        }
-        if !flags.is_empty() {
+
+        // Flags are offered at every position: options are valid wherever
+        // they are typed (e.g. `git-ai stats --j<TAB>` at CURRENT == 3), so
+        // they must not be gated behind the subcommand position.
+        if has_flags {
             let quoted: Vec<String> = flags.iter().map(|flag| format!("'{flag}'")).collect();
             out.push_str(&format!("            _arguments {}\n", quoted.join(" ")));
         }
+
+        // Subcommand candidates only at the first positional
+        // (`git-ai <cmd> <TAB>`, CURRENT == 3).
+        if has_subs {
+            let var = format!("{}_subcommands", name.replace('-', "_"));
+            out.push_str("            if (( CURRENT == 3 )); then\n");
+            out.push_str(&format!("                local -a {var}\n"));
+            let quoted: Vec<String> = subcommands.iter().map(|sub| format!("'{sub}'")).collect();
+            out.push_str(&format!("                {var}=({})\n", quoted.join(" ")));
+            out.push_str(&format!(
+                "                _describe -t commands 'git-ai {name} subcommand' {var}\n"
+            ));
+            out.push_str("            fi\n");
+        }
+
+        // Filenames go where the command actually takes paths.
+        if file_first {
+            // blame: the file is the first positional (CURRENT 3 onward).
+            out.push_str("            if (( CURRENT >= 3 )); then\n");
+            out.push_str("                _files\n");
+            out.push_str("            fi\n");
+        }
+        if file_after_first {
+            // checkpoint: paths only after a preset/`--` (CURRENT >= 4).
+            out.push_str("            if (( CURRENT >= 4 )); then\n");
+            out.push_str("                _files\n");
+            out.push_str("            fi\n");
+        }
+
         out.push_str("            ;;\n");
     }
     out.push_str("    esac\n");
@@ -423,8 +466,11 @@ fn generate_fish() -> String {
     out.push_str("\n# Nested subcommands\n");
     for (name, _description, _flags, subcommands) in effective_commands() {
         for sub in subcommands {
+            // Gate enumerated candidates to the first positional
+            // (`git-ai <cmd> <TAB>` == 2 tokens); once a preset/action/shell
+            // is chosen (>= 3 tokens) the count-gated -f/-F rules take over.
             out.push_str(&format!(
-                "complete -c git-ai -n '__fish_seen_subcommand_from {name}' -a {sub}\n"
+                "complete -c git-ai -n '__fish_seen_subcommand_from {name}; and test (count (commandline -opc)) -le 2' -a {sub}\n"
             ));
         }
     }
@@ -742,7 +788,9 @@ mod tests {
                 );
                 assert!(zsh.contains(action), "zsh missing `{action}`");
                 assert!(
-                    fish.contains(&format!("__fish_seen_subcommand_from {cmd}' -a {action}")),
+                    fish.contains(&format!(
+                        "__fish_seen_subcommand_from {cmd}; and test (count (commandline -opc)) -le 2' -a {action}"
+                    )),
                     "fish `{cmd}` missing `{action}`:\n{fish}"
                 );
             }
@@ -775,7 +823,9 @@ mod tests {
 
         let fish = script("fish");
         assert!(
-            fish.contains("__fish_seen_subcommand_from config' -a set"),
+            fish.contains(
+                "__fish_seen_subcommand_from config; and test (count (commandline -opc)) -le 2' -a set"
+            ),
             "fish config missing `set`"
         );
         assert!(
@@ -905,7 +955,7 @@ mod tests {
         for shell in ["bash", "zsh", "fish"] {
             assert!(
                 fish.contains(&format!(
-                    "__fish_seen_subcommand_from completions' -a {shell}"
+                    "__fish_seen_subcommand_from completions; and test (count (commandline -opc)) -le 2' -a {shell}"
                 )),
                 "fish completions missing `{shell}`:\n{fish}"
             );
@@ -958,7 +1008,9 @@ mod tests {
         let fish = script("fish");
         // Presets are offered as first-positional candidates.
         assert!(
-            fish.contains("__fish_seen_subcommand_from checkpoint' -a claude"),
+            fish.contains(
+                "__fish_seen_subcommand_from checkpoint; and test (count (commandline -opc)) -le 2' -a claude"
+            ),
             "fish checkpoint missing presets:\n{fish}"
         );
         // `commandline -opc` token counts: `git-ai checkpoint <TAB>` = 2
@@ -1003,6 +1055,130 @@ mod tests {
         assert!(
             !fish.contains("-F -n '__fish_seen_subcommand_from claude"),
             "no preset-name-gated force rule may exist:\n{fish}"
+        );
+    }
+
+    #[test]
+    fn first_positional_candidates_are_position_gated() {
+        // bash: checkpoint presets live only in the COMP_CWORD == 2 branch;
+        // later positions keep flags (and fall through to `-o default` files).
+        let arm = bash_arm("checkpoint");
+        let after_else = arm.split("else").nth(1).unwrap();
+        for preset in ["claude", "human", "mock_ai"] {
+            assert!(
+                !after_else.contains(preset),
+                "preset leaked past the first positional:\n{arm}"
+            );
+        }
+        assert!(
+            after_else.contains("--hook-input"),
+            "later positions must keep flags:\n{arm}"
+        );
+
+        let bg_arm = bash_arm("bg");
+        assert!(
+            bg_arm.contains("${COMP_CWORD} -eq 2"),
+            "bg actions must be first-positional only:\n{bg_arm}"
+        );
+
+        // zsh: nested `_describe` is inside the CURRENT == 3 branch, and
+        // `_files` exists for genuine file positions (blame, checkpoint-after).
+        let zsh = script("zsh");
+        assert!(
+            zsh.contains("if (( CURRENT == 3 )); then"),
+            "zsh must gate nested candidates to the first positional:\n{zsh}"
+        );
+        assert!(
+            zsh.contains("_files"),
+            "zsh must offer _files for file positions:\n{zsh}"
+        );
+
+        // fish: every enumerated candidate line is gated to the first
+        // positional (`-le 2` tokens), so a preset word is not re-offered once
+        // a preset/action/shell has been chosen.
+        let fish = script("fish");
+        for line in fish.lines() {
+            if line.contains("-a claude") || line.contains("-a start") || line.contains("-a bash") {
+                assert!(
+                    line.contains("test (count (commandline -opc)) -le 2"),
+                    "fish candidate not gated to the first positional:\n{line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zsh_offers_flags_at_every_position() {
+        let zsh = script("zsh");
+
+        // stats is flag-only: `_arguments` must be ungated (reachable at
+        // CURRENT == 3, e.g. `git-ai stats --j<TAB>`).
+        let stats_arm = zsh
+            .split("\n        stats)")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(
+            stats_arm.contains("_arguments '--json' '--ignore'"),
+            "stats flags must be offered:\n{stats_arm}"
+        );
+        assert!(
+            !stats_arm.contains("CURRENT"),
+            "stats flags must not be gated:\n{stats_arm}"
+        );
+
+        // blame: `_files` from the first positional (CURRENT 3) onward.
+        let blame_arm = zsh
+            .split("\n        blame)")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(
+            blame_arm.contains("_files") && blame_arm.contains("CURRENT >= 3"),
+            "blame must offer files at the first positional:\n{blame_arm}"
+        );
+
+        // checkpoint: presets at CURRENT == 3; files only at CURRENT >= 4
+        // (after a preset or `--`).
+        let checkpoint_arm = zsh
+            .split("\n        checkpoint)")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(
+            checkpoint_arm.contains("CURRENT == 3"),
+            "checkpoint presets must be gated to the first positional:\n{checkpoint_arm}"
+        );
+        assert!(
+            checkpoint_arm.contains("_files") && checkpoint_arm.contains("CURRENT >= 4"),
+            "checkpoint files must be gated after a preset:\n{checkpoint_arm}"
+        );
+
+        // config: flags ungated, subcommand describe gated.
+        let config_arm = zsh
+            .split("\n        config)")
+            .nth(1)
+            .unwrap()
+            .split(";;")
+            .next()
+            .unwrap();
+        assert!(
+            config_arm.contains("_arguments '--add'"),
+            "config flags must be ungated:\n{config_arm}"
+        );
+        let describe_part = config_arm
+            .split("if (( CURRENT == 3 )); then")
+            .nth(1)
+            .unwrap();
+        assert!(
+            describe_part.contains("config_subcommands=('set' 'unset')"),
+            "config subcommands must be gated to the first positional:\n{config_arm}"
         );
     }
 }
