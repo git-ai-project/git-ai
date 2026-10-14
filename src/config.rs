@@ -19,6 +19,7 @@ use std::sync::RwLock;
 /// Default API base URL for comparison
 pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
 pub const DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 3 * 1024 * 1024;
+pub const DEFAULT_STATS_MAX_FILE_BYTES: usize = 3 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
 pub(crate) const MEBIBYTE_BYTES: u64 = 1024 * 1024;
@@ -194,6 +195,7 @@ pub struct Config {
     max_checkpoint_file_size_bytes: usize,
     max_checkpoint_total_size_bytes: usize,
     max_checkpoint_total_lines: usize,
+    stats_max_file_bytes: usize,
     daemon_memory_limit_mb: Option<u64>,
 }
 
@@ -285,6 +287,8 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_checkpoint_total_lines: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_max_file_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_memory_limit_mb: Option<u64>,
 }
 
@@ -355,6 +359,8 @@ pub struct ConfigPatch {
     pub max_checkpoint_total_size_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_checkpoint_total_lines: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_max_file_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_memory_limit_mb: Option<u64>,
 }
@@ -681,6 +687,12 @@ impl Config {
     /// Returns the total line budget for content in one checkpoint request.
     pub fn max_checkpoint_total_lines(&self) -> usize {
         self.max_checkpoint_total_lines
+    }
+
+    /// Returns the per-file size cap (in bytes) for stats char/byte derivation.
+    /// Files larger than this are skipped by the stats volume helpers.
+    pub fn stats_max_file_bytes(&self) -> usize {
+        self.stats_max_file_bytes
     }
 
     /// Returns the daemon peak-RSS limit in MiB, or `None` when disabled.
@@ -1257,6 +1269,13 @@ fn build_config() -> Config {
         .or_else(|| file_cfg.as_ref().and_then(|c| c.max_checkpoint_total_lines))
         .unwrap_or(DEFAULT_MAX_CHECKPOINT_TOTAL_LINES);
 
+    // Stats volume per-file cap: env > file > default.
+    let stats_max_file_bytes = env::var("GIT_AI_STATS_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.stats_max_file_bytes))
+        .unwrap_or(DEFAULT_STATS_MAX_FILE_BYTES);
+
     let daemon_memory_limit_mb = file_cfg
         .as_ref()
         .and_then(|c| c.daemon_memory_limit_mb)
@@ -1292,6 +1311,7 @@ fn build_config() -> Config {
             max_checkpoint_file_size_bytes,
             max_checkpoint_total_size_bytes,
             max_checkpoint_total_lines,
+            stats_max_file_bytes,
             daemon_memory_limit_mb,
         };
         apply_test_config_patch(&mut config);
@@ -1327,6 +1347,7 @@ fn build_config() -> Config {
         max_checkpoint_file_size_bytes,
         max_checkpoint_total_size_bytes,
         max_checkpoint_total_lines,
+        stats_max_file_bytes,
         daemon_memory_limit_mb,
     }
 }
@@ -1831,6 +1852,9 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(max_lines) = patch.max_checkpoint_total_lines {
             config.max_checkpoint_total_lines = max_lines;
         }
+        if let Some(max_bytes) = patch.stats_max_file_bytes {
+            config.stats_max_file_bytes = max_bytes;
+        }
         if let Some(limit_mb) = patch.daemon_memory_limit_mb {
             config.daemon_memory_limit_mb = normalize_daemon_memory_limit_mb(limit_mb);
         }
@@ -1879,6 +1903,7 @@ mod tests {
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
+            stats_max_file_bytes: DEFAULT_STATS_MAX_FILE_BYTES,
             daemon_memory_limit_mb: None,
         }
     }
@@ -2147,6 +2172,7 @@ mod tests {
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
+            stats_max_file_bytes: DEFAULT_STATS_MAX_FILE_BYTES,
             daemon_memory_limit_mb: None,
         }
     }
@@ -2297,6 +2323,7 @@ mod tests {
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
+            stats_max_file_bytes: DEFAULT_STATS_MAX_FILE_BYTES,
             daemon_memory_limit_mb: None,
         }
     }
@@ -2823,5 +2850,44 @@ mod tests {
             None => unsafe { std::env::remove_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS") },
         }
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_stats_max_file_bytes_default() {
+        let config = create_test_config(vec![], vec![]);
+        assert_eq!(config.stats_max_file_bytes(), 3 * 1024 * 1024);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stats_max_file_bytes_env_override() {
+        let previous = std::env::var("GIT_AI_STATS_MAX_FILE_BYTES").ok();
+        unsafe { std::env::set_var("GIT_AI_STATS_MAX_FILE_BYTES", "1048576") };
+        let config = build_config();
+        let result = config.stats_max_file_bytes;
+        match previous {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_STATS_MAX_FILE_BYTES", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_STATS_MAX_FILE_BYTES") },
+        }
+        assert_eq!(result, 1024 * 1024);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stats_max_file_bytes_config_patch_override() {
+        let previous = std::env::var("GIT_AI_TEST_CONFIG_PATCH").ok();
+        unsafe {
+            std::env::set_var(
+                "GIT_AI_TEST_CONFIG_PATCH",
+                "{\"stats_max_file_bytes\": 65536}",
+            )
+        };
+        let config = build_config();
+        let result = config.stats_max_file_bytes;
+        match previous {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_TEST_CONFIG_PATCH", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_TEST_CONFIG_PATCH") },
+        }
+        assert_eq!(result, 65536);
     }
 }
