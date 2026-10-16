@@ -112,41 +112,103 @@ impl CrushInstaller {
             .map(|s| s + "\n")
     }
 
-    fn install_script(&self, params: &HookInstallerParams, dry_run: bool) -> Option<String> {
+    fn install_script(
+        &self,
+        params: &HookInstallerParams,
+        dry_run: bool,
+    ) -> Result<Option<String>, GitAiError> {
         let script_path = Self::script_path();
         let existing = fs::read_to_string(&script_path).unwrap_or_default();
         let new_content = Self::generate_script_content(&params.binary_path);
 
         if existing.trim() == new_content.trim() {
-            return None;
+            return Ok(None);
         }
 
         let diff = generate_diff(&script_path, &existing, &new_content);
         if !dry_run {
             if let Some(dir) = script_path.parent() {
-                let _ = fs::create_dir_all(dir);
+                fs::create_dir_all(dir).map_err(|e| {
+                    GitAiError::Generic(format!(
+                        "Failed to create Crush hooks directory {}: {}",
+                        dir.display(),
+                        e
+                    ))
+                })?;
             }
-            if write_atomic(&script_path, new_content.as_bytes()).is_ok() {
-                Self::make_executable(&script_path);
-            }
+            write_atomic(&script_path, new_content.as_bytes()).map_err(|e| {
+                GitAiError::Generic(format!(
+                    "Failed to write Crush hook script {}: {}",
+                    script_path.display(),
+                    e
+                ))
+            })?;
+            Self::make_executable(&script_path)?;
         }
-        Some(diff)
+        Ok(Some(diff))
     }
 
-    fn make_executable(path: &Path) {
+    fn make_executable(path: &Path) -> Result<(), GitAiError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(path) {
-                let mut permissions = metadata.permissions();
-                permissions.set_mode(0o755);
-                let _ = fs::set_permissions(path, permissions);
-            }
+            let mut permissions = fs::metadata(path)
+                .map_err(|e| {
+                    GitAiError::Generic(format!(
+                        "Failed to read Crush hook script metadata {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })?
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).map_err(|e| {
+                GitAiError::Generic(format!(
+                    "Failed to make Crush hook script executable {}: {}",
+                    path.display(),
+                    e
+                ))
+            })
         }
         #[cfg(not(unix))]
         {
             let _ = path;
+            Ok(())
         }
+    }
+
+    /// Fail unless the hook script exists and is executable, so the config
+    /// entry never points at a script Crush cannot run.
+    fn verify_script_executable(script_path: &Path) -> Result<(), GitAiError> {
+        if !script_path.is_file() {
+            return Err(GitAiError::Generic(format!(
+                "Crush hook script not found at {}",
+                script_path.display()
+            )));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(script_path)
+                .map_err(|e| {
+                    GitAiError::Generic(format!(
+                        "Failed to read Crush hook script metadata {}: {}",
+                        script_path.display(),
+                        e
+                    ))
+                })?
+                .permissions()
+                .mode();
+            if mode & 0o111 == 0 {
+                return Err(GitAiError::Generic(format!(
+                    "Crush hook script is not executable: {}",
+                    script_path.display()
+                )));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -200,8 +262,14 @@ impl HookInstaller for CrushInstaller {
         let script_path = Self::script_path();
 
         let mut diffs: Vec<String> = Vec::new();
-        if let Some(diff) = self.install_script(params, dry_run) {
+        if let Some(diff) = self.install_script(params, dry_run)? {
             diffs.push(diff);
+        }
+
+        // The config entry points at the script; never register it unless
+        // the script is present and executable.
+        if !dry_run {
+            Self::verify_script_executable(&script_path)?;
         }
 
         let existing = Self::read_config(&config_path)?;
@@ -391,6 +459,39 @@ mod tests {
         let (installed, up_to_date) = CrushInstaller::hook_status(&json!({}), &script_path);
         assert!(!installed);
         assert!(!up_to_date);
+    }
+
+    #[test]
+    fn test_crush_verify_script_executable_rejects_missing_script() {
+        let missing = PathBuf::from("/nonexistent/git-ai-checkpoint.sh");
+        assert!(CrushInstaller::verify_script_executable(&missing).is_err());
+    }
+
+    #[test]
+    fn test_crush_verify_script_executable_rejects_non_executable_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("git-ai-checkpoint.sh");
+        fs::write(&script, "#!/usr/bin/env bash\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o644);
+            fs::set_permissions(&script, permissions).unwrap();
+            assert!(CrushInstaller::verify_script_executable(&script).is_err());
+        }
+
+        #[cfg(not(unix))]
+        {
+            assert!(CrushInstaller::verify_script_executable(&script).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_crush_make_executable_errors_on_missing_file() {
+        let missing = PathBuf::from("/nonexistent/git-ai-checkpoint.sh");
+        assert!(CrushInstaller::make_executable(&missing).is_err());
     }
 
     #[test]
