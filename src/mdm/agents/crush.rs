@@ -34,8 +34,15 @@ impl CrushInstaller {
             .join("git-ai-checkpoint.sh")
     }
 
+    /// Escape a string for use inside single quotes in POSIX shell source.
+    /// Single quotes preserve everything literally except the quote itself,
+    /// which is closed, escaped, and reopened (`'\''`).
+    fn shell_single_quote_escape(value: &str) -> String {
+        value.replace('\'', r"'\''")
+    }
+
     fn generate_script_content(binary_path: &Path) -> String {
-        let path_str = binary_path.display().to_string().replace('\\', "\\\\");
+        let path_str = Self::shell_single_quote_escape(&binary_path.display().to_string());
         CRUSH_HOOK_SCRIPT_CONTENT.replace("__GIT_AI_BINARY_PATH__", &path_str)
     }
 
@@ -354,6 +361,16 @@ mod tests {
         assert!(content.contains("PostToolUse"));
         assert!(content.contains("PreToolUse"));
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
+    }
+
+    #[test]
+    fn test_crush_script_content_escapes_apostrophes_in_binary_path() {
+        let binary_path = PathBuf::from("/opt/doesn't work/git-ai");
+        let content = CrushInstaller::generate_script_content(&binary_path);
+        // The embedded path must close the quote, escape the apostrophe, and
+        // reopen the quote; a raw apostrophe would break out of the shell
+        // string and allow command injection.
+        assert!(content.contains(r"GIT_AI_BIN='/opt/doesn'\''t work/git-ai'"));
     }
 
     #[test]
