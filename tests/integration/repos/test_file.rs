@@ -16,6 +16,7 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "gemini",
     "amp",
     "windsurf",
+    "crush",
     "devin",
     "cloud-agent",
     "codex-cloud",

@@ -2,6 +2,7 @@ mod amp;
 mod claude_code;
 mod cline;
 mod codex;
+mod crush;
 mod cursor;
 mod droid;
 mod firebender;
@@ -19,6 +20,7 @@ pub use amp::AmpInstaller;
 pub use claude_code::ClaudeCodeInstaller;
 pub use cline::ClineInstaller;
 pub use codex::CodexInstaller;
+pub use crush::CrushInstaller;
 pub use cursor::CursorInstaller;
 pub use droid::DroidInstaller;
 pub use firebender::FirebenderInstaller;
@@ -46,6 +48,7 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(AmpInstaller),
         Box::new(OpenCodeInstaller),
         Box::new(PiInstaller),
+        Box::new(CrushInstaller),
         Box::new(GeminiInstaller),
         Box::new(DroidInstaller),
         Box::new(FirebenderInstaller),
