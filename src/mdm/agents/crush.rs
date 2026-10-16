@@ -223,7 +223,7 @@ impl HookInstaller for CrushInstaller {
         "crush"
     }
 
-    fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+    fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("crush");
         let has_global_config = Self::config_dir().exists();
         let has_local_config = Path::new(".crush").exists();
@@ -248,10 +248,17 @@ impl HookInstaller for CrushInstaller {
         let config = Self::read_config(&Self::config_path())?;
         let (hooks_installed, hooks_up_to_date) = Self::hook_status(&config, &script_path);
 
+        // A script whose content is stale (e.g. it embeds a binary path from
+        // a previous installation) or that is no longer executable must not
+        // be reported as up to date; install-hooks would then skip fixing it.
+        let script_current = fs::read_to_string(&script_path).unwrap_or_default().trim()
+            == Self::generate_script_content(&params.binary_path).trim()
+            && Self::verify_script_executable(&script_path).is_ok();
+
         Ok(HookCheckResult {
             tool_installed: true,
             hooks_installed,
-            hooks_up_to_date,
+            hooks_up_to_date: hooks_up_to_date && script_current,
         })
     }
 
@@ -518,6 +525,104 @@ mod tests {
     fn test_crush_make_executable_errors_on_missing_file() {
         let missing = PathBuf::from("/nonexistent/git-ai-checkpoint.sh");
         assert!(CrushInstaller::make_executable(&missing).is_err());
+    }
+
+    fn write_hook_state(dir: &Path, script_content: &str, executable: bool) {
+        let hooks_dir = dir.join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let script = hooks_dir.join("git-ai-checkpoint.sh");
+        fs::write(&script, script_content).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(if executable { 0o755 } else { 0o644 });
+            fs::set_permissions(&script, permissions).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = executable;
+        }
+
+        let script_path_str = script.display().to_string();
+        let config = json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": CRUSH_MATCHER, "command": script_path_str}
+                ]
+            }
+        });
+        fs::write(
+            dir.join("crush.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_crush_check_hooks_reports_stale_script_not_up_to_date() {
+        let temp = tempfile::tempdir().unwrap();
+        let params = HookInstallerParams {
+            binary_path: PathBuf::from("/usr/local/bin/git-ai"),
+        };
+
+        // Script embeds a binary path from a previous installation.
+        let stale_content =
+            CrushInstaller::generate_script_content(&PathBuf::from("/old/location/git-ai"));
+        write_hook_state(temp.path(), &stale_content, true);
+
+        unsafe { std::env::set_var("GIT_AI_CRUSH_CONFIG_PATH", temp.path()) };
+        let result = CrushInstaller.check_hooks(&params).unwrap();
+        unsafe { std::env::remove_var("GIT_AI_CRUSH_CONFIG_PATH") };
+
+        assert!(result.hooks_installed);
+        assert!(
+            !result.hooks_up_to_date,
+            "stale script content must not be reported as up to date"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_crush_check_hooks_reports_non_executable_script_not_up_to_date() {
+        let temp = tempfile::tempdir().unwrap();
+        let params = HookInstallerParams {
+            binary_path: PathBuf::from("/usr/local/bin/git-ai"),
+        };
+
+        let current_content = CrushInstaller::generate_script_content(&params.binary_path);
+        write_hook_state(temp.path(), &current_content, false);
+
+        unsafe { std::env::set_var("GIT_AI_CRUSH_CONFIG_PATH", temp.path()) };
+        let result = CrushInstaller.check_hooks(&params).unwrap();
+        unsafe { std::env::remove_var("GIT_AI_CRUSH_CONFIG_PATH") };
+
+        assert!(result.hooks_installed);
+        assert!(
+            !result.hooks_up_to_date,
+            "non-executable script must not be reported as up to date"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_crush_check_hooks_reports_current_script_up_to_date() {
+        let temp = tempfile::tempdir().unwrap();
+        let params = HookInstallerParams {
+            binary_path: PathBuf::from("/usr/local/bin/git-ai"),
+        };
+
+        let current_content = CrushInstaller::generate_script_content(&params.binary_path);
+        write_hook_state(temp.path(), &current_content, true);
+
+        unsafe { std::env::set_var("GIT_AI_CRUSH_CONFIG_PATH", temp.path()) };
+        let result = CrushInstaller.check_hooks(&params).unwrap();
+        unsafe { std::env::remove_var("GIT_AI_CRUSH_CONFIG_PATH") };
+
+        assert!(result.hooks_installed);
+        assert!(result.hooks_up_to_date);
     }
 
     #[test]
