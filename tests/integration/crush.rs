@@ -91,7 +91,7 @@ fn test_crush_preset_posttooluse_returns_ai_checkpoint() {
     create_crush_db(
         &project_dir,
         "crush-session-123",
-        "turkcelltech-glm-53/glm-53-fp8",
+        "custom-gateway/glm-53-fp8",
     );
 
     let hook_input = json!({
