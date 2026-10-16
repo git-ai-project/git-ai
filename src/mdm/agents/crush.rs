@@ -10,8 +10,9 @@ const CRUSH_HOOK_SCRIPT_CONTENT: &str = include_str!(concat!(
     "/agent-support/crush/git-ai-hook.sh"
 ));
 
-/// Tools that can modify tracked files. Read-only bash invocations are
-/// filtered inside the hook script itself.
+/// Tools that can modify tracked files. All bash invocations are included:
+/// a command that merely looks read-only cannot be proven harmless (e.g.
+/// `python3 -c` writing a file), and a missed write would lose attribution.
 const CRUSH_MATCHER: &str = "^(edit|write|multiedit|lsp_replace_symbol|lsp_rename|bash)$";
 
 pub struct CrushInstaller;
@@ -55,8 +56,11 @@ impl CrushInstaller {
 
     /// Returns `(hooks_installed, hooks_up_to_date)` for the hook entry in
     /// crush.json. `hooks_installed` = a hook entry referencing our script
-    /// exists; `hooks_up_to_date` = the entry matches the expected matcher
-    /// and command exactly.
+    /// exists; `hooks_up_to_date` = exactly one entry exists and it matches
+    /// the expected matcher and command exactly. Stale duplicates (e.g. an
+    /// older matcher pointing at the same script) leave hooks out of date so
+    /// the next install removes them instead of leaving duplicate checkpoints
+    /// running.
     fn hook_status(config: &Value, script_path: &Path) -> (bool, bool) {
         let blocks = config
             .get("hooks")
@@ -68,8 +72,8 @@ impl CrushInstaller {
         };
 
         let expected = Self::expected_hook_entry(script_path);
-        let mut installed = false;
-        let mut up_to_date = false;
+        let mut ours_count = 0usize;
+        let mut exact_match = false;
 
         for block in blocks {
             let command = block.get("command").and_then(|c| c.as_str()).unwrap_or("");
@@ -80,11 +84,14 @@ impl CrushInstaller {
             if !is_ours {
                 continue;
             }
-            installed = true;
+            ours_count += 1;
             if *block == expected {
-                up_to_date = true;
+                exact_match = true;
             }
         }
+
+        let installed = ours_count > 0;
+        let up_to_date = ours_count == 1 && exact_match;
 
         (installed, up_to_date)
     }
@@ -691,5 +698,36 @@ mod tests {
             !installed,
             "only exact script path matches should count as our hook"
         );
+    }
+
+    #[test]
+    fn test_crush_hook_status_reports_duplicate_entries_not_up_to_date() {
+        // An exact entry plus a stale duplicate (older matcher, same script)
+        // must not be reported as up to date; otherwise install-hooks skips
+        // the cleanup and both entries keep firing on every matching tool.
+        let script_path = PathBuf::from("/home/user/.config/crush/hooks/git-ai-checkpoint.sh");
+        let config = json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "^edit$", "command": script_path.display().to_string()},
+                    {"matcher": CRUSH_MATCHER, "command": script_path.display().to_string()}
+                ]
+            }
+        });
+        let (installed, up_to_date) = CrushInstaller::hook_status(&config, &script_path);
+        assert!(installed);
+        assert!(
+            !up_to_date,
+            "duplicate git-ai entries must be reported as not up to date"
+        );
+    }
+
+    #[test]
+    fn test_crush_script_content_checkpoints_all_bash_invocations() {
+        let content = CrushInstaller::generate_script_content(&create_test_binary_path());
+        // A textual read-only filter cannot prove a command cannot write
+        // tracked files; the wrapper must not skip bash invocations.
+        assert!(!content.contains("grep -qE"));
+        assert!(!content.contains("CRUSH_TOOL_INPUT_COMMAND"));
     }
 }

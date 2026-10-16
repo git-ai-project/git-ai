@@ -24,17 +24,16 @@ FALLBACK_DELAY=${GIT_AI_CRUSH_POST_DELAY:-10}
 
 input=$(cat)
 
-tool_name=${CRUSH_TOOL_NAME:-$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)}
 project_dir=${CRUSH_PROJECT_DIR:-${CRUSH_CWD:-$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)}}
 session_id=${CRUSH_SESSION_ID:-$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)}
 session_id=${session_id:-unknown}
 
-# Read-only bash commands cannot modify tracked files; skip them to avoid
-# checkpoint churn on every shell call.
-if [[ "$tool_name" == "bash" ]]; then
-  cmd=${CRUSH_TOOL_INPUT_COMMAND:-$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)}
-  printf '%s' "$cmd" | grep -qE '(>>|>[[:space:]]*[^&>]|sed -i|tee |cp |mv |rm |mkdir |touch |truncate |dd |patch |git apply)' || exit 0
-fi
+# Every bash invocation is checkpointed, including commands that only look
+# read-only: a textual filter cannot prove a command cannot write tracked
+# files (e.g. `python3 -c 'Path(...).write_text(...)'`, `perl -e`,
+# `git checkout`), and a missed write would silently lose AI attribution.
+# The extra checkpoints on genuinely read-only commands are cheap and
+# attribute nothing.
 
 state_dir="${TMPDIR:-/tmp}/git-ai-crush/$session_id"
 mkdir -p "$state_dir" 2>/dev/null || exit 0
