@@ -73,8 +73,10 @@ impl CrushInstaller {
 
         for block in blocks {
             let command = block.get("command").and_then(|c| c.as_str()).unwrap_or("");
-            let is_ours = command == script_path.display().to_string()
-                || command.contains("git-ai-checkpoint.sh");
+            // Only exact matches against our installed script path count as
+            // ours; substring matching would let us claim (and later remove)
+            // unrelated user hooks that merely mention git-ai.
+            let is_ours = command == script_path.display().to_string();
             if !is_ours {
                 continue;
             }
@@ -297,11 +299,13 @@ impl HookInstaller for CrushInstaller {
                 .cloned()
                 .unwrap_or_default();
 
-            // Remove any stale git-ai entries (e.g. old matcher/command), then
-            // append the current one.
+            // Replace only entries that point at our exact script path
+            // (e.g. stale matchers from earlier installs); unrelated user
+            // hooks are preserved even if they mention git-ai.
+            let our_command = script_path.display().to_string();
             pre_tool_array.retain(|block| {
                 let command = block.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                !(command.contains("git-ai-checkpoint.sh") || command.contains("git-ai checkpoint"))
+                command != our_command
             });
             pre_tool_array.push(Self::expected_hook_entry(&script_path));
 
@@ -346,13 +350,13 @@ impl HookInstaller for CrushInstaller {
             if let Some(hooks_obj) = existing.get("hooks").and_then(|h| h.as_object()) {
                 if let Some(pre_tool_array) = hooks_obj.get("PreToolUse").and_then(|v| v.as_array())
                 {
+                    let our_command = script_path.display().to_string();
                     let filtered: Vec<Value> = pre_tool_array
                         .iter()
                         .filter(|block| {
                             let command =
                                 block.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                            !(command.contains("git-ai-checkpoint.sh")
-                                || command.contains("git-ai checkpoint"))
+                            command != our_command
                         })
                         .cloned()
                         .collect();
@@ -559,5 +563,28 @@ mod tests {
         });
         let (installed, _up_to_date) = CrushInstaller::hook_status(&config, &script_path);
         assert!(!installed);
+    }
+
+    #[test]
+    fn test_crush_hook_status_does_not_claim_user_hooks_mentioning_git_ai() {
+        // A user-owned wrapper that happens to invoke `git-ai checkpoint`
+        // must not be treated as ours; otherwise install/uninstall would
+        // rewrite or silently delete it.
+        let script_path = PathBuf::from("/home/user/.config/crush/hooks/git-ai-checkpoint.sh");
+        let config = json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "^bash$",
+                     "command": "/home/user/bin/my-wrapper.sh | git-ai checkpoint claude --hook-input stdin"},
+                    {"matcher": "^edit$",
+                     "command": "/home/user/.config/crush/hooks/../hooks/git-ai-checkpoint.sh"}
+                ]
+            }
+        });
+        let (installed, _up_to_date) = CrushInstaller::hook_status(&config, &script_path);
+        assert!(
+            !installed,
+            "only exact script path matches should count as our hook"
+        );
     }
 }
