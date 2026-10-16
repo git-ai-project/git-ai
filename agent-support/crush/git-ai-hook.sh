@@ -58,7 +58,14 @@ emit_pending_post() {
 emit_pending_post
 
 # 2) Pre-edit checkpoint: mark the currently dirty state as human-authored.
-printf '%s' "$input" | "$GIT_AI_BIN" checkpoint crush --hook-input stdin >/dev/null 2>&1
+#    This baseline separates earlier (possibly human) edits from the tool's
+#    changes. If it fails (e.g. the daemon is unavailable), the synthetic
+#    post would credit those earlier edits to the AI, so abort instead.
+#    Exiting 0 is non-blocking for Crush; attribution simply falls back to
+#    human for this invocation.
+if ! printf '%s' "$input" | "$GIT_AI_BIN" checkpoint crush --hook-input stdin >/dev/null 2>&1; then
+  exit 0
+fi
 
 # 3) Persist this invocation's payload for a later flush.
 printf '%s' "$input" >"$state_dir/pending"

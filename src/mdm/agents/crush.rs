@@ -444,6 +444,28 @@ mod tests {
     }
 
     #[test]
+    fn test_crush_script_content_aborts_when_pre_checkpoint_fails() {
+        let content = CrushInstaller::generate_script_content(&create_test_binary_path());
+        // Without a successful human pre-mark baseline, a synthetic post
+        // could credit earlier human edits to the AI; the wrapper must
+        // check the pre checkpoint exit status before scheduling the post.
+        assert!(content.contains("if ! printf '%s' \"$input\""));
+        assert!(content.contains("checkpoint crush --hook-input stdin >/dev/null 2>&1; then"));
+        // The pending payload must be written only after the guarded
+        // pre checkpoint, never before it.
+        let guard_pos = content
+            .find("checkpoint crush --hook-input stdin >/dev/null 2>&1; then")
+            .expect("pre checkpoint guard should exist");
+        let pending_pos = content
+            .find("printf '%s' \"$input\" >\"$state_dir/pending\"")
+            .expect("pending write should exist");
+        assert!(
+            pending_pos > guard_pos,
+            "pending payload must be written after the pre checkpoint guard"
+        );
+    }
+
+    #[test]
     fn test_crush_script_content_escapes_apostrophes_in_binary_path() {
         let binary_path = PathBuf::from("/opt/doesn't work/git-ai");
         let content = CrushInstaller::generate_script_content(&binary_path);
