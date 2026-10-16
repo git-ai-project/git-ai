@@ -7,6 +7,7 @@ mod claude;
 mod cline;
 mod codex;
 mod continue_cli;
+mod crush;
 mod cursor;
 mod droid;
 mod firebender;
@@ -150,6 +151,10 @@ pub trait AgentPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError>;
 }
 
+// Re-exported so sibling presets can reuse OpenCode's tool_input path
+// extraction (Crush payloads share the same tool_input shape).
+pub(crate) use opencode::OpenCodePreset;
+
 pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
     match name {
         "claude" => Ok(Box::new(claude::ClaudePreset)),
@@ -168,6 +173,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "droid" => Ok(Box::new(droid::DroidPreset)),
         "opencode" => Ok(Box::new(opencode::OpenCodePreset)),
         "pi" => Ok(Box::new(pi::PiPreset)),
+        "crush" => Ok(Box::new(crush::CrushPreset)),
         "human" => Ok(Box::new(human::HumanPreset)),
         "mock_ai" => Ok(Box::new(mock_ai::MockAiPreset)),
         "known_human" => Ok(Box::new(known_human::KnownHumanPreset)),
