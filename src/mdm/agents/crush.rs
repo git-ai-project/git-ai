@@ -364,6 +364,18 @@ mod tests {
     }
 
     #[test]
+    fn test_crush_script_content_uses_sequential_flush_with_fallback_timer() {
+        let content = CrushInstaller::generate_script_content(&create_test_binary_path());
+        // Long-running tool calls are attributed by flushing the pending
+        // post checkpoint when the next PreToolUse fires (tools run
+        // sequentially); the sleep timer is only a last-tool fallback.
+        assert!(content.contains("emit_pending_post"));
+        assert!(content.contains("counter_file"));
+        assert!(content.contains("FALLBACK_DELAY"));
+        assert!(content.contains("$invocation"));
+    }
+
+    #[test]
     fn test_crush_script_content_escapes_apostrophes_in_binary_path() {
         let binary_path = PathBuf::from("/opt/doesn't work/git-ai");
         let content = CrushInstaller::generate_script_content(&binary_path);
