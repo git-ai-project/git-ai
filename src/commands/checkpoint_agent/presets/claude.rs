@@ -66,7 +66,7 @@ impl AgentPreset for ClaudePreset {
             });
 
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
-        let tool_use_id = parse::str_or_default_multi(&data, &["tool_use_id", "toolUseId"], "bash");
+        let tool_use_id = parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"]);
 
         let is_bash = tool_class == ToolClass::Bash;
 
@@ -106,18 +106,18 @@ impl AgentPreset for ClaudePreset {
         let event = match (hook_event, is_bash) {
             (Some("PreToolUse"), true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
-                tool_use_id: tool_use_id.to_string(),
+                tool_use_id: tool_use_id.unwrap_or("bash").to_string(),
                 command: bash_command,
             }),
             (Some("PreToolUse"), false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
-                tool_use_id: Some(tool_use_id.to_string()),
+                tool_use_id: tool_use_id.map(str::to_string),
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
-                tool_use_id: tool_use_id.to_string(),
+                tool_use_id: tool_use_id.unwrap_or("bash").to_string(),
                 command: bash_command,
                 stream_source,
             }),
@@ -126,7 +126,7 @@ impl AgentPreset for ClaudePreset {
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
                 stream_source,
-                tool_use_id: Some(tool_use_id.to_string()),
+                tool_use_id: tool_use_id.map(str::to_string),
             }),
         };
 
@@ -324,5 +324,29 @@ mod tests {
         })
         .to_string();
         assert!(ClaudePreset.parse(&input, "t_test123456789a").is_err());
+    }
+
+    #[test]
+    fn test_claude_file_edit_without_tool_use_id_has_no_join_key() {
+        let mut data: serde_json::Value =
+            serde_json::from_str(&make_claude_hook_input("PreToolUse", "Write")).unwrap();
+        data.as_object_mut().unwrap().remove("tool_use_id");
+        let events = ClaudePreset
+            .parse(&data.to_string(), "t_test123456789a")
+            .unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => assert_eq!(e.tool_use_id, None),
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_claude_file_edit_keeps_tool_use_id() {
+        let input = make_claude_hook_input("PostToolUse", "Write");
+        let events = ClaudePreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => assert_eq!(e.tool_use_id.as_deref(), Some("tu-1")),
+            _ => panic!("Expected PostFileEdit"),
+        }
     }
 }
