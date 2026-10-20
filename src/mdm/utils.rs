@@ -2,6 +2,7 @@ use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::error::GitAiError;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -797,6 +798,61 @@ pub fn update_vscode_chat_hook_settings(
     Ok(Some(diff_output))
 }
 
+/// Parses settings-file content as JSONC (`//` line comments, `/* */`
+/// block comments, and trailing commas) into a [`serde_json::Value`].
+///
+/// Several agent settings files (e.g. Augment's `~/.augment/settings.json`,
+/// per <https://docs.augmentcode.com/cli/config>) document JSONC support,
+/// but the underlying data model callers want to work with is plain
+/// `serde_json::Value`. This parses through `jsonc_parser` and converts the
+/// result to `serde_json::Value`.
+///
+/// Empty or whitespace-only content parses as an empty object (`{}`),
+/// matching the "no settings file yet" case.
+///
+/// Note: this discards comments and trailing-comma formatting -- callers
+/// that rewrite the file after parsing with this function reserialise it
+/// as plain JSON, dropping any comments the original file had. If comment
+/// preservation becomes important, migrate to `CstRootNode` (as used in
+/// [`update_vscode_chat_hook_settings`]).
+pub fn parse_jsonc_settings(content: &str) -> Result<Value, GitAiError> {
+    if content.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    let parsed = jsonc_parser::parse_to_value(content, &ParseOptions::default())
+        .map_err(|e| GitAiError::Generic(e.to_string()))?;
+    match parsed {
+        Some(val) => jsonc_value_to_serde(val),
+        None => Ok(json!({})),
+    }
+}
+
+/// Converts a parsed JSONC value to `serde_json::Value`, failing rather
+/// than silently substituting `Value::Null` when a JSON number cannot be
+/// represented by `serde_json` (e.g. `1e400`, which overflows `f64` to
+/// infinity and `serde_json` refuses to encode). Silently coercing such a
+/// number to `null` would let a later settings rewrite persist `null` in
+/// place of the user's original value, corrupting the file.
+fn jsonc_value_to_serde(val: jsonc_parser::JsonValue<'_>) -> Result<Value, GitAiError> {
+    match val {
+        jsonc_parser::JsonValue::Null => Ok(Value::Null),
+        jsonc_parser::JsonValue::Boolean(b) => Ok(Value::Bool(b)),
+        jsonc_parser::JsonValue::Number(n) => serde_json::from_str(n)
+            .map_err(|e| GitAiError::Generic(format!("Unrepresentable JSON number `{n}`: {e}"))),
+        jsonc_parser::JsonValue::String(s) => Ok(Value::String(s.into_owned())),
+        jsonc_parser::JsonValue::Array(arr) => arr
+            .into_iter()
+            .map(jsonc_value_to_serde)
+            .collect::<Result<Vec<Value>, GitAiError>>()
+            .map(Value::Array),
+        jsonc_parser::JsonValue::Object(obj) => obj
+            .into_iter()
+            .map(|(k, v)| jsonc_value_to_serde(v).map(|v| (k, v)))
+            .collect::<Result<serde_json::Map<String, Value>, GitAiError>>()
+            .map(Value::Object),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,5 +1566,39 @@ mod tests {
         // A path with no parent component should not error
         let path = Path::new("standalone_file.txt");
         ensure_parent_dir(path).unwrap();
+    }
+
+    #[test]
+    fn parse_jsonc_settings_valid_object_roundtrips() {
+        let result = parse_jsonc_settings("{\n  // comment\n  \"a\": 1,\n}").unwrap();
+        assert_eq!(result, json!({"a": 1}));
+    }
+
+    #[test]
+    fn parse_jsonc_settings_empty_content_is_empty_object() {
+        assert_eq!(parse_jsonc_settings("").unwrap(), json!({}));
+        assert_eq!(parse_jsonc_settings("   \n\t").unwrap(), json!({}));
+    }
+
+    /// A JSON number that cannot be represented by `serde_json` (e.g. an
+    /// exponent that overflows `f64` to infinity) must be a parse error,
+    /// never silently coerced to `null` -- otherwise a later settings
+    /// rewrite would persist `null` in place of the user's real value.
+    #[test]
+    fn parse_jsonc_settings_rejects_unrepresentable_number() {
+        let err = parse_jsonc_settings(r#"{"x": 1e400}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("Unrepresentable JSON number"),
+            "{err}"
+        );
+    }
+
+    /// Same check nested inside an array/object, to confirm the error
+    /// propagates through the recursive array/object conversion instead
+    /// of being swallowed partway through.
+    #[test]
+    fn parse_jsonc_settings_rejects_unrepresentable_number_nested() {
+        assert!(parse_jsonc_settings(r#"{"a": [1, 2, 1e400]}"#).is_err());
+        assert!(parse_jsonc_settings(r#"[{"nested": 1e400}]"#).is_err());
     }
 }
