@@ -73,6 +73,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 </tr>
 </table>
 
+Huawei Cloud [CodeArts Agent](docs/codearts.md) is also supported through its IDE, editor extension, and CLI tool hooks.
+
 
 ## Our Choices
 

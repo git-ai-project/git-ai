@@ -3,7 +3,7 @@ use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::checkpoint_content_budget::CheckpointContentBudget;
 use crate::commands::checkpoint_agent::presets::{
     KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    StreamSource, UntrackedEdit,
+    SessionUpdate, StreamSource, UntrackedEdit,
 };
 use crate::config;
 use crate::daemon::checkpoint::PreparedPathRole;
@@ -307,6 +307,7 @@ fn execute_event(
         ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name),
         ParsedHookEvent::PreBashCall(e) => execute_pre_bash_call(e),
         ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e),
+        ParsedHookEvent::SessionUpdate(e) => execute_session_update(e),
         ParsedHookEvent::KnownHumanEdit(e) => execute_known_human_edit(e),
         ParsedHookEvent::UntrackedEdit(e) => execute_untracked_edit(e),
     }
@@ -421,6 +422,34 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<Vec<CheckpointRequest>, Gi
         None,
         HashMap::new(),
     ))
+}
+
+fn execute_session_update(e: SessionUpdate) -> Result<Vec<CheckpointRequest>, GitAiError> {
+    // Session updates bypass checkpoint submission, so enforce its repository
+    // filters here before notifying the transcript worker.
+    let config = config::Config::get();
+    if config.has_repository_filters() {
+        let repo = discover_repository_in_path_no_git_exec(&e.context.cwd)?;
+        if !config.is_allowed_repository(&Some(repo)) {
+            return Ok(vec![]);
+        }
+    }
+
+    let daemon_config = crate::daemon::DaemonConfig::from_env_or_default_paths()?;
+    let response = crate::daemon::send_control_request_with_timeout(
+        &daemon_config.control_socket_path,
+        &crate::daemon::ControlRequest::TranscriptUpdate {
+            context: e.context,
+            stream_source: e.stream_source,
+        },
+        std::time::Duration::from_millis(500),
+    )?;
+    if !response.ok {
+        return Err(GitAiError::Generic(response.error.unwrap_or_else(|| {
+            "daemon rejected transcript update".to_string()
+        })));
+    }
+    Ok(vec![])
 }
 
 fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAiError> {

@@ -53,6 +53,20 @@ impl OpenCodePreset {
             serde_json::Value::Object(map) => {
                 for (key, val) in map {
                     let key_lower = key.to_ascii_lowercase();
+                    // File contents can contain patch examples or file URIs;
+                    // those are source text, not additional edit targets.
+                    if matches!(
+                        key_lower.as_str(),
+                        "content"
+                            | "oldstring"
+                            | "newstring"
+                            | "oldtext"
+                            | "newtext"
+                            | "old_text"
+                            | "new_text"
+                    ) {
+                        continue;
+                    }
                     let is_single_path_key = key_lower == "file_path"
                         || key_lower == "filepath"
                         || key_lower == "path"
@@ -152,7 +166,7 @@ impl OpenCodePreset {
         None
     }
 
-    fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
+    pub(super) fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
         let conn = crate::streams::agents::opencode::open_sqlite_readonly(db_path).ok()?;
         conn.query_row(
             "SELECT parent_id FROM session WHERE id = ?",

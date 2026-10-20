@@ -345,6 +345,12 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "bash" | "shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::CodeArts => match tool_name.to_ascii_lowercase().as_str() {
+            "edit" | "write" | "patch" | "multiedit" | "apply_patch" | "applypatch"
+            | "deletefile" => ToolClass::FileEdit,
+            "bash" | "shell" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
         Agent::Firebender => match tool_name {
             "Write" | "Edit" | "Delete" | "RenameSymbol" | "DeleteSymbol" => ToolClass::FileEdit,
             "Bash" => ToolClass::Bash,
@@ -399,6 +405,7 @@ pub enum Agent {
     Droid,
     Amp,
     OpenCode,
+    CodeArts,
     Firebender,
     Codex,
     Pi,

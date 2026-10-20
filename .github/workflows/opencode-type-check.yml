@@ -14,7 +14,10 @@ on:
 
 jobs:
   type-check:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: agent-support/opencode
@@ -37,4 +40,7 @@ jobs:
 
       - name: Run type check
         run: npm run type-check
+
+      - name: Test OpenCode and CodeArts hooks
+        run: npm test
 

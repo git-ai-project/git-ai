@@ -188,6 +188,7 @@ const ALL_AGENT_TYPES: &[&str] = &[
     "codex",
     "amp",
     "opencode",
+    "codearts",
     "pi",
 ];
 
@@ -208,7 +209,8 @@ pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
         "windsurf" => Some(Box::new(super::agents::WindsurfAgent::new())),
         "codex" => Some(Box::new(super::agents::CodexAgent::new())),
         "amp" => Some(Box::new(super::agents::AmpAgent::new())),
-        "opencode" => Some(Box::new(super::agents::OpenCodeAgent::new())),
+        // CodeArts kernels use the same SQLite schema, with separate session identities.
+        "opencode" | "codearts" => Some(Box::new(super::agents::OpenCodeAgent::new())),
         "pi" => Some(Box::new(super::agents::PiAgent::new())),
         _ => None,
     }

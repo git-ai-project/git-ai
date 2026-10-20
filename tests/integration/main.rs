@@ -41,6 +41,7 @@ mod ci_partial_clone;
 mod ci_squash_rebase;
 mod claude_code;
 mod cli_parser_rebase_args;
+mod codearts;
 mod codex;
 mod cold_trace2_repo;
 mod commit_metric_metadata;

@@ -17,15 +17,21 @@
  * @see https://opencode.ai/docs/plugins/
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Hooks, Plugin } from "@opencode-ai/plugin"
 import { spawn } from "child_process"
 import { readFile, stat } from "fs/promises"
+import { homedir } from "os"
 import { dirname, isAbsolute, join, resolve } from "path"
+import { fileURLToPath } from "url"
 
+// Also embedded by the CodeArts installer, which substitutes this agent name.
+const AGENT_NAME = "opencode"
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
 const CHECKPOINT_TIMEOUT_MS = 10_000
-const CHECKPOINT_ARGS = ["checkpoint", "opencode", "--hook-input", "stdin"]
+const CHECKPOINT_ARGS = ["checkpoint", AGENT_NAME, "--hook-input", "stdin"]
+const MAX_SESSION_MODELS = 256
+const MAX_PENDING_CALLS = 1024
 
 // Tools that modify files and should be tracked
 const FILE_EDIT_TOOLS = new Set([
@@ -44,31 +50,58 @@ const APPLY_PATCH_FILE_PREFIXES = [
   "*** Move to: ",
 ]
 
-const isEditTool = (toolName: string): boolean => FILE_EDIT_TOOLS.has(toolName.toLowerCase())
+const isEditTool = (toolName: string): boolean =>
+  FILE_EDIT_TOOLS.has(toolName.toLowerCase()) ||
+  (AGENT_NAME.toString() === "codearts" && toolName.toLowerCase() === "deletefile")
 
 const isBashTool = (toolName: string): boolean => {
   const name = toolName.toLowerCase()
   return name === "bash" || name === "shell"
 }
 
-const normalizePath = (rawPath: string, cwd?: string): string | null => {
+const codeArtsTranscriptPath = (): string | undefined => {
+  if (AGENT_NAME.toString() !== "codearts") return undefined
+
+  // CodeArts CLI and IDE kernels share OpenCode's SQLite format, but set their
+  // own data directory. Resolve here so the daemon need not inherit their env.
+  const database = process.env.OPENCODE_DB || "opencode.db"
+  if (database === ":memory:") return undefined
+  if (isAbsolute(database)) return resolve(process.cwd(), database)
+  const data = process.env.KERNEL_DATA_DIR || join(
+    process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+    process.env.SCENARIO || "opencode",
+  )
+  return resolve(process.cwd(), join(data, database))
+}
+
+const normalizePath = (rawPath: string, cwd?: string, toolName?: string): string | null => {
   const trimmed = rawPath.trim().replace(/^['"]|['"]$/g, "")
   if (!trimmed) {
     return null
   }
 
-  const withoutScheme = trimmed
-    .replace(/^file:\/\/localhost/, "")
-    .replace(/^file:\/\//, "")
+  if (trimmed.startsWith("file://")) {
+    try {
+      return fileURLToPath(trimmed)
+    } catch {
+      return null
+    }
+  }
 
-  const isWindowsAbs = /^[a-zA-Z]:[\\/]/.test(withoutScheme)
-  if (isAbsolute(withoutScheme) || isWindowsAbs) {
-    return withoutScheme
+  // CodeArts 26.8.1 rewrites MSYS drive paths before edit/deleteFile execute.
+  // Its write and patch tools do not apply that execution-time transformation.
+  const isCodeArtsDrivePath = AGENT_NAME.toString() === "codearts" && process.platform === "win32"
+    && (toolName?.toLowerCase() === "edit" || toolName?.toLowerCase() === "deletefile")
+  const toolPath = isCodeArtsDrivePath ? trimmed.replace(/^\/([a-zA-Z])\//, "$1:/") : trimmed
+
+  const isWindowsAbs = /^[a-zA-Z]:[\\/]/.test(toolPath)
+  if (isAbsolute(toolPath) || isWindowsAbs) {
+    return toolPath
   }
 
   // Use provided cwd, or fall back to process.cwd() for relative paths
   const resolvedCwd = cwd || process.cwd()
-  return join(resolvedCwd, withoutScheme)
+  return join(resolvedCwd, toolPath)
 }
 
 const collectApplyPatchPaths = (raw: string, out: Set<string>): void => {
@@ -107,6 +140,10 @@ const collectToolPaths = (value: unknown, out: Set<string>): void => {
 
   for (const [key, val] of Object.entries(value)) {
     const keyLower = key.toLowerCase()
+    // Source text may itself contain file URIs or examples of apply_patch input.
+    if (["content", "oldstring", "newstring", "oldtext", "newtext", "old_text", "new_text"].includes(keyLower)) {
+      continue
+    }
     const isSinglePathKey = keyLower === "file_path" || keyLower === "filepath" || keyLower === "path" || keyLower === "fspath"
     const isMultiPathKey = keyLower === "files" || keyLower === "filepaths" || keyLower === "file_paths"
 
@@ -128,13 +165,13 @@ const collectToolPaths = (value: unknown, out: Set<string>): void => {
   }
 }
 
-const extractFilePaths = (args: unknown, cwd?: string): string[] => {
+const extractFilePaths = (args: unknown, cwd?: string, toolName?: string): string[] => {
   const rawPaths = new Set<string>()
   collectToolPaths(args, rawPaths)
 
   const normalizedPaths = new Set<string>()
   for (const rawPath of rawPaths) {
-    const normalized = normalizePath(rawPath, cwd)
+    const normalized = normalizePath(rawPath, cwd, toolName)
     if (normalized) {
       normalizedPaths.add(normalized)
     }
@@ -167,7 +204,7 @@ const extractToolCwd = (args: Record<string, unknown> | undefined): string | und
 }
 
 const debugEnabled = (): boolean => {
-  const value = process.env.GIT_AI_OPENCODE_DEBUG ?? process.env.GIT_AI_DEBUG
+  const value = process.env[`GIT_AI_${AGENT_NAME.toUpperCase()}_DEBUG`] ?? process.env.GIT_AI_DEBUG
   return value === "1" || value?.toLowerCase() === "true"
 }
 
@@ -182,7 +219,7 @@ const debugLog = (message: string, error?: unknown): void => {
       : error === undefined
         ? ""
         : String(error)
-    console.error(`[git-ai opencode] ${message}${detail ? `: ${detail}` : ""}`)
+    console.error(`[git-ai ${AGENT_NAME}] ${message}${detail ? `: ${detail}` : ""}`)
   } catch {
     // Debug logging must never be the reason a hook fails.
   }
@@ -223,6 +260,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
 
     const child = spawn(GIT_AI_BIN, CHECKPOINT_ARGS, {
       stdio: ["pipe", "ignore", "pipe"],
+      windowsHide: true,
     })
 
     timeout = setTimeout(() => {
@@ -231,7 +269,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
       } catch (error) {
         debugLog("failed to kill timed-out checkpoint command", error)
       }
-      finish(new Error(`git-ai checkpoint opencode timed out after ${CHECKPOINT_TIMEOUT_MS}ms`))
+      finish(new Error(`git-ai checkpoint ${AGENT_NAME} timed out after ${CHECKPOINT_TIMEOUT_MS}ms`))
     }, CHECKPOINT_TIMEOUT_MS)
 
     const stderr: Buffer[] = []
@@ -251,7 +289,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
       }
 
       const stderrText = Buffer.concat(stderr).toString().trim()
-      finish(new Error(`git-ai checkpoint opencode exited with ${code}${stderrText ? `: ${stderrText}` : ""}`))
+      finish(new Error(`git-ai checkpoint ${AGENT_NAME} exited with ${code}${stderrText ? `: ${stderrText}` : ""}`))
     })
 
     child.stdin.end(hookInput)
@@ -269,10 +307,22 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
 const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugin>> => {
   const { worktree, directory } = ctx
-  const defaultCwd = worktree || directory || process.cwd()
+  const defaultCwd = directory || worktree || process.cwd()
+  const transcriptPath = codeArtsTranscriptPath()
 
-  // Track pending calls by callID so we can reference them in the after hook
-  const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
+  // Call IDs can be reused across sessions. Keep each before/after pair together.
+  const callKey = (sessionID: string, callID: string): string => JSON.stringify([sessionID, callID])
+  const pendingCalls = new Map<string, { cwd: string; sessionID: string; toolInput: unknown; model?: string }>()
+  const sessionModels = new Map<string, string>()
+  const rememberSessionModel = (sessionID: string, model: string): void => {
+    // Keep recent sessions even when the client never emits session.deleted.
+    sessionModels.delete(sessionID)
+    sessionModels.set(sessionID, model)
+    if (sessionModels.size > MAX_SESSION_MODELS) {
+      const oldestSessionID = sessionModels.keys().next().value
+      if (oldestSessionID !== undefined) sessionModels.delete(oldestSessionID)
+    }
+  }
 
   const nearestExistingDirectory = async (pathHint: string): Promise<string | null> => {
     let candidate = pathHint
@@ -396,53 +446,47 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
     return null
   }
 
-  const extractMetadataFilePaths = (metadata: unknown, cwd?: string): string[] => {
-    if (!metadata || typeof metadata !== "object") {
-      return []
-    }
-
-    const files = (metadata as { files?: unknown }).files
-    if (!Array.isArray(files)) {
-      return []
-    }
-
-    const paths = new Set<string>()
-    for (const file of files) {
-      if (!file || typeof file !== "object") {
-        continue
-      }
-
-      const filePath = (file as { filePath?: unknown; path?: unknown }).filePath ?? (file as { path?: unknown }).path
-      if (typeof filePath === "string") {
-        const normalized = normalizePath(filePath, cwd ?? defaultCwd)
-        if (normalized) {
-          paths.add(normalized)
-        }
-      }
-    }
-
-    return [...paths]
-  }
-
-  const withMetadataFilePaths = (toolInput: unknown, filePaths: string[]): unknown => {
-    if (filePaths.length === 0) {
-      return toolInput
-    }
-
-    if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
-      return {
-        ...toolInput,
-        file_paths: filePaths,
-      }
-    }
-
-    return {
-      input: toolInput,
-      file_paths: filePaths,
-    }
-  }
-
   return {
+    event: swallowHookErrors(
+      "tool/session event failed",
+      async ({ event }: Parameters<NonNullable<Hooks["event"]>>[0]) => {
+        if (event.type === "session.deleted") {
+          sessionModels.delete(event.properties.info.id)
+        }
+        if (event.type === "message.part.updated") {
+          const part = event.properties.part
+          if (part.type === "tool" && part.state.status === "error") {
+            pendingCalls.delete(callKey(part.sessionID, part.callID))
+          }
+        }
+        if (transcriptPath && event.type === "message.updated") {
+          const info = event.properties.info
+          if (info.role !== "assistant" || typeof info.time.completed !== "number" || !info.sessionID.trim()) return
+          const repoDir = await resolveRepoDir([], defaultCwd)
+          if (!repoDir) return
+          // CodeArts persists final tool results and reply parts after the tool
+          // hook. A completed message refreshes only its transcript, not files.
+          await runCheckpoint(JSON.stringify({
+            hook_event_name: "SessionUpdate",
+            session_id: info.sessionID,
+            cwd: repoDir,
+            transcript_path: transcriptPath,
+          }))
+        }
+      },
+    ),
+
+    "chat.params": swallowHookErrors(
+      "model capture failed",
+      async (input: { sessionID: string; agent?: string; model: { id?: string }; isEnsureTitle?: boolean }) => {
+        if (input.isEnsureTitle || input.agent === "title") return
+        const model = hookString(input.model?.id).trim()
+        if (input.sessionID && model) {
+          rememberSessionModel(input.sessionID, model)
+        }
+      },
+    ),
+
     "tool.execute.before": swallowHookErrors(
       "pre-tool checkpoint failed",
       async (input: ToolHookInput, output?: { args?: unknown }) => {
@@ -455,56 +499,84 @@ const createGitAiPlugin = (ctx: Parameters<Plugin>[0]): Awaited<ReturnType<Plugi
 
         const callID = hookString(input.callID)
         const sessionID = hookString(input.sessionID)
-        const toolInput = output?.args ?? input.args
-        const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
-        const filePaths = isTrackedEdit ? extractFilePaths(toolInput, toolCwd) : []
-        const repoDir = await resolveRepoDir(filePaths, toolCwd)
-        if (!repoDir) {
+        if (!callID.trim() || !sessionID.trim()) {
           return
         }
+        const toolInput = output?.args ?? input.args
+        const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
+        const filePaths = isTrackedEdit ? extractFilePaths(toolInput, toolCwd, toolName) : []
+        // An empty edit scope can turn into a repository-wide checkpoint.
+        if (isTrackedEdit && filePaths.length === 0) return
+        // The checkpoint runs at the repo root, while tool paths may be relative
+        // to a subdirectory. Send resolved edit paths, not the original arguments.
+        const checkpointInput = isTrackedEdit ? { file_paths: filePaths } : toolInput
+        const model = sessionModels.get(sessionID)
+        if (model) rememberSessionModel(sessionID, model)
+        const key = callKey(sessionID, callID)
+        const callInfo = { cwd: toolCwd, sessionID, toolInput: checkpointInput, model }
+        // Register before any asynchronous work so cancellation can remove the
+        // call while repository discovery or the pre-checkpoint is in flight.
+        pendingCalls.delete(key)
+        pendingCalls.set(key, callInfo)
+        // Some clients omit terminal events for cancelled/failed calls. Bound
+        // retained state; an evicted call safely skips its post-checkpoint.
+        if (pendingCalls.size > MAX_PENDING_CALLS) {
+          const oldestKey = pendingCalls.keys().next().value
+          if (oldestKey !== undefined) pendingCalls.delete(oldestKey)
+        }
 
-        pendingCalls.set(callID, { repoDir, sessionID, toolInput })
-
-        const hookInput = JSON.stringify({
-          hook_event_name: "PreToolUse",
-          session_id: sessionID,
-          tool_use_id: callID,
-          cwd: repoDir,
-          tool_name: toolName,
-          tool_input: toolInput,
-        })
-        await runCheckpoint(hookInput)
+        let checkpointSucceeded = false
+        try {
+          const repoDir = await resolveRepoDir(filePaths, toolCwd)
+          if (!repoDir || pendingCalls.get(key) !== callInfo) return
+          callInfo.cwd = isTrackedBash ? toolCwd : repoDir
+          await runCheckpoint(JSON.stringify({
+            hook_event_name: "PreToolUse",
+            session_id: sessionID,
+            tool_use_id: callID,
+            cwd: callInfo.cwd,
+            tool_name: toolName,
+            tool_input: checkpointInput,
+            model,
+          }))
+          checkpointSucceeded = true
+        } finally {
+          if (!checkpointSucceeded && pendingCalls.get(key) === callInfo) {
+            pendingCalls.delete(key)
+          }
+        }
       },
     ),
 
     "tool.execute.after": swallowHookErrors(
       "post-tool checkpoint failed",
-      async (input: ToolHookInput, output?: { metadata?: unknown }) => {
+      async (input: ToolHookInput) => {
         const toolName = hookString(input.tool)
         if (!isEditTool(toolName) && !isBashTool(toolName)) {
           return
         }
 
         const callID = hookString(input.callID)
-        const callInfo = pendingCalls.get(callID)
-        pendingCalls.delete(callID)
+        const key = callKey(hookString(input.sessionID), callID)
+        const callInfo = pendingCalls.get(key)
+        pendingCalls.delete(key)
 
         if (!callInfo) {
           debugLog(`skipping post-tool checkpoint without matching pre-tool call for ${callID}`)
           return
         }
 
-        const toolCwd = resolveCwd(extractToolCwd(asRecord(input.args)))
-        const metadataFilePaths = extractMetadataFilePaths(output?.metadata, toolCwd)
-        const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths)
-
         const hookInput = JSON.stringify({
           hook_event_name: "PostToolUse",
           session_id: callInfo.sessionID,
           tool_use_id: callID,
-          cwd: callInfo.repoDir,
+          cwd: callInfo.cwd,
           tool_name: toolName,
-          tool_input: toolInput,
+          // Only attribute paths whose pre-edit state was checkpointed. Files
+          // discovered in post metadata may already contain unrelated edits.
+          tool_input: callInfo.toolInput,
+          model: callInfo.model,
+          transcript_path: transcriptPath,
         })
         await runCheckpoint(hookInput)
       },
