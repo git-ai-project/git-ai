@@ -3792,6 +3792,121 @@ fn daemon_windows_trace_pipe_worker_exhaustion_does_not_block_later_trace_connec
     );
 }
 
+/// Best-effort shutdown-on-drop for the daemon started by the wrapper below,
+/// so a panic anywhere in the test body cannot strand a daemon (max uptime
+/// is 24h) on the machine. Mirrors `StrayDaemonGuard` above.
+#[cfg(windows)]
+struct BgStartDaemonCleanup {
+    control_socket_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for BgStartDaemonCleanup {
+    fn drop(&mut self) {
+        let _ = send_control_request(&self.control_socket_path, &ControlRequest::Shutdown);
+    }
+}
+
+/// Regression for `disable_inherit_for_own_stdio`: `spawn_daemon_run_detached`
+/// spawns the daemon via `Command::spawn`, which on Windows always requests
+/// `bInheritHandles = TRUE`. Without clearing the inherit flag on this
+/// process's own stdio first, every inheritable handle open in the `bg
+/// start` wrapper -- not only the daemon's own null stdio -- gets duplicated
+/// into the long-lived daemon. If the wrapper's own stdout is a pipe (as it
+/// is for a CI step or installer invoking `git-ai bg start`), a leaked
+/// write-end handle keeps that pipe open long after the wrapper exits,
+/// hanging any reader waiting for EOF. This exercises the real `bg start`
+/// spawn path, not a daemon started directly via `DaemonGuard` (which uses
+/// null stdio and never goes through `spawn_daemon_run_detached`).
+#[test]
+#[cfg(windows)]
+fn daemon_windows_bg_start_wrapper_stdout_closes_promptly_while_daemon_stays_up() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let control_socket = daemon_control_socket_path(&repo);
+    let _cleanup = BgStartDaemonCleanup {
+        control_socket_path: control_socket.clone(),
+    };
+
+    let mut attempt = 0;
+    let eof_rx = loop {
+        let mut command = Command::new(get_binary_path());
+        command
+            .arg("bg")
+            .arg("start")
+            .current_dir(repo.path())
+            .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+            .env("GITAI_TEST_DB_PATH", repo.test_db_path())
+            .env("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400")
+            .env("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_test_home_env(&mut command, repo.test_home_path());
+        configure_test_daemon_env(
+            &mut command,
+            &repo.daemon_home_path(),
+            &control_socket,
+            &daemon_trace_socket_path(&repo),
+        );
+
+        let mut wrapper = command
+            .spawn()
+            .expect("failed to spawn `git-ai bg start` wrapper");
+        let mut wrapper_stdout = wrapper.stdout.take().expect("wrapper stdout was not piped");
+
+        // Drained on a background thread so this test's own read can never
+        // block the wrapper on a full pipe buffer. Only observed via a
+        // bounded `recv_timeout` below, so a still-blocked reader (the exact
+        // regression under test) cannot itself hang the test.
+        let (eof_tx, eof_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = wrapper_stdout.read_to_end(&mut sink);
+            let _ = eof_tx.send(());
+        });
+
+        let mut status = None;
+        for _ in 0..600 {
+            if let Some(s) = wrapper.try_wait().expect("failed to poll wrapper status") {
+                status = Some(s);
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let status = status.unwrap_or_else(|| {
+            let _ = wrapper.kill();
+            let _ = wrapper.wait();
+            panic!("`git-ai bg start` wrapper did not exit within the bounded wait");
+        });
+
+        if !status.success() {
+            if is_windows_loader_init_failure(&status)
+                && attempt + 1 < DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS
+            {
+                attempt += 1;
+                continue;
+            }
+            panic!("`git-ai bg start` wrapper exited with failure: {status:?}");
+        }
+        break eof_rx;
+    };
+
+    // The wrapper has already exited. If its stdout pipe's write end leaked
+    // into the detached daemon, this would hang until the daemon itself
+    // exits; it must instead observe EOF promptly.
+    eof_rx.recv_timeout(Duration::from_secs(5)).expect(
+        "wrapper's stdout pipe did not reach EOF promptly after the wrapper exited -- \
+         a handle likely leaked into the detached daemon",
+    );
+
+    let ping = send_control_request(&control_socket, &ControlRequest::Ping)
+        .expect("daemon control socket should be reachable after `bg start`");
+    assert!(
+        ping.ok,
+        "daemon should report ok after `bg start`: {ping:?}"
+    );
+}
+
 #[test]
 #[serial]
 #[cfg(not(windows))]
