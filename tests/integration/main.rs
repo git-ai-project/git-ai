@@ -50,6 +50,7 @@ mod config_cli_coverage;
 mod config_pattern_detection;
 mod continue_cli;
 mod cross_repo_cwd_attribution;
+mod crush;
 mod cursor;
 mod daemon_commit_carryover;
 mod daemon_runtime_memory;
