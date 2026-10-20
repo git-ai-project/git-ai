@@ -4,7 +4,8 @@ use crate::authorship::attribution_recovery::{
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::diff_base::single_commit_diff_base;
 use crate::authorship::ignore::{
-    build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+    IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns_at_commit,
+    should_ignore_file_with_matcher,
 };
 use crate::authorship::rewrite::DiffTreeResult;
 use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
@@ -41,6 +42,36 @@ pub struct StatsCostEstimate {
     pub added_lines: usize,
     pub hunk_ranges: usize,
     pub deleted_lines: usize,
+}
+
+/// Ignore patterns and their compiled matcher resolved from the exact commit
+/// being finalized (not the mutable working tree).
+struct CommitIgnore {
+    patterns: Vec<String>,
+    matcher: IgnoreMatcher,
+}
+
+/// Resolve the commit-scoped ignore rules lazily and at most once per
+/// post-commit call, caching them in `slot`.
+///
+/// Post-commit runs asynchronously in the daemon and may lag well behind later
+/// working-tree edits, so `.git-ai-ignore` / `.gitattributes` MUST be read from
+/// the commit being finalized rather than the current working tree. Sharing a
+/// single resolution across background fill, recovery, and stats also avoids
+/// repeatedly reading those files. The resolution itself uses a constant number
+/// of git invocations, so callers that skip these blocks (e.g. the batched
+/// conflict-resolution path with stats/recovery disabled and no background
+/// agent) pay nothing.
+fn commit_ignore_for<'a>(
+    slot: &'a mut Option<CommitIgnore>,
+    repo: &Repository,
+    commit_sha: &str,
+) -> &'a CommitIgnore {
+    slot.get_or_insert_with(|| {
+        let patterns = effective_ignore_patterns_at_commit(repo, commit_sha, &[], &[]);
+        let matcher = build_ignore_matcher(&patterns);
+        CommitIgnore { patterns, matcher }
+    })
 }
 
 fn checkpoint_entry_requires_post_processing(
@@ -347,6 +378,12 @@ where
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
+    // Ignore rules must be resolved from the EXACT commit being finalized, not the
+    // mutable working tree: the daemon processes post-commit asynchronously and may
+    // run well behind later edits. Resolved lazily and shared across background
+    // fill, recovery, and stats (see `commit_ignore_for`).
+    let mut commit_ignore: Option<CommitIgnore> = None;
+
     // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire checkpoints
     // for all edits. Attribute any committed lines that have no existing attestation
     // ("holes") to the detected agent, preserving explicit attributions.
@@ -389,7 +426,14 @@ where
                         .collect()
                 })
         };
-        if let Some(committed_hunks) = committed_hunks {
+        if let Some(mut committed_hunks) = committed_hunks {
+            // Filter out files matching .git-ai-ignore patterns so that
+            // tool-generated files (e.g. i18n) are not incorrectly attributed
+            // to the background agent.
+            let bg_ignore_matcher =
+                &commit_ignore_for(&mut commit_ignore, repo, &commit_sha).matcher;
+            committed_hunks
+                .retain(|path, _| !should_ignore_file_with_matcher(path, bg_ignore_matcher));
             crate::authorship::background_agent::fill_unattributed_lines(
                 &mut authorship_log,
                 &committed_hunks,
@@ -406,12 +450,17 @@ where
     });
     // Synthetic self-check commits already provide explicit attribution for every line.
     if options.recover_attribution && !is_debug_self_check {
-        let recovery_hunks = recovery_committed_hunks(
-            repo,
-            &parent_sha,
-            &commit_sha,
-            context.precomputed_parent_diff,
-        )?;
+        let recovery_hunks = {
+            let recovery_ignore_matcher =
+                &commit_ignore_for(&mut commit_ignore, repo, &commit_sha).matcher;
+            recovery_committed_hunks(
+                repo,
+                &parent_sha,
+                &commit_sha,
+                context.precomputed_parent_diff,
+                recovery_ignore_matcher,
+            )?
+        };
         crate::authorship::attribution_recovery::recover_attribution(
             repo,
             &parent_sha,
@@ -460,11 +509,12 @@ where
             .find_commit(commit_sha.clone())
             .map(|commit| commit.parent_count().unwrap_or(0) > 1)
             .unwrap_or(false);
-        let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
         skip_reason = if is_merge_commit {
             Some(StatsSkipReason::MergeCommit)
         } else {
-            estimate_stats_cost(repo, &stats_diff_base, &commit_sha, &ignore_patterns)
+            let ignore_patterns =
+                &commit_ignore_for(&mut commit_ignore, repo, &commit_sha).patterns;
+            estimate_stats_cost(repo, &stats_diff_base, &commit_sha, ignore_patterns)
                 .ok()
                 .and_then(|estimate| {
                     if should_skip_expensive_post_commit_stats(&estimate) {
@@ -482,10 +532,12 @@ where
                 &commit_sha,
             )?;
 
+            let ignore_patterns =
+                &commit_ignore_for(&mut commit_ignore, repo, &commit_sha).patterns;
             let computed = stats_for_commit_stats_from_hunks(
                 repo,
                 &commit_sha,
-                &ignore_patterns,
+                ignore_patterns,
                 &diff_hunks,
                 Some(&authorship_log),
             )?;
@@ -615,27 +667,36 @@ fn recovery_committed_hunks(
     parent_sha: &str,
     commit_sha: &str,
     precomputed_parent_diff: Option<&crate::authorship::rewrite::DiffTreeResult>,
+    ignore_matcher: &IgnoreMatcher,
 ) -> Result<HashMap<String, Vec<crate::authorship::authorship_log::LineRange>>, GitAiError> {
-    if let Some(diff) = precomputed_parent_diff {
-        return Ok(
-            crate::authorship::virtual_attribution::committed_hunks_from_diff_result(diff, None),
-        );
-    }
+    let mut hunks = if let Some(diff) = precomputed_parent_diff {
+        crate::authorship::virtual_attribution::committed_hunks_from_diff_result(diff, None)
+    } else {
+        // Recovery only attributes lines added by the commit being finalized, so the
+        // diff must be bounded to that single commit (see `single_commit_diff_base`).
+        let diff_base = single_commit_diff_base(parent_sha, commit_sha);
+        let added_lines = repo.diff_added_lines(&diff_base, commit_sha, None)?;
+        added_lines
+            .into_iter()
+            .filter(|(_, lines)| !lines.is_empty())
+            .map(|(path, lines)| {
+                (
+                    path,
+                    crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                )
+            })
+            .collect()
+    };
 
-    // Recovery only attributes lines added by the commit being finalized, so the
-    // diff must be bounded to that single commit (see `single_commit_diff_base`).
-    let diff_base = single_commit_diff_base(parent_sha, commit_sha);
-    let added_lines = repo.diff_added_lines(&diff_base, commit_sha, None)?;
-    Ok(added_lines
-        .into_iter()
-        .filter(|(_, lines)| !lines.is_empty())
-        .map(|(path, lines)| {
-            (
-                path,
-                crate::authorship::authorship_log::LineRange::compress_lines(&lines),
-            )
-        })
-        .collect())
+    // Filter out files matching .git-ai-ignore / default / linguist-generated
+    // patterns so that tool-generated files are not fed into attribution
+    // recovery, which would otherwise incorrectly attribute them. The matcher is
+    // resolved by the caller from the exact commit being finalized (not the
+    // mutable working tree) so async processing stays consistent with commit
+    // time.
+    hunks.retain(|path, _| !should_ignore_file_with_matcher(path, ignore_matcher));
+
+    Ok(hunks)
 }
 
 /// Amend-specific post-commit that merges blame-sourced attributions from the
@@ -757,6 +818,13 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
 
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
+    // Resolve ignore rules from the amended commit itself, not the mutable
+    // working tree: amend post-processing is also async in the daemon, so the
+    // working tree may have moved past the amended commit. Shared by background
+    // fill and recovery below.
+    let amend_ignore_patterns = effective_ignore_patterns_at_commit(repo, amended_commit, &[], &[]);
+    let amend_ignore_matcher = build_ignore_matcher(&amend_ignore_patterns);
+
     // Fill unattributed lines for background agents
     if !matches!(
         crate::authorship::background_agent::detect(),
@@ -775,6 +843,10 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
             > = added_lines
                 .into_iter()
                 .filter(|(_, lines)| !lines.is_empty())
+                // Filter out files matching .git-ai-ignore patterns so that
+                // tool-generated files are not incorrectly attributed to the
+                // background agent during amend.
+                .filter(|(path, _)| !should_ignore_file_with_matcher(path, &amend_ignore_matcher))
                 .map(|(path, lines)| {
                     (
                         path,
@@ -790,7 +862,13 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
         }
     }
 
-    let recovery_hunks = recovery_committed_hunks(repo, &parent_sha, amended_commit, None)?;
+    let recovery_hunks = recovery_committed_hunks(
+        repo,
+        &parent_sha,
+        amended_commit,
+        None,
+        &amend_ignore_matcher,
+    )?;
     crate::authorship::attribution_recovery::recover_attribution(
         repo,
         &parent_sha,
