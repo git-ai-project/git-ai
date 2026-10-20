@@ -166,6 +166,15 @@ fn test_ai_tab_requires_non_empty_tool_and_model() {
 
 #[test]
 fn test_ai_tab_e2e_marks_ai_lines() {
+    assert_ai_tab_e2e_marks_ai_lines("github-copilot-tab");
+}
+
+#[test]
+fn test_ai_tab_e2e_preserves_cursor_tool() {
+    assert_ai_tab_e2e_marks_ai_lines("cursor-tab");
+}
+
+fn assert_ai_tab_e2e_marks_ai_lines(tool: &str) {
     let repo = TestRepo::new();
     let relative_path = "notes_test.ts";
     let file_path = repo.canonical_path().join(relative_path);
@@ -173,6 +182,10 @@ fn test_ai_tab_e2e_marks_ai_lines() {
     let base_content = "console.log(\"hello world\");\n".to_string();
     fs::write(&file_path, &base_content).unwrap();
     repo.stage_all_and_commit("Initial human commit").unwrap();
+    let mut file = repo.filename(relative_path);
+    file.assert_committed_lines(crate::lines![
+        "console.log(\"hello world\");".unattributed_human()
+    ]);
 
     let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -181,7 +194,7 @@ fn test_ai_tab_e2e_marks_ai_lines() {
         &repo,
         json!({
             "hook_event_name": "before_edit",
-            "tool": "github-copilot-tab",
+            "tool": tool,
             "model": "default",
             "repo_working_dir": repo.canonical_path().to_string_lossy(),
             "will_edit_filepaths": [file_path_str.clone()],
@@ -201,7 +214,7 @@ fn test_ai_tab_e2e_marks_ai_lines() {
         &repo,
         json!({
             "hook_event_name": "after_edit",
-            "tool": "github-copilot-tab",
+            "tool": tool,
             "model": "default",
             "repo_working_dir": repo.canonical_path().to_string_lossy(),
             "edited_filepaths": [file_path_str.clone()],
@@ -211,10 +224,14 @@ fn test_ai_tab_e2e_marks_ai_lines() {
         }),
     );
 
-    repo.stage_all_and_commit("Accept AI tab completion")
+    let commit = repo
+        .stage_all_and_commit("Accept AI tab completion")
         .unwrap();
 
-    let mut file = repo.filename(relative_path);
+    assert!(!commit.authorship_log.metadata.sessions.is_empty());
+    for session in commit.authorship_log.metadata.sessions.values() {
+        assert_eq!(session.agent_id.tool, tool);
+    }
     file.assert_lines_and_blame(crate::lines![
         "console.log(\"hello world\");".human(),
         "// Log hello world".ai(),
@@ -313,5 +330,6 @@ crate::reuse_tests_in_worktree!(
     test_ai_tab_rejects_invalid_hook_event,
     test_ai_tab_requires_non_empty_tool_and_model,
     test_ai_tab_e2e_marks_ai_lines,
+    test_ai_tab_e2e_preserves_cursor_tool,
     test_ai_tab_e2e_handles_dirty_files_map,
 );
