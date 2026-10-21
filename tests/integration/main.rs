@@ -137,6 +137,7 @@ mod stale_prompt_carry;
 mod stash_attribution;
 mod stash_hooks_unit;
 mod stats;
+mod stats_range_volume;
 mod stats_unit;
 mod status_ignore;
 mod status_unit;
