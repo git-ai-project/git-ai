@@ -194,6 +194,9 @@ mod tests {
         assert!(content.contains("amp.on('tool.call'"));
         assert!(content.contains("amp.on('tool.result'"));
         assert!(content.contains("filesModifiedByToolCall"));
+        assert!(content.contains("event.thread.id"));
+        assert!(content.contains("'threads', 'export', threadId"));
+        assert!(content.contains("transcript_path"));
         assert!(content.contains("spawn("));
         assert!(content.contains("'--hook-input', 'stdin'"));
         assert!(content.contains("rev-parse"));
