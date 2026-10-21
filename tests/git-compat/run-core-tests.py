@@ -62,8 +62,9 @@ def make_isolated_env(isolated_home: str) -> dict:
     - git_path           : hardcoded real-git path so git-ai never probes on
                            every invocation
     - allow_repositories : non-empty sentinel so no compat-test repo (which has
-                           no remotes) ever matches → skip_hooks=true → git-ai
-                           acts as a pure passthrough proxy for every command.
+                           no remotes) ever matches → the repository filters
+                           reject every compat-test repo → git-ai records no
+                           checkpoints there.
                            Without this, git-ai runs its full hook machinery
                            (checkpoint creation, repo-state diffing, …) for every
                            single git call in the ~1 000-command test suite, which
@@ -104,7 +105,7 @@ def make_isolated_env(isolated_home: str) -> dict:
                 "git_path": real_git,
                 # Sentinel allow_repositories: compat-test repos have no remotes,
                 # so none will match this pattern.  is_allowed_repository() returns
-                # False → skip_hooks=True → git-ai proxies without running hooks.
+                # False → git-ai records no checkpoints.
                 "allow_repositories": ["GIT_AI_COMPAT_TEST_SENTINEL_NEVER_MATCHES"],
             },
             f,

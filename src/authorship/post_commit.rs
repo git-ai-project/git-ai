@@ -298,6 +298,10 @@ where
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
 
+    if !Config::fresh().tracks_repository(repo) {
+        return untracked_repository_post_commit(repo, &parent_sha, &commit_sha);
+    }
+
     // Initialize the new storage system
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(&parent_sha)?;
@@ -586,6 +590,30 @@ where
     })
 }
 
+/// Post-commit for a repository the repository filters exclude: no attribution
+/// recovery, no note, no stats or metrics. Only the working log of the old base
+/// is dropped, so checkpoints recorded before the repository was excluded are
+/// neither kept nor carried to the new commit.
+fn untracked_repository_post_commit(
+    repo: &Repository,
+    working_log_base: &str,
+    commit_sha: &str,
+) -> Result<PostCommitDetailedResult, GitAiError> {
+    tracing::debug!(
+        "repository filters exclude this repository; no authorship note for {}",
+        commit_sha
+    );
+    repo.storage
+        .delete_working_log_for_base_commit(working_log_base)?;
+    let mut authorship_log = AuthorshipLog::new();
+    authorship_log.metadata.base_commit_sha = commit_sha.to_string();
+    Ok(PostCommitDetailedResult {
+        commit_sha: commit_sha.to_string(),
+        authorship_log,
+        authorship_note: String::new(),
+    })
+}
+
 fn commit_tree_snapshot_for_files(
     repo: &Repository,
     commit_sha: &str,
@@ -690,6 +718,27 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
     recovery_file_timestamps: Option<&FileTimestampsByPath>,
     before_external_recovery: Option<&dyn Fn(&UnknownLinesByFile)>,
 ) -> Result<PostCommitAmendResult, GitAiError> {
+    // Resolve parent of the amended commit for diff base
+    let amended_commit_obj = repo.find_commit(amended_commit.to_string())?;
+    let parent_sha = if amended_commit_obj.parent_count()? > 0 {
+        amended_commit_obj
+            .parent(0)
+            .map(|p| p.id())
+            .unwrap_or_else(|_| "initial".to_string())
+    } else {
+        "initial".to_string()
+    };
+
+    if !Config::fresh().tracks_repository(repo) {
+        let result = untracked_repository_post_commit(repo, original_commit, amended_commit)?;
+        return Ok(PostCommitAmendResult {
+            commit_sha: result.commit_sha,
+            authorship_log: result.authorship_log,
+            authorship_note: result.authorship_note,
+            parent_sha,
+        });
+    }
+
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
 
@@ -734,17 +783,6 @@ pub(crate) fn post_commit_amend_with_recovery_timestamps_detailed(
         )
         .await
     })?;
-
-    // Resolve parent of the amended commit for diff base
-    let amended_commit_obj = repo.find_commit(amended_commit.to_string())?;
-    let parent_sha = if amended_commit_obj.parent_count()? > 0 {
-        amended_commit_obj
-            .parent(0)
-            .map(|p| p.id())
-            .unwrap_or_else(|_| "initial".to_string())
-    } else {
-        "initial".to_string()
-    };
 
     let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
         .to_authorship_log_and_initial_working_log(

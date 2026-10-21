@@ -21,7 +21,8 @@ use git_ai::daemon::{
 use git_ai::git::repository::find_repository_in_path;
 use git_ai::metrics::db::MetricsDatabase;
 use git_ai::metrics::{
-    EventAttributes, MetricEvent, PosEncoded, SessionEventValues, TokenUsageValues,
+    CheckpointValues, CommittedValues, EventAttributes, InstallHooksValues, MetricEvent,
+    OtelTraceValues, PosEncoded, RewriteCommittedValues, SessionEventValues, TokenUsageValues,
 };
 use repos::test_file::ExpectedLineExt;
 #[cfg(not(windows))]
@@ -315,6 +316,10 @@ fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
                 "failure_count": 0
             })
             .to_string()
+        }
+        notes_read if notes_read.starts_with("/worker/notes/?") => {
+            let _ = tx.send(json!({ "path": path, "body": request_json }));
+            json!({ "notes": {} }).to_string()
         }
         _ => "{}".to_string(),
     };
@@ -8543,6 +8548,175 @@ fn daemon_marks_repository_filtered_token_usage_events_delivered_without_uploadi
     let metrics_db = MetricsDatabase::open_at_path(&metrics_db_path).unwrap();
     let status = metrics_db.status().unwrap();
     assert_eq!(status.delivered, 2);
+}
+
+/// Every event that carries a `repo_url` gets the upload-time repo gate, not
+/// only transcript-derived ones: OtelTrace comes from the same transcript
+/// streams, and commit/checkpoint/rewrite events recorded before a repo was
+/// excluded must not upload after it.
+#[test]
+fn daemon_marks_repository_filtered_events_of_every_kind_delivered_without_uploading_them() {
+    let mut mock_api = MockApiServer::start();
+    let metrics_db_path = std::env::temp_dir().join(format!(
+        "git-ai-filtered-events-of-every-kind-{}.db",
+        git_ai::uuid::generate_v4()
+    ));
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_API_BASE_URL", mock_api.base_url()),
+        ("GIT_AI_API_KEY", "test-api-key"),
+        (
+            "GIT_AI_TEST_METRICS_DB_PATH",
+            metrics_db_path.to_str().unwrap(),
+        ),
+    ]);
+    fs::write(
+        repo.test_home_path().join(".git-ai/config.json"),
+        r#"{"allow_repositories":["https://github.com/acme/*"],"exclude_repositories":["git@github.com:acme/private"]}"#,
+    )
+    .unwrap();
+
+    let attrs = |marker: &str, repo_url: &str| {
+        EventAttributes::with_version("test")
+            .session_id(marker)
+            .repo_url(repo_url)
+            .to_sparse()
+    };
+    let mut events = Vec::new();
+    for (scope, repo_url) in [
+        ("allowed", "https://github.com/acme/public"),
+        ("excluded", "https://github.com/acme/private"),
+    ] {
+        events.extend([
+            MetricEvent::from_values(
+                CommittedValues::new(),
+                attrs(&format!("{scope}-committed"), repo_url),
+            ),
+            MetricEvent::from_values(
+                CheckpointValues::new(),
+                attrs(&format!("{scope}-checkpoint"), repo_url),
+            ),
+            MetricEvent::from_values(
+                OtelTraceValues::new(json!({ "marker": format!("{scope}-otel") })),
+                attrs(&format!("{scope}-otel"), repo_url),
+            ),
+            MetricEvent::from_values(
+                RewriteCommittedValues::new(),
+                attrs(&format!("{scope}-rewrite"), repo_url),
+            ),
+        ]);
+    }
+    // Not tied to a repository: passes the allowlist (unchanged fail-open).
+    events.push(MetricEvent::from_values(
+        InstallHooksValues::new(),
+        EventAttributes::with_version("test")
+            .session_id("repo-less-install-hooks")
+            .to_sparse(),
+    ));
+    let serialized_events = events
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    MetricsDatabase::open_at_path(&metrics_db_path)
+        .unwrap()
+        .insert_events(&serialized_events)
+        .unwrap();
+
+    repo.git_ai(&["await", "--timeout", "30"])
+        .expect("await should flush metrics");
+
+    let uploaded_requests = serde_json::to_string(&mock_api.collect_requests()).unwrap();
+    assert!(
+        uploaded_requests.contains("repo-less-install-hooks"),
+        "events without a repo_url still upload under an allowlist"
+    );
+    for kind in ["committed", "checkpoint", "otel", "rewrite"] {
+        assert!(
+            uploaded_requests.contains(&format!("allowed-{kind}")),
+            "positive control: allowed {kind} event uploads"
+        );
+        assert!(
+            !uploaded_requests.contains(&format!("excluded-{kind}")),
+            "excluded {kind} event must not upload"
+        );
+    }
+
+    let metrics_db = MetricsDatabase::open_at_path(&metrics_db_path).unwrap();
+    assert_eq!(metrics_db.status().unwrap().delivered, events.len());
+}
+
+/// Rebase, with the HTTP notes backend, of commits whose notes are not in the
+/// local cache, after setting `exclude`. Returns the notes reads the server got.
+fn http_notes_reads_after_rebase(exclude: &[&str]) -> Vec<Value> {
+    let mut mock_api = MockApiServer::start();
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_API_KEY", "test-api-key"),
+        ("GIT_AI_NOTES_BACKEND_KIND", "http"),
+        ("GIT_AI_NOTES_BACKEND_URL", mock_api.base_url()),
+    ]);
+    let origin = "https://github.com/acme/filtered.git";
+    let bare = tempfile::tempdir().unwrap();
+    repo.git_og(&["init", "--bare", "-q", bare.path().to_str().unwrap()])
+        .unwrap();
+    repo.git_og(&["remote", "add", "origin", origin]).unwrap();
+    repo.git_og(&[
+        "config",
+        &format!("url.{}.insteadOf", bare.path().to_str().unwrap()),
+        origin,
+    ])
+    .unwrap();
+
+    // Plain git: these commits get no notes, so every read is a cache miss.
+    let commit = |name: &str| {
+        fs::write(repo.path().join(name), format!("{name}\n")).unwrap();
+        repo.git_og(&["add", name]).unwrap();
+        repo.git_og(&["commit", "-q", "-m", name]).unwrap();
+    };
+    commit("base.txt");
+    let main_branch = repo.current_branch();
+    repo.git_og(&["checkout", "-q", "-b", "feature"]).unwrap();
+    commit("feature.txt");
+    repo.git_og(&["checkout", "-q", &main_branch]).unwrap();
+    commit("main.txt");
+    repo.git_og(&["checkout", "-q", "feature"]).unwrap();
+
+    let config_path = repo.test_home_path().join(".git-ai/config.json");
+    let mut config: serde_json::Map<String, Value> =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config.insert("exclude_repositories".to_string(), json!(exclude));
+    fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    repo.git(&["rebase", &main_branch]).unwrap();
+    repo.sync_daemon_force();
+
+    mock_api
+        .collect_requests()
+        .into_iter()
+        .filter(|request| {
+            request["path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("/worker/notes/?"))
+        })
+        .collect()
+}
+
+#[test]
+fn rebase_in_allowed_repository_reads_missing_notes_from_http_backend() {
+    assert!(
+        !http_notes_reads_after_rebase(&["https://gitlab.example.com/*"]).is_empty(),
+        "positive control: a rebase in a tracked repository asks the server for missing notes"
+    );
+}
+
+/// An excluded repository sends nothing to git-ai's server: reads keep using
+/// the local cache and git notes, but cache misses are not fetched remotely.
+#[test]
+fn excluded_repository_rebase_reads_no_notes_from_http_backend() {
+    let reads = http_notes_reads_after_rebase(&["https://github.com/*"]);
+    assert!(
+        reads.is_empty(),
+        "a rebase in an excluded repository must not query the notes server: {reads:?}"
+    );
 }
 
 #[test]
