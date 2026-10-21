@@ -23,6 +23,7 @@ pub mod rewrite_reset;
 pub mod rewrite_revert;
 pub mod rewrite_stash;
 pub mod secrets;
+pub(crate) mod stale_attribution_reconciliation;
 pub mod stats;
 pub mod transcript;
 pub mod virtual_attribution;
