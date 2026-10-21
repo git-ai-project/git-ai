@@ -194,6 +194,13 @@ mod tests {
         assert!(content.contains("amp.on('tool.call'"));
         assert!(content.contains("amp.on('tool.result'"));
         assert!(content.contains("filesModifiedByToolCall"));
+        assert!(content.contains("event.thread.id"));
+        assert!(content.contains("'threads', 'export', threadId"));
+        assert!(content.contains("transcript_path"));
+        assert!(content.contains("AMP_CHECKPOINT_TOOLS"));
+        assert!(content.contains("lastTranscriptPaths"));
+        assert!(content.contains("mkdtemp"));
+        assert!(content.contains("rename(stagedPath, transcriptPath)"));
         assert!(content.contains("spawn("));
         assert!(content.contains("'--hook-input', 'stdin'"));
         assert!(content.contains("rev-parse"));
