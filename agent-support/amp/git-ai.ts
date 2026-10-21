@@ -183,8 +183,8 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 		})()
 
 		transcriptExports.set(threadId, exported)
-		void exported.then((transcriptPath) => {
-			if (transcriptPath === null) {
+		void exported.finally(() => {
+			if (transcriptExports.get(threadId) === exported) {
 				transcriptExports.delete(threadId)
 			}
 		})
