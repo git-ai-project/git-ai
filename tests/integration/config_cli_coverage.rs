@@ -436,6 +436,7 @@ fn fully_populated_file_config() -> FileConfig {
         include_prompts_in_repositories: Some(vec!["*".to_string()]),
         allow_repositories: Some(vec!["*".to_string()]),
         exclude_repositories: Some(vec!["*".to_string()]),
+        untraced_fixup_ignored_paths: Some(vec!["*-scratch/.git".to_string()]),
         telemetry_oss: Some("off".to_string()),
         telemetry_enterprise_dsn: Some("https://example.com".to_string()),
         disable_version_checks: Some(true),

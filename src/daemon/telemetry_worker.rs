@@ -486,6 +486,26 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
     let _ = DAEMON_INTERNAL_TELEMETRY.set(handle);
 }
 
+/// Supplies the pipeline-health fields folded into each heartbeat.
+pub type HeartbeatFieldsProvider =
+    Arc<dyn Fn() -> BTreeMap<String, DaemonLogFieldValue> + Send + Sync>;
+
+/// Registered once at daemon startup by the coordinator, so the worker
+/// carries no coordinator dependency and the 15-minute cadence stays here.
+static DAEMON_HEARTBEAT_FIELDS_PROVIDER: std::sync::OnceLock<HeartbeatFieldsProvider> =
+    std::sync::OnceLock::new();
+
+pub fn set_daemon_heartbeat_fields_provider(provider: HeartbeatFieldsProvider) {
+    let _ = DAEMON_HEARTBEAT_FIELDS_PROVIDER.set(provider);
+}
+
+fn daemon_heartbeat_health_fields() -> BTreeMap<String, DaemonLogFieldValue> {
+    DAEMON_HEARTBEAT_FIELDS_PROVIDER
+        .get()
+        .map(|provider| provider())
+        .unwrap_or_default()
+}
+
 /// Submit telemetry from within the daemon process.
 /// Returns true if the handle was available and envelopes were submitted.
 pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
@@ -719,7 +739,10 @@ async fn telemetry_flush_loop(
             while next_heartbeat_at <= now {
                 next_heartbeat_at += DAEMON_LOG_HEARTBEAT_INTERVAL;
             }
-            Some(daemon_heartbeat_event(started_at.elapsed()))
+            Some(daemon_heartbeat_event(
+                started_at.elapsed(),
+                daemon_heartbeat_health_fields(),
+            ))
         } else {
             None
         };
@@ -749,10 +772,15 @@ async fn telemetry_flush_loop(
         let flush_result = tokio::task::spawn_blocking(move || {
             #[cfg(feature = "test-support")]
             maybe_stall_telemetry_upload_for_test();
+            // Periodic flushes pace their metrics work against the shared
+            // background-work ledger (the token sweep charges the same one),
+            // so a backfill's emission volume cannot saturate cores; awaited
+            // flushes drain at full speed for the `git-ai await` barrier.
+            let pace = flush_mode == FlushMode::Periodic;
             let requeue_daemon_logs = if let Some(snapshot) = snapshot {
-                flush_telemetry_batch(snapshot, &daemon_id_for_flush)
+                flush_telemetry_batch(snapshot, &daemon_id_for_flush, pace)
             } else {
-                flush_pending_metrics();
+                flush_pending_metrics(pace);
                 Vec::new()
             };
             let await_status = collect_await_flush_status(flush_mode);
@@ -830,13 +858,17 @@ fn maybe_stall_telemetry_upload_for_test() {
     }
 }
 
-fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonLogEvent> {
+fn flush_telemetry_batch(
+    batch: TelemetryBuffer,
+    daemon_id: &str,
+    pace: bool,
+) -> Vec<DaemonLogEvent> {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
 
     // Flush metrics (always processed — uploaded or stored in SQLite)
     if !batch.metrics.is_empty() {
-        flush_metrics(&batch.metrics);
+        flush_metrics(&batch.metrics, pace);
     }
 
     // Flush Sentry events (errors, performance, messages)
@@ -861,7 +893,7 @@ fn flush_telemetry_batch(batch: TelemetryBuffer, daemon_id: &str) -> Vec<DaemonL
     // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
     flush_notes();
 
-    flush_pending_metrics();
+    flush_pending_metrics(pace);
 
     if batch.daemon_logs.is_empty() {
         Vec::new()
@@ -911,7 +943,7 @@ fn count_pending_metrics_for_await() -> usize {
         .unwrap_or(0)
 }
 
-fn flush_metrics(events: &[MetricEvent]) {
+fn flush_metrics(events: &[MetricEvent], pace: bool) {
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -923,13 +955,17 @@ fn flush_metrics(events: &[MetricEvent]) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let store_started = std::time::Instant::now();
         if let Err(e) = store_metrics_in_db(chunk) {
             tracing::warn!(%e, "telemetry: failed to persist metrics before upload");
             continue;
         }
+        // Only the store is charged here: the drain below paces itself, and
+        // wrapping it would bill its own pauses as fresh work.
+        pace_background_flush(pace, store_started.elapsed());
 
         if should_upload && !upload_failed && std::time::Instant::now() < deadline {
-            match flush_pending_metrics_from_db(&client, deadline) {
+            match flush_pending_metrics_from_db(&client, deadline, pace) {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(%e, "telemetry: failed to upload pending metrics");
@@ -940,7 +976,7 @@ fn flush_metrics(events: &[MetricEvent]) {
     }
 }
 
-fn flush_pending_metrics() {
+fn flush_pending_metrics(pace: bool) {
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -955,8 +991,24 @@ fn flush_pending_metrics() {
     }
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    if let Err(e) = flush_pending_metrics_from_db(&client, deadline) {
+    if let Err(e) = flush_pending_metrics_from_db(&client, deadline, pace) {
         tracing::warn!(%e, "telemetry: failed to upload pending metrics");
+    }
+}
+
+/// Sleep out a paced flush segment's pause: the same shared ledger and duty
+/// cycle as the token sweep. The sleep is capped so an awaited flush
+/// arriving behind a paced drain is not held long; the capped remainder is
+/// not forgiven — the ledger reservation stands and the next background
+/// segment (either pipeline) waits it out.
+fn pace_background_flush(pace: bool, work: std::time::Duration) {
+    const MAX_FLUSH_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+    if !pace {
+        return;
+    }
+    let pause = crate::daemon::token_usage_worker::background_work_pause(work).min(MAX_FLUSH_PAUSE);
+    if !pause.is_zero() {
+        std::thread::sleep(pause);
     }
 }
 
@@ -981,6 +1033,14 @@ fn store_metrics_in_db(events: &[MetricEvent]) -> Result<Vec<i64>, GitAiError> {
     db_lock.insert_events(&event_jsons)
 }
 
+/// How much of the pending backlog one flush invocation may drain, and
+/// whether it paces itself against the shared background-work ledger.
+struct PendingFlushBudget {
+    deadline: std::time::Instant,
+    max_batch_size: usize,
+    paced: bool,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PendingMetricsFlushResult {
     uploaded_events: usize,
@@ -991,6 +1051,7 @@ struct PendingMetricsFlushResult {
 fn flush_pending_metrics_from_db(
     client: &ApiClient,
     deadline: std::time::Instant,
+    pace: bool,
 ) -> Result<PendingMetricsFlushResult, GitAiError> {
     flush_pending_metric_records_with(
         read_pending_metrics_batch,
@@ -998,8 +1059,11 @@ fn flush_pending_metrics_from_db(
         mark_metric_records_failed,
         mark_metric_records_undeliverable,
         |batch| client.upload_metrics(batch),
-        deadline,
-        MAX_METRICS_PER_ENVELOPE,
+        PendingFlushBudget {
+            deadline,
+            max_batch_size: MAX_METRICS_PER_ENVELOPE,
+            paced: pace,
+        },
     )
 }
 
@@ -1048,8 +1112,7 @@ fn flush_pending_metric_records_with<
     mut mark_failed: MarkFailed,
     mut mark_undeliverable: MarkUndeliverable,
     mut upload_batch: UploadBatch,
-    deadline: std::time::Instant,
-    max_batch_size: usize,
+    budget: PendingFlushBudget,
 ) -> Result<PendingMetricsFlushResult, GitAiError>
 where
     DequeueBatch: FnMut(usize) -> Result<Vec<MetricRecord>, GitAiError>,
@@ -1061,8 +1124,31 @@ where
     let mut result = PendingMetricsFlushResult::default();
     let config = Config::fresh();
 
-    while std::time::Instant::now() < deadline {
-        let batch = dequeue_batch(max_batch_size)?;
+    // A paced (periodic, background) drain processes a bounded slice of the
+    // backlog per flush cycle: pending rows are durable, the next tick (3s)
+    // resumes, and an awaited flush never queues behind a long paced drain.
+    // The cap counts iterations, not uploads — a backlog of filtered or
+    // malformed records must not loop unpaced to the deadline. Paced batches
+    // are also smaller: each iteration's live set (dequeued rows, parsed
+    // events, serialized envelope) sets the process's RSS high-water mark,
+    // which a background drain must keep low — an awaited flush keeps the
+    // full envelope size.
+    const MAX_PACED_BATCHES_PER_CYCLE: usize = 16;
+    const PACED_BATCH_SIZE: usize = 250;
+    let mut iterations = 0usize;
+
+    while std::time::Instant::now() < budget.deadline {
+        if budget.paced && iterations >= MAX_PACED_BATCHES_PER_CYCLE {
+            break;
+        }
+        iterations += 1;
+        let batch_started = std::time::Instant::now();
+        let batch_size = if budget.paced {
+            budget.max_batch_size.min(PACED_BATCH_SIZE)
+        } else {
+            budget.max_batch_size
+        };
+        let batch = dequeue_batch(batch_size)?;
         if batch.is_empty() {
             break;
         }
@@ -1097,6 +1183,7 @@ where
         }
 
         if events.is_empty() {
+            pace_background_flush(budget.paced, batch_started.elapsed());
             continue;
         }
 
@@ -1161,6 +1248,7 @@ where
 
         result.uploaded_events += successful_ids.len();
         result.uploaded_batches += 1;
+        pace_background_flush(budget.paced, batch_started.elapsed());
     }
 
     Ok(result)
@@ -1196,8 +1284,12 @@ fn daemon_run_id() -> &'static str {
     DAEMON_RUN_ID.get_or_init(crate::uuid::generate_v4).as_str()
 }
 
-fn daemon_heartbeat_event(uptime: std::time::Duration) -> DaemonLogEvent {
-    let mut fields = BTreeMap::new();
+/// Builds the heartbeat from the daemon's health `fields`; the contract fields
+/// (`uptime_seconds`, `os`, `arch`) are set last and always win.
+fn daemon_heartbeat_event(
+    uptime: std::time::Duration,
+    mut fields: BTreeMap<String, DaemonLogFieldValue>,
+) -> DaemonLogEvent {
     fields.insert(
         "uptime_seconds".to_string(),
         DaemonLogFieldValue::from(uptime.as_secs()),
@@ -2065,8 +2157,11 @@ mod tests {
                     Ok(MetricsUploadResponse { errors: vec![] })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            1,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2083,6 +2178,113 @@ mod tests {
         assert_eq!(
             db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
             2
+        );
+    }
+
+    #[test]
+    fn paced_flush_drains_a_bounded_slice_per_cycle() {
+        // A paced (periodic background) drain must stop after its per-cycle
+        // batch cap: pending rows are durable and resume next tick, and an
+        // awaited flush never queues behind a long paced drain. An unpaced
+        // (awaited) drain with the same backlog runs it dry.
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
+        let events: Vec<String> = (0..20).map(|i| event_json(now_ts() - 30 + i)).collect();
+        db.borrow_mut().insert_events(&events).unwrap();
+
+        let run = |pace: bool| {
+            flush_pending_metric_records_with(
+                {
+                    let db = Rc::clone(&db);
+                    move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+                },
+                {
+                    let db = Rc::clone(&db);
+                    move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+                },
+                {
+                    let db = Rc::clone(&db);
+                    move |ids, err| {
+                        let now = unix_now();
+                        db.borrow_mut()
+                            .mark_records_failed(ids, &err.to_string(), now)
+                    }
+                },
+                {
+                    let db = Rc::clone(&db);
+                    move |records| {
+                        db.borrow_mut()
+                            .mark_records_undeliverable(records, unix_now())
+                    }
+                },
+                |_batch| Ok(MetricsUploadResponse { errors: vec![] }),
+                PendingFlushBudget {
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    max_batch_size: 1,
+                    paced: pace,
+                },
+            )
+            .unwrap()
+        };
+
+        let paced = run(true);
+        assert_eq!(paced.uploaded_batches, 16, "paced cycle stops at its cap");
+        assert_eq!(db.borrow().count().unwrap(), 4, "the rest stays pending");
+
+        let drained = run(false);
+        assert_eq!(drained.uploaded_batches, 4, "unpaced drain runs dry");
+        assert_eq!(db.borrow().count().unwrap(), 0);
+    }
+
+    #[test]
+    fn paced_flush_caps_iterations_even_when_nothing_uploads() {
+        // A backlog of malformed records uploads nothing, so a cap counted
+        // in uploaded batches would never trip and the drain would loop
+        // unpaced to its 30s deadline. The cap counts iterations.
+        let (metrics_db, _metrics_db_dir) = MetricsDatabase::new_temp_for_tests().unwrap();
+        let db = Rc::new(RefCell::new(metrics_db));
+        let rows: Vec<String> = (0..20).map(|_| "not json".to_string()).collect();
+        db.borrow_mut().insert_events(&rows).unwrap();
+
+        let result = flush_pending_metric_records_with(
+            {
+                let db = Rc::clone(&db);
+                move |limit| db.borrow_mut().dequeue_pending_batch(limit)
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
+            },
+            {
+                let db = Rc::clone(&db);
+                move |ids, err| {
+                    let now = unix_now();
+                    db.borrow_mut()
+                        .mark_records_failed(ids, &err.to_string(), now)
+                }
+            },
+            {
+                let db = Rc::clone(&db);
+                move |records| {
+                    db.borrow_mut()
+                        .mark_records_undeliverable(records, unix_now())
+                }
+            },
+            |_batch| Ok(MetricsUploadResponse { errors: vec![] }),
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.uploaded_batches, 0);
+        assert_eq!(result.invalid_records, 16, "one invalid row per iteration");
+        assert_eq!(
+            db.borrow().count().unwrap(),
+            4,
+            "the rest waits for the next cycle"
         );
     }
 
@@ -2129,8 +2331,11 @@ mod tests {
                     Ok(MetricsUploadResponse { errors: vec![] })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2200,8 +2405,11 @@ mod tests {
                     })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2276,8 +2484,11 @@ mod tests {
                     ],
                 })
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2343,8 +2554,11 @@ mod tests {
                     }],
                 })
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         );
 
         assert!(result.is_err());
@@ -2388,8 +2602,11 @@ mod tests {
                 }
             },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            10,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 10,
+                paced: false,
+            },
         );
 
         assert!(result.is_err());
@@ -2431,8 +2648,11 @@ mod tests {
                 }
             },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            1,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: false,
+            },
         );
         assert!(failed.is_err());
         assert_eq!(db.borrow().count_retryable().unwrap(), 0);
@@ -2477,8 +2697,11 @@ mod tests {
                     Ok(MetricsUploadResponse { errors: vec![] })
                 }
             },
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            1,
+            PendingFlushBudget {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                max_batch_size: 1,
+                paced: false,
+            },
         )
         .unwrap();
 
@@ -2666,7 +2889,7 @@ mod tests {
 
     #[test]
     fn daemon_heartbeat_event_uses_upload_contract_shape() {
-        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900));
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), BTreeMap::new());
 
         assert!(event.id.is_some());
         assert_eq!(event.kind, DaemonLogKind::Heartbeat);
@@ -2676,6 +2899,43 @@ mod tests {
         assert_eq!(
             event.fields.get("uptime_seconds"),
             Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert!(event.fields.contains_key("os"));
+        assert!(event.fields.contains_key("arch"));
+    }
+
+    #[test]
+    fn daemon_heartbeat_event_merges_health_fields_and_keeps_contract_fields() {
+        let mut health = BTreeMap::new();
+        health.insert(
+            "sequencer_stalled".to_string(),
+            DaemonLogFieldValue::from(false),
+        );
+        health.insert(
+            "trace_roots_open_mutating".to_string(),
+            DaemonLogFieldValue::from(2_u64),
+        );
+        // A provider must not be able to shadow the contract fields.
+        health.insert(
+            "uptime_seconds".to_string(),
+            DaemonLogFieldValue::from(1_u64),
+        );
+
+        let event = daemon_heartbeat_event(std::time::Duration::from_secs(900), health);
+
+        assert_eq!(event.kind, DaemonLogKind::Heartbeat);
+        assert_eq!(event.message, "alive");
+        assert_eq!(
+            event.fields.get("uptime_seconds"),
+            Some(&DaemonLogFieldValue::from(900_u64))
+        );
+        assert_eq!(
+            event.fields.get("sequencer_stalled"),
+            Some(&DaemonLogFieldValue::from(false))
+        );
+        assert_eq!(
+            event.fields.get("trace_roots_open_mutating"),
+            Some(&DaemonLogFieldValue::from(2_u64))
         );
         assert!(event.fields.contains_key("os"));
         assert!(event.fields.contains_key("arch"));

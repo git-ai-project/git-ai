@@ -8,17 +8,20 @@
 //! - Deduplication and the replacement policy run in the token-usage database
 //!   (entries stream in across runs), via [`should_replace_entry`] and the
 //!   `message_id` fallback; ccusage dedups in memory over whole files.
-//! - Fast-speed entries keep their base model name (no "-fast" suffix or fast
-//!   pricing multiplier); `usage.speed` remains the replacement tie-breaker.
+//! - Fast-speed entries keep their base model name (no "-fast" suffix);
+//!   `usage.speed` carries the fast pricing multiplier (see `cost.rs`) and
+//!   remains the replacement tie-breaker.
 //! - Entries whose model is missing or `<synthetic>` are attributed to
 //!   [`UNKNOWN_MODEL`] instead of carrying no model, so tokens aren't lost.
-//! - Long-context tiered pricing is not applied (git-ai's models.dev catalog
-//!   has flat rates); the 1h-ephemeral cache multiplier is (see `cost.rs`).
+//! - Sidechain (subagent) usage is attributed to the sidechain's own session
+//!   with the parent as a relationship (leaf attribution, standardized
+//!   across tools); ccusage rolls it into the parent session. Cross-file
+//!   dedup of replayed parent messages is unaffected — it is global.
 
 use serde::Deserialize;
 
 use super::extractor::UsageExtractor;
-use super::types::{TokenCounts, UsageEntry, parse_rfc3339_secs};
+use super::types::{PricingShape, Speed, TokenCounts, UsageEntry, parse_rfc3339_secs};
 
 /// Model recorded for entries with no usable model name.
 pub const UNKNOWN_MODEL: &str = "unknown";
@@ -52,7 +55,7 @@ impl From<&UsageEntry> for ReplacementCandidate {
         Self {
             is_sidechain: entry.is_sidechain,
             token_total: entry.dedupe_token_total(),
-            has_speed: entry.has_speed,
+            has_speed: entry.speed.is_some(),
         }
     }
 }
@@ -103,19 +106,12 @@ struct RawUsage {
     cache_creation_input_tokens: u64,
     #[serde(default)]
     cache_read_input_tokens: u64,
+    /// ccusage `Speed`: unknown values fail the line's parse, matching
+    /// ccusage's strict schema.
     #[serde(default)]
     speed: Option<Speed>,
     #[serde(default)]
     cache_creation: Option<RawCacheCreation>,
-}
-
-/// ccusage `Speed`: unknown values fail the line's parse, matching ccusage's
-/// strict schema.
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-enum Speed {
-    Standard,
-    Fast,
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
@@ -230,7 +226,12 @@ fn usage_entry(
             .filter(|cost| cost.is_finite() && *cost >= 0.0)
             .map(super::cost::micro_usd),
         is_sidechain,
-        has_speed: usage.speed.is_some(),
+        speed: usage.speed,
+        // The wire flag means "tier not recorded in the transcript" — an
+        // unmarked Claude entry lands in the standard bucket by default,
+        // exactly like an unmarked Codex entry, and must report the same.
+        speed_inferred: usage.speed.is_none(),
+        pricing_shape: PricingShape::Claude,
     }
 }
 
@@ -447,7 +448,9 @@ mod tests {
         assert_eq!(e.cache_write_1h, 0);
         assert_eq!(e.transcript_cost_micro_usd, None);
         assert!(!e.is_sidechain);
-        assert!(!e.has_speed);
+        assert_eq!(e.speed, None);
+        assert!(e.speed_inferred, "no usage.speed marker was recorded");
+        assert_eq!(e.pricing_shape, PricingShape::Claude);
     }
 
     #[test]
@@ -566,7 +569,7 @@ mod tests {
 
         // Tie: speed marker wins.
         let mut with_speed = base.clone();
-        with_speed.has_speed = true;
+        with_speed.speed = Some(Speed::Standard);
         assert!(should_replace_entry(&with_speed, base));
         assert!(!should_replace_entry(base, &with_speed));
         assert!(!should_replace_entry(&base.clone(), base));
@@ -582,9 +585,13 @@ mod tests {
     fn speed_marker_is_extracted() {
         let line = r#"{"timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"x","usage":{"input_tokens":1,"output_tokens":1,"speed":"fast"}},"requestId":"r"}"#;
         let e = &extract(line)[0];
-        assert!(e.has_speed);
+        assert_eq!(e.speed, Some(Speed::Fast));
+        assert!(!e.speed_inferred);
         // Model name keeps its base form (deviation from ccusage's "-fast").
         assert_eq!(e.model, "x");
+
+        let standard = r#"{"timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"x","usage":{"input_tokens":1,"output_tokens":1,"speed":"standard"}},"requestId":"r"}"#;
+        assert_eq!(extract(standard)[0].speed, Some(Speed::Standard));
     }
 
     #[test]
@@ -654,15 +661,15 @@ mod tests {
     }
 
     #[test]
-    fn fast_speed_entries_price_at_the_base_rate() {
-        // Documented deviation: no fast-speed multiplier (the models.dev
-        // catalog has no fast rates). Pin that has_speed does not change the
-        // computed cost.
-        let base = r#"{"timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"claude-sonnet-4-20250514","usage":{"input_tokens":1000000,"output_tokens":0}},"requestId":"r"}"#;
-        let fast = r#"{"timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"claude-sonnet-4-20250514","usage":{"input_tokens":1000000,"output_tokens":0,"speed":"fast"}},"requestId":"r"}"#;
+    fn fast_speed_entries_price_at_the_fast_multiplier() {
+        // claude-opus-4-8 carries a 2x fast multiplier in the catalog; a
+        // fast-speed entry bills its whole request at it, while the base
+        // model name is unchanged.
+        let base = r#"{"timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"claude-opus-4-8-20260601","usage":{"input_tokens":1000000,"output_tokens":0}},"requestId":"r"}"#;
+        let fast = r#"{"timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"claude-opus-4-8-20260601","usage":{"input_tokens":1000000,"output_tokens":0,"speed":"fast"}},"requestId":"r"}"#;
         assert_eq!(
-            super::super::cost::entry_cost_micro_usd(&extract(base)[0]),
-            super::super::cost::entry_cost_micro_usd(&extract(fast)[0]),
+            super::super::cost::entry_cost_micro_usd(&extract(fast)[0]).unwrap(),
+            2 * super::super::cost::entry_cost_micro_usd(&extract(base)[0]).unwrap(),
         );
     }
 

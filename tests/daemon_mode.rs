@@ -24,9 +24,12 @@ use git_ai::metrics::{
     EventAttributes, MetricEvent, PosEncoded, SessionEventValues, TokenUsageValues,
 };
 use repos::test_file::ExpectedLineExt;
+#[cfg(not(windows))]
+use repos::test_repo::live_pid_trace_sid;
 use repos::test_repo::{
     DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS, DaemonTestCompletionLogEntry, DaemonTestScope, TestRepo,
-    get_binary_path, is_windows_loader_init_failure, real_git_executable,
+    configure_raw_traced_git_env_for, get_binary_path, is_windows_loader_init_failure,
+    real_git_executable, trace_atexit_frame, write_trace_frames,
 };
 use serde_json::Value;
 use serde_json::json;
@@ -136,39 +139,30 @@ fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
     let mut stream =
         open_local_socket_stream_with_timeout(trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
             .expect("failed to connect to trace socket");
-    for payload in payloads {
-        let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
-        stream
-            .write_all(raw.as_bytes())
-            .expect("failed to write trace payload");
-        stream
-            .write_all(b"\n")
-            .expect("failed to write trace newline");
-    }
-    stream.flush().expect("failed to flush trace payloads");
+    write_trace_frames(&mut stream, payloads);
 }
 
-fn trace_atexit_frame(sid: &str, code: i32, time_ns: u64) -> Value {
-    json!({
-        "event": "atexit",
-        "sid": sid,
-        "code": code,
-        "time_ns": time_ns,
-    })
-}
-
+/// Waits until the repo's dedicated daemon logs that a delayed side-effect
+/// pass (GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND) has started executing,
+/// so grind tests gate on the actual daemon-side precondition instead of
+/// fixed sleeps that can pass vacuously or fail spuriously on loaded runners.
 #[cfg(not(windows))]
-fn write_trace_frames_to_stream(stream: &mut impl Write, payloads: &[Value]) {
-    for payload in payloads {
-        let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
-        stream
-            .write_all(raw.as_bytes())
-            .expect("failed to write trace payload");
-        stream
-            .write_all(b"\n")
-            .expect("failed to write trace newline");
+fn wait_for_test_side_effect_delay_started(repo: &TestRepo) {
+    let started = std::time::Instant::now();
+    loop {
+        if repo
+            .daemon_stderr_contents()
+            .contains("test side-effect delay started")
+        {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "daemon never entered the delayed side-effect pass; logs:\n{}",
+            repo.daemon_stderr_contents()
+        );
+        thread::sleep(Duration::from_millis(25));
     }
-    stream.flush().expect("failed to flush trace payloads");
 }
 
 fn repo_workdir_string(repo: &TestRepo) -> String {
@@ -704,15 +698,14 @@ impl WorkdirRaceHarness {
     fn run_traced_git(&self, workdir: &Path, args: &[&str]) {
         let mut command = Command::new(real_git_executable());
         command.args(args).current_dir(workdir);
-        configure_test_home_env(&mut command, &self.test_home);
+        configure_raw_traced_git_env_for(
+            &mut command,
+            &self.test_home,
+            &DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
+        );
         let output = command
             .env("GIT_AI_TEST_DB_PATH", &self.test_db_path)
             .env("GITAI_TEST_DB_PATH", &self.test_db_path)
-            .env(
-                "GIT_TRACE2_EVENT",
-                DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
-            )
-            .env("GIT_TRACE2_EVENT_NESTING", "0")
             .output()
             .expect("failed to execute traced git command");
         assert!(
@@ -2126,6 +2119,403 @@ fn daemon_drains_independent_checkpoint_families_concurrently() {
     }
 }
 
+/// Regression test for #2252: a long write-op side-effect pass in one family
+/// (a large checkout/commit in a monorepo) must not stall the trace-ingest
+/// watermark that checkpoint admission waits on. A checkpoint for an
+/// independent repository family must be admitted and processed while the
+/// other family's side effects are still grinding.
+#[test]
+#[cfg(not(windows))]
+fn family_side_effect_grind_does_not_stall_independent_checkpoint_admission() {
+    let grinding_repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=10000",
+    )]);
+    let independent_repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let control_socket = daemon_control_socket_path(&grinding_repo);
+
+    // A traced commit whose side-effect pass grinds for 10s in its family.
+    fs::write(grinding_repo.path().join("grind.txt"), "grind\n").unwrap();
+    grinding_repo
+        .git_without_test_sync_for_test(&["add", "grind.txt"], &[])
+        .unwrap();
+    grinding_repo
+        .git_without_test_sync_for_test(&["commit", "-m", "grind commit"], &[])
+        .unwrap();
+
+    wait_for_test_side_effect_delay_started(&grinding_repo);
+
+    fs::write(
+        independent_repo.path().join("independent.txt"),
+        "independent-grind-checkpoint\n",
+    )
+    .unwrap();
+    let checkpoint = CheckpointRequest {
+        trace_id: "independent-grind-checkpoint".to_string(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: Some(AgentId {
+            tool: "mock_ai".to_string(),
+            id: "independent-grind-checkpoint".to_string(),
+            model: "test".to_string(),
+        }),
+        files: vec![CheckpointFile {
+            path: PathBuf::from("independent.txt"),
+            content: Some("independent-grind-checkpoint\n".to_string()),
+            repo_work_dir: independent_repo.path().to_path_buf(),
+            base_commit: BaseCommit::Initial,
+        }],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: Default::default(),
+    };
+    let response =
+        send_checkpoint_request_with_timeout(&control_socket, &checkpoint, Duration::from_secs(2))
+            .expect("checkpoint should be acknowledged during an unrelated side-effect grind");
+    assert!(response.ok, "checkpoint failed: {response:?}");
+
+    // The independent family must finish processing well before the 10s grind
+    // completes; admission queueing behind the grind is issue #2252.
+    let started = std::time::Instant::now();
+    loop {
+        let checkpoint_count = find_repository_in_path(independent_repo.path().to_str().unwrap())
+            .unwrap()
+            .storage
+            .working_log_for_base_commit("initial")
+            .unwrap()
+            .read_all_checkpoints()
+            .map(|checkpoints| checkpoints.len())
+            .unwrap_or(0);
+        if checkpoint_count == 1 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "independent checkpoint was not admitted/processed while another \
+             family's side effects were running (#2252)"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Regression test for #2252's headline symptom: checkpoints "received into
+/// bounded ingress" but never "prepared for family admission" while the same
+/// family's write-op side effects grind. Admission is a global sequencing
+/// stage and must not queue behind side-effect execution; only processing may
+/// wait for the family's turn.
+#[test]
+#[cfg(not(windows))]
+fn checkpoint_admission_proceeds_while_same_family_side_effects_grind() {
+    let repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=10000",
+    )]);
+
+    fs::write(repo.path().join("grind.txt"), "grind\n").unwrap();
+    repo.git_without_test_sync_for_test(&["add", "grind.txt"], &[])
+        .unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "grind commit"], &[])
+        .unwrap();
+
+    wait_for_test_side_effect_delay_started(&repo);
+
+    fs::write(repo.path().join("same-family.txt"), "same-family\n").unwrap();
+    let checkpoint = CheckpointRequest {
+        trace_id: "same-family-grind-checkpoint".to_string(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: Some(AgentId {
+            tool: "mock_ai".to_string(),
+            id: "same-family-grind-checkpoint".to_string(),
+            model: "test".to_string(),
+        }),
+        files: vec![CheckpointFile {
+            path: PathBuf::from("same-family.txt"),
+            content: Some("same-family\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Initial,
+        }],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: Default::default(),
+    };
+    let response = send_checkpoint_request_with_timeout(
+        &daemon_control_socket_path(&repo),
+        &checkpoint,
+        Duration::from_secs(2),
+    )
+    .expect("checkpoint should be acknowledged during a same-family side-effect grind");
+    assert!(response.ok, "checkpoint failed: {response:?}");
+
+    // Admission (not processing) must complete well before the 10s grind ends.
+    let started = std::time::Instant::now();
+    loop {
+        let logs = repo.daemon_stderr_contents();
+        if logs.lines().any(|line| {
+            line.contains("checkpoint prepared for family admission")
+                && line.contains("same-family-grind-checkpoint")
+        }) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "checkpoint was received but not admitted while the same family's \
+             side effects were running (#2252); daemon logs:\n{logs}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// #2252: side effects for commands that do not participate in the family
+/// sequencer (e.g. `git am`) run on detached tasks. `sync.family` must still
+/// cover them — it must not report a family as synced while such a pass is
+/// in flight.
+#[test]
+#[cfg(not(windows))]
+fn sync_family_waits_for_detached_non_sequencer_side_effects() {
+    let repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "am=3000",
+    )]);
+
+    // Base commit so `git am` has a parent to apply onto.
+    fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+    repo.git_without_test_sync_for_test(&["add", "base.txt"], &[])
+        .unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "base"], &[])
+        .unwrap();
+
+    let patch = "\
+From 1111111111111111111111111111111111111111 Mon Sep 17 00:00:00 2001
+From: Repro <repro@example.com>
+Date: Mon, 1 Sep 2026 00:00:00 +0000
+Subject: [PATCH] add am file
+
+---
+ am.txt | 1 +
+ 1 file changed, 1 insertion(+)
+ create mode 100644 am.txt
+
+diff --git a/am.txt b/am.txt
+new file mode 100644
+index 0000000..7898192
+--- /dev/null
++++ b/am.txt
+@@ -0,0 +1 @@
++a
+--\x20
+2.39.0
+";
+    fs::write(repo.path().join("am-patch.mbox"), patch).unwrap();
+    repo.git_without_test_sync_for_test(&["am", "am-patch.mbox"], &[])
+        .unwrap();
+    wait_for_test_side_effect_delay_started(&repo);
+
+    let sync = send_control_request_with_timeout(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::SyncFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+        Duration::from_secs(30),
+    )
+    .expect("sync.family should succeed");
+    assert!(sync.ok, "sync.family failed: {sync:?}");
+
+    let am_entries = completion_entries_for_command(&repo, "am");
+    assert!(
+        !am_entries.is_empty(),
+        "sync.family returned before the detached `git am` side-effect pass completed (#2252)"
+    );
+}
+
+/// #2252: with side-effect passes running on detached tasks, graceful
+/// shutdown must not complete while such a pass is still in flight — the
+/// process exit right after the shutdown response would kill it mid-write.
+#[test]
+#[cfg(not(windows))]
+fn graceful_shutdown_waits_for_detached_side_effect_passes() {
+    let repo = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "commit=3000",
+    )]);
+
+    fs::write(repo.path().join("grind.txt"), "grind\n").unwrap();
+    repo.git_without_test_sync_for_test(&["add", "grind.txt"], &[])
+        .unwrap();
+    repo.git_without_test_sync_for_test(&["commit", "-m", "grind commit"], &[])
+        .unwrap();
+    wait_for_test_side_effect_delay_started(&repo);
+
+    let shutdown = send_control_request_with_timeout(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+        Duration::from_secs(30),
+    )
+    .expect("graceful shutdown request should succeed");
+    assert!(shutdown.ok, "graceful shutdown failed: {shutdown:?}");
+
+    let commit_entries = completion_entries_for_command(&repo, "commit");
+    assert!(
+        !commit_entries.is_empty(),
+        "graceful shutdown completed while the commit side-effect pass was still running (#2252)"
+    );
+}
+
+/// #2252: a side-effect pass can write into a DIFFERENT repository — e.g.
+/// `git push <path>` pushes authorship notes into the destination repo.
+/// Before side effects ran detached, the global ingest watermark implied
+/// they had completed, so `sync.family` on the destination covered them
+/// transitively. That guarantee must survive detachment: sync.family must
+/// not report until already-ingested side-effect work has finished, in any
+/// family.
+#[test]
+#[cfg(not(windows))]
+fn sync_family_covers_cross_repo_side_effects_of_other_families() {
+    let local = TestRepo::new_with_daemon_env(&[(
+        "GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND",
+        "push=3000",
+    )]);
+    let destination = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    fs::write(local.path().join("pushed.txt"), "pushed\n").unwrap();
+    local.git_og(&["add", "pushed.txt"]).unwrap();
+    local.git_og(&["commit", "-m", "pushed commit"]).unwrap();
+    let commit_sha = local
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    local
+        .git_og(&[
+            "notes",
+            "--ref=ai",
+            "add",
+            "-m",
+            "cross-repo-note",
+            commit_sha.as_str(),
+        ])
+        .unwrap();
+
+    let destination_path = destination.path().to_string_lossy().to_string();
+    local
+        .git_without_test_sync_for_test(
+            &["push", destination_path.as_str(), "HEAD:refs/heads/pushed"],
+            &[],
+        )
+        .unwrap();
+    wait_for_test_side_effect_delay_started(&local);
+
+    let sync = send_control_request_with_timeout(
+        &daemon_control_socket_path(&local),
+        &ControlRequest::SyncFamily {
+            repo_working_dir: destination_path.clone(),
+        },
+        Duration::from_secs(30),
+    )
+    .expect("sync.family for the destination should succeed");
+    assert!(sync.ok, "sync.family failed: {sync:?}");
+
+    let pushed_note = destination.git_og(&["notes", "--ref=ai", "show", commit_sha.as_str()]);
+    assert!(
+        pushed_note.is_ok_and(|note| note.contains("cross-repo-note")),
+        "sync.family for the destination returned before the push side-effect \
+         pass finished pushing authorship notes into it (#2252)"
+    );
+}
+
+/// #2252 observability: when checkpoint admission is delayed behind the
+/// trace-ingest watermark, the daemon must log the delay explicitly instead
+/// of it having to be inferred from absent admission log lines.
+#[test]
+#[cfg(not(windows))]
+fn delayed_checkpoint_admission_is_logged() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    // Delay the trace ingest worker's start so the synthetic frames below are
+    // enqueued but the watermark checkpoint admission waits on cannot advance.
+    // The delay-log interval is lowered so the warning fires well within the
+    // stall window even when daemon startup eats seconds on a loaded runner.
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_TEST_TRACE_INGEST_WORKER_START_DELAY_MS", "10000"),
+            (
+                "GIT_AI_TEST_CHECKPOINT_ADMISSION_DELAY_LOG_INTERVAL_MS",
+                "500",
+            ),
+        ],
+    );
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    send_trace_frames(
+        &daemon_trace_socket_path(&repo),
+        &[
+            json!({
+                "event": "start",
+                "sid": "stalled-ingest-root",
+                "argv": ["git", "commit", "-m", "synthetic"],
+                "time_ns": 10_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "stalled-ingest-root",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 10_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "stalled-ingest-root",
+                "code": 0,
+                "time_ns": 10_100u64,
+            }),
+            trace_atexit_frame("stalled-ingest-root", 0, 10_101u64),
+        ],
+    );
+    // Let the trace reader enqueue the frames (allocating ingest sequence
+    // numbers) before the checkpoint samples its admission target.
+    thread::sleep(Duration::from_millis(200));
+
+    fs::write(repo.path().join("delayed.txt"), "delayed\n").unwrap();
+    let checkpoint = CheckpointRequest {
+        trace_id: "delayed-admission-checkpoint".to_string(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: Some(AgentId {
+            tool: "mock_ai".to_string(),
+            id: "delayed-admission-checkpoint".to_string(),
+            model: "test".to_string(),
+        }),
+        files: vec![CheckpointFile {
+            path: PathBuf::from("delayed.txt"),
+            content: Some("delayed\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Initial,
+        }],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: Default::default(),
+    };
+    let response = send_checkpoint_request_with_timeout(
+        &daemon_control_socket_path(&repo),
+        &checkpoint,
+        Duration::from_secs(2),
+    )
+    .expect("checkpoint should be acknowledged while trace ingest is stalled");
+    assert!(response.ok, "checkpoint failed: {response:?}");
+
+    let started = std::time::Instant::now();
+    loop {
+        let logs = daemon.stderr_contents();
+        if logs.contains("checkpoint admission delayed waiting for trace ingestion") {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(9),
+            "stalled checkpoint admission was not logged (#2252); daemon logs:\n{logs}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    daemon.shutdown();
+}
+
 #[test]
 #[cfg(not(windows))]
 fn daemon_checkpoint_processing_failure_is_logged_after_receipt_ack() {
@@ -2462,38 +2852,196 @@ fn daemon_stalled_unidentified_trace_connection_does_not_block_sync_control_requ
 
 #[test]
 #[cfg(not(windows))]
+fn daemon_sync_family_returns_promptly_with_open_unwritten_mutating_root() {
+    let repo = TestRepo::new_dedicated_daemon();
+    // An attributed `git commit` that is still running (its worktree HEAD
+    // reflog has not grown) fences nothing: nobody waits for an editor.
+    let sid = live_pid_trace_sid("sync");
+    let mut open_trace = repo.open_mutating_commit_trace_root(&sid, true);
+    thread::sleep(Duration::from_millis(150));
+
+    let started = std::time::Instant::now();
+    let response = send_control_request_with_timeout(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::SyncFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+        Duration::from_secs(5),
+    )
+    .expect("sync.family must return while an interactive git command stays open");
+    assert!(response.ok, "sync.family failed: {response:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "sync.family must not wait for a root that has written nothing"
+    );
+
+    write_trace_frames(&mut open_trace, &[trace_atexit_frame(&sid, 0, 1_002)]);
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_await_completes_with_idle_open_mutating_root() {
+    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_DAEMON_CAUSAL_GRACE_MS", "300")]);
+    let sid = live_pid_trace_sid("await");
+    let mut open_trace = repo.open_mutating_commit_trace_root(&sid, true);
+    thread::sleep(Duration::from_millis(150));
+
+    let started = std::time::Instant::now();
+    let response = send_control_request_with_timeout(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Await { timeout_secs: 5 },
+        Duration::from_secs(15),
+    )
+    .expect("await must answer while an interactive git command stays open");
+    assert!(response.ok, "await failed: {response:?}");
+    let data = response.data.expect("await response data");
+    assert_eq!(
+        data["timed_out"],
+        json!(false),
+        "await must not run to its deadline behind a human at an editor: {data}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "await should return well before its 5s deadline"
+    );
+
+    write_trace_frames(&mut open_trace, &[trace_atexit_frame(&sid, 0, 1_002)]);
+}
+
+#[cfg(not(windows))]
+fn status_daemon(repo: &TestRepo) -> Value {
+    let response = send_control_request(
+        &daemon_control_socket_path(repo),
+        &ControlRequest::StatusDaemon,
+    )
+    .expect("status.daemon request");
+    assert!(response.ok, "status.daemon failed: {response:?}");
+    response.data.expect("status.daemon data")
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_status_daemon_reports_open_root_and_fenced_checkpoint() {
+    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_DAEMON_CAUSAL_GRACE_MS", "10000")]);
+    let idle = status_daemon(&repo);
+    assert_eq!(idle["trace_roots_open_mutating"], json!(0), "{idle}");
+    assert_eq!(idle["sequencer_entries_total"], json!(0), "{idle}");
+    assert_eq!(idle["snapshot_partial"], json!(false), "{idle}");
+    assert!(idle["uptime_seconds"].is_u64(), "{idle}");
+    assert!(idle["checkpoints_dropped"].is_u64(), "{idle}");
+
+    let sid = live_pid_trace_sid("status");
+    let mut open_trace = repo.open_mutating_commit_trace_root(&sid, true);
+    // The reader must have registered the root before anything waits on it.
+    let started = std::time::Instant::now();
+    while status_daemon(&repo)["trace_roots_open_mutating"] != json!(1) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "status.daemon never reported the open root"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    // The root writes refs (as a commit running its post-commit hook would):
+    // from here on its family's work is fenced behind it.
+    repo.git_og_with_env(
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "written under the open root",
+        ],
+        &[("GIT_TRACE2_EVENT", "0")],
+    )
+    .expect("untraced commit");
+    fs::write(repo.path().join("fenced.txt"), "fenced ai\n").unwrap();
+    repo.git_ai_without_pre_sync_for_test(&["checkpoint", "mock_ai", "fenced.txt"])
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let fenced = loop {
+        let snapshot = status_daemon(&repo);
+        if snapshot["trace_roots_open_mutating"] == json!(1)
+            && snapshot["families"][0]["front_kind"] == json!("checkpoint")
+        {
+            break snapshot;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "status.daemon never reported the fenced checkpoint: {snapshot}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(
+        fenced["sequencer_entries_checkpoints"],
+        json!(1),
+        "{fenced}"
+    );
+    assert_eq!(fenced["sequencer_fenced_families"], json!(1), "{fenced}");
+    assert_eq!(fenced["trace_roots_written"], json!(1), "{fenced}");
+    assert_eq!(fenced["families"][0]["fenced"], json!(true), "{fenced}");
+    assert_eq!(fenced["sequencer_stalled"], json!(false), "{fenced}");
+
+    write_trace_frames(&mut open_trace, &[trace_atexit_frame(&sid, 0, 1_002)]);
+    let started = std::time::Instant::now();
+    loop {
+        let snapshot = status_daemon(&repo);
+        if snapshot["trace_roots_open_mutating"] == json!(0)
+            && snapshot["sequencer_entries_total"] == json!(0)
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "status.daemon never reported the drained checkpoint: {snapshot}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    repo.sync_daemon();
+}
+
+#[test]
+fn daemon_bg_status_includes_daemon_health() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let output = bg_command(&repo, "status", &[]);
+    assert!(output.status.success(), "bg status failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("bg status must print JSON ({error}): {stdout}"));
+    assert_eq!(value["ok"], json!(true), "{value}");
+    assert!(value["data"]["family_key"].is_string(), "{value}");
+    assert!(value["daemon"]["uptime_seconds"].is_u64(), "{value}");
+    assert!(
+        value["daemon"]["sequencer_entries_total"].is_u64(),
+        "{value}"
+    );
+    assert!(value["daemon"]["families"].is_array(), "{value}");
+}
+
+#[test]
+#[cfg(not(windows))]
 fn daemon_sync_family_ignores_open_mutating_root_from_other_family() {
     let first_repo = TestRepo::new_dedicated_daemon();
     let second_repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
-    let trace_socket = daemon_trace_socket_path(&first_repo);
     let control_socket = daemon_control_socket_path(&first_repo);
-    let first_worktree = repo_workdir_string(&first_repo);
     let second_worktree = repo_workdir_string(&second_repo);
-    let first_git_dir = first_repo.path().join(".git").to_string_lossy().to_string();
     let sid = "cross-family-open-mutating-root";
 
-    let mut open_trace =
-        open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
-            .expect("failed to connect to trace socket");
-    write_trace_frames_to_stream(
-        &mut open_trace,
-        &[
-            json!({
-                "event": "start",
-                "sid": sid,
-                "argv": ["git", "commit", "-m", "long-running commit"],
-                "time_ns": 1_000u64,
-            }),
-            json!({
-                "event": "def_repo",
-                "sid": sid,
-                "worktree": first_worktree,
-                "repo": first_git_dir,
-                "time_ns": 1_001u64,
-            }),
-        ],
-    );
+    let mut open_trace = first_repo.open_mutating_commit_trace_root(sid, true);
     thread::sleep(Duration::from_millis(150));
+
+    // The root has written refs (a real commit in its worktree, as its
+    // process would); from here on its own family must wait for it.
+    first_repo
+        .git_og_with_env(
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "written under the open root",
+            ],
+            &[("GIT_TRACE2_EVENT", "0")],
+        )
+        .expect("untraced commit");
 
     let own_control_socket = control_socket.clone();
     let own_worktree = repo_workdir_string(&first_repo);
@@ -2512,7 +3060,7 @@ fn daemon_sync_family_ignores_open_mutating_root_from_other_family() {
         own_sync_rx
             .recv_timeout(Duration::from_millis(250))
             .is_err(),
-        "sync.family must still wait for an open mutating root in its own family"
+        "sync.family must still wait for an open mutating root in its own family once it has written"
     );
 
     let unrelated_sync = send_control_request_with_timeout(
@@ -2528,7 +3076,7 @@ fn daemon_sync_family_ignores_open_mutating_root_from_other_family() {
         "unrelated sync.family request failed: {unrelated_sync:?}"
     );
 
-    write_trace_frames_to_stream(&mut open_trace, &[trace_atexit_frame(sid, 0, 1_002)]);
+    write_trace_frames(&mut open_trace, &[trace_atexit_frame(sid, 0, 1_002)]);
     let own_sync_response = own_sync_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("own-family sync should complete after the trace root closes")
@@ -2661,7 +3209,7 @@ fn daemon_trace_read_error_does_not_leave_root_open_forever() {
     let mut stream =
         open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
             .expect("failed to connect to trace socket");
-    write_trace_frames_to_stream(
+    write_trace_frames(
         &mut stream,
         &[
             json!({
@@ -2720,7 +3268,7 @@ fn daemon_trace_family_resolution_io_does_not_block_other_readers() {
     let mut slow_repo_stream =
         open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
             .expect("failed to connect slow-repo trace socket");
-    write_trace_frames_to_stream(
+    write_trace_frames(
         &mut slow_repo_stream,
         &[
             json!({
@@ -3265,7 +3813,7 @@ fn daemon_trace_ingest_backpressure_shuts_down_without_blocking_listener() {
     let mut stream =
         open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
             .expect("failed to connect trace socket");
-    write_trace_frames_to_stream(
+    write_trace_frames(
         &mut stream,
         &[
             json!({
@@ -7687,7 +8235,7 @@ fn trace_queue_full_drop_logs_the_dropped_root() {
     let mut stream =
         open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
             .expect("failed to connect trace socket");
-    write_trace_frames_to_stream(
+    write_trace_frames(
         &mut stream,
         &[
             json!({

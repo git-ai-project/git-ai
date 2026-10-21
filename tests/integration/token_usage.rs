@@ -245,6 +245,85 @@ fn claude_transcript_emits_token_usage_bucket_events() {
     }
 }
 
+/// `git-ai usage` sources tokens and cost exclusively from the TokenUsage
+/// events the pipeline emitted (the SessionEvent raw JSON is not re-parsed).
+#[test]
+fn usage_command_reports_tokens_and_cost_from_token_usage_events() {
+    let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
+    let repo =
+        TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str())]);
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/token-usage.git",
+    ])
+    .expect("remote add should succeed");
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+    let repo_root = repo.canonical_path();
+
+    let transcript_path = repo_root.join("claude-session.jsonl");
+    fs::write(
+        &transcript_path,
+        format!(
+            "{}\n{}\n",
+            claude_usage_line("m1", "r1", &recent_ts(1, 0), 50, Some(1.25)),
+            claude_usage_line("m2", "r2", &recent_ts(6, 0), 70, None),
+        ),
+    )
+    .unwrap();
+
+    let file_path = repo_root.join("example.ts");
+    fs::write(&file_path, "const x = 1;\n").unwrap();
+    checkpoint_with_transcript(
+        &repo,
+        "claude",
+        "sess-usage-cmd",
+        &transcript_path,
+        &file_path,
+        "const x = 1;\nconst y = 2;\n",
+    );
+    sync_token_usage_pipeline(&repo);
+    assert_eq!(token_usage_events(&metrics_db_path).len(), 2);
+
+    let output = repo
+        .git_ai_with_env(
+            &["usage", "--json"],
+            &[("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str())],
+        )
+        .expect("usage --json should succeed");
+    let value: serde_json::Value =
+        serde_json::from_str(&crate::test_utils::extract_json_object(&output))
+            .expect("usage output should be JSON");
+
+    // Both transcript entries: 100 input / 200 cache-read / 30 cache-write
+    // each, outputs 50 and 70.
+    let tokens = &value["tokens"];
+    assert_eq!(tokens["input"].as_u64(), Some(200));
+    assert_eq!(tokens["output"].as_u64(), Some(120));
+    assert_eq!(tokens["cache_read"].as_u64(), Some(400));
+    assert_eq!(tokens["cache_creation"].as_u64(), Some(60));
+    // Cost = the first entry's transcript costUSD (1.25) plus a non-zero
+    // catalog-computed cost for the second entry.
+    let cost = tokens["estimated_cost_usd"].as_f64().unwrap();
+    assert!(cost > 1.25, "expected cost above 1.25, got {cost}");
+    let model = &tokens["by_model"][0];
+    assert_eq!(model["model"].as_str(), Some("claude-sonnet-4"));
+    assert_eq!(model["sessions"].as_u64(), Some(1));
+
+    // The per-repo breakdown carries the same authoritative spend.
+    let repo_row = &value["repos"][0];
+    assert!(
+        repo_row["repo_url"]
+            .as_str()
+            .unwrap()
+            .contains("acme/token-usage")
+    );
+    let repo_cost = repo_row["estimated_cost_usd"].as_f64().unwrap();
+    assert!((repo_cost - cost).abs() < 1e-9);
+}
+
 #[test]
 fn codex_transcript_emits_deltas_with_reasoning_tokens() {
     let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
@@ -326,6 +405,203 @@ fn codex_transcript_emits_deltas_with_reasoning_tokens() {
     assert_eq!(
         attrs.session_id,
         Some(Some(generate_session_id("sess-token-codex", "codex")))
+    );
+}
+
+#[test]
+fn fast_long_context_codex_usage_emits_tier_and_speed_fields() {
+    let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str()),
+        // The org-configured attribute map must ride token-usage events
+        // like every other event type.
+        (
+            "GIT_AI_TEST_CONFIG_PATCH",
+            r#"{"custom_attributes":{"team":"platform"}}"#,
+        ),
+    ]);
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+    let repo_root = repo.canonical_path();
+
+    // A recorded fast tier and one turn whose raw input (300K, cached
+    // included) crosses gpt-5.6-sol's 272K long-context threshold.
+    let transcript_path = repo_root.join("codex-fast-session.jsonl");
+    fs::write(
+        &transcript_path,
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta", "payload": {"id": "sess-fast-codex"}}),
+            json!({"timestamp": "2026-01-01T00:00:10Z", "type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}),
+            json!({"timestamp": "2026-01-01T00:00:20Z", "type": "event_msg", "payload": {"type": "thread_settings_applied", "thread_settings": {"service_tier": "fast"}}}),
+            json!({
+                "timestamp": recent_ts(1, 0),
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {"total_token_usage": {
+                    "input_tokens": 300_000u64,
+                    "cached_input_tokens": 20_000u64,
+                    "output_tokens": 1_000u64,
+                    "reasoning_output_tokens": 100u64,
+                    "total_tokens": 301_000u64
+                }}}
+            }),
+        ),
+    )
+    .unwrap();
+
+    let file_path = repo_root.join("main.rs");
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    checkpoint_with_transcript(
+        &repo,
+        "codex",
+        "sess-fast-codex",
+        &transcript_path,
+        &file_path,
+        "fn main() {}\nfn added() {}\n",
+    );
+    sync_token_usage_pipeline(&repo);
+
+    let events = token_usage_events(&metrics_db_path);
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(value_u64(event, token_usage_pos::SPEED), Some(1));
+    assert_eq!(
+        value_u64(event, token_usage_pos::SPEED_INFERRED),
+        Some(0),
+        "the tier was recorded in the transcript"
+    );
+    assert_eq!(
+        value_u64(event, token_usage_pos::INPUT_TOKENS),
+        Some(280_000)
+    );
+    assert_eq!(
+        value_u64(event, token_usage_pos::LONG_CONTEXT_INPUT_TOKENS),
+        Some(280_000)
+    );
+    assert_eq!(
+        value_u64(event, token_usage_pos::LONG_CONTEXT_CACHE_READ_TOKENS),
+        Some(20_000)
+    );
+    assert_eq!(
+        value_u64(event, token_usage_pos::LONG_CONTEXT_OUTPUT_TOKENS),
+        Some(1_000)
+    );
+    assert_eq!(
+        value_u64(event, token_usage_pos::TRANSCRIPT_COST_MICRO_USD),
+        Some(0)
+    );
+    // Whole request at the above-threshold rates times the fast multiplier.
+    // Derived from the embedded snapshot (the daemon subprocess and this
+    // process both run with GIT_AI_TEST_DB_PATH set, pinning it) so the
+    // weekly snapshot refresh cannot break this assertion; e.g. at 8/30
+    // input/output and 0.8 cache read: (0.28*8 + 0.02*0.8 + 0.001*30) * 2 =
+    // $4.572.
+    let pricing = git_ai::metrics::model_pricing::pricing_for("gpt-5.6-sol")
+        .expect("gpt-5.6-sol must be in the embedded snapshot");
+    let expected_usd = (0.28 * pricing.input_above.unwrap()
+        + 0.02 * pricing.cache_read_above.unwrap()
+        + 0.001 * pricing.output_above.unwrap())
+        * pricing.fast_multiplier;
+    assert_eq!(
+        value_u64(event, token_usage_pos::EST_COST_MICRO_USD),
+        Some((expected_usd * 1_000_000.0).round() as u64)
+    );
+    let attrs = EventAttributes::from_sparse(&event.attrs);
+    let catalog = attrs
+        .pricing_catalog
+        .flatten()
+        .expect("catalog-priced buckets carry the pricing catalog id");
+    assert!(catalog.starts_with("embedded:"), "{catalog}");
+    let custom = attrs
+        .custom_attributes
+        .flatten()
+        .expect("org-configured attributes ride token-usage events");
+    assert_eq!(custom, r#"{"team":"platform"}"#);
+}
+
+#[test]
+fn forked_codex_session_counts_only_its_own_usage() {
+    let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
+    let repo =
+        TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str())]);
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+    let repo_root = repo.canonical_path();
+
+    // Codex-style sessions tree: the parent rollout is on disk but only the
+    // child is checkpointed, so the daemon resolves the parent by scanning.
+    let day_dir = repo_root.join("sessions/2026/01/09");
+    fs::create_dir_all(&day_dir).unwrap();
+    let usage = |ts: &str, input: u64, cached: u64, output: u64, total: u64| {
+        json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total_token_usage": {
+                "input_tokens": input,
+                "cached_input_tokens": cached,
+                "output_tokens": output,
+                "reasoning_output_tokens": 0,
+                "total_tokens": total
+            }}}
+        })
+        .to_string()
+    };
+    fs::write(
+        day_dir.join("rollout-fork-parent.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({"timestamp": recent_ts(0, 30), "type": "session_meta", "payload": {"id": "fork-parent"}}),
+            json!({"timestamp": recent_ts(0, 40), "type": "turn_context", "payload": {"model": "gpt-5.1"}}),
+            usage(&recent_ts(1, 0), 16_262, 9_984, 246, 16_508),
+        ),
+    )
+    .unwrap();
+    // The child replays the parent's history with a rewritten timestamp; its
+    // own first turn follows ~7s later — past the burst window, so only
+    // parent-prefix matching keeps the replay out.
+    let child_path = day_dir.join("rollout-fork-child.jsonl");
+    fs::write(
+        &child_path,
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"timestamp": recent_ts(2, 0), "type": "session_meta", "payload": {"id": "fork-child", "forked_from_id": "fork-parent"}}),
+            json!({"timestamp": recent_ts(2, 0), "type": "turn_context", "payload": {"model": "gpt-5.1"}}),
+            usage(&recent_ts(2, 0), 16_262, 9_984, 246, 16_508),
+            usage(&recent_ts(2, 7), 16_385, 10_084, 266, 16_651),
+        ),
+    )
+    .unwrap();
+
+    let file_path = repo_root.join("main.rs");
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    checkpoint_with_transcript(
+        &repo,
+        "codex",
+        "fork-child",
+        &child_path,
+        &file_path,
+        "fn main() {}\nfn added() {}\n",
+    );
+    sync_token_usage_pipeline(&repo);
+
+    let events = token_usage_events(&metrics_db_path);
+    assert_eq!(events.len(), 1);
+    // Only the child's own delta: (16385-16262) - (10084-9984) = 23 input.
+    assert_eq!(
+        value_u64(&events[0], token_usage_pos::INPUT_TOKENS),
+        Some(23)
+    );
+    assert_eq!(
+        value_u64(&events[0], token_usage_pos::CACHE_READ_TOKENS),
+        Some(100)
+    );
+    assert_eq!(
+        value_u64(&events[0], token_usage_pos::TOTAL_TOKENS),
+        Some(143)
+    );
+    assert_eq!(
+        value_u64(&events[0], token_usage_pos::MESSAGE_COUNT),
+        Some(1)
     );
 }
 
@@ -514,7 +790,7 @@ fn resumed_session_through_the_daemon_does_not_double_count() {
 /// parent session through the real daemon, and a sidechain replay of a
 /// parent message dedups across the two files.
 #[test]
-fn subagent_transcript_rolls_up_to_the_parent_session() {
+fn subagent_transcript_owns_its_usage_and_links_to_the_parent() {
     let (_metrics_db_dir, metrics_db_path) = isolated_metrics_db_path();
     let repo =
         TestRepo::new_with_daemon_env(&[("GIT_AI_TEST_METRICS_DB_PATH", metrics_db_path.as_str())]);
@@ -572,9 +848,10 @@ fn subagent_transcript_rolls_up_to_the_parent_session() {
     sync_token_usage_pipeline(&repo);
 
     let events = token_usage_events(&metrics_db_path);
-    // The sidechain replay deduped against the parent's entry (no inflated
-    // re-emission of the first bucket); only the subagent's own turn emits,
-    // attributed to the PARENT session.
+    // The sidechain replay deduped against the parent's entry across files
+    // (dedup is global, not session-scoped); only the subagent's own turn
+    // emits, attributed to the SUBAGENT session with the parent carried as a
+    // relationship (leaf attribution, matching SessionEvents).
     assert_eq!(events.len(), 2);
     let subagent_event = &events[1];
     assert_eq!(
@@ -589,7 +866,15 @@ fn subagent_transcript_rolls_up_to_the_parent_session() {
     let attrs = EventAttributes::from_sparse(&subagent_event.attrs);
     assert_eq!(
         attrs.session_id,
+        Some(Some(generate_session_id("agent-1", "claude")))
+    );
+    assert_eq!(
+        attrs.parent_session_id,
         Some(Some(generate_session_id("sess-parent", "claude")))
+    );
+    assert_eq!(
+        attrs.external_parent_session_id,
+        Some(Some("sess-parent".to_string()))
     );
 }
 

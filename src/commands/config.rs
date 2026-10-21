@@ -101,6 +101,9 @@ fn print_config_help() {
     println!("  exclude_prompts_in_repositories  Repos to exclude prompts from (array)");
     println!("  allow_repositories           Allowed repos (array)");
     println!("  exclude_repositories         Excluded repos (array)");
+    println!(
+        "  untraced_fixup_ignored_paths Repo path globs the untraced-commit fixup skips (array)"
+    );
     println!("  telemetry_oss                OSS telemetry setting (on/off)");
     println!("  telemetry_enterprise_dsn     Enterprise telemetry DSN");
     println!("  disable_version_checks       Disable version checks (bool)");
@@ -300,6 +303,17 @@ fn show_all_config() -> Result<(), String> {
         effective_config.insert("exclude_repositories".to_string(), Value::Array(vec![]));
     }
 
+    effective_config.insert(
+        "untraced_fixup_ignored_paths".to_string(),
+        serde_json::to_value(
+            file_config
+                .untraced_fixup_ignored_paths
+                .clone()
+                .unwrap_or_default(),
+        )
+        .unwrap(),
+    );
+
     // Booleans with runtime values
     effective_config.insert(
         "telemetry_oss_disabled".to_string(),
@@ -479,6 +493,13 @@ fn get_config_value(key: &str) -> Result<(), String> {
                     Value::Array(vec![])
                 }
             }
+            "untraced_fixup_ignored_paths" => serde_json::to_value(
+                file_config
+                    .untraced_fixup_ignored_paths
+                    .clone()
+                    .unwrap_or_default(),
+            )
+            .unwrap(),
             "telemetry_oss_disabled" => Value::Bool(runtime_config.is_telemetry_oss_disabled()),
             "telemetry_enterprise_dsn" => {
                 if let Some(ref dsn) = file_config.telemetry_enterprise_dsn {
@@ -697,6 +718,15 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             "exclude_repositories" => {
                 let added = set_repository_array_field(
                     &mut file_config.exclude_repositories,
+                    value,
+                    add_mode,
+                )?;
+                crate::config::save_file_config(&file_config)?;
+                log_array_changes(&added, add_mode);
+            }
+            "untraced_fixup_ignored_paths" => {
+                let added = set_string_array_field(
+                    &mut file_config.untraced_fixup_ignored_paths,
                     value,
                     add_mode,
                 )?;
@@ -1116,6 +1146,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     log_array_removals(&items);
                 }
             }
+            "untraced_fixup_ignored_paths" => {
+                let old_values = file_config.untraced_fixup_ignored_paths.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(items) = old_values {
+                    log_array_removals(&items);
+                }
+            }
             "telemetry_oss" => {
                 let old_value = file_config.telemetry_oss.take();
                 crate::config::save_file_config(&file_config)?;
@@ -1512,6 +1549,46 @@ fn set_repository_array_field(
 /// Resolve a repository value - returns the actual patterns to store
 /// For file paths, resolves to repository remote URLs
 /// For URLs/patterns, returns as-is
+/// Set a plain string-array field (path globs): a JSON array or one value,
+/// appended without duplicates in add mode. Unlike repository patterns,
+/// values are taken literally — nothing is resolved to remotes.
+fn set_string_array_field(
+    field: &mut Option<Vec<String>>,
+    value: &str,
+    add_mode: bool,
+) -> Result<Vec<String>, String> {
+    let values: Vec<String> = if value.trim_start().starts_with('[') {
+        match serde_json::from_str::<Value>(value)
+            .map_err(|e| format!("Invalid JSON array: {}", e))?
+        {
+            Value::Array(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    Value::String(s) => Ok(s),
+                    _ => Err("Array must contain only strings".to_string()),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => return Err("Expected a JSON array".to_string()),
+        }
+    } else {
+        vec![value.to_string()]
+    };
+    if add_mode {
+        let existing = field.get_or_insert_with(Vec::new);
+        let mut added = Vec::new();
+        for value in values {
+            if !existing.contains(&value) && !added.contains(&value) {
+                added.push(value);
+            }
+        }
+        existing.extend(added.iter().cloned());
+        Ok(added)
+    } else {
+        *field = Some(values.clone());
+        Ok(values)
+    }
+}
+
 fn resolve_repository_value(value: &str) -> Result<Vec<String>, String> {
     match detect_pattern_type(value) {
         PatternType::GlobalWildcard | PatternType::UrlOrGitProtocol => {

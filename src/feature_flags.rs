@@ -86,7 +86,9 @@ define_feature_flags!(
     bash_checkpoints_v2: bash_checkpoints_v2, debug = false, release = false,
     daemon_log_upload: daemon_log_upload, debug = true, release = true,
     rewrite_metrics_events: rewrite_metrics_events, debug = true, release = false,
-    token_usage_metrics: token_usage_metrics, debug = true, release = false,
+    token_usage_metrics: token_usage_metrics, debug = true, release = true,
+    untraced_commit_fixup: untraced_commit_fixup, debug = true, release = true,
+    untraced_fixup_ignore_temp_repos: untraced_fixup_ignore_temp_repos, debug = true, release = true,
 );
 
 impl FeatureFlags {
@@ -145,6 +147,8 @@ mod tests {
             assert!(flags.daemon_log_upload);
             assert!(flags.rewrite_metrics_events);
             assert!(flags.token_usage_metrics);
+            assert!(flags.untraced_commit_fixup);
+            assert!(flags.untraced_fixup_ignore_temp_repos);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -156,7 +160,9 @@ mod tests {
             assert!(!flags.bash_checkpoints_v2);
             assert!(flags.daemon_log_upload);
             assert!(!flags.rewrite_metrics_events);
-            assert!(!flags.token_usage_metrics);
+            assert!(flags.token_usage_metrics);
+            assert!(flags.untraced_commit_fixup);
+            assert!(flags.untraced_fixup_ignore_temp_repos);
         }
     }
 
@@ -279,6 +285,8 @@ mod tests {
             daemon_log_upload: true,
             rewrite_metrics_events: true,
             token_usage_metrics: true,
+            untraced_commit_fixup: true,
+            untraced_fixup_ignore_temp_repos: true,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -291,6 +299,8 @@ mod tests {
         assert!(serialized.contains("daemon_log_upload"));
         assert!(serialized.contains("rewrite_metrics_events"));
         assert!(serialized.contains("token_usage_metrics"));
+        assert!(serialized.contains("untraced_commit_fixup"));
+        assert!(serialized.contains("untraced_fixup_ignore_temp_repos"));
     }
 
     #[test]
@@ -305,6 +315,8 @@ mod tests {
             daemon_log_upload: true,
             rewrite_metrics_events: true,
             token_usage_metrics: true,
+            untraced_commit_fixup: false,
+            untraced_fixup_ignore_temp_repos: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.lite_mode, flags.lite_mode);
@@ -316,6 +328,11 @@ mod tests {
         assert_eq!(cloned.daemon_log_upload, flags.daemon_log_upload);
         assert_eq!(cloned.rewrite_metrics_events, flags.rewrite_metrics_events);
         assert_eq!(cloned.token_usage_metrics, flags.token_usage_metrics);
+        assert_eq!(cloned.untraced_commit_fixup, flags.untraced_commit_fixup);
+        assert_eq!(
+            cloned.untraced_fixup_ignore_temp_repos,
+            flags.untraced_fixup_ignore_temp_repos
+        );
     }
 
     #[test]

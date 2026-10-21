@@ -23,10 +23,12 @@
 //!   error backoff so a permanently failing transcript is not re-read on
 //!   every trigger. The size/mtime quiet-skip snapshot is written only after
 //!   a fully successful pass.
-//! - Claude subagent transcripts roll up to their parent session (matching
-//!   ccusage), which also lets sidechain replays dedup against the parent's
-//!   entries. Entry dedup itself is global across sessions (resume/fork
-//!   copies); when a replacement moves an entry between sessions, the
+//! - Usage is leaf-attributed: subagent/fork transcripts own their usage
+//!   under their own session (like SessionEvents), carrying the parent as
+//!   the parent_session_id/external_parent_session_id attributes. Entry
+//!   dedup is global across sessions (resume/fork copies; sidechain replays
+//!   of parent messages dedup against the parent's entries wherever they
+//!   live); when a replacement moves an entry between sessions, the
 //!   previous owner's files are invalidated so its buckets re-reconcile on
 //!   the next pass with their own attributes.
 //! - The `token_usage_metrics` feature flag gates the worker at daemon
@@ -55,7 +57,8 @@ use crate::error::GitAiError;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, TokenUsageValues};
 use crate::streams::db::{StreamRecord, StreamsDatabase};
 use crate::token_usage::db::{BatchCommit, TokenUsageDatabase, TrackedFile};
-use crate::token_usage::extractor_for_tool;
+use crate::token_usage::extractor::{ParentPrefixRequest, UsageSignature};
+use crate::token_usage::{Speed, extractor_for_tool};
 
 /// One raw JSONL line read as bytes: unlike UTF-8-strict `read_line`, a
 /// single invalid byte cannot wedge the cursor forever (the line decodes
@@ -87,26 +90,108 @@ fn read_line_bytes(
 const BATCH_MAX_ENTRIES: usize = 1_000;
 const BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// CPU duty cycle for sweep-origin transcript passes: after each batch, the
-/// pass sleeps long enough that the work occupies at most this share of one
-/// core (work W is followed by a pause of W * (100 - duty) / duty). A multi-
-/// gigabyte backfill therefore takes ~3x longer instead of pinning a core.
+/// CPU duty cycle for sweep-origin work: every charged segment (batch,
+/// bucket emission, cross-session reconcile) is followed by a pause long
+/// enough that the work occupies at most this share of one core (work W is
+/// followed by a pause of W * (100 - duty) / duty). A multi-gigabyte
+/// backfill therefore takes ~3x longer instead of pinning a core.
 /// Notification-origin passes are never throttled (see `TaskOrigin`).
 const THROTTLE_DUTY_PERCENT: u32 = 30;
-/// Batches doing less work than this owe no pause (quiet skips, small
-/// appends swept between notifications).
+/// Work debt below this settles without a pause; it stays on the ledger and
+/// is paid by a later settlement. Without the carried debt, a backfill of
+/// many small files (each under the floor per segment) would never pause at
+/// all and run at full speed — the floor only batches sleeps, it must not
+/// forgive work.
 const THROTTLE_MIN_WORK: Duration = Duration::from_millis(5);
-/// Upper bound on a single pause (guards pathologically slow batches, and
-/// bounds how long a pass can delay a drain or shutdown).
+/// Upper bound on a single pause AND on one caller's total wait including
+/// reservations queued by other pipelines (guards pathologically slow
+/// segments, and bounds how long a pass can delay a drain or shutdown).
+/// Work the cap left unpaid stays on the ledger.
 const THROTTLE_MAX_PAUSE: Duration = Duration::from_secs(5);
 
-/// The pause owed after `work` of batch processing under the duty cycle.
-fn throttle_pause_for(work: Duration) -> Duration {
-    if work < THROTTLE_MIN_WORK {
+/// One process-wide ledger for all paced background work: the sweep's
+/// parse/emit segments and the telemetry worker's background metrics flush
+/// charge the same debt, so their combined CPU holds the duty cycle instead
+/// of each pipeline claiming 30% on its own thread. Notify-origin passes and
+/// awaited flushes never charge it.
+///
+/// Pauses are issued as *serialized reservations* (`paused_until`): a caller
+/// settling while another caller's pause is still reserved queues its pause
+/// behind it and is told to wait out both, so concurrent sleepers cannot
+/// overlap their pauses and double the effective duty. A caller that sleeps
+/// less than it was told (the flush caps its sleeps to stay responsive)
+/// forgives nothing — the reservation stands and the next background segment
+/// absorbs the remainder.
+struct BackgroundLedger {
+    debt: Duration,
+    paused_until: Option<std::time::Instant>,
+}
+
+static BACKGROUND_LEDGER: std::sync::Mutex<BackgroundLedger> =
+    std::sync::Mutex::new(BackgroundLedger {
+        debt: Duration::ZERO,
+        paused_until: None,
+    });
+
+/// Charge `work` to the shared background ledger and return how long this
+/// caller must wait (its own pause queued behind any outstanding
+/// reservation).
+pub(crate) fn background_work_pause(work: Duration) -> Duration {
+    reserve_background_pause(&BACKGROUND_LEDGER, work)
+}
+
+fn reserve_background_pause(
+    ledger: &std::sync::Mutex<BackgroundLedger>,
+    work: Duration,
+) -> Duration {
+    let mut ledger = ledger
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pause_owed = settle_throttle_debt(&mut ledger.debt, work);
+    let now = std::time::Instant::now();
+    let start = match ledger.paused_until {
+        Some(reserved) if reserved > now => reserved,
+        _ => now,
+    };
+    // No caller — queued reservations included — waits past this horizon:
+    // fresh notifications and drains sit behind at most one capped pause.
+    // The pause that does not fit is not forgiven: its work equivalent is
+    // refunded to the debt ledger and a later settlement pays it.
+    let horizon = now + THROTTLE_MAX_PAUSE;
+    let room = horizon.saturating_duration_since(start);
+    let granted = pause_owed.min(room);
+    let refused = pause_owed.saturating_sub(granted);
+    if !refused.is_zero() {
+        ledger.debt = ledger.debt.saturating_add(
+            refused.saturating_mul(THROTTLE_DUTY_PERCENT) / (100 - THROTTLE_DUTY_PERCENT),
+        );
+    }
+    let end = start + granted;
+    if end > now {
+        ledger.paused_until = Some(end);
+    }
+    end - now
+}
+
+/// Cap on one batch's wall time: a slow-disk batch pauses (and observes
+/// shutdown) at this cadence instead of only at the byte/entry bounds, so a
+/// one-second window never holds much more work than the duty cycle allows.
+const BATCH_MAX_SEGMENT: Duration = Duration::from_millis(150);
+
+/// Add `work` to the debt ledger and settle it into the pause now owed.
+/// Debt the returned pause does not cover (the floor or the cap) carries to
+/// the next settlement, so the duty cycle holds across many small segments,
+/// not just within large ones.
+fn settle_throttle_debt(debt: &mut Duration, work: Duration) -> Duration {
+    *debt = debt.saturating_add(work);
+    if *debt < THROTTLE_MIN_WORK {
         return Duration::ZERO;
     }
-    (work.saturating_mul(100 - THROTTLE_DUTY_PERCENT) / THROTTLE_DUTY_PERCENT)
-        .min(THROTTLE_MAX_PAUSE)
+    let pause = (debt.saturating_mul(100 - THROTTLE_DUTY_PERCENT) / THROTTLE_DUTY_PERCENT)
+        .min(THROTTLE_MAX_PAUSE);
+    let paid = pause.saturating_mul(THROTTLE_DUTY_PERCENT) / (100 - THROTTLE_DUTY_PERCENT);
+    *debt = debt.saturating_sub(paid);
+    pause
 }
 
 /// Sleep out a throttle pause in small chunks so shutdown stays prompt.
@@ -241,7 +326,8 @@ struct TokenUsageWorker {
     /// telemetry handle.
     #[cfg(test)]
     test_sink: Option<TestSink>,
-    /// Test-only throttle-pause recorder, replacing the real sleep.
+    /// Test-only recorder of charged work segments, replacing the debt
+    /// ledger and the real sleep.
     #[cfg(test)]
     test_throttle: Option<TestThrottle>,
 }
@@ -301,6 +387,7 @@ impl TokenUsageWorker {
                     }
                     if let Some((task, origin)) = self.pop_next() {
                         self.process_task(task, origin).await;
+                        self.settle_flags_if_drained().await;
                     }
                 }
                 _ = sweep_ticker.tick() => {
@@ -315,6 +402,9 @@ impl TokenUsageWorker {
                     self.enqueue_notify(task);
                 }
                 Some(request) = self.drain_rx.recv() => {
+                    // handle_drain settles reconcile flags before its ack,
+                    // which also covers flags whose deferred settle a
+                    // pending drain suppressed in the ready-task arm.
                     self.handle_drain(request).await;
                 }
             }
@@ -334,6 +424,19 @@ impl TokenUsageWorker {
                 break;
             }
         }
+        // Settle reconcile flags BEFORE acknowledging, unthrottled like all
+        // barrier work: a notify task's inline reconcile can fail
+        // transiently, and the barrier must not report success while a
+        // correction it produced is still pending. Normally one SELECT; a
+        // failure here leaves the durable flags for the next trigger.
+        let token_db = self.token_db.clone();
+        let sink = self.make_sink();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(e) = reconcile_flagged_sessions(&token_db, &sink) {
+                tracing::warn!(error = %e, "token-usage reconcile before drain ack failed; flags retained for retry");
+            }
+        })
+        .await;
         let _ = request.completion.send(());
     }
 
@@ -424,32 +527,93 @@ impl TokenUsageWorker {
         }
     }
 
-    /// Reconcile cross-session flags off the async loop (used by sweeps for
-    /// crash recovery; the per-task path reconciles inline).
-    async fn reconcile_flagged(&self) {
-        let token_db = self.token_db.clone();
-        let sink = self.make_sink();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Err(e) = reconcile_flagged_sessions(&token_db, &sink) {
-                tracing::warn!(error = %e, "token-usage cross-session reconcile failed");
-            }
-        })
-        .await;
+    /// Settle deferred cross-session reconcile flags once the backlog is
+    /// drained. Sweep tasks defer reconciliation (a notify task settles all
+    /// flags inline for the drain barrier): settling once the backlog
+    /// drains re-aggregates each flagged session once instead of after
+    /// every file of a large backfill. Pending channel traffic is ingested
+    /// first — it must not wait behind even one throttled reconcile step.
+    /// Also runs after notify tasks and drains: their inline reconciles
+    /// normally leave nothing (this is then one SELECT), but flags left by
+    /// a FAILED inline pass must not wait for the next 30-minute sweep
+    /// tick.
+    async fn settle_flags_if_drained(&mut self) {
+        while let Ok(task) = self.notify_rx.try_recv() {
+            self.enqueue_notify(task);
+        }
+        if self.notify_queue.is_empty()
+            && self.sweep_queue.is_empty()
+            && self.drain_rx.is_empty()
+            && !self.shutdown_flag.load(Ordering::Relaxed)
+        {
+            self.reconcile_flagged().await;
+        }
     }
 
-    /// The pause a sweep-origin pass sleeps after each batch. Tests inject a
-    /// recorder to pin the per-batch call sites without wall-clock waits.
+    /// Reconcile cross-session flags off the async loop, throttled like all
+    /// other sweep-origin work (notify tasks reconcile inline, unthrottled,
+    /// for the drain barrier). Called when the task backlog drains, on every
+    /// sweep tick (crash recovery for flags left by a pass that died between
+    /// its batch commit and its reconcile), and at startup. One session per
+    /// blocking job — its throttle pause included — so shutdown, drains, and
+    /// fresh notifications are serviced between sessions instead of stalling
+    /// behind the whole flag set.
+    async fn reconcile_flagged(&mut self) {
+        loop {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            let token_db = self.token_db.clone();
+            let sink = self.make_sink();
+            let throttle = self.make_throttle();
+            let mut handle = tokio::task::spawn_blocking(move || {
+                reconcile_next_flagged_session(&token_db, &sink, &throttle)
+            });
+            let result = tokio::select! {
+                result = &mut handle => result,
+                _ = self.shutdown_notify.notified() => {
+                    self.shutdown_flag.store(true, Ordering::Relaxed);
+                    (&mut handle).await
+                }
+            };
+            match result {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => return,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "token-usage cross-session reconcile failed");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "token-usage cross-session reconcile panicked");
+                    return;
+                }
+            }
+            // Fresh traffic takes priority over the remaining flags: a
+            // notify task's inline reconcile settles them anyway, and a
+            // drain must not wait out throttle pauses. Flags are durable —
+            // whatever is left resumes at the next backlog drain or sweep
+            // tick.
+            if !self.notify_rx.is_empty() || !self.drain_rx.is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// The charge function sweep-origin work calls with each segment's
+    /// measured work: it settles the shared debt ledger and sleeps out the
+    /// pause owed. Tests inject a recorder to pin the charge sites without
+    /// wall-clock waits.
     fn make_throttle(&self) -> impl Fn(Duration) + Send + Sync + use<> {
         let shutdown_flag = self.shutdown_flag.clone();
         #[cfg(test)]
         let test_throttle = self.test_throttle.clone();
-        move |pause: Duration| {
+        move |work: Duration| {
             #[cfg(test)]
             if let Some(throttle) = &test_throttle {
-                throttle(pause);
+                throttle(work);
                 return;
             }
-            throttle_sleep(pause, &shutdown_flag);
+            throttle_sleep(background_work_pause(work), &shutdown_flag);
         }
     }
 
@@ -472,6 +636,7 @@ impl TokenUsageWorker {
                 &token_db,
                 &sink,
                 throttle,
+                origin,
                 &task_clone,
                 &shutdown_flag,
             )
@@ -546,29 +711,26 @@ fn sweep_candidates(
     tasks
 }
 
-/// Rollup identity of the session a transcript belongs to: subagent
-/// transcripts attribute to their parent session (matching ccusage).
+/// Identity of the session a transcript belongs to: every agent execution
+/// owns its own usage, so subagent/fork transcripts attribute to their own
+/// session and carry the parent as a relationship — the same leaf identity
+/// SessionEvents use. (Deviation from ccusage, which rolls Claude sidechains
+/// into the parent session: totals still match, but git-ai groups every
+/// tool the same way and keeps the per-agent view; the parent-inclusive
+/// total stays derivable through the parent attributes.)
 struct SessionIdentity {
     session_id: String,
     external_session_id: String,
+    external_parent_session_id: Option<String>,
     tool: String,
 }
 
 impl SessionIdentity {
     fn from_stream(stream: &StreamRecord) -> Self {
-        let (session_id, external_session_id) = match &stream.external_parent_session_id {
-            Some(parent_ext) => (
-                generate_session_id(parent_ext, &stream.tool),
-                parent_ext.clone(),
-            ),
-            None => (
-                stream.session_id.clone(),
-                stream.external_session_id.clone(),
-            ),
-        };
         Self {
-            session_id,
-            external_session_id,
+            session_id: stream.session_id.clone(),
+            external_session_id: stream.external_session_id.clone(),
+            external_parent_session_id: stream.external_parent_session_id.clone(),
             tool: stream.tool.clone(),
         }
     }
@@ -638,6 +800,7 @@ fn process_task_blocking(
     token_db: &TokenUsageDatabase,
     sink: &impl Fn(&[MetricEvent]) -> Result<(), GitAiError>,
     throttle: Option<&(dyn Fn(Duration) + Sync)>,
+    origin: TaskOrigin,
     task: &TokenUsageTask,
     shutdown_flag: &AtomicBool,
 ) -> Result<(), GitAiError> {
@@ -667,8 +830,8 @@ fn process_task_blocking(
         throttle,
     );
     if let Err(e) = &result {
-        // Keyed by the rollup session id (subagent transcripts track under
-        // their parent), matching the row ensure_file created.
+        // Keyed by the transcript's own session id (leaf attribution),
+        // matching the row ensure_file created.
         let _ = token_db.record_error(
             &identity.session_id,
             &task.stream_path,
@@ -677,11 +840,16 @@ fn process_task_blocking(
         );
     }
     // Cross-session replacements flagged other sessions during the batch
-    // commits: reconcile them now, DB-only. Failures here belong to the
-    // flagged sessions (the durable flag retries them), NOT to this task's
+    // commits: notify-origin passes (unthrottled — the drain barrier awaits
+    // them) reconcile inline, DB-only, so `git-ai await` reflects the moves.
+    // Sweep passes leave the durable flags for the run loop to settle once
+    // the backlog drains, instead of re-aggregating the flagged sessions
+    // after every file of a backfill. Failures here belong to the flagged
+    // sessions (the durable flag retries them), NOT to this task's
     // transcript — charging them here would put a healthy file into error
     // backoff and point diagnostics at the wrong session.
     if result.is_ok()
+        && origin == TaskOrigin::Notify
         && let Err(e) = reconcile_flagged_sessions(token_db, sink)
     {
         tracing::warn!(error = %e, "token-usage cross-session reconcile failed; flags retained for retry");
@@ -718,15 +886,199 @@ fn reconcile_flagged_sessions(
     sink: &impl Fn(&[MetricEvent]) -> Result<(), GitAiError>,
 ) -> Result<(), GitAiError> {
     for session in token_db.sessions_needing_reconcile()? {
-        let identity = SessionIdentity {
-            session_id: session.session_id.clone(),
-            external_session_id: session.external_session_id,
-            tool: session.tool,
-        };
-        emit_changed_buckets(token_db, &identity, || session.repo_url, sink)?;
-        token_db.clear_needs_reconcile(&session.session_id)?;
+        reconcile_session(token_db, session, sink)?;
     }
     Ok(())
+}
+
+/// Reconcile one flagged session (the deferred, throttled path): emit its
+/// changed buckets, clear its flag, and charge the throttle for the work.
+/// Returns whether a session was reconciled, so the caller can hand control
+/// back to its event loop between sessions and come back for the rest.
+fn reconcile_next_flagged_session(
+    token_db: &TokenUsageDatabase,
+    sink: &impl Fn(&[MetricEvent]) -> Result<(), GitAiError>,
+    throttle: &(dyn Fn(Duration) + Sync),
+) -> Result<bool, GitAiError> {
+    let started = std::time::Instant::now();
+    let Some(session) = token_db.next_session_needing_reconcile()? else {
+        return Ok(false);
+    };
+    reconcile_session(token_db, session, sink)?;
+    throttle(started.elapsed());
+    Ok(true)
+}
+
+fn reconcile_session(
+    token_db: &TokenUsageDatabase,
+    session: crate::token_usage::db::ReconcileSession,
+    sink: &impl Fn(&[MetricEvent]) -> Result<(), GitAiError>,
+) -> Result<(), GitAiError> {
+    let identity = SessionIdentity {
+        session_id: session.session_id.clone(),
+        external_session_id: session.external_session_id,
+        external_parent_session_id: session.external_parent_session_id,
+        tool: session.tool,
+    };
+    emit_changed_buckets(token_db, &identity, || session.repo_url, sink)?;
+    token_db.clear_needs_reconcile(&session.session_id)
+}
+
+/// Speed fallback from the rollout's codex-home `config.toml` (recorded
+/// service tiers win; this covers unmarked entries). Cached by config mtime:
+/// a pass over many rollouts stats the file once per rollout but reads and
+/// parses it only when it changed — never per line.
+fn codex_config_fallback_speed(stream_path: &Path) -> Option<Speed> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::SystemTime;
+    type Cache = HashMap<PathBuf, (Option<SystemTime>, Option<Speed>)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+    let config_path =
+        crate::streams::model_extraction::codex_home_from_transcript_path(stream_path)?
+            .join("config.toml");
+    let modified = std::fs::metadata(&config_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(cache) = cache.lock()
+        && let Some((cached_modified, speed)) = cache.get(&config_path)
+        && *cached_modified == modified
+    {
+        return *speed;
+    }
+    let speed = crate::streams::model_extraction::read_codex_config(&config_path)
+        .as_deref()
+        .and_then(crate::token_usage::codex::config_fallback_speed);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(config_path, (modified, speed));
+    }
+    speed
+}
+
+/// Cap on directory entries visited when scanning the codex sessions tree
+/// for a fork's parent rollout — far above a real `sessions/YYYY/MM/DD`
+/// layout, so pathological trees can't wedge a pass.
+const PARENT_SCAN_MAX_ENTRIES: usize = 50_000;
+
+/// Locate and read a forked child's parent rollout, returning its pre-fork
+/// usage prefix. Candidates come from the token database (files tracked
+/// under the parent's own external session id) and a bounded scan of the
+/// codex sessions tree
+/// for filenames carrying the parent id; a candidate counts only when its
+/// first line is a `session_meta` recording that id (ccusage locates parents
+/// by recorded id, never by filename). `None` — the parent is unresolvable —
+/// sends the extractor to its rewritten-burst fallback, like ccusage with an
+/// unavailable parent log, and is not retried.
+fn resolve_parent_prefix(
+    token_db: &TokenUsageDatabase,
+    tool: &str,
+    child_path: &str,
+    request: &ParentPrefixRequest,
+) -> Option<Vec<UsageSignature>> {
+    // The trait hook is provider-neutral, but everything below is codex
+    // machinery (rollout layout, session_meta confirmation, codex delta
+    // parsing). Another tool's request resolves to "parent unavailable"
+    // (its burst fallback) instead of misparsing a foreign transcript as a
+    // rollout; extend with per-tool dispatch when a second tool needs it.
+    if tool != "codex" {
+        return None;
+    }
+    let tracked = token_db
+        .stream_paths_for_external_session(&request.parent_id, tool)
+        .unwrap_or_default();
+    let parent = tracked
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path != Path::new(child_path))
+        .find(|path| records_session_id(path, &request.parent_id))
+        .or_else(|| scan_sessions_tree(Path::new(child_path), &request.parent_id))?;
+    let file = std::fs::File::open(&parent).ok()?;
+    crate::token_usage::codex::collect_parent_prefix(
+        BufReader::with_capacity(128 * 1024, file),
+        request.fork_ts_ms,
+    )
+}
+
+/// Whether the rollout's first line records `session_id` as its own id.
+fn records_session_id(path: &Path, session_id: &str) -> bool {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // A candidate whose first line is larger than any real session_meta
+    // must not be buffered wholly into memory (the scan feeds this any
+    // .jsonl whose name carries the parent id). The cap is generous:
+    // session_meta embeds the session's instructions (AGENTS.md contents),
+    // which can reach hundreds of KiB.
+    const MAX_FIRST_LINE_BYTES: u64 = 1024 * 1024;
+    let mut line = Vec::new();
+    let mut reader = BufReader::new(file.take(MAX_FIRST_LINE_BYTES));
+    if read_line_bytes(&mut reader, &mut line).is_err() {
+        return false;
+    }
+    // A line truncated at the cap is not valid JSON and fails the id parse.
+    crate::token_usage::codex::session_meta_id(&String::from_utf8_lossy(&line)).as_deref()
+        == Some(session_id)
+}
+
+/// Fallback parent discovery for rollouts the token database has not tracked
+/// (yet): walk the codex home's `sessions` and `archived_sessions` trees for
+/// a filename carrying the parent id (codex rollout filenames embed the
+/// session uuid), confirming by the recorded `session_meta` id. The home is
+/// resolved like `streams::model_extraction` (configured home, else the
+/// nearest `.codex` ancestor) so archived or custom-layout children resolve
+/// too; a `sessions`/`archived_sessions` ancestor is the fallback anchor.
+fn scan_sessions_tree(child_path: &Path, parent_id: &str) -> Option<PathBuf> {
+    let roots: Vec<PathBuf> =
+        match crate::streams::model_extraction::codex_home_from_transcript_path(child_path) {
+            Some(home) => vec![home.join("sessions"), home.join("archived_sessions")],
+            None => {
+                let anchor = child_path.ancestors().find(|dir| {
+                    matches!(
+                        dir.file_name().and_then(|name| name.to_str()),
+                        Some("sessions" | "archived_sessions")
+                    )
+                })?;
+                let parent = anchor.parent();
+                vec![
+                    anchor.to_path_buf(),
+                    match parent {
+                        Some(dir) if anchor.ends_with("sessions") => dir.join("archived_sessions"),
+                        Some(dir) => dir.join("sessions"),
+                        None => return None,
+                    },
+                ]
+            }
+        };
+    let mut pending = roots;
+    let mut visited = 0usize;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > PARENT_SCAN_MAX_ENTRIES {
+                return None;
+            }
+            let path = entry.path();
+            // file_type() is free on the readdir result, unlike a stat per
+            // entry; symlinked directories are deliberately not followed.
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(path);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(parent_id) && name.ends_with(".jsonl"))
+                && path != child_path
+                && records_session_id(&path, parent_id)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Incrementally read one transcript file, persist deduplicated entries, and
@@ -746,6 +1098,7 @@ fn process_file(
         stream_path,
         &identity.tool,
         &identity.external_session_id,
+        identity.external_parent_session_id.as_deref(),
     )?;
     let now = now_secs();
 
@@ -789,6 +1142,34 @@ fn process_file(
         return Ok(());
     }
 
+    // The pass is live from here on: everything below up to the first batch
+    // commit (config lookup, parent-prefix resolution, open, seek) is work
+    // the first batch's throttle charge covers. Quiet skips returned above
+    // and stay free.
+    let mut batch_started = std::time::Instant::now();
+
+    // Only lines fed below consume the fallback speed, so quiet-skipped
+    // passes never pay the config lookup.
+    if identity.tool == "codex" {
+        extractor.set_fallback_speed(codex_config_fallback_speed(Path::new(stream_path)));
+    }
+
+    // Serve a fork's parent-prefix request as soon as it appears — after
+    // restoring persisted state here, and after every consumed line below —
+    // so the parent's replayed history is known before the next usage event
+    // is judged. A cheap no-op for everything but a freshly detected fork.
+    let serve_parent_request = |extractor: &mut Box<dyn crate::token_usage::UsageExtractor>| {
+        if let Some(request) = extractor.parent_request() {
+            extractor.provide_parent_prefix(resolve_parent_prefix(
+                token_db,
+                &identity.tool,
+                stream_path,
+                &request,
+            ));
+        }
+    };
+    serve_parent_request(&mut extractor);
+
     let file = std::fs::File::open(stream_path)?;
     let mut reader = BufReader::with_capacity(128 * 1024, file);
     reader.seek(SeekFrom::Start(offset))?;
@@ -798,7 +1179,6 @@ fn process_file(
     let mut reached_end = false;
     let mut interrupted = false;
     while !reached_end && !interrupted {
-        let batch_started = std::time::Instant::now();
         let mut entries = Vec::new();
         let mut consumed = 0usize;
         loop {
@@ -826,6 +1206,7 @@ fn process_file(
                         offset += bytes as u64;
                         if extractor.wants_line(trimmed) {
                             entries.extend(extractor.extract_line(trimmed));
+                            serve_parent_request(&mut extractor);
                         }
                     }
                     reached_end = true;
@@ -838,8 +1219,12 @@ fn process_file(
                     let trimmed = text.trim_end();
                     if extractor.wants_line(trimmed) {
                         entries.extend(extractor.extract_line(trimmed));
+                        serve_parent_request(&mut extractor);
                     }
-                    if entries.len() >= BATCH_MAX_ENTRIES || consumed >= BATCH_MAX_BYTES {
+                    if entries.len() >= BATCH_MAX_ENTRIES
+                        || consumed >= BATCH_MAX_BYTES
+                        || batch_started.elapsed() >= BATCH_MAX_SEGMENT
+                    {
                         break;
                     }
                 }
@@ -860,12 +1245,14 @@ fn process_file(
             pending_flush: extractor.has_pending(),
             min_bucket_ts: cutoff,
         })?;
-        // CPU throttle (sweep-origin passes only): pay for this batch's work
-        // with a proportional pause (also after the final batch, so back-to-
-        // back file passes during a large backfill hold the duty cycle too).
+        // CPU throttle (sweep-origin passes only): charge this batch's work
+        // to the debt ledger and sleep out the pause owed (also after the
+        // final batch, so back-to-back file passes during a large backfill
+        // hold the duty cycle too).
         if let Some(throttle) = throttle {
-            throttle(throttle_pause_for(batch_started.elapsed()));
+            throttle(batch_started.elapsed());
         }
+        batch_started = std::time::Instant::now();
     }
 
     if interrupted {
@@ -874,11 +1261,19 @@ fn process_file(
         // reconciles emission.
         return Ok(());
     }
+    let emit_started = std::time::Instant::now();
     emit_changed_buckets(token_db, identity, resolve_repo_url, sink)?;
     // The quiet-skip snapshot is written only after emission succeeded, so a
     // failed hand-off (or a crash anywhere in this pass) leaves the file
     // "changed" and the next pass re-runs reconciliation.
-    token_db.update_file_metadata(&identity.session_id, stream_path, size, modified)
+    let result = token_db.update_file_metadata(&identity.session_id, stream_path, size, modified);
+    // Bucket aggregation and event emission are real work too — charge them
+    // like a batch, or a backfill's duty cycle only covers the parsing half
+    // of each pass.
+    if let Some(throttle) = throttle {
+        throttle(emit_started.elapsed());
+    }
+    result
 }
 
 /// Reconcile the session's buckets in one pass and emit those whose
@@ -912,12 +1307,23 @@ fn emit_changed_buckets(
             (bucket, next_seq)
         })
         .collect();
-    let reservations: Vec<(String, u32, u64)> = changed
+    let reservations: Vec<(String, u8, u32, u64)> = changed
         .iter()
-        .map(|(bucket, next_seq)| (bucket.model.clone(), bucket.bucket_ts, *next_seq))
+        .map(|(bucket, next_seq)| {
+            (
+                bucket.model.clone(),
+                bucket.speed,
+                bucket.bucket_ts,
+                *next_seq,
+            )
+        })
         .collect();
     token_db.reserve_emit_seqs(&identity.session_id, &reservations)?;
     let repo_url = resolve_repo_url();
+    // The org-configured attribute map every event type carries (the
+    // checkpoint and session emitters attach the same one).
+    let config = crate::config::Config::fresh();
+    let custom_attributes = config.custom_attributes();
     let mut events = Vec::with_capacity(changed.len());
     for (bucket, next_seq) in &changed {
         let aggregate = &bucket.aggregate;
@@ -933,8 +1339,18 @@ fn emit_changed_buckets(
             .message_count(aggregate.message_count)
             // Strictly increasing per bucket: the server keeps the highest
             // revision, so same-second re-emissions cannot tie.
-            .emitted_seq(*next_seq);
+            .emitted_seq(*next_seq)
+            .speed(bucket.speed as u32)
+            .speed_inferred(aggregate.speed_inferred)
+            .cache_write_1h_tokens(aggregate.cache_write_1h)
+            .long_context_input_tokens(aggregate.long_context_input)
+            .long_context_output_tokens(aggregate.long_context_output)
+            .long_context_cache_read_tokens(aggregate.long_context_cache_read)
+            .long_context_cache_write_tokens(aggregate.long_context_cache_write)
+            .long_context_cache_write_1h_tokens(aggregate.long_context_cache_write_1h)
+            .transcript_cost_micro_usd(aggregate.transcript_cost_micro_usd);
         let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+            .custom_attributes_map(custom_attributes)
             .session_id(identity.session_id.clone())
             .tool(&identity.tool)
             .model(&bucket.model);
@@ -943,8 +1359,24 @@ fn emit_changed_buckets(
         if !identity.external_session_id.is_empty() {
             attrs = attrs.external_session_id(identity.external_session_id.clone());
         }
+        // Subagent/fork sessions carry their parent as a relationship (leaf
+        // attribution), exactly like SessionEvents.
+        if let Some(parent_ext) = identity
+            .external_parent_session_id
+            .as_deref()
+            .filter(|parent_ext| !parent_ext.is_empty())
+        {
+            attrs = attrs
+                .external_parent_session_id(parent_ext.to_string())
+                .parent_session_id(generate_session_id(parent_ext, &identity.tool));
+        }
         if let Some(url) = &repo_url {
             attrs = attrs.repo_url(url.clone());
+        }
+        if let Some(catalog) = &aggregate.pricing_catalog {
+            // A dedicated attribute: custom_attributes stays reserved for
+            // the org-configured map every event type carries.
+            attrs = attrs.pricing_catalog(catalog.clone());
         }
         events.push(MetricEvent::new(&values, attrs.to_sparse()));
     }
@@ -954,6 +1386,7 @@ fn emit_changed_buckets(
         token_db.mark_emitted(
             &identity.session_id,
             &bucket.model,
+            bucket.speed,
             bucket.bucket_ts,
             &bucket.aggregate.fingerprint(),
             next_seq,
@@ -974,6 +1407,7 @@ mod tests {
         SessionIdentity {
             session_id: "s_test".to_string(),
             external_session_id: "ext-test".to_string(),
+            external_parent_session_id: None,
             tool: "claude".to_string(),
         }
     }
@@ -1318,7 +1752,7 @@ mod tests {
             Some(50)
         );
         let first_bucket = db
-            .aggregate_bucket(&identity.session_id, "gpt-5", bucket_of(1, 0) as u32)
+            .aggregate_bucket(&identity.session_id, "gpt-5", 0, bucket_of(1, 0) as u32)
             .unwrap();
         assert_eq!(first_bucket.message_count, 1, "no double count");
     }
@@ -1340,7 +1774,12 @@ mod tests {
         let events = run(&db, &transcript).unwrap();
         assert!(events.is_empty(), "no aggregate change from the re-read");
         let agg = db
-            .aggregate_bucket("s_test", "claude-sonnet-4-20250514", bucket_of(1, 0) as u32)
+            .aggregate_bucket(
+                "s_test",
+                "claude-sonnet-4-20250514",
+                0,
+                bucket_of(1, 0) as u32,
+            )
             .unwrap();
         assert_eq!(agg.message_count, 2);
     }
@@ -1399,7 +1838,7 @@ mod tests {
         let events = run_as(&db, &identity, &transcript).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(
-            db.ensure_file(&identity.session_id, &path, "claude", "ext-test")
+            db.ensure_file(&identity.session_id, &path, "claude", "ext-test", None)
                 .unwrap()
                 .processing_errors,
             0
@@ -1477,6 +1916,272 @@ mod tests {
     }
 
     #[test]
+    fn fast_and_standard_usage_emit_separate_bucket_events() {
+        let (_dir, db, transcript) = setup();
+        let fast_line = format!(
+            r#"{{"timestamp":"{}","sessionId":"ext-test","requestId":"r1","costUSD":0.5,"message":{{"id":"m1","model":"claude-sonnet-4-20250514","usage":{{"input_tokens":100,"output_tokens":50,"speed":"fast","cache_creation":{{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}}}}}}}}"#,
+            recent_ts(1, 0)
+        );
+        fs::write(
+            &transcript,
+            format!(
+                "{fast_line}\n{}\n",
+                claude_line("m2", "r2", &recent_ts(1, 30), 50)
+            ),
+        )
+        .unwrap();
+
+        let mut events = run(&db, &transcript).unwrap();
+        events.sort_by_key(|e| value_u64(e, token_usage_pos::SPEED));
+        assert_eq!(events.len(), 2, "one event per speed, same model+bucket");
+        for event in &events {
+            assert_eq!(
+                value_u64(event, token_usage_pos::BUCKET_TS),
+                Some(bucket_of(1, 0))
+            );
+        }
+        let standard = &events[0];
+        assert_eq!(value_u64(standard, token_usage_pos::SPEED), Some(0));
+        assert_eq!(
+            value_u64(standard, token_usage_pos::SPEED_INFERRED),
+            Some(1),
+            "no usage.speed marker was recorded on the standard entry"
+        );
+        assert_eq!(
+            value_u64(standard, token_usage_pos::TRANSCRIPT_COST_MICRO_USD),
+            Some(0)
+        );
+        // Catalog-priced: the pricing catalog id rides its dedicated
+        // attribute (custom_attributes stays free for the org map).
+        let attrs = EventAttributes::from_sparse(&standard.attrs);
+        assert_eq!(
+            attrs.pricing_catalog.flatten().as_deref(),
+            Some(crate::metrics::model_pricing::pricing_catalog_id())
+        );
+        assert_eq!(attrs.custom_attributes, None);
+
+        let fast = &events[1];
+        assert_eq!(value_u64(fast, token_usage_pos::SPEED), Some(1));
+        assert_eq!(
+            value_u64(fast, token_usage_pos::CACHE_WRITE_TOKENS),
+            Some(30)
+        );
+        assert_eq!(
+            value_u64(fast, token_usage_pos::CACHE_WRITE_1H_TOKENS),
+            Some(20)
+        );
+        // costUSD 0.5 -> the whole cost is transcript-provided; no catalog.
+        assert_eq!(
+            value_u64(fast, token_usage_pos::TRANSCRIPT_COST_MICRO_USD),
+            Some(500_000)
+        );
+        assert_eq!(
+            value_u64(fast, token_usage_pos::EST_COST_MICRO_USD),
+            Some(500_000)
+        );
+        let attrs = EventAttributes::from_sparse(&fast.attrs);
+        assert!(attrs.pricing_catalog.flatten().is_none());
+    }
+
+    fn codex_meta_line(id: &str, forked_from: Option<&str>, ts: &str) -> String {
+        let fork = forked_from
+            .map(|parent| format!(r#","forked_from_id":"{parent}""#))
+            .unwrap_or_default();
+        format!(r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{id}"{fork}}}}}"#)
+    }
+
+    fn codex_usage_line(ts: &str, totals: (u64, u64, u64, u64, u64)) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{},"cached_input_tokens":{},"output_tokens":{},"reasoning_output_tokens":{},"total_tokens":{}}}}}}}}}"#,
+            totals.0, totals.1, totals.2, totals.3, totals.4
+        )
+    }
+
+    #[test]
+    fn forked_codex_replay_is_skipped_via_the_tracked_parent() {
+        // The child's leading event replays the parent's history with a
+        // rewritten timestamp and its own turn follows 30s later — far past
+        // the burst window, so only parent-prefix matching can tell the
+        // replay apart (and the rewritten timestamp gives it a fresh
+        // content-derived key, so dedup alone would double count).
+        let (dir, db, _) = setup();
+        let identity = SessionIdentity {
+            tool: "codex".to_string(),
+            external_session_id: "parent-ext".to_string(),
+            ..identity()
+        };
+        let parent_path = dir.path().join("parent.jsonl");
+        fs::write(
+            &parent_path,
+            format!(
+                "{}\n{}\n",
+                codex_meta_line("parent-ext", None, &recent_ts(0, 30)),
+                codex_usage_line(&recent_ts(1, 0), (100, 40, 50, 10, 150)),
+            ),
+        )
+        .unwrap();
+        assert_eq!(run_as(&db, &identity, &parent_path).unwrap().len(), 1);
+
+        let child_path = dir.path().join("child.jsonl");
+        fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n{}\n",
+                codex_meta_line("child-ext", Some("parent-ext"), &recent_ts(2, 0)),
+                codex_usage_line(&recent_ts(2, 0), (100, 40, 50, 10, 150)),
+                codex_usage_line(&recent_ts(2, 30), (300, 140, 90, 30, 390)),
+            ),
+        )
+        .unwrap();
+        let events = run_as(&db, &identity, &child_path).unwrap();
+        assert_eq!(events.len(), 1);
+        // Parent's 60 + the child's own 100 — without the 60 the replayed
+        // copy would have re-added.
+        assert_eq!(
+            value_u64(&events[0], token_usage_pos::INPUT_TOKENS),
+            Some(160)
+        );
+        assert_eq!(
+            value_u64(&events[0], token_usage_pos::MESSAGE_COUNT),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn forked_codex_parent_is_found_by_scanning_the_sessions_tree() {
+        // The parent rollout exists on disk but was never tracked (the child
+        // is processed first): resolution falls back to scanning the codex
+        // sessions tree and confirming the recorded session id.
+        let (dir, db, _) = setup();
+        let day_dir = dir.path().join("sessions/2026/01/09");
+        fs::create_dir_all(&day_dir).unwrap();
+        fs::write(
+            day_dir.join("rollout-parent-ext.jsonl"),
+            format!(
+                "{}\n{}\n",
+                codex_meta_line("parent-ext", None, &recent_ts(0, 30)),
+                codex_usage_line(&recent_ts(1, 0), (100, 40, 50, 10, 150)),
+            ),
+        )
+        .unwrap();
+        let child_path = day_dir.join("rollout-child-ext.jsonl");
+        fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n{}\n",
+                codex_meta_line("child-ext", Some("parent-ext"), &recent_ts(2, 0)),
+                codex_usage_line(&recent_ts(2, 0), (100, 40, 50, 10, 150)),
+                codex_usage_line(&recent_ts(2, 30), (300, 140, 90, 30, 390)),
+            ),
+        )
+        .unwrap();
+
+        let identity = SessionIdentity {
+            tool: "codex".to_string(),
+            external_session_id: "parent-ext".to_string(),
+            ..identity()
+        };
+        let events = run_as(&db, &identity, &child_path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            value_u64(&events[0], token_usage_pos::INPUT_TOKENS),
+            Some(100),
+            "only the child's own delta counts"
+        );
+    }
+
+    #[test]
+    fn forked_codex_parent_is_found_under_archived_sessions() {
+        // Codex moves archived rollouts to `archived_sessions`, a sibling of
+        // `sessions`: a fork whose parent was archived must still resolve
+        // instead of falling back to the burst heuristic.
+        let (dir, db, _) = setup();
+        let archived_dir = dir.path().join("archived_sessions/2026/01/08");
+        fs::create_dir_all(&archived_dir).unwrap();
+        fs::write(
+            archived_dir.join("rollout-parent-ext.jsonl"),
+            format!(
+                "{}\n{}\n",
+                codex_meta_line("parent-ext", None, &recent_ts(0, 30)),
+                codex_usage_line(&recent_ts(1, 0), (100, 40, 50, 10, 150)),
+            ),
+        )
+        .unwrap();
+        let day_dir = dir.path().join("sessions/2026/01/09");
+        fs::create_dir_all(&day_dir).unwrap();
+        let child_path = day_dir.join("rollout-child-ext.jsonl");
+        fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n{}\n",
+                codex_meta_line("child-ext", Some("parent-ext"), &recent_ts(2, 0)),
+                codex_usage_line(&recent_ts(2, 0), (100, 40, 50, 10, 150)),
+                codex_usage_line(&recent_ts(2, 30), (300, 140, 90, 30, 390)),
+            ),
+        )
+        .unwrap();
+
+        let identity = SessionIdentity {
+            tool: "codex".to_string(),
+            external_session_id: "parent-ext".to_string(),
+            ..identity()
+        };
+        let events = run_as(&db, &identity, &child_path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            value_u64(&events[0], token_usage_pos::INPUT_TOKENS),
+            Some(100),
+            "only the child's own delta counts"
+        );
+    }
+
+    #[test]
+    fn codex_config_service_tier_is_the_fallback_for_unmarked_entries() {
+        // A rollout under a codex home whose config.toml requests the fast
+        // tier: unmarked entries resolve to fast (inferred), while a recorded
+        // tier still wins.
+        let (dir, db, _) = setup();
+        let codex_home = dir.path().join(".codex");
+        fs::create_dir_all(codex_home.join("sessions")).unwrap();
+        fs::write(
+            codex_home.join("config.toml"),
+            "model = \"gpt-5.1\"\nservice_tier = \"fast\" # priority lane\n",
+        )
+        .unwrap();
+        let transcript = codex_home.join("sessions").join("rollout-test.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n{}\n",
+                codex_usage_line(&recent_ts(1, 0), (100, 40, 50, 10, 150)),
+                r#"{"timestamp":"2026-01-01T00:02:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"standard"}}}"#,
+                codex_usage_line(&recent_ts(3, 0), (300, 140, 90, 30, 390)),
+            ),
+        )
+        .unwrap();
+        let identity = SessionIdentity {
+            tool: "codex".to_string(),
+            ..identity()
+        };
+        run_as(&db, &identity, &transcript).unwrap();
+
+        let conn =
+            crate::sqlite::open_with_memory_limits(dir.path().join("token-usage-db")).unwrap();
+        // Both turns land in the same 5-minute bucket, so order by insertion
+        // (file) order rather than the tying bucket_ts.
+        let rows: Vec<(u64, i64, bool)> = conn
+            .prepare("SELECT input_tokens, speed, speed_inferred FROM usage_entries ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        // First turn: unmarked -> config fast, inferred. Second: recorded
+        // standard wins, not inferred.
+        assert_eq!(rows, vec![(60, 1, true), (100, 0, false)]);
+    }
+
+    #[test]
     fn cross_session_replacement_reconciles_the_previous_owner_without_its_file() {
         let (dir, db, transcript_a) = setup();
         let identity_a = identity();
@@ -1500,6 +2205,7 @@ mod tests {
         let identity_b = SessionIdentity {
             session_id: "s_resumed".to_string(),
             external_session_id: "ext-resumed".to_string(),
+            external_parent_session_id: None,
             tool: "claude".to_string(),
         };
         let transcript_b = dir.path().join("resumed.jsonl");
@@ -1556,6 +2262,7 @@ mod tests {
         let identity_b = SessionIdentity {
             session_id: "s_resumed".to_string(),
             external_session_id: "ext-resumed".to_string(),
+            external_parent_session_id: None,
             tool: "claude".to_string(),
         };
         let transcript_b = dir.path().join("resumed.jsonl");
@@ -1571,7 +2278,7 @@ mod tests {
         assert!(
             reconcile_flagged_sessions(&db, &|_: &[MetricEvent]| {
                 Err(GitAiError::Generic("sink down".to_string()))
-            })
+            },)
             .is_err()
         );
         assert_eq!(db.sessions_needing_reconcile().unwrap().len(), 1);
@@ -1585,6 +2292,287 @@ mod tests {
         .unwrap();
         assert_eq!(collected.into_inner().unwrap().len(), 1);
         assert!(db.sessions_needing_reconcile().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sweep_origin_pass_defers_cross_session_reconcile() {
+        // A throttled (sweep-origin) pass must NOT reconcile flagged
+        // sessions inline: during a large backfill that would re-aggregate
+        // every flagged session after every file, unthrottled. The durable
+        // flag stays for the run loop to settle; a notify-origin pass still
+        // settles it inline for the drain barrier.
+        let dir = tempfile::tempdir().unwrap();
+        let streams_db =
+            Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
+        let token_db =
+            Arc::new(TokenUsageDatabase::open(dir.path().join("token-usage-db")).unwrap());
+        let base = dir.path().join("base.jsonl");
+        fs::write(
+            &base,
+            format!("{}\n", claude_line("m1", "r1", &recent_ts(1, 0), 50)),
+        )
+        .unwrap();
+        let resume = dir.path().join("resume.jsonl");
+        fs::write(
+            &resume,
+            format!("{}\n", claude_line("m1", "r1", &recent_ts(1, 30), 90)),
+        )
+        .unwrap();
+        for (session, path) in [("s_base", &base), ("s_resume", &resume)] {
+            streams_db
+                .insert_stream(&stream_record(
+                    session,
+                    "claude",
+                    &path.display().to_string(),
+                ))
+                .unwrap();
+        }
+        let (_collected, sink) = collecting_sink();
+        let noop_throttle = |_: Duration| {};
+        for session in ["s_base", "s_resume"] {
+            process_task_blocking(
+                &streams_db,
+                &token_db,
+                &|e| sink(e),
+                Some(&noop_throttle),
+                TaskOrigin::Sweep,
+                &TokenUsageTask {
+                    session_id: session.to_string(),
+                    tool: "claude".to_string(),
+                    stream_path: if session == "s_base" { &base } else { &resume }
+                        .display()
+                        .to_string(),
+                },
+                &flag_off(),
+            )
+            .unwrap();
+        }
+        // The resume pass moved m1 to s_resume and flagged s_base — and the
+        // sweep-origin pass left the flag alone.
+        assert_eq!(token_db.sessions_needing_reconcile().unwrap().len(), 1);
+
+        // A notify-origin (unthrottled) pass settles all flags inline.
+        process_task_blocking(
+            &streams_db,
+            &token_db,
+            &|e| sink(e),
+            None,
+            TaskOrigin::Notify,
+            &TokenUsageTask {
+                session_id: "s_resume".to_string(),
+                tool: "claude".to_string(),
+                stream_path: resume.display().to_string(),
+            },
+            &flag_off(),
+        )
+        .unwrap();
+        assert!(token_db.sessions_needing_reconcile().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_loop_settles_sweep_reconcile_flags_when_the_backlog_drains() {
+        // End to end through run(): the startup sweep backfills a base
+        // session and a resumed copy that steals its entry; the deferred
+        // reconcile pass runs once the backlog drains and emits the base
+        // session's corrected (zeroed) bucket without any notification.
+        let dir = tempfile::tempdir().unwrap();
+        let streams_db =
+            Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
+        let token_db =
+            Arc::new(TokenUsageDatabase::open(dir.path().join("token-usage-db")).unwrap());
+        let base = dir.path().join("base.jsonl");
+        fs::write(
+            &base,
+            format!("{}\n", claude_line("m1", "r1", &recent_ts(1, 0), 50)),
+        )
+        .unwrap();
+        let resume = dir.path().join("resume.jsonl");
+        fs::write(
+            &resume,
+            format!("{}\n", claude_line("m1", "r1", &recent_ts(1, 30), 90)),
+        )
+        .unwrap();
+        for (session, path) in [("s_base", &base), ("s_resume", &resume)] {
+            streams_db
+                .insert_stream(&stream_record(
+                    session,
+                    "claude",
+                    &path.display().to_string(),
+                ))
+                .unwrap();
+        }
+        let (collected, sink) = collecting_sink();
+        let (_handle, shutdown) = spawn_run_loop(
+            streams_db.clone(),
+            token_db.clone(),
+            sink,
+            Duration::from_secs(600),
+        );
+
+        // The correction is a re-emission of s_base's bucket at zero.
+        for _ in 0..600 {
+            let corrected = collected.lock().unwrap().iter().any(|e| {
+                EventAttributes::from_sparse(&e.attrs).session_id
+                    == Some(Some("s_base".to_string()))
+                    && value_u64(e, token_usage_pos::TOTAL_TOKENS) == Some(0)
+            });
+            if corrected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let corrected = collected.lock().unwrap().iter().any(|e| {
+            EventAttributes::from_sparse(&e.attrs).session_id == Some(Some("s_base".to_string()))
+                && value_u64(e, token_usage_pos::TOTAL_TOKENS) == Some(0)
+        });
+        assert!(corrected, "deferred reconcile emits the correction");
+        assert!(token_db.sessions_needing_reconcile().unwrap().is_empty());
+        shutdown.notify_one();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_reconcile_yields_to_fresh_notifications_between_sessions() {
+        // The deferred pass reconciles one session per blocking job and
+        // hands control back when notify traffic arrives: the remaining
+        // durable flags must not make a fresh notification (or drain) wait
+        // out throttle pauses for the whole flag set.
+        let dir = tempfile::tempdir().unwrap();
+        let streams_db =
+            Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
+        let token_db =
+            Arc::new(TokenUsageDatabase::open(dir.path().join("token-usage-db")).unwrap());
+        for (session, message) in [("s_base1", "m1"), ("s_base2", "m2")] {
+            let path = dir.path().join(format!("{session}.jsonl"));
+            fs::write(
+                &path,
+                format!("{}\n", claude_line(message, message, &recent_ts(1, 0), 50)),
+            )
+            .unwrap();
+            let identity = SessionIdentity {
+                session_id: session.to_string(),
+                external_session_id: format!("{session}-ext"),
+                external_parent_session_id: None,
+                tool: "claude".to_string(),
+            };
+            run_as(&token_db, &identity, &path).unwrap();
+        }
+        // One resumed session steals an entry from each base session,
+        // flagging both.
+        let resume = dir.path().join("resume.jsonl");
+        fs::write(
+            &resume,
+            format!(
+                "{}\n{}\n",
+                claude_line("m1", "m1", &recent_ts(1, 30), 90),
+                claude_line("m2", "m2", &recent_ts(1, 30), 90)
+            ),
+        )
+        .unwrap();
+        let identity = SessionIdentity {
+            session_id: "s_resume".to_string(),
+            external_session_id: "s_resume-ext".to_string(),
+            external_parent_session_id: None,
+            tool: "claude".to_string(),
+        };
+        run_as(&token_db, &identity, &resume).unwrap();
+        assert_eq!(token_db.sessions_needing_reconcile().unwrap().len(), 2);
+
+        let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_collected, sink) = collecting_sink();
+        let mut worker = TokenUsageWorker {
+            streams_db,
+            token_db: token_db.clone(),
+            telemetry: DaemonTelemetryWorkerHandle::new_noop(),
+            shutdown_notify: Arc::new(Notify::new()),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            notify_rx,
+            drain_rx,
+            notify_queue: VecDeque::new(),
+            sweep_queue: VecDeque::new(),
+            queued: HashSet::new(),
+            sweep_interval: Duration::from_secs(600),
+            test_sink: Some(sink),
+            test_throttle: Some(Arc::new(|_| {})),
+        };
+        notify_tx
+            .send(TokenUsageTask {
+                session_id: "s_resume".to_string(),
+                tool: "claude".to_string(),
+                stream_path: resume.display().to_string(),
+            })
+            .unwrap();
+        worker.reconcile_flagged().await;
+        assert_eq!(
+            token_db.sessions_needing_reconcile().unwrap().len(),
+            1,
+            "one session settled, then control returned to the queued notification"
+        );
+
+        // With no pending traffic, the pass runs the flag set dry.
+        worker.notify_rx.try_recv().unwrap();
+        worker.reconcile_flagged().await;
+        assert!(token_db.sessions_needing_reconcile().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_settles_reconcile_flags_before_acknowledging() {
+        // The barrier must not report success while corrections are still
+        // pending: flags left over (e.g. by a failed inline pass, or by a
+        // deferred sweep settle a pending drain suppressed) are settled
+        // before the drain acknowledgment, so by the time `git-ai await`
+        // returns, the corrections are in the sink.
+        let dir = tempfile::tempdir().unwrap();
+        let streams_db =
+            Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
+        let token_db =
+            Arc::new(TokenUsageDatabase::open(dir.path().join("token-usage-db")).unwrap());
+        let base = dir.path().join("base.jsonl");
+        fs::write(
+            &base,
+            format!("{}\n", claude_line("m1", "r1", &recent_ts(1, 0), 50)),
+        )
+        .unwrap();
+        let resume = dir.path().join("resume.jsonl");
+        fs::write(
+            &resume,
+            format!("{}\n", claude_line("m1", "r1", &recent_ts(1, 30), 90)),
+        )
+        .unwrap();
+        let identity_base = SessionIdentity {
+            session_id: "s_base".to_string(),
+            external_session_id: "s_base-ext".to_string(),
+            external_parent_session_id: None,
+            tool: "claude".to_string(),
+        };
+        let identity_resume = SessionIdentity {
+            session_id: "s_resume".to_string(),
+            external_session_id: "s_resume-ext".to_string(),
+            external_parent_session_id: None,
+            tool: "claude".to_string(),
+        };
+        run_as(&token_db, &identity_base, &base).unwrap();
+        run_as(&token_db, &identity_resume, &resume).unwrap();
+        // The replacement left s_base flagged (run_as never reconciles).
+        assert_eq!(token_db.sessions_needing_reconcile().unwrap().len(), 1);
+
+        let (collected, sink) = collecting_sink();
+        let (handle, shutdown) = spawn_run_loop(
+            streams_db.clone(),
+            token_db.clone(),
+            sink,
+            Duration::from_secs(600),
+        );
+        handle.drain().await.unwrap();
+        // The ack has been received: the flag is already settled and the
+        // correction already handed to the sink.
+        assert!(token_db.sessions_needing_reconcile().unwrap().is_empty());
+        let corrected = collected.lock().unwrap().iter().any(|e| {
+            EventAttributes::from_sparse(&e.attrs).session_id == Some(Some("s_base".to_string()))
+                && value_u64(e, token_usage_pos::TOTAL_TOKENS) == Some(0)
+        });
+        assert!(corrected, "correction emitted before the drain ack");
+        shutdown.notify_one();
     }
 
     #[test]
@@ -1602,6 +2590,7 @@ mod tests {
         let identity_b = SessionIdentity {
             session_id: "s_resumed".to_string(),
             external_session_id: "ext-resumed".to_string(),
+            external_parent_session_id: None,
             tool: "claude".to_string(),
         };
         let transcript_b = dir.path().join("resumed.jsonl");
@@ -1724,7 +2713,7 @@ mod tests {
         // The settled file's snapshot matches its current metadata.
         let metadata = fs::metadata(&settled_path).unwrap();
         token_db
-            .ensure_file("s_settled", &settled_path, "claude", "s_settled-ext")
+            .ensure_file("s_settled", &settled_path, "claude", "s_settled-ext", None)
             .unwrap();
         token_db
             .update_file_metadata(
@@ -1788,9 +2777,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn processing_errors_are_recorded_under_the_rollup_session() {
-        // Subagent transcripts track under their parent session id, so error
-        // recording must use the same key or the UPDATE matches no row.
+    async fn processing_errors_are_recorded_under_the_leaf_session() {
+        // Subagent transcripts track under their own session id (leaf
+        // attribution), so error recording must use the same key or the
+        // UPDATE matches no row.
         let dir = tempfile::tempdir().unwrap();
         let streams_db =
             Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
@@ -1811,14 +2801,20 @@ mod tests {
             &token_db,
             &|_: &[MetricEvent]| Ok(()),
             None,
+            TaskOrigin::Notify,
             &task,
             &AtomicBool::new(false),
         );
         assert!(result.is_err());
 
-        let parent_session = generate_session_id("parent-ext", "claude");
         let tracked = token_db
-            .ensure_file(&parent_session, &missing, "claude", "parent-ext")
+            .ensure_file(
+                "s_child",
+                &missing,
+                "claude",
+                "child-ext",
+                Some("parent-ext"),
+            )
             .unwrap();
         assert_eq!(tracked.processing_errors, 1);
         assert!(tracked.last_error_at.is_some());
@@ -1826,41 +2822,124 @@ mod tests {
     }
 
     #[test]
-    fn subagent_stream_rolls_up_to_parent_session() {
+    fn subagent_stream_owns_its_usage_and_carries_the_parent() {
+        // Leaf attribution: the transcript's own session owns the usage;
+        // the parent is a relationship, not the owner (same identity model
+        // as SessionEvents).
         let mut stream = stream_record("s_child", "claude", "/tmp/child.jsonl");
         stream.external_session_id = "child-ext".to_string();
         stream.external_parent_session_id = Some("parent-ext".to_string());
         let identity = SessionIdentity::from_stream(&stream);
+        assert_eq!(identity.session_id, "s_child");
+        assert_eq!(identity.external_session_id, "child-ext");
         assert_eq!(
-            identity.session_id,
-            generate_session_id("parent-ext", "claude")
+            identity.external_parent_session_id.as_deref(),
+            Some("parent-ext")
         );
-        assert_eq!(identity.external_session_id, "parent-ext");
 
         stream.external_parent_session_id = None;
         let identity = SessionIdentity::from_stream(&stream);
         assert_eq!(identity.session_id, "s_child");
-        assert_eq!(identity.external_session_id, "child-ext");
+        assert_eq!(identity.external_parent_session_id, None);
     }
 
     #[test]
-    fn throttle_pause_holds_the_duty_cycle() {
-        // Below the floor: not throttled (quiet skips, small appends), so
-        // notification-driven work and the drain barrier stay fast.
-        assert_eq!(throttle_pause_for(Duration::from_millis(4)), Duration::ZERO);
-        // 30% duty cycle: work W is followed by a pause of 7W/3.
+    fn background_pauses_are_serialized_reservations() {
+        // Two pipelines settling concurrently must queue their pauses, not
+        // overlap them: the second caller is told to wait out the first
+        // caller's outstanding reservation plus its own pause, so combined
+        // background CPU holds one duty cycle instead of two.
+        let ledger = std::sync::Mutex::new(BackgroundLedger {
+            debt: Duration::ZERO,
+            paused_until: None,
+        });
+        let first = reserve_background_pause(&ledger, Duration::from_millis(300));
+        assert!(
+            first >= Duration::from_millis(690) && first <= Duration::from_millis(710),
+            "own pause only: {first:?}"
+        );
+        // Settle immediately (the first sleeper has not woken): queued.
+        let second = reserve_background_pause(&ledger, Duration::from_millis(300));
+        assert!(
+            second >= Duration::from_millis(1380) && second <= Duration::from_millis(1420),
+            "queued behind the first reservation: {second:?}"
+        );
+
+        // A caller that under-sleeps its reservation (the flush caps its
+        // sleeps) forgives nothing: with zero new work, the wait returned to
+        // the next caller still covers the outstanding reservation.
+        let remainder = reserve_background_pause(&ledger, Duration::ZERO);
+        assert!(
+            remainder >= Duration::from_millis(1350),
+            "reservation persists: {remainder:?}"
+        );
+    }
+
+    #[test]
+    fn no_caller_waits_past_the_pause_cap_and_refused_pause_stays_owed() {
+        // Stacked reservations must not make one sweep sleep exceed the cap
+        // (fresh notifications and drains wait behind at most one capped
+        // pause), and pause that does not fit the horizon is refunded to
+        // the debt ledger rather than forgiven.
+        let ledger = std::sync::Mutex::new(BackgroundLedger {
+            debt: Duration::ZERO,
+            paused_until: None,
+        });
+        for _ in 0..4 {
+            let wait = reserve_background_pause(&ledger, Duration::from_secs(30));
+            assert!(
+                wait <= THROTTLE_MAX_PAUSE,
+                "wait bounded by the cap: {wait:?}"
+            );
+        }
+        // 120s of work owes ~280s of pause; the horizon granted at most 5s.
+        // The refused remainder must survive as debt: even with no new
+        // work, settlements keep owing full capped pauses.
+        let debt = ledger.lock().unwrap().debt;
+        assert!(
+            debt >= Duration::from_secs(100),
+            "refused pause refunded as debt: {debt:?}"
+        );
+    }
+
+    #[test]
+    fn throttle_debt_holds_the_duty_cycle_across_small_segments() {
+        // 30% duty cycle: work W is followed by a pause of 7W/3, and the
+        // ledger returns to (near) zero.
+        let mut debt = Duration::ZERO;
         assert_eq!(
-            throttle_pause_for(Duration::from_millis(300)),
+            settle_throttle_debt(&mut debt, Duration::from_millis(300)),
             Duration::from_millis(700)
         );
+        assert!(debt < Duration::from_micros(10), "paid debt clears");
+
+        // Below the floor no pause is owed yet, but the work is NOT
+        // forgiven: it stays on the ledger and a later settlement pays it.
+        // (Without the carry, a backfill of many small files would never
+        // pause at all.)
+        let mut debt = Duration::ZERO;
         assert_eq!(
-            throttle_pause_for(Duration::from_millis(900)),
-            Duration::from_millis(2100)
+            settle_throttle_debt(&mut debt, Duration::from_millis(4)),
+            Duration::ZERO
         );
-        // Capped, so one pathologically slow batch cannot stall a drain or
-        // shutdown for minutes.
+        assert_eq!(debt, Duration::from_millis(4));
         assert_eq!(
-            throttle_pause_for(Duration::from_secs(60)),
+            settle_throttle_debt(&mut debt, Duration::from_millis(2)),
+            Duration::from_millis(14)
+        );
+        assert!(debt < Duration::from_micros(10));
+
+        // Capped, so one pathologically slow segment cannot stall a drain
+        // or shutdown for minutes; the unpaid remainder carries.
+        let mut debt = Duration::ZERO;
+        assert_eq!(
+            settle_throttle_debt(&mut debt, Duration::from_secs(60)),
+            THROTTLE_MAX_PAUSE
+        );
+        // 5s of pause pays ~2.14s of work; the rest stays owed.
+        assert!(debt > Duration::from_secs(57));
+        assert_eq!(
+            settle_throttle_debt(&mut debt, Duration::ZERO),
             THROTTLE_MAX_PAUSE
         );
     }
@@ -1874,11 +2953,11 @@ mod tests {
     }
 
     #[test]
-    fn throttled_passes_pay_a_pause_per_batch_and_quiet_skips_pay_nothing() {
-        // Pins the call site (finding: deleting the throttle call failed no
-        // test): a throttled multi-batch pass owes exactly one pause per
-        // batch commit, recorded via the injectable sleeper — no wall-clock
-        // assertions needed.
+    fn throttled_passes_charge_each_batch_and_emission_and_quiet_skips_pay_nothing() {
+        // Pins the charge sites (finding: deleting the throttle call failed
+        // no test): a throttled multi-batch pass charges once per batch
+        // commit plus once for bucket emission, recorded via the injectable
+        // recorder — no wall-clock assertions needed.
         let (_dir, db, transcript) = setup();
         let mut content = String::new();
         for i in 0..(BATCH_MAX_ENTRIES + 1) {
@@ -1892,8 +2971,8 @@ mod tests {
         }
         fs::write(&transcript, content).unwrap();
 
-        let pauses = Mutex::new(Vec::new());
-        let recorder = |pause: Duration| pauses.lock().unwrap().push(pause);
+        let charges = Mutex::new(Vec::new());
+        let recorder = |work: Duration| charges.lock().unwrap().push(work);
         let flag = AtomicBool::new(false);
         process_file(
             &db,
@@ -1905,9 +2984,13 @@ mod tests {
             Some(&recorder),
         )
         .unwrap();
-        assert_eq!(pauses.lock().unwrap().len(), 2, "one pause per batch");
+        assert_eq!(
+            charges.lock().unwrap().len(),
+            3,
+            "one charge per batch plus one for emission"
+        );
 
-        // Quiet skip: unchanged bytes owe no pause at all.
+        // Quiet skip: unchanged bytes charge nothing at all.
         process_file(
             &db,
             &identity(),
@@ -1918,7 +3001,7 @@ mod tests {
             Some(&recorder),
         )
         .unwrap();
-        assert_eq!(pauses.lock().unwrap().len(), 2, "quiet skip pays nothing");
+        assert_eq!(charges.lock().unwrap().len(), 3, "quiet skip pays nothing");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2039,13 +3122,14 @@ mod tests {
             &token_db,
             &|e| sink(e),
             None,
+            TaskOrigin::Notify,
             &task,
             &flag_off(),
         )
         .unwrap();
         assert!(collected.lock().unwrap().is_empty(), "turn stays parked");
         let tracked = token_db
-            .ensure_file("s_fork", &path_str, "codex", "s_fork-ext")
+            .ensure_file("s_fork", &path_str, "codex", "s_fork-ext", None)
             .unwrap();
         assert!(tracked.pending_flush);
         // The bytes have not changed, but the pending flush alone keeps the
@@ -2062,6 +3146,7 @@ mod tests {
             &token_db,
             &|e| sink(e),
             None,
+            TaskOrigin::Notify,
             &task,
             &flag_off(),
         )
@@ -2073,7 +3158,7 @@ mod tests {
             Some(15)
         );
         let tracked = token_db
-            .ensure_file("s_fork", &path_str, "codex", "s_fork-ext")
+            .ensure_file("s_fork", &path_str, "codex", "s_fork-ext", None)
             .unwrap();
         assert!(!tracked.pending_flush);
         assert!(sweep_candidates(&streams_db, &token_db).is_empty());
@@ -2240,5 +3325,592 @@ mod tests {
             .filter(|e| value_u64(e, token_usage_pos::BUCKET_TS) == Some(bucket_of(1, 0)))
             .count();
         assert_eq!(first_bucket_emissions, 1, "restart must not re-emit");
+    }
+
+    /// CPU/RSS profile of a cold backfill over a realistic corpus, at the
+    /// real run() loop with the real throttle. Ignored: run manually with
+    /// `task test TEST_FILTER=bench_backfill_cpu_duty NO_CAPTURE=true \
+    ///  EXTRA_TEST_BINARY_ARGS="--ignored"` and read the printed duty
+    /// timeline. Guards the ~30% sweep duty-cycle contract end to end —
+    /// including emission and cross-session reconciliation, not just the
+    /// parse batches.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    #[cfg(target_os = "linux")] // CPU/RSS sampling reads /proc
+    async fn bench_backfill_cpu_duty() {
+        const BASE_SESSIONS: usize = 240;
+        const LINES_PER_SESSION: usize = 800;
+        const RESUME_SESSIONS: usize = 120;
+        const SIDECHAIN_SESSIONS: usize = 60;
+        const CODEX_SESSIONS: usize = 40;
+        const CODEX_TURNS: usize = 600;
+        const CODEX_FORKS: usize = 20;
+        const SMALL_SESSIONS: usize = 400;
+
+        fn cpu_ticks() -> u64 {
+            let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+            // utime + stime are fields 14 + 15; comm (field 2) may contain
+            // spaces, so parse after the closing paren.
+            let after = &stat[stat.rfind(')').unwrap() + 2..];
+            let fields: Vec<&str> = after.split_whitespace().collect();
+            fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+        }
+        fn rss_kb() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let streams_db =
+            Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
+        let token_db =
+            Arc::new(TokenUsageDatabase::open(dir.path().join("token-usage-db")).unwrap());
+
+        let claude_usage = |sess: usize, i: usize, output: u64| {
+            // ~55 buckets per session, all inside the retention window.
+            let ts = recent_ts((i / 8) as u32 % 1200, (i % 8) as u32 * 7);
+            format!(
+                r#"{{"timestamp":"{ts}","sessionId":"ext-{sess}","requestId":"r{sess}_{i}","message":{{"id":"m{sess}_{i}","model":"claude-sonnet-4-6-20260115","usage":{{"input_tokens":220,"output_tokens":{output},"cache_creation_input_tokens":40,"cache_read_input_tokens":18000}}}}}}"#
+            )
+        };
+
+        let insert = |session: &str, tool: &str, path: &std::path::Path| {
+            streams_db
+                .insert_stream(&stream_record(session, tool, &path.display().to_string()))
+                .unwrap();
+        };
+
+        let mut total_bytes = 0usize;
+        // Base claude sessions first (the bulk parse phase).
+        for sess in 0..BASE_SESSIONS {
+            let mut body = String::with_capacity(LINES_PER_SESSION * 320);
+            for i in 0..LINES_PER_SESSION {
+                body.push_str(&claude_usage(sess, i, 900));
+                body.push('\n');
+            }
+            total_bytes += body.len();
+            let path = dir.path().join(format!("claude-{sess}.jsonl"));
+            fs::write(&path, body).unwrap();
+            insert(&format!("s_claude_{sess}"), "claude", &path);
+        }
+        // Many small sessions (the common real shape): each is one batch of
+        // a few milliseconds — work the throttle floor must accumulate, not
+        // forgive, or this whole phase runs unthrottled.
+        for sess in 0..SMALL_SESSIONS {
+            let mut body = String::with_capacity(12 * 320);
+            for i in 0..12usize {
+                body.push_str(&claude_usage(BASE_SESSIONS + sess, i, 900));
+                body.push('\n');
+            }
+            total_bytes += body.len();
+            let path = dir.path().join(format!("claude-small-{sess}.jsonl"));
+            fs::write(&path, body).unwrap();
+            insert(&format!("s_claude_small_{sess}"), "claude", &path);
+        }
+        // Codex rollouts + forks replaying a parent prefix.
+        for sess in 0..CODEX_SESSIONS {
+            let mut body = String::with_capacity(CODEX_TURNS * 300);
+            body.push_str(&codex_meta_line(
+                &format!("codex-{sess}"),
+                None,
+                &recent_ts(0, 5),
+            ));
+            body.push('\n');
+            for i in 0..CODEX_TURNS {
+                let base = (i as u64 + 1) * 1200;
+                body.push_str(&codex_usage_line(
+                    &recent_ts((i / 6) as u32 % 1200, (i % 6) as u32 * 9),
+                    (base, base / 3, base / 10, base / 40, base + base / 10),
+                ));
+                body.push('\n');
+            }
+            total_bytes += body.len();
+            let path = dir.path().join(format!("codex-{sess}.jsonl"));
+            fs::write(&path, body).unwrap();
+            insert(&format!("s_codex_{sess}"), "codex", &path);
+        }
+        for fork in 0..CODEX_FORKS {
+            let parent = fork % CODEX_SESSIONS;
+            let mut body = String::new();
+            body.push_str(&codex_meta_line(
+                &format!("fork-{fork}"),
+                Some(&format!("codex-{parent}")),
+                &recent_ts(600, 0),
+            ));
+            body.push('\n');
+            // Replay the parent's first 50 cumulative totals verbatim.
+            for i in 0..50usize {
+                let base = (i as u64 + 1) * 1200;
+                body.push_str(&codex_usage_line(
+                    &recent_ts(600, 1),
+                    (base, base / 3, base / 10, base / 40, base + base / 10),
+                ));
+                body.push('\n');
+            }
+            // Then its own turns.
+            for i in 50..80usize {
+                let base = (i as u64 + 1) * 1300;
+                body.push_str(&codex_usage_line(
+                    &recent_ts(601 + (i as u32 - 50), 0),
+                    (base, base / 3, base / 10, base / 40, base + base / 10),
+                ));
+                body.push('\n');
+            }
+            total_bytes += body.len();
+            let path = dir.path().join(format!("codex-fork-{fork}.jsonl"));
+            fs::write(&path, body).unwrap();
+            let mut record = stream_record(
+                &format!("s_codex_fork_{fork}"),
+                "codex",
+                &path.display().to_string(),
+            );
+            record.external_session_id = format!("fork-{fork}");
+            record.external_parent_session_id = Some(format!("codex-{parent}"));
+            streams_db.insert_stream(&record).unwrap();
+        }
+        // Sidechain replays (message-id dedup against the base sessions).
+        for sc in 0..SIDECHAIN_SESSIONS {
+            let parent = sc % BASE_SESSIONS;
+            let mut body = String::new();
+            for i in 0..120usize {
+                let ts = recent_ts((i / 8) as u32 % 1200, (i % 8) as u32 * 7);
+                body.push_str(&format!(
+                    r#"{{"timestamp":"{ts}","isSidechain":true,"sessionId":"ext-sc-{sc}","requestId":"rsc{sc}_{i}","message":{{"id":"m{parent}_{i}","model":"claude-sonnet-4-6-20260115","usage":{{"input_tokens":220,"output_tokens":900,"cache_creation_input_tokens":40,"cache_read_input_tokens":45000}}}}}}"#
+                ));
+                body.push('\n');
+            }
+            total_bytes += body.len();
+            let path = dir.path().join(format!("claude-sc-{sc}.jsonl"));
+            fs::write(&path, body).unwrap();
+            let mut record = stream_record(
+                &format!("s_claude_sc_{sc}"),
+                "claude",
+                &path.display().to_string(),
+            );
+            record.external_session_id = format!("sc-{sc}-ext");
+            record.external_parent_session_id = Some(format!("ext-{parent}"));
+            streams_db.insert_stream(&record).unwrap();
+        }
+        // Resume copies LAST: every duplicated message carries larger totals,
+        // so each line replaces the base session's row and flags it for
+        // reconciliation — the storm lands at the end of the cycle, like a
+        // real backfill tail.
+        for res in 0..RESUME_SESSIONS {
+            let parent = res % BASE_SESSIONS;
+            let mut body = String::with_capacity(LINES_PER_SESSION * 320);
+            for i in 0..LINES_PER_SESSION {
+                body.push_str(&claude_usage(parent, i, 910));
+                body.push('\n');
+            }
+            total_bytes += body.len();
+            let path = dir.path().join(format!("claude-resume-{res}.jsonl"));
+            fs::write(&path, body).unwrap();
+            insert(&format!("s_claude_res_{res}"), "claude", &path);
+        }
+
+        let files = BASE_SESSIONS
+            + SMALL_SESSIONS
+            + CODEX_SESSIONS
+            + CODEX_FORKS
+            + SIDECHAIN_SESSIONS
+            + RESUME_SESSIONS;
+        println!(
+            "corpus: {files} files, {:.1} MiB",
+            total_bytes as f64 / 1048576.0
+        );
+
+        // Sample process CPU + RSS at 100ms.
+        let stop = Arc::new(AtomicBool::new(false));
+        let sampler_stop = stop.clone();
+        let sampler = std::thread::spawn(move || {
+            let tick_hz = 100.0; // Linux USER_HZ
+            let mut last = cpu_ticks();
+            let mut samples: Vec<f64> = Vec::new();
+            let mut max_rss = 0u64;
+            while !sampler_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                let now = cpu_ticks();
+                samples.push((now - last) as f64 / tick_hz / 0.1 * 100.0);
+                last = now;
+                max_rss = max_rss.max(rss_kb());
+            }
+            (samples, max_rss)
+        });
+
+        let started = std::time::Instant::now();
+        let (collected, sink) = collecting_sink();
+        let (_handle, shutdown) = spawn_run_loop(
+            streams_db.clone(),
+            token_db.clone(),
+            sink,
+            Duration::from_secs(600),
+        );
+
+        // Done when every file is quiet (size/mtime snapshots written, no
+        // pending flushes) and nothing is left to reconcile.
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let streams_db = streams_db.clone();
+            let token_db = token_db.clone();
+            let quiet = tokio::task::spawn_blocking(move || {
+                sweep_candidates(&streams_db, &token_db).is_empty()
+                    && token_db.sessions_needing_reconcile().unwrap().is_empty()
+            })
+            .await
+            .unwrap();
+            if quiet && started.elapsed() > Duration::from_secs(2) {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(1200), "bench hung");
+        }
+        let wall = started.elapsed();
+        shutdown.notify_one();
+        stop.store(true, Ordering::Relaxed);
+        let (samples, max_rss) = sampler.join().unwrap();
+
+        let events = collected.lock().unwrap().len();
+        let total_cpu: f64 = samples.iter().sum::<f64>() * 0.1 / 100.0;
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |q: f64| sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)];
+        println!(
+            "wall={:.1}s cpu={:.1}s avg_duty={:.0}% p50={:.0}% p95={:.0}% max={:.0}% max_rss={}MiB events={events}",
+            wall.as_secs_f64(),
+            total_cpu,
+            total_cpu / wall.as_secs_f64() * 100.0,
+            pct(0.5),
+            pct(0.95),
+            sorted[sorted.len() - 1],
+            max_rss / 1024,
+        );
+        // 1-second duty timeline (10 samples each).
+        let timeline: Vec<String> = samples
+            .chunks(10)
+            .map(|c| format!("{:.0}", c.iter().sum::<f64>() / c.len() as f64))
+            .collect();
+        println!("duty/s: {}", timeline.join(" "));
+    }
+
+    /// CPU/RSS profile over a small number of GIANT transcripts (500MB-2GB
+    /// each, ~8GB total), the complement of `bench_backfill_cpu_duty`'s
+    /// many-small-files corpus: single-file batch chains hundreds of
+    /// batches long, a fork prefix streamed from a 1GB parent, a resume
+    /// copy flagging a giant session, and pathological single lines (100MB
+    /// unmatched, 50MB matching the usage prefilter) that bound the line
+    /// buffer and parse allocations. Ignored: needs ~8GB free in the temp
+    /// dir; run manually with NO_CAPTURE and --ignored and read the
+    /// printed duty/RSS timeline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    #[cfg(target_os = "linux")] // CPU/RSS sampling reads /proc
+    async fn bench_giant_transcripts_cpu_rss() {
+        use std::io::Write;
+
+        fn cpu_ticks() -> u64 {
+            let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+            let after = &stat[stat.rfind(')').unwrap() + 2..];
+            let fields: Vec<&str> = after.split_whitespace().collect();
+            fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+        }
+        fn rss_kb() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let streams_db =
+            Arc::new(StreamsDatabase::open(dir.path().join("transcripts-db")).unwrap());
+        let token_db =
+            Arc::new(TokenUsageDatabase::open(dir.path().join("token-usage-db")).unwrap());
+
+        // ~3KB noise lines that miss each tool's prefilter.
+        let claude_noise = format!(
+            "{{\"type\":\"assistant\",\"timestamp\":\"{}\",\"content\":\"{}\"}}\n",
+            recent_ts(1, 0),
+            "n".repeat(3000)
+        );
+        let codex_noise = format!(
+            "{{\"timestamp\":\"{}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"{}\"}}}}\n",
+            recent_ts(1, 0),
+            "n".repeat(3000)
+        );
+        let claude_usage = |sess: &str, i: usize, output: u64| {
+            let ts = recent_ts((i / 12) as u32 % 1000, (i % 12) as u32 * 5);
+            format!(
+                "{{\"timestamp\":\"{ts}\",\"sessionId\":\"ext-{sess}\",\"requestId\":\"r{sess}_{i}\",\"message\":{{\"id\":\"m{sess}_{i}\",\"model\":\"claude-sonnet-4-6-20260115\",\"usage\":{{\"input_tokens\":220,\"output_tokens\":{output},\"cache_creation_input_tokens\":40,\"cache_read_input_tokens\":18000}}}}}}\n"
+            )
+        };
+        let codex_usage = |i: usize| {
+            let base = (i as u64 + 1) * 1500;
+            format!(
+                "{}\n",
+                codex_usage_line(
+                    &recent_ts((i / 12) as u32 % 1000, (i % 12) as u32 * 5),
+                    (base, base / 3, base / 10, base / 40, base + base / 10),
+                )
+            )
+        };
+
+        // Write `target` bytes: one usage line per `interval` noise lines.
+        let write_claude_giant = |path: &std::path::Path, sess: &str, target: u64, output: u64| {
+            let mut w = std::io::BufWriter::with_capacity(
+                1024 * 1024,
+                std::fs::File::create(path).unwrap(),
+            );
+            let mut written = 0u64;
+            let mut i = 0usize;
+            while written < target {
+                for _ in 0..50 {
+                    w.write_all(claude_noise.as_bytes()).unwrap();
+                    written += claude_noise.len() as u64;
+                }
+                let usage = claude_usage(sess, i, output);
+                w.write_all(usage.as_bytes()).unwrap();
+                written += usage.len() as u64;
+                i += 1;
+            }
+            w.flush().unwrap();
+        };
+        let write_codex_giant = |path: &std::path::Path, ext_id: &str, target: u64| {
+            let mut w = std::io::BufWriter::with_capacity(
+                1024 * 1024,
+                std::fs::File::create(path).unwrap(),
+            );
+            let meta = format!("{}\n", codex_meta_line(ext_id, None, &recent_ts(0, 1)));
+            w.write_all(meta.as_bytes()).unwrap();
+            let mut written = meta.len() as u64;
+            let mut i = 0usize;
+            while written < target {
+                for _ in 0..50 {
+                    w.write_all(codex_noise.as_bytes()).unwrap();
+                    written += codex_noise.len() as u64;
+                }
+                let usage = codex_usage(i);
+                w.write_all(usage.as_bytes()).unwrap();
+                written += usage.len() as u64;
+                i += 1;
+            }
+            w.flush().unwrap();
+        };
+        let insert = |session: &str, tool: &str, path: &std::path::Path, parent: Option<&str>| {
+            let mut record = stream_record(session, tool, &path.display().to_string());
+            if let Some(parent) = parent {
+                record.external_parent_session_id = Some(parent.to_string());
+            }
+            streams_db.insert_stream(&record).unwrap();
+        };
+
+        const GB: u64 = 1024 * 1024 * 1024;
+        const MB: u64 = 1024 * 1024;
+        let gen_started = std::time::Instant::now();
+
+        for (name, size) in [
+            ("g0", 2 * GB),
+            ("g1", GB),
+            ("g2", 800 * MB),
+            ("g3", 500 * MB),
+        ] {
+            let path = dir.path().join(format!("claude-{name}.jsonl"));
+            write_claude_giant(&path, name, size, 900);
+            insert(&format!("s_claude_{name}"), "claude", &path, None);
+        }
+
+        // Pathological single lines: a 100MB line missing the prefilter and
+        // a 50MB line matching it (a real usage object at the end), inside a
+        // 500MB file of normal traffic.
+        {
+            let path = dir.path().join("claude-hugeline.jsonl");
+            write_claude_giant(&path, "hl", 350 * MB, 900);
+            let mut w = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            let unmatched = format!(
+                "{{\"type\":\"assistant\",\"content\":\"{}\"}}\n",
+                "x".repeat(100 * MB as usize)
+            );
+            w.write_all(unmatched.as_bytes()).unwrap();
+            drop(unmatched);
+            let matched = format!(
+                "{{\"timestamp\":\"{}\",\"sessionId\":\"ext-hl\",\"requestId\":\"rhl_huge\",\"filler\":\"{}\",\"message\":{{\"id\":\"mhl_huge\",\"model\":\"claude-sonnet-4-6-20260115\",\"usage\":{{\"input_tokens\":220,\"output_tokens\":900,\"cache_creation_input_tokens\":40,\"cache_read_input_tokens\":18000}}}}}}\n",
+                recent_ts(999, 0),
+                "y".repeat(50 * MB as usize)
+            );
+            w.write_all(matched.as_bytes()).unwrap();
+            w.flush().unwrap();
+            insert("s_claude_hl", "claude", &path, None);
+        }
+
+        // Resume copy of the 2GB giant's usage with larger totals: every
+        // duplicated id replaces g0's row and flags a ~14k-entry session.
+        {
+            let path = dir.path().join("claude-resume-g0.jsonl");
+            let mut w = std::io::BufWriter::with_capacity(
+                1024 * 1024,
+                std::fs::File::create(&path).unwrap(),
+            );
+            let mut written = 0u64;
+            let mut i = 0usize;
+            while written < 500 * MB {
+                for _ in 0..50 {
+                    w.write_all(claude_noise.as_bytes()).unwrap();
+                    written += claude_noise.len() as u64;
+                }
+                let usage = claude_usage("g0", i, 910);
+                w.write_all(usage.as_bytes()).unwrap();
+                written += usage.len() as u64;
+                i += 1;
+            }
+            w.flush().unwrap();
+            insert("s_claude_resume", "claude", &path, None);
+        }
+
+        for (name, size) in [("cg0", GB), ("cg1", 700 * MB), ("cg2", 500 * MB)] {
+            let path = dir.path().join(format!("codex-{name}.jsonl"));
+            write_codex_giant(&path, name, size);
+            insert(&format!("s_codex_{name}"), "codex", &path, None);
+        }
+
+        // A 300MB fork child of the 1GB parent: prefix resolution streams
+        // the parent up to the fork instant. The replayed head repeats the
+        // parent's first cumulative totals verbatim.
+        {
+            let path = dir.path().join("codex-fork.jsonl");
+            let mut w = std::io::BufWriter::with_capacity(
+                1024 * 1024,
+                std::fs::File::create(&path).unwrap(),
+            );
+            let meta = format!(
+                "{}\n",
+                codex_meta_line("fork-child", Some("cg0"), &recent_ts(1100, 0))
+            );
+            w.write_all(meta.as_bytes()).unwrap();
+            for i in 0..200usize {
+                w.write_all(codex_usage(i).as_bytes()).unwrap();
+            }
+            let mut written = 0u64;
+            let mut i = 200usize;
+            while written < 300 * MB {
+                for _ in 0..50 {
+                    w.write_all(codex_noise.as_bytes()).unwrap();
+                    written += codex_noise.len() as u64;
+                }
+                let base = (i as u64 + 1) * 1700;
+                let own = format!(
+                    "{}\n",
+                    codex_usage_line(
+                        &recent_ts(1101 + (i as u32 % 90), (i % 12) as u32 * 5),
+                        (base, base / 3, base / 10, base / 40, base + base / 10),
+                    )
+                );
+                w.write_all(own.as_bytes()).unwrap();
+                written += own.len() as u64;
+                i += 1;
+            }
+            w.flush().unwrap();
+            let mut record = stream_record("s_codex_fork", "codex", &path.display().to_string());
+            record.external_session_id = "fork-child".to_string();
+            record.external_parent_session_id = Some("cg0".to_string());
+            streams_db.insert_stream(&record).unwrap();
+        }
+
+        let total: u64 = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        println!(
+            "corpus: {:.1} GiB in 10 giants, generated in {:.0}s",
+            total as f64 / GB as f64,
+            gen_started.elapsed().as_secs_f64()
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let sampler_stop = stop.clone();
+        let sampler = std::thread::spawn(move || {
+            let mut last = cpu_ticks();
+            let mut cpu: Vec<f64> = Vec::new();
+            let mut rss: Vec<u64> = Vec::new();
+            while !sampler_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                let now = cpu_ticks();
+                cpu.push((now - last) as f64);
+                last = now;
+                rss.push(rss_kb());
+            }
+            (cpu, rss)
+        });
+
+        let started = std::time::Instant::now();
+        let (collected, sink) = collecting_sink();
+        let (_handle, shutdown) = spawn_run_loop(
+            streams_db.clone(),
+            token_db.clone(),
+            sink,
+            Duration::from_secs(3600),
+        );
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let streams_db = streams_db.clone();
+            let token_db = token_db.clone();
+            let quiet = tokio::task::spawn_blocking(move || {
+                sweep_candidates(&streams_db, &token_db).is_empty()
+                    && token_db.sessions_needing_reconcile().unwrap().is_empty()
+            })
+            .await
+            .unwrap();
+            if quiet && started.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(1800), "bench hung");
+        }
+        let wall = started.elapsed();
+        shutdown.notify_one();
+        stop.store(true, Ordering::Relaxed);
+        let (cpu, rss) = sampler.join().unwrap();
+
+        let events = collected.lock().unwrap().len();
+        let total_cpu: f64 = cpu.iter().sum::<f64>() / 1000.0;
+        let mut cpu_sorted = cpu.clone();
+        cpu_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct =
+            |q: f64| cpu_sorted[((cpu_sorted.len() as f64 * q) as usize).min(cpu_sorted.len() - 1)];
+        let mut rss_sorted = rss.clone();
+        rss_sorted.sort_unstable();
+        println!(
+            "wall={:.0}s cpu={:.0}s avg_duty={:.0}% p95={:.0}% max={:.0}% rss_p50={}MiB rss_p95={}MiB rss_max={}MiB events={events}",
+            wall.as_secs_f64(),
+            total_cpu,
+            total_cpu / wall.as_secs_f64() * 100.0,
+            pct(0.95),
+            cpu_sorted[cpu_sorted.len() - 1],
+            rss_sorted[rss_sorted.len() / 2] / 1024,
+            rss_sorted[((rss_sorted.len() as f64 * 0.95) as usize).min(rss_sorted.len() - 1)]
+                / 1024,
+            rss_sorted[rss_sorted.len() - 1] / 1024,
+        );
+        let duty_line: Vec<String> = cpu
+            .chunks(50)
+            .map(|c| format!("{:.0}", c.iter().sum::<f64>() / c.len() as f64))
+            .collect();
+        println!("duty/5s: {}", duty_line.join(" "));
+        let rss_line: Vec<String> = rss
+            .chunks(50)
+            .map(|c| format!("{}", c.iter().max().unwrap() / 1024))
+            .collect();
+        println!("rssMiB/5s: {}", rss_line.join(" "));
     }
 }

@@ -8,6 +8,7 @@ use git_ai::daemon::{
     local_socket_connects_with_timeout, open_local_socket_stream_with_timeout,
     send_control_request,
 };
+use git_ai::utils::LockFile;
 #[cfg(not(windows))]
 use interprocess::local_socket::traits::Stream;
 use repos::test_repo::{DaemonTestScope, TestRepo, get_binary_path, real_git_executable};
@@ -18,7 +19,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -673,4 +674,88 @@ fn daemon_reaps_idle_control_connection_after_valid_request() {
     wait_for_control_connection_close(&mut reader, Duration::from_secs(15));
 
     shutdown_daemon(&repo);
+}
+
+/// `bg shutdown` returns before the old daemon releases its lock, so a login
+/// start racing that window sees "lock held". `--retry-secs` keeps trying
+/// within a bounded window instead of giving up on the first attempt.
+#[test]
+fn daemon_start_retries_while_lock_is_held() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    write_daemon_config(&repo);
+    let lock_path = DaemonConfig::from_home(&repo.daemon_home_path()).lock_path;
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let held_lock = LockFile::try_acquire(&lock_path).expect("test should hold the daemon lock");
+
+    let output = daemon_command_output(&repo, &["bg", "start"], repo.test_home_path());
+    assert!(
+        !output.status.success(),
+        "bg start without --retry-secs should fail while the lock is held"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("lock held"),
+        "stderr should explain the held lock: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let releaser = thread::spawn(move || {
+        thread::sleep(Duration::from_secs(1));
+        drop(held_lock);
+    });
+    let started = Instant::now();
+    let output = daemon_command_output(
+        &repo,
+        &["bg", "start", "--retry-secs", "20"],
+        repo.test_home_path(),
+    );
+    releaser.join().unwrap();
+    assert!(
+        output.status.success(),
+        "bg start --retry-secs should succeed once the lock is released: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "bg start should return as soon as the daemon is up, not after the whole retry window"
+    );
+
+    wait_for_daemon_sockets(&repo);
+    shutdown_daemon(&repo);
+}
+
+#[test]
+fn daemon_start_rejects_invalid_retry_window() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    write_daemon_config(&repo);
+
+    let output = daemon_command_output(
+        &repo,
+        &["bg", "start", "--retry-secs", "soon"],
+        repo.test_home_path(),
+    );
+    assert!(
+        !output.status.success(),
+        "a non-numeric --retry-secs must be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--retry-secs"),
+        "stderr should name the bad flag: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = daemon_command_output(
+        &repo,
+        &["bg", "start", "--retry-secs", &u64::MAX.to_string()],
+        repo.test_home_path(),
+    );
+    assert!(
+        !output.status.success(),
+        "an overflowing --retry-secs must be rejected, not panic"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--retry-secs is too large"),
+        "stderr should explain the rejected window: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

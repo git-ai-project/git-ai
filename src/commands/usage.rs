@@ -105,7 +105,8 @@ pub fn handle_usage(args: &[String]) {
             + stats.tokens.output
             + stats.tokens.cache_read
             + stats.tokens.cache_creation
-            == 0;
+            == 0
+        && stats.tokens.estimated_cost_usd == 0.0;
     if no_data {
         eprintln!(
             "No activity data found for the {} window.",

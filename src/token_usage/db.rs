@@ -40,8 +40,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::claude::{ReplacementCandidate, should_replace};
-use super::cost::entry_cost_micro_usd;
-use super::types::{UsageEntry, bucket_ts};
+use super::cost::price_entry;
+use super::types::{Speed, UsageEntry, bucket_ts};
 use crate::error::GitAiError;
 
 /// Schema migrations - each entry is SQL to apply for that version.
@@ -130,11 +130,191 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO schema_version (version) VALUES (2);
     "#,
+    // Version 3: per-entry pricing dimensions (speed/service tier, tier
+    // inference, 1h cache-write split, transcript-vs-catalog cost provenance,
+    // long-context tier decision, pricing catalog id). Pre-release reset: v2
+    // rows carry neither the new extraction facts nor tier-aware costs, so
+    // the tables are rebuilt and the dropped cursors make the next pass
+    // re-extract every transcript under the new pricing rules (entry-level
+    // dedup keeps that idempotent; emission reconciles by fingerprint).
+    r#"
+    DROP TABLE IF EXISTS tracked_files;
+    DROP TABLE IF EXISTS usage_entries;
+    DROP TABLE IF EXISTS bucket_state;
+
+    CREATE TABLE tracked_files (
+        session_id  TEXT NOT NULL,
+        stream_path TEXT NOT NULL,
+        tool        TEXT NOT NULL,
+        byte_offset INTEGER NOT NULL DEFAULT 0,
+        state_json  TEXT,
+        last_known_size INTEGER NOT NULL DEFAULT 0,
+        last_modified INTEGER,
+        processing_errors INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        pending_flush INTEGER NOT NULL DEFAULT 0,
+        last_error_at INTEGER,
+        external_session_id TEXT NOT NULL DEFAULT '',
+        needs_reconcile INTEGER NOT NULL DEFAULT 0,
+        repo_url TEXT,
+        PRIMARY KEY (session_id, stream_path)
+    );
+
+    CREATE TABLE usage_entries (
+        session_id TEXT NOT NULL,
+        entry_key  TEXT NOT NULL,
+        message_id TEXT,
+        model      TEXT NOT NULL,
+        bucket_ts  INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_output_tokens INTEGER,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_micro_usd INTEGER,
+        transcript_cost_micro_usd INTEGER,
+        is_sidechain INTEGER NOT NULL DEFAULT 0,
+        speed INTEGER,
+        speed_inferred INTEGER NOT NULL DEFAULT 0,
+        long_context INTEGER NOT NULL DEFAULT 0,
+        pricing_catalog TEXT,
+        PRIMARY KEY (session_id, entry_key)
+    );
+
+    CREATE INDEX idx_usage_entries_bucket
+        ON usage_entries(session_id, model, bucket_ts);
+    CREATE INDEX idx_usage_entries_message
+        ON usage_entries(session_id, message_id) WHERE message_id IS NOT NULL;
+    CREATE UNIQUE INDEX idx_usage_entries_key
+        ON usage_entries(entry_key);
+    CREATE INDEX idx_usage_entries_message_global
+        ON usage_entries(message_id) WHERE message_id IS NOT NULL;
+
+    CREATE TABLE bucket_state (
+        session_id TEXT NOT NULL,
+        model      TEXT NOT NULL,
+        bucket_ts  INTEGER NOT NULL,
+        emitted_fingerprint TEXT NOT NULL,
+        last_emitted_at INTEGER NOT NULL,
+        emit_seq INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_id, model, bucket_ts)
+    );
+
+    INSERT INTO schema_version (version) VALUES (3);
+    "#,
+    // Version 4: buckets gain the speed dimension (fast and standard usage
+    // of one model bill at different rates, so they must never share a
+    // bucket identity on the server). Pre-release reset like v3. The
+    // expression index matches the reconciliation GROUP BY exactly —
+    // grouping by COALESCE(speed, 0) over the plain bucket index would
+    // otherwise sort every session aggregate through a temp B-tree — and
+    // fully supersedes v3's plain bucket index, which no remaining query
+    // uses, so that one is dropped rather than maintained on every write.
+    r#"
+    CREATE INDEX idx_usage_entries_bucket_speed
+        ON usage_entries(session_id, model, COALESCE(speed, 0), bucket_ts);
+    DROP INDEX IF EXISTS idx_usage_entries_bucket;
+
+    DROP TABLE bucket_state;
+
+    CREATE TABLE bucket_state (
+        session_id TEXT NOT NULL,
+        model      TEXT NOT NULL,
+        speed      INTEGER NOT NULL DEFAULT 0,
+        bucket_ts  INTEGER NOT NULL,
+        emitted_fingerprint TEXT NOT NULL,
+        last_emitted_at INTEGER NOT NULL,
+        emit_seq INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_id, model, speed, bucket_ts)
+    );
+
+    INSERT INTO schema_version (version) VALUES (4);
+    "#,
+    // Version 5: leaf session attribution. Usage is owned by the transcript's
+    // own session — subagent/fork transcripts no longer roll up into their
+    // parent — with the parent carried as a relationship
+    // (tracked_files.external_parent_session_id, emitted as the
+    // parent_session_id/external_parent_session_id attributes, matching
+    // SessionEvents). Pre-release reset like v3: existing rows are keyed by
+    // the rolled-up parent session and cannot be reassigned (they don't
+    // record their source rollout), so the tables are rebuilt and the next
+    // pass re-extracts everything under leaf identities.
+    r#"
+    DROP TABLE IF EXISTS tracked_files;
+    DROP TABLE IF EXISTS usage_entries;
+    DROP TABLE IF EXISTS bucket_state;
+
+    CREATE TABLE tracked_files (
+        session_id  TEXT NOT NULL,
+        stream_path TEXT NOT NULL,
+        tool        TEXT NOT NULL,
+        byte_offset INTEGER NOT NULL DEFAULT 0,
+        state_json  TEXT,
+        last_known_size INTEGER NOT NULL DEFAULT 0,
+        last_modified INTEGER,
+        processing_errors INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        pending_flush INTEGER NOT NULL DEFAULT 0,
+        last_error_at INTEGER,
+        external_session_id TEXT NOT NULL DEFAULT '',
+        external_parent_session_id TEXT,
+        needs_reconcile INTEGER NOT NULL DEFAULT 0,
+        repo_url TEXT,
+        PRIMARY KEY (session_id, stream_path)
+    );
+
+    CREATE TABLE usage_entries (
+        session_id TEXT NOT NULL,
+        entry_key  TEXT NOT NULL,
+        message_id TEXT,
+        model      TEXT NOT NULL,
+        bucket_ts  INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_output_tokens INTEGER,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_micro_usd INTEGER,
+        transcript_cost_micro_usd INTEGER,
+        is_sidechain INTEGER NOT NULL DEFAULT 0,
+        speed INTEGER,
+        speed_inferred INTEGER NOT NULL DEFAULT 0,
+        long_context INTEGER NOT NULL DEFAULT 0,
+        pricing_catalog TEXT,
+        PRIMARY KEY (session_id, entry_key)
+    );
+
+    CREATE INDEX idx_usage_entries_bucket_speed
+        ON usage_entries(session_id, model, COALESCE(speed, 0), bucket_ts);
+    CREATE INDEX idx_usage_entries_message
+        ON usage_entries(session_id, message_id) WHERE message_id IS NOT NULL;
+    CREATE UNIQUE INDEX idx_usage_entries_key
+        ON usage_entries(entry_key);
+    CREATE INDEX idx_usage_entries_message_global
+        ON usage_entries(message_id) WHERE message_id IS NOT NULL;
+
+    CREATE TABLE bucket_state (
+        session_id TEXT NOT NULL,
+        model      TEXT NOT NULL,
+        speed      INTEGER NOT NULL DEFAULT 0,
+        bucket_ts  INTEGER NOT NULL,
+        emitted_fingerprint TEXT NOT NULL,
+        last_emitted_at INTEGER NOT NULL,
+        emit_seq INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_id, model, speed, bucket_ts)
+    );
+
+    INSERT INTO schema_version (version) VALUES (5);
+    "#,
 ];
 
 const TRACKED_FILE_COLUMNS: &str = "session_id, stream_path, tool, byte_offset, state_json, \
      last_known_size, last_modified, processing_errors, last_error_at, pending_flush, \
-     external_session_id, needs_reconcile, repo_url";
+     external_session_id, external_parent_session_id, needs_reconcile, repo_url";
 
 /// A tracked transcript file: read cursor plus extractor state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,9 +331,12 @@ pub struct TrackedFile {
     /// The extractor reported buffered entries at the end of the last pass;
     /// the file must be re-processed even if its bytes have not changed.
     pub pending_flush: bool,
-    /// External id of the rollup session (for emission attributes when the
+    /// The session's own external id (for emission attributes when the
     /// session is reconciled without reading any file).
     pub external_session_id: String,
+    /// External id of the parent session for subagent/fork transcripts;
+    /// emitted as the parent-relationship attributes.
+    pub external_parent_session_id: Option<String>,
     /// A cross-session replacement changed this session's buckets; it must
     /// be re-reconciled even if none of its files change (or still exist).
     pub needs_reconcile: bool,
@@ -175,24 +358,47 @@ fn read_tracked_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackedFile> {
         last_error_at: row.get(8)?,
         pending_flush: row.get(9)?,
         external_session_id: row.get(10)?,
-        needs_reconcile: row.get(11)?,
-        repo_url: row.get(12)?,
+        external_parent_session_id: row.get(11)?,
+        needs_reconcile: row.get(12)?,
+        repo_url: row.get(13)?,
     })
 }
 
-/// The aggregate of one `(session_id, model, bucket_ts)` bucket, i.e. exactly
-/// the values a TokenUsage event carries.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The aggregate of one `(session_id, model, speed, bucket_ts)` bucket, i.e.
+/// exactly the values a TokenUsage event carries. The long-context sums are
+/// the tokens of entries whose request selected the model's long-context
+/// tier (whole-request selection at pricing time), so a different pricing
+/// sheet can rebill the bucket: base tokens are the totals minus these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BucketAggregate {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// Portion of `cache_write` written with a 1-hour TTL (billed at 2x the
+    /// input rate of the entry's tier).
+    pub cache_write_1h: u64,
     /// `Some` iff any entry in the bucket reported reasoning tokens.
     pub reasoning_output: Option<u64>,
     pub total: u64,
     pub cost_micro_usd: u64,
+    /// Portion of `cost_micro_usd` that came from transcript `costUSD`
+    /// fields — fixed under repricing (its tokens are still in the totals).
+    pub transcript_cost_micro_usd: u64,
     pub message_count: u32,
+    /// Any entry's speed was not recorded in the transcript (resolved from
+    /// configuration or the standard default instead).
+    pub speed_inferred: bool,
+    pub long_context_input: u64,
+    pub long_context_output: u64,
+    pub long_context_cache_read: u64,
+    pub long_context_cache_write: u64,
+    pub long_context_cache_write_1h: u64,
+    /// Greatest (SQL `MAX`, i.e. lexicographic — not most recent) pricing-
+    /// catalog id among the bucket's catalog-priced entries. Buckets price
+    /// under one catalog in practice; one that mixes catalogs (a refresh
+    /// plus daemon restart mid-bucket) is identified approximately.
+    pub pricing_catalog: Option<String>,
 }
 
 impl BucketAggregate {
@@ -200,16 +406,24 @@ impl BucketAggregate {
     /// drop to zero - changes the fingerprint.
     pub fn fingerprint(&self) -> String {
         format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.input,
             self.output,
             self.cache_read,
             self.cache_write,
+            self.cache_write_1h,
             self.reasoning_output
                 .map_or_else(|| "-".to_string(), |v| v.to_string()),
             self.total,
             self.cost_micro_usd,
-            self.message_count
+            self.transcript_cost_micro_usd,
+            self.message_count,
+            self.speed_inferred,
+            self.long_context_input,
+            self.long_context_output,
+            self.long_context_cache_read,
+            self.long_context_cache_write,
+            self.long_context_cache_write_1h,
         )
     }
 }
@@ -219,6 +433,9 @@ impl BucketAggregate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedBucket {
     pub model: String,
+    /// Bucket speed dimension: 0 standard (including entries with no
+    /// recorded marker), 1 fast.
+    pub speed: u8,
     pub bucket_ts: u32,
     pub aggregate: BucketAggregate,
     /// Revision of the last emission for this bucket (0 when never emitted).
@@ -232,8 +449,26 @@ pub struct ChangedBucket {
 pub struct ReconcileSession {
     pub session_id: String,
     pub external_session_id: String,
+    pub external_parent_session_id: Option<String>,
     pub tool: String,
     pub repo_url: Option<String>,
+}
+
+/// Grouped projection of the flagged sessions, shared by the full listing
+/// and the incremental single-session fetch so the two can never diverge.
+const RECONCILE_SESSIONS_SQL: &str =
+    "SELECT session_id, MAX(external_session_id), MAX(external_parent_session_id),
+            MAX(tool), MAX(repo_url)
+     FROM tracked_files WHERE needs_reconcile = 1 GROUP BY session_id";
+
+fn read_reconcile_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReconcileSession> {
+    Ok(ReconcileSession {
+        session_id: row.get(0)?,
+        external_session_id: row.get(1)?,
+        external_parent_session_id: row.get(2)?,
+        tool: row.get(3)?,
+        repo_url: row.get(4)?,
+    })
 }
 
 /// One extracted batch to persist atomically.
@@ -323,6 +558,17 @@ impl TokenUsageDatabase {
         } else {
             0
         };
+        // A database from a NEWER binary must fail closed here: migrations
+        // are destructive from v3 on (columns renamed/dropped), so a
+        // downgraded daemon would otherwise open fine and then fail every
+        // pass at runtime on missing columns, churning error backoff.
+        if current_version > MIGRATIONS.len() as u32 {
+            return Err(GitAiError::Generic(format!(
+                "token-usage database schema v{current_version} is newer than this binary \
+                 (supports up to v{}); upgrade git-ai or delete the database",
+                MIGRATIONS.len()
+            )));
+        }
         for (version, migration_sql) in MIGRATIONS.iter().enumerate() {
             if current_version < (version + 1) as u32 {
                 // Each migration commits atomically: a crash between the
@@ -348,8 +594,9 @@ impl TokenUsageDatabase {
     }
 
     /// Fetch the tracked file row, creating it with a zero cursor when new.
-    /// The rollup session's external id is recorded (or backfilled on rows
-    /// from before it was tracked) so the session can later be reconciled
+    /// The session's external identity (own id, and the parent id for
+    /// subagent/fork transcripts) is recorded — or backfilled on rows from
+    /// before it was tracked — so the session can later be reconciled
     /// without reading any file.
     pub fn ensure_file(
         &self,
@@ -357,17 +604,24 @@ impl TokenUsageDatabase {
         stream_path: &str,
         tool: &str,
         external_session_id: &str,
+        external_parent_session_id: Option<&str>,
     ) -> Result<TrackedFile, GitAiError> {
         let conn = self.lock();
         conn.execute(
-            "INSERT OR IGNORE INTO tracked_files (session_id, stream_path, tool, external_session_id)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, stream_path, tool, external_session_id],
+            "INSERT OR IGNORE INTO tracked_files (session_id, stream_path, tool, external_session_id, external_parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, stream_path, tool, external_session_id, external_parent_session_id],
         )?;
         conn.execute(
             "UPDATE tracked_files SET external_session_id = ?3
              WHERE session_id = ?1 AND stream_path = ?2 AND external_session_id = ''",
             params![session_id, stream_path, external_session_id],
+        )?;
+        conn.execute(
+            "UPDATE tracked_files SET external_parent_session_id = ?3
+             WHERE session_id = ?1 AND stream_path = ?2 AND external_parent_session_id IS NULL
+               AND ?3 IS NOT NULL",
+            params![session_id, stream_path, external_parent_session_id],
         )?;
         Ok(conn.query_row(
             &format!(
@@ -430,19 +684,21 @@ impl TokenUsageDatabase {
     /// file: identity plus the repo_url their events were last emitted with.
     pub fn sessions_needing_reconcile(&self) -> Result<Vec<ReconcileSession>, GitAiError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, MAX(external_session_id), MAX(tool), MAX(repo_url)
-             FROM tracked_files WHERE needs_reconcile = 1 GROUP BY session_id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ReconcileSession {
-                session_id: row.get(0)?,
-                external_session_id: row.get(1)?,
-                tool: row.get(2)?,
-                repo_url: row.get(3)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(RECONCILE_SESSIONS_SQL)?;
+        let rows = stmt.query_map([], read_reconcile_session)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// One flagged session, for callers that reconcile incrementally and
+    /// hand control back between sessions (same grouped projection as
+    /// [`Self::sessions_needing_reconcile`], stopping at the first group).
+    pub fn next_session_needing_reconcile(&self) -> Result<Option<ReconcileSession>, GitAiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!("{RECONCILE_SESSIONS_SQL} LIMIT 1"))?;
+        Ok(stmt
+            .query_map([], read_reconcile_session)?
+            .next()
+            .transpose()?)
     }
 
     /// Persist the repo_url the session's events are emitted with, so later
@@ -458,6 +714,25 @@ impl TokenUsageDatabase {
             params![session_id, repo_url],
         )?;
         Ok(())
+    }
+
+    /// Stream paths tracked under a session's own external id (usage is
+    /// leaf-attributed, so a parent id maps to the parent's own rollout);
+    /// callers still confirm by each file's recorded `session_meta` id.
+    pub fn stream_paths_for_external_session(
+        &self,
+        external_session_id: &str,
+        tool: &str,
+    ) -> Result<Vec<String>, GitAiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT stream_path FROM tracked_files
+             WHERE external_session_id = ?1 AND tool = ?2",
+        )?;
+        let paths = stmt
+            .query_map(params![external_session_id, tool], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(paths)
     }
 
     /// Clear the reconcile flag after the session's buckets were reconciled.
@@ -476,65 +751,55 @@ impl TokenUsageDatabase {
     pub fn changed_buckets(&self, session_id: &str) -> Result<Vec<ChangedBucket>, GitAiError> {
         let conn = self.lock();
 
-        // (model, bucket_ts) -> (fingerprint, emit_seq) of the last emission.
+        // (model, speed, bucket_ts) -> (fingerprint, emit_seq) of the last
+        // emission.
         let mut stmt = conn.prepare(
-            "SELECT model, bucket_ts, emitted_fingerprint, emit_seq
+            "SELECT model, speed, bucket_ts, emitted_fingerprint, emit_seq
              FROM bucket_state WHERE session_id = ?1",
         )?;
-        let emitted: Vec<(String, u32, String, i64)> = stmt
+        let emitted: Vec<(String, u8, u32, String, i64)> = stmt
             .query_map(params![session_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut emitted: std::collections::HashMap<(String, u32), (String, u64)> = emitted
-            .into_iter()
-            .map(|(model, bucket, fp, seq)| ((model, bucket), (fp, seq.max(0) as u64)))
-            .collect();
-
-        let mut stmt = conn.prepare(
-            "SELECT model, bucket_ts,
-                    COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(cache_read_tokens), 0),
-                    COALESCE(SUM(cache_write_tokens), 0),
-                    COUNT(reasoning_output_tokens),
-                    COALESCE(SUM(reasoning_output_tokens), 0),
-                    COALESCE(SUM(total_tokens), 0),
-                    COALESCE(SUM(cost_micro_usd), 0),
-                    COUNT(*)
-             FROM usage_entries
-             WHERE session_id = ?1
-             GROUP BY model, bucket_ts",
-        )?;
-        let aggregates: Vec<(String, u32, BucketAggregate)> = stmt
-            .query_map(params![session_id], |row| {
-                let reasoning_entries: i64 = row.get(6)?;
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
-                    BucketAggregate {
-                        input: row.get::<_, i64>(2)? as u64,
-                        output: row.get::<_, i64>(3)? as u64,
-                        cache_read: row.get::<_, i64>(4)? as u64,
-                        cache_write: row.get::<_, i64>(5)? as u64,
-                        reasoning_output: (reasoning_entries > 0)
-                            .then(|| row.get::<_, i64>(7).map(|v| v as u64))
-                            .transpose()?,
-                        total: row.get::<_, i64>(8)? as u64,
-                        cost_micro_usd: row.get::<_, i64>(9)? as u64,
-                        message_count: row.get::<_, i64>(10)? as u32,
-                    },
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut emitted: std::collections::HashMap<(String, u8, u32), (String, u64)> = emitted
+            .into_iter()
+            .map(|(model, speed, bucket, fp, seq)| {
+                ((model, speed, bucket), (fp, seq.max(0) as u64))
+            })
+            .collect();
+
+        let mut stmt = conn.prepare(&format!(
+            "SELECT model, COALESCE(speed, 0), bucket_ts, {AGGREGATE_COLUMNS}
+             FROM usage_entries
+             WHERE session_id = ?1
+             GROUP BY model, COALESCE(speed, 0), bucket_ts",
+        ))?;
+        let aggregates: Vec<(String, u8, u32, BucketAggregate)> = stmt
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    read_aggregate(row, 3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut changed = Vec::new();
-        for (model, bucket, aggregate) in aggregates {
-            let last = emitted.remove(&(model.clone(), bucket));
+        for (model, speed, bucket, aggregate) in aggregates {
+            let last = emitted.remove(&(model.clone(), speed, bucket));
             let emit_seq = last.as_ref().map_or(0, |(_, seq)| *seq);
             if last.map(|(fp, _)| fp).as_deref() != Some(aggregate.fingerprint().as_str()) {
                 changed.push(ChangedBucket {
                     model,
+                    speed,
                     bucket_ts: bucket,
                     aggregate,
                     emit_seq,
@@ -543,11 +808,12 @@ impl TokenUsageDatabase {
         }
         // Buckets with emission state but no remaining entries: emptied, and
         // re-emitted as zero unless zero was already emitted.
-        for ((model, bucket), (fingerprint, emit_seq)) in emitted {
+        for ((model, speed, bucket), (fingerprint, emit_seq)) in emitted {
             let aggregate = BucketAggregate::default();
             if fingerprint != aggregate.fingerprint() {
                 changed.push(ChangedBucket {
                     model,
+                    speed,
                     bucket_ts: bucket,
                     aggregate,
                     emit_seq,
@@ -595,36 +861,18 @@ impl TokenUsageDatabase {
         &self,
         session_id: &str,
         model: &str,
+        speed: u8,
         bucket: u32,
     ) -> Result<BucketAggregate, GitAiError> {
         Ok(self.lock().query_row(
-            "SELECT COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(cache_read_tokens), 0),
-                    COALESCE(SUM(cache_write_tokens), 0),
-                    COUNT(reasoning_output_tokens),
-                    COALESCE(SUM(reasoning_output_tokens), 0),
-                    COALESCE(SUM(total_tokens), 0),
-                    COALESCE(SUM(cost_micro_usd), 0),
-                    COUNT(*)
-             FROM usage_entries
-             WHERE session_id = ?1 AND model = ?2 AND bucket_ts = ?3",
-            params![session_id, model, bucket],
-            |row| {
-                let reasoning_entries: i64 = row.get(4)?;
-                Ok(BucketAggregate {
-                    input: row.get::<_, i64>(0)? as u64,
-                    output: row.get::<_, i64>(1)? as u64,
-                    cache_read: row.get::<_, i64>(2)? as u64,
-                    cache_write: row.get::<_, i64>(3)? as u64,
-                    reasoning_output: (reasoning_entries > 0)
-                        .then(|| row.get::<_, i64>(5).map(|v| v as u64))
-                        .transpose()?,
-                    total: row.get::<_, i64>(6)? as u64,
-                    cost_micro_usd: row.get::<_, i64>(7)? as u64,
-                    message_count: row.get::<_, i64>(8)? as u32,
-                })
-            },
+            &format!(
+                "SELECT {AGGREGATE_COLUMNS}
+                 FROM usage_entries
+                 WHERE session_id = ?1 AND model = ?2 AND COALESCE(speed, 0) = ?3
+                   AND bucket_ts = ?4"
+            ),
+            params![session_id, model, speed, bucket],
+            |row| read_aggregate(row, 0),
         )?)
     }
 
@@ -633,14 +881,15 @@ impl TokenUsageDatabase {
         &self,
         session_id: &str,
         model: &str,
+        speed: u8,
         bucket: u32,
     ) -> Result<Option<String>, GitAiError> {
         Ok(self
             .lock()
             .query_row(
                 "SELECT emitted_fingerprint FROM bucket_state
-                 WHERE session_id = ?1 AND model = ?2 AND bucket_ts = ?3",
-                params![session_id, model, bucket],
+                 WHERE session_id = ?1 AND model = ?2 AND speed = ?3 AND bucket_ts = ?4",
+                params![session_id, model, speed, bucket],
                 |row| row.get(0),
             )
             .optional()?)
@@ -656,17 +905,17 @@ impl TokenUsageDatabase {
     pub fn reserve_emit_seqs(
         &self,
         session_id: &str,
-        reservations: &[(String, u32, u64)],
+        reservations: &[(String, u8, u32, u64)],
     ) -> Result<(), GitAiError> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        for (model, bucket, emit_seq) in reservations {
+        for (model, speed, bucket, emit_seq) in reservations {
             tx.execute(
-                "INSERT INTO bucket_state (session_id, model, bucket_ts, emitted_fingerprint, emit_seq, last_emitted_at)
-                 VALUES (?1, ?2, ?3, '', ?4, 0)
-                 ON CONFLICT(session_id, model, bucket_ts)
-                 DO UPDATE SET emit_seq = ?4",
-                params![session_id, model, bucket, to_db_i64(*emit_seq)],
+                "INSERT INTO bucket_state (session_id, model, speed, bucket_ts, emitted_fingerprint, emit_seq, last_emitted_at)
+                 VALUES (?1, ?2, ?3, ?4, '', ?5, 0)
+                 ON CONFLICT(session_id, model, speed, bucket_ts)
+                 DO UPDATE SET emit_seq = ?5",
+                params![session_id, model, speed, bucket, to_db_i64(*emit_seq)],
             )?;
         }
         tx.commit()?;
@@ -675,23 +924,26 @@ impl TokenUsageDatabase {
 
     /// Record that the bucket's current aggregate was handed to the metrics
     /// pipeline as revision `emit_seq`.
+    #[allow(clippy::too_many_arguments)]
     pub fn mark_emitted(
         &self,
         session_id: &str,
         model: &str,
+        speed: u8,
         bucket: u32,
         fingerprint: &str,
         emit_seq: u64,
         now_ts: i64,
     ) -> Result<(), GitAiError> {
         self.lock().execute(
-            "INSERT INTO bucket_state (session_id, model, bucket_ts, emitted_fingerprint, emit_seq, last_emitted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(session_id, model, bucket_ts)
-             DO UPDATE SET emitted_fingerprint = ?4, emit_seq = ?5, last_emitted_at = ?6",
+            "INSERT INTO bucket_state (session_id, model, speed, bucket_ts, emitted_fingerprint, emit_seq, last_emitted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(session_id, model, speed, bucket_ts)
+             DO UPDATE SET emitted_fingerprint = ?5, emit_seq = ?6, last_emitted_at = ?7",
             params![
                 session_id,
                 model,
+                speed,
                 bucket,
                 fingerprint,
                 to_db_i64(emit_seq),
@@ -721,6 +973,57 @@ impl TokenUsageDatabase {
     }
 }
 
+/// The SELECT list producing one [`BucketAggregate`], shared by the
+/// reconciliation sweep and the single-bucket lookup so the two can never
+/// disagree on a fingerprint. `long_context` marks entries whose request
+/// selected the long-context tier, so the CASE sums split every token class
+/// by billing tier.
+const AGGREGATE_COLUMNS: &str = "
+    COALESCE(SUM(input_tokens), 0),
+    COALESCE(SUM(output_tokens), 0),
+    COALESCE(SUM(cache_read_tokens), 0),
+    COALESCE(SUM(cache_write_tokens), 0),
+    COALESCE(SUM(cache_write_1h_tokens), 0),
+    COUNT(reasoning_output_tokens),
+    COALESCE(SUM(reasoning_output_tokens), 0),
+    COALESCE(SUM(total_tokens), 0),
+    COALESCE(SUM(cost_micro_usd), 0),
+    COALESCE(SUM(transcript_cost_micro_usd), 0),
+    COUNT(*),
+    COALESCE(MAX(speed_inferred), 0),
+    COALESCE(SUM(CASE WHEN long_context THEN input_tokens ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN long_context THEN output_tokens ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN long_context THEN cache_read_tokens ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN long_context THEN cache_write_tokens ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN long_context THEN cache_write_1h_tokens ELSE 0 END), 0),
+    MAX(pricing_catalog)";
+
+/// Read the [`AGGREGATE_COLUMNS`] starting at column `base`.
+fn read_aggregate(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<BucketAggregate> {
+    let reasoning_entries: i64 = row.get(base + 5)?;
+    Ok(BucketAggregate {
+        input: row.get::<_, i64>(base)? as u64,
+        output: row.get::<_, i64>(base + 1)? as u64,
+        cache_read: row.get::<_, i64>(base + 2)? as u64,
+        cache_write: row.get::<_, i64>(base + 3)? as u64,
+        cache_write_1h: row.get::<_, i64>(base + 4)? as u64,
+        reasoning_output: (reasoning_entries > 0)
+            .then(|| row.get::<_, i64>(base + 6).map(|v| v as u64))
+            .transpose()?,
+        total: row.get::<_, i64>(base + 7)? as u64,
+        cost_micro_usd: row.get::<_, i64>(base + 8)? as u64,
+        transcript_cost_micro_usd: row.get::<_, i64>(base + 9)? as u64,
+        message_count: row.get::<_, i64>(base + 10)? as u32,
+        speed_inferred: row.get(base + 11)?,
+        long_context_input: row.get::<_, i64>(base + 12)? as u64,
+        long_context_output: row.get::<_, i64>(base + 13)? as u64,
+        long_context_cache_read: row.get::<_, i64>(base + 14)? as u64,
+        long_context_cache_write: row.get::<_, i64>(base + 15)? as u64,
+        long_context_cache_write_1h: row.get::<_, i64>(base + 16)? as u64,
+        pricing_catalog: row.get(base + 17)?,
+    })
+}
+
 /// A stored entry's dedup-relevant fields.
 struct ExistingRow {
     rowid: i64,
@@ -744,14 +1047,18 @@ fn upsert_entry(
     match existing {
         Some(row) => {
             if should_replace(entry.into(), row.replacement) {
+                let priced = price_entry(entry);
                 tx.execute(
                     "UPDATE usage_entries SET
                         session_id = ?1, entry_key = ?2, message_id = ?3, model = ?4,
                         bucket_ts = ?5, input_tokens = ?6, output_tokens = ?7,
                         cache_read_tokens = ?8, cache_write_tokens = ?9,
-                        reasoning_output_tokens = ?10, total_tokens = ?11,
-                        cost_micro_usd = ?12, is_sidechain = ?13, has_speed = ?14
-                     WHERE rowid = ?15",
+                        cache_write_1h_tokens = ?10, reasoning_output_tokens = ?11,
+                        total_tokens = ?12, cost_micro_usd = ?13,
+                        transcript_cost_micro_usd = ?14, is_sidechain = ?15,
+                        speed = ?16, speed_inferred = ?17, long_context = ?18,
+                        pricing_catalog = ?19
+                     WHERE rowid = ?20",
                     params![
                         session_id,
                         entry.entry_key,
@@ -762,11 +1069,16 @@ fn upsert_entry(
                         to_db_i64(entry.tokens.output),
                         to_db_i64(entry.tokens.cache_read),
                         to_db_i64(entry.tokens.cache_write),
+                        to_db_i64(entry.cache_write_1h),
                         entry.tokens.reasoning_output.map(to_db_i64),
                         to_db_i64(entry.tokens.total),
-                        entry_cost_micro_usd(entry).map(to_db_i64),
+                        priced.cost_micro_usd.map(to_db_i64),
+                        entry.transcript_cost_micro_usd.map(to_db_i64),
                         entry.is_sidechain,
-                        entry.has_speed,
+                        entry.speed.map(speed_to_db),
+                        entry.speed_inferred,
+                        priced.long_context,
+                        priced.pricing_catalog,
                         row.rowid,
                     ],
                 )?;
@@ -777,13 +1089,16 @@ fn upsert_entry(
             Ok(None)
         }
         None => {
+            let priced = price_entry(entry);
             tx.execute(
                 "INSERT INTO usage_entries (
                     session_id, entry_key, message_id, model, bucket_ts,
                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                    reasoning_output_tokens, total_tokens, cost_micro_usd,
-                    is_sidechain, has_speed
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    cache_write_1h_tokens, reasoning_output_tokens, total_tokens,
+                    cost_micro_usd, transcript_cost_micro_usd, is_sidechain,
+                    speed, speed_inferred, long_context, pricing_catalog
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                           ?15, ?16, ?17, ?18, ?19)",
                 params![
                     session_id,
                     entry.entry_key,
@@ -794,15 +1109,28 @@ fn upsert_entry(
                     to_db_i64(entry.tokens.output),
                     to_db_i64(entry.tokens.cache_read),
                     to_db_i64(entry.tokens.cache_write),
+                    to_db_i64(entry.cache_write_1h),
                     entry.tokens.reasoning_output.map(to_db_i64),
                     to_db_i64(entry.tokens.total),
-                    entry_cost_micro_usd(entry).map(to_db_i64),
+                    priced.cost_micro_usd.map(to_db_i64),
+                    entry.transcript_cost_micro_usd.map(to_db_i64),
                     entry.is_sidechain,
-                    entry.has_speed,
+                    entry.speed.map(speed_to_db),
+                    entry.speed_inferred,
+                    priced.long_context,
+                    priced.pricing_catalog,
                 ],
             )?;
             Ok(None)
         }
+    }
+}
+
+/// Column encoding of a recorded speed (NULL = the transcript carried none).
+fn speed_to_db(speed: Speed) -> i64 {
+    match speed {
+        Speed::Standard => 0,
+        Speed::Fast => 1,
     }
 }
 
@@ -826,7 +1154,8 @@ fn find_dedupe_target(
         })
     };
     const ROW_COLUMNS: &str = "rowid, session_id, input_tokens, output_tokens, \
-                               cache_read_tokens, cache_write_tokens, is_sidechain, has_speed";
+                               cache_read_tokens, cache_write_tokens, is_sidechain, \
+                               speed IS NOT NULL";
 
     let exact = tx
         .query_row(
@@ -875,12 +1204,14 @@ mod tests {
             entry_key: key.to_string(),
             message_id: message_id.map(str::to_string),
             ts,
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             tokens,
             cache_write_1h: 0,
             transcript_cost_micro_usd: Some(1_000),
             is_sidechain: false,
-            has_speed: false,
+            speed: None,
+            speed_inferred: false,
+            pricing_shape: crate::token_usage::PricingShape::Claude,
         }
     }
 
@@ -895,7 +1226,7 @@ mod tests {
 
     fn commit_for(db: &TokenUsageDatabase, session: &str, entries: &[UsageEntry]) {
         let path = format!("/{session}.jsonl");
-        db.ensure_file(session, &path, "claude", &format!("{session}-ext"))
+        db.ensure_file(session, &path, "claude", &format!("{session}-ext"), None)
             .unwrap();
         db.commit_batch(&BatchCommit {
             session_id: session,
@@ -914,21 +1245,80 @@ mod tests {
     }
 
     #[test]
+    fn upsert_stores_the_pricing_dimensions() {
+        let (_dir, db) = db();
+        let mut e = entry(
+            "k1",
+            None,
+            600,
+            TokenCounts {
+                input: 300_000,
+                output: 10,
+                total: 300_010,
+                ..Default::default()
+            },
+        );
+        // Catalog-priced (no transcript cost), fast, and over the sonnet
+        // 200K long-context threshold.
+        e.transcript_cost_micro_usd = None;
+        e.speed = Some(Speed::Fast);
+        commit_for(&db, "s1", &[e.clone()]);
+
+        let conn = db.conn.lock().unwrap();
+        let (cost, speed, long_context, catalog): (u64, i64, bool, Option<String>) = conn
+            .query_row(
+                "SELECT cost_micro_usd, speed, long_context, pricing_catalog FROM usage_entries",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(Some(cost), price_entry(&e).cost_micro_usd);
+        assert_eq!(speed, 1);
+        assert!(long_context);
+        assert_eq!(
+            catalog.as_deref(),
+            Some(crate::metrics::model_pricing::pricing_catalog_id())
+        );
+    }
+
+    #[test]
     fn migrations_apply_and_are_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token-usage-db");
         let db = TokenUsageDatabase::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 5);
         drop(db);
         let db = TokenUsageDatabase::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 5);
+    }
+
+    #[test]
+    fn newer_schema_versions_fail_closed_on_open() {
+        // Migrations are destructive from v3 on, so a downgraded binary must
+        // refuse a database written by a newer one instead of failing every
+        // pass at runtime on missing columns.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token-usage-db");
+        drop(TokenUsageDatabase::open(&path).unwrap());
+        crate::sqlite::open_with_memory_limits(&path)
+            .unwrap()
+            .execute("INSERT INTO schema_version (version) VALUES (99)", [])
+            .unwrap();
+
+        let Err(err) = TokenUsageDatabase::open(&path) else {
+            panic!("opening a newer-schema database must fail closed");
+        };
+        assert!(
+            err.to_string().contains("newer than this binary"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn ensure_file_creates_zero_cursor_and_is_stable() {
         let (_dir, db) = db();
         let file = db
-            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         assert_eq!(file.byte_offset, 0);
         assert_eq!(file.state_json, None);
@@ -944,7 +1334,7 @@ mod tests {
         })
         .unwrap();
         let file = db
-            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         assert_eq!(file.byte_offset, 42);
         assert_eq!(file.state_json.as_deref(), Some("{\"x\":1}"));
@@ -957,10 +1347,10 @@ mod tests {
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         let changed = db.changed_buckets("s1").unwrap();
         assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0].model, "claude-sonnet-4-20250514");
+        assert_eq!(changed[0].model, "claude-sonnet-4-5-20250929");
         assert_eq!(changed[0].bucket_ts, 600);
         assert_eq!(changed[0].emit_seq, 0);
-        let agg = changed[0].aggregate;
+        let agg = changed[0].aggregate.clone();
         assert_eq!(agg.input, 10);
         assert_eq!(agg.output, 5);
         assert_eq!(agg.message_count, 1);
@@ -979,13 +1369,13 @@ mod tests {
         assert!(db.sessions_needing_reconcile().unwrap().is_empty());
         // The entry stays attributed to the first-seen session.
         assert_eq!(
-            db.aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap()
                 .message_count,
             1
         );
         assert_eq!(
-            db.aggregate_bucket("s2", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s2", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap()
                 .message_count,
             0
@@ -1011,6 +1401,7 @@ mod tests {
             vec![ReconcileSession {
                 session_id: "s1".to_string(),
                 external_session_id: "s1-ext".to_string(),
+                external_parent_session_id: None,
                 tool: "claude".to_string(),
                 repo_url: None,
             }]
@@ -1018,13 +1409,13 @@ mod tests {
         db.clear_needs_reconcile("s1").unwrap();
         assert!(db.sessions_needing_reconcile().unwrap().is_empty());
         assert_eq!(
-            db.aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap()
                 .message_count,
             0
         );
         assert_eq!(
-            db.aggregate_bucket("s2", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s2", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap()
                 .output,
             50
@@ -1036,12 +1427,12 @@ mod tests {
         let (_dir, db) = db();
         let e = entry("m1|r1", Some("m1"), 600, tokens(10, 5));
         commit(&db, std::slice::from_ref(&e));
-        let model = "claude-sonnet-4-20250514";
-        let before = db.aggregate_bucket("s1", model, 600).unwrap();
+        let model = "claude-sonnet-4-5-20250929";
+        let before = db.aggregate_bucket("s1", model, 0, 600).unwrap();
         // Identical replay: policy keeps the existing row, aggregate (and
         // therefore the emission fingerprint) is unchanged.
         commit(&db, &[e]);
-        assert_eq!(db.aggregate_bucket("s1", model, 600).unwrap(), before);
+        assert_eq!(db.aggregate_bucket("s1", model, 0, 600).unwrap(), before);
         assert_eq!(before.message_count, 1);
     }
 
@@ -1051,14 +1442,14 @@ mod tests {
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 50))]);
         let agg = db
-            .aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            .aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
             .unwrap();
         assert_eq!(agg.output, 50);
         assert_eq!(agg.message_count, 1);
         // Smaller totals never replace.
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(1, 1))]);
         assert_eq!(
-            db.aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap(),
             agg
         );
@@ -1074,7 +1465,7 @@ mod tests {
         // loses to it despite larger totals.
         commit(&db, &[replay]);
         let agg = db
-            .aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            .aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
             .unwrap();
         assert_eq!(agg.input, 10);
         assert_eq!(agg.message_count, 1);
@@ -1088,7 +1479,7 @@ mod tests {
         commit(&db, &[replay]);
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         let agg = db
-            .aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            .aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
             .unwrap();
         assert_eq!(agg.input, 10);
         assert_eq!(agg.message_count, 1);
@@ -1096,7 +1487,7 @@ mod tests {
         // parent entry again leaves the aggregate untouched.
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         assert_eq!(
-            db.aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap(),
             agg
         );
@@ -1110,7 +1501,7 @@ mod tests {
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         commit(&db, &[entry("m1|r2", Some("m1"), 600, tokens(7, 3))]);
         let agg = db
-            .aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            .aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
             .unwrap();
         assert_eq!(agg.message_count, 2);
         assert_eq!(agg.input, 17);
@@ -1119,13 +1510,14 @@ mod tests {
     #[test]
     fn changed_buckets_skips_unchanged_and_reports_emptied() {
         let (_dir, db) = db();
-        let model = "claude-sonnet-4-20250514";
+        let model = "claude-sonnet-4-5-20250929";
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         let changed = db.changed_buckets("s1").unwrap();
         assert_eq!(changed.len(), 1);
         db.mark_emitted(
             "s1",
             model,
+            0,
             600,
             &changed[0].aggregate.fingerprint(),
             changed[0].emit_seq + 1,
@@ -1152,6 +1544,7 @@ mod tests {
         db.mark_emitted(
             "s1",
             model,
+            0,
             600,
             &BucketAggregate::default().fingerprint(),
             2,
@@ -1166,7 +1559,7 @@ mod tests {
     #[test]
     fn entries_before_the_retention_cutoff_are_dropped_at_insert() {
         let (_dir, db) = db();
-        db.ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+        db.ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         db.commit_batch(&BatchCommit {
             session_id: "s1",
@@ -1189,10 +1582,11 @@ mod tests {
     #[test]
     fn v1_databases_with_legacy_cross_session_duplicates_upgrade_cleanly() {
         // A v1 database (session-scoped dedup) can hold the same entry_key
-        // under several sessions. The v2 migration keeps the first-seen row
-        // and enforces global uniqueness, so a later cross-session
-        // replacement can never collide on the (session_id, entry_key)
-        // primary key and poison the transcript.
+        // under several sessions; the intermediate v2 migration must still
+        // purge those so its unique index can be created, and the v3
+        // pre-release rebuild then drops everything: cursors reset so the
+        // next pass re-extracts every transcript under the pricing-aware
+        // schema.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token-usage-db");
         {
@@ -1216,38 +1610,24 @@ mod tests {
         }
 
         let db = TokenUsageDatabase::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
-        // Sessions whose rows were purged are flagged so their (now lower)
-        // aggregates re-emit; the surviving session is not.
-        let flagged: Vec<String> = db
-            .sessions_needing_reconcile()
-            .unwrap()
-            .into_iter()
-            .map(|session| session.session_id)
-            .collect();
-        assert_eq!(flagged, vec!["s2".to_string(), "s3".to_string()]);
-        // First-seen row (s1) survives; the duplicates are gone.
+        assert_eq!(db.schema_version().unwrap(), 5);
+        // Rebuilt empty: no legacy rows, cursors, or reconcile flags survive.
+        assert!(db.all_files().unwrap().is_empty());
+        assert!(db.sessions_needing_reconcile().unwrap().is_empty());
         assert_eq!(
-            db.aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
-                .unwrap()
-                .message_count,
-            1
-        );
-        assert_eq!(
-            db.aggregate_bucket("s2", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap()
                 .message_count,
             0
         );
-        // A cross-session replacement over the legacy key works (this used
-        // to violate the primary key when a duplicate existed).
+        // The rebuilt schema accepts fresh commits, including a legacy key.
         commit_for(
             &db,
             "s2",
             &[entry("m1|r1", Some("m1"), 600, tokens(10, 50))],
         );
         assert_eq!(
-            db.aggregate_bucket("s2", "claude-sonnet-4-20250514", 600)
+            db.aggregate_bucket("s2", "claude-sonnet-4-5-20250929", 0, 600)
                 .unwrap()
                 .output,
             50
@@ -1260,11 +1640,11 @@ mod tests {
         // fingerprint write must not lead to a second payload with an equal
         // revision.
         let (_dir, db) = db();
-        let model = "claude-sonnet-4-20250514";
+        let model = "claude-sonnet-4-5-20250929";
         commit(&db, &[entry("m1|r1", Some("m1"), 600, tokens(10, 5))]);
         let changed = db.changed_buckets("s1").unwrap();
         assert_eq!(changed[0].emit_seq, 0);
-        db.reserve_emit_seqs("s1", &[(model.to_string(), 600, 1)])
+        db.reserve_emit_seqs("s1", &[(model.to_string(), 0, 600, 1)])
             .unwrap();
 
         // Fingerprint untouched by the reservation: the bucket still
@@ -1274,24 +1654,95 @@ mod tests {
         assert_eq!(changed[0].emit_seq, 1);
 
         // Success path completes the emission; nothing left to reconcile.
-        db.reserve_emit_seqs("s1", &[(model.to_string(), 600, 2)])
+        db.reserve_emit_seqs("s1", &[(model.to_string(), 0, 600, 2)])
             .unwrap();
-        db.mark_emitted("s1", model, 600, &changed[0].aggregate.fingerprint(), 2, 9)
-            .unwrap();
+        db.mark_emitted(
+            "s1",
+            model,
+            0,
+            600,
+            &changed[0].aggregate.fingerprint(),
+            2,
+            9,
+        )
+        .unwrap();
         assert!(db.changed_buckets("s1").unwrap().is_empty());
     }
 
     #[test]
+    fn buckets_split_by_speed_and_carry_the_tier_sums() {
+        let (_dir, db) = db();
+        let mut fast = entry("k1", None, 600, tokens(10, 5));
+        fast.speed = Some(Speed::Fast);
+        let standard = entry("k2", None, 630, tokens(20, 5));
+        // Unmarked and catalog-priced, over the sonnet 200K threshold: joins
+        // the standard bucket and fills the long-context sums.
+        let mut unmarked_long = entry(
+            "k3",
+            None,
+            660,
+            TokenCounts {
+                input: 300_000,
+                output: 1,
+                total: 300_001,
+                ..Default::default()
+            },
+        );
+        unmarked_long.transcript_cost_micro_usd = None;
+        commit_for(&db, "s1", &[fast, standard, unmarked_long.clone()]);
+
+        let mut changed = db.changed_buckets("s1").unwrap();
+        changed.sort_by_key(|bucket| bucket.speed);
+        assert_eq!(changed.len(), 2, "one bucket per speed, same model+ts");
+        let standard_bucket = &changed[0];
+        assert_eq!(standard_bucket.speed, 0);
+        assert_eq!(standard_bucket.aggregate.input, 300_020);
+        assert_eq!(standard_bucket.aggregate.message_count, 2);
+        assert_eq!(standard_bucket.aggregate.long_context_input, 300_000);
+        assert_eq!(standard_bucket.aggregate.long_context_output, 1);
+        // Only k2's cost came from the transcript; k3 was catalog-priced.
+        assert_eq!(standard_bucket.aggregate.transcript_cost_micro_usd, 1_000);
+        assert_eq!(
+            standard_bucket.aggregate.cost_micro_usd,
+            1_000 + price_entry(&unmarked_long).cost_micro_usd.unwrap()
+        );
+        assert_eq!(
+            standard_bucket.aggregate.pricing_catalog.as_deref(),
+            Some(crate::metrics::model_pricing::pricing_catalog_id())
+        );
+        let fast_bucket = &changed[1];
+        assert_eq!(fast_bucket.speed, 1);
+        assert_eq!(fast_bucket.aggregate.input, 10);
+        assert_eq!(fast_bucket.aggregate.message_count, 1);
+        assert_eq!(fast_bucket.aggregate.long_context_input, 0);
+        assert_eq!(fast_bucket.aggregate.pricing_catalog, None);
+        assert_eq!(fast_bucket.bucket_ts, standard_bucket.bucket_ts);
+        assert_eq!(fast_bucket.model, standard_bucket.model);
+    }
+
+    #[test]
     fn fingerprint_covers_every_emitted_field() {
+        // Every emitted *value* must reach the fingerprint (pricing_catalog
+        // rides the attributes and is deliberately excluded: a catalog-id
+        // change without any numeric change means identical rates).
         let base = BucketAggregate {
             input: 1,
             output: 2,
             cache_read: 3,
             cache_write: 4,
+            cache_write_1h: 2,
             reasoning_output: None,
             total: 10,
             cost_micro_usd: 5,
+            transcript_cost_micro_usd: 2,
             message_count: 6,
+            speed_inferred: false,
+            long_context_input: 1,
+            long_context_output: 1,
+            long_context_cache_read: 1,
+            long_context_cache_write: 1,
+            long_context_cache_write_1h: 1,
+            pricing_catalog: None,
         };
         let mut seen = HashSet::from([base.fingerprint()]);
         for mutate in [
@@ -1299,12 +1750,20 @@ mod tests {
             |a| a.output += 1,
             |a| a.cache_read += 1,
             |a| a.cache_write += 1,
+            |a| a.cache_write_1h += 1,
             |a| a.reasoning_output = Some(0),
             |a| a.total += 1,
             |a| a.cost_micro_usd += 1,
+            |a| a.transcript_cost_micro_usd += 1,
             |a| a.message_count += 1,
+            |a| a.speed_inferred = true,
+            |a| a.long_context_input += 1,
+            |a| a.long_context_output += 1,
+            |a| a.long_context_cache_read += 1,
+            |a| a.long_context_cache_write += 1,
+            |a| a.long_context_cache_write_1h += 1,
         ] {
-            let mut variant = base;
+            let mut variant = base.clone();
             mutate(&mut variant);
             assert!(seen.insert(variant.fingerprint()), "fingerprint collision");
         }
@@ -1318,7 +1777,7 @@ mod tests {
         codex.transcript_cost_micro_usd = None;
         codex.model = "gpt-5".to_string();
         commit(&db, &[codex]);
-        let agg = db.aggregate_bucket("s1", "gpt-5", 600).unwrap();
+        let agg = db.aggregate_bucket("s1", "gpt-5", 0, 600).unwrap();
         assert_eq!(agg.reasoning_output, Some(4));
         // Cost falls back to the pricing catalog (gpt-5 is in the snapshot).
         assert!(agg.cost_micro_usd > 0);
@@ -1338,7 +1797,7 @@ mod tests {
             commit(&db, &[e]);
         }
         let agg = db
-            .aggregate_bucket("s1", "claude-sonnet-4-20250514", 600)
+            .aggregate_bucket("s1", "claude-sonnet-4-5-20250929", 0, 600)
             .unwrap();
         assert_eq!(agg.input, 2 * TOKEN_VALUE_CEILING);
         assert_eq!(agg.total, 2 * TOKEN_VALUE_CEILING);
@@ -1348,13 +1807,13 @@ mod tests {
     #[test]
     fn record_error_tracks_and_commit_clears() {
         let (_dir, db) = db();
-        db.ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+        db.ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         db.record_error("s1", "/t.jsonl", "boom", 100).unwrap();
         db.record_error("s1", "/t.jsonl", "boom again", 200)
             .unwrap();
         let file = db
-            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         assert_eq!(file.processing_errors, 2);
         assert_eq!(file.last_error_at, Some(200));
@@ -1369,7 +1828,7 @@ mod tests {
         })
         .unwrap();
         let file = db
-            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         assert_eq!(file.processing_errors, 0);
         assert_eq!(file.last_error_at, None);
@@ -1399,12 +1858,12 @@ mod tests {
     #[test]
     fn file_metadata_roundtrip() {
         let (_dir, db) = db();
-        db.ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+        db.ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         db.update_file_metadata("s1", "/t.jsonl", 1234, Some(99))
             .unwrap();
         let file = db
-            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext")
+            .ensure_file("s1", "/t.jsonl", "claude", "s1-ext", None)
             .unwrap();
         assert_eq!(file.last_known_size, 1234);
         assert_eq!(file.last_modified, Some(99));
@@ -1420,14 +1879,16 @@ mod tests {
                 entry("m2|r2", Some("m2"), 999_900, tokens(1, 1)),
             ],
         );
-        let model = "claude-sonnet-4-20250514";
-        db.mark_emitted("s1", model, 600, "fp", 1, 1).unwrap();
+        let model = "claude-sonnet-4-5-20250929";
+        db.mark_emitted("s1", model, 0, 600, "fp", 1, 1).unwrap();
         assert_eq!(db.prune_buckets_before(999_000).unwrap(), 1);
         assert_eq!(
-            db.aggregate_bucket("s1", model, 600).unwrap().message_count,
+            db.aggregate_bucket("s1", model, 0, 600)
+                .unwrap()
+                .message_count,
             0
         );
-        assert_eq!(db.emitted_fingerprint("s1", model, 600).unwrap(), None);
+        assert_eq!(db.emitted_fingerprint("s1", model, 0, 600).unwrap(), None);
         // No orphan bucket_state row: the emptied old bucket is NOT a
         // reconciliation candidate after the prune.
         let changed = db.changed_buckets("s1").unwrap();
