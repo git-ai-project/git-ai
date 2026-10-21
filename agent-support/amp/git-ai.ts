@@ -2,13 +2,24 @@
 // Required by Amp: this exact marker must remain the first line in the plugin file.
 import type { PluginAPI, ToolCallEvent } from '@ampcode/plugin'
 import { spawn } from 'child_process'
-import { mkdir, writeFile } from 'fs/promises'
+import { randomUUID } from 'crypto'
+import { mkdir, mkdtemp, rename, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { dirname, isAbsolute, resolve } from 'path'
 import { fileURLToPath } from 'url'
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = '__GIT_AI_BINARY_PATH__'
+const AMP_CHECKPOINT_TOOLS = new Set([
+	'Write',
+	'Edit',
+	'create_file',
+	'edit_file',
+	'apply_patch',
+	'undo_edit',
+	'Bash',
+	'shell_command',
+])
 
 type PendingToolCall = {
 	cwd: string
@@ -83,6 +94,8 @@ function filesFromToolCall(amp: PluginAPI, event: ToolCallEvent): string[] {
 export default function ampGitAiPlugin(amp: PluginAPI) {
 	const pendingCalls = new Map<string, PendingToolCall>()
 	const transcriptExports = new Map<string, Promise<string | null>>()
+	const lastTranscriptPaths = new Map<string, string>()
+	let exportDirPromise: Promise<string> | null = null
 	let gitAiInstalledPromise: Promise<boolean> | null = null
 
 	const runProcess = (
@@ -135,6 +148,7 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 		if (existing) {
 			return existing
 		}
+		const previousTranscriptPath = lastTranscriptPaths.get(threadId) ?? null
 
 		const exported = (async () => {
 			try {
@@ -148,7 +162,7 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 							stderr ? `: ${stderr}` : ''
 						}`,
 					)
-					return null
+					return previousTranscriptPath
 				}
 
 				const transcript = JSON.parse(result.stdout) as { messages?: unknown }
@@ -167,18 +181,22 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 						typeof message.usage.model === 'string',
 				)
 				if (!hasModel) {
-					return null
+					return previousTranscriptPath
 				}
 
-				const exportDir = resolve(tmpdir(), `git-ai-amp-${process.pid}`)
+				exportDirPromise ??= mkdtemp(resolve(tmpdir(), 'git-ai-amp-'))
+				const exportDir = await exportDirPromise
 				await mkdir(exportDir, { recursive: true, mode: 0o700 })
 				const safeThreadId = threadId.replace(/[^A-Za-z0-9_-]/g, '_')
 				const transcriptPath = resolve(exportDir, `${safeThreadId}.json`)
-				await writeFile(transcriptPath, result.stdout, { mode: 0o600 })
+				const stagedPath = resolve(exportDir, `${safeThreadId}.${randomUUID()}.tmp`)
+				await writeFile(stagedPath, result.stdout, { flag: 'wx', mode: 0o600 })
+				await rename(stagedPath, transcriptPath)
+				lastTranscriptPaths.set(threadId, transcriptPath)
 				return transcriptPath
 			} catch (error) {
 				ctx.logger.log(`[git-ai] unable to export Amp thread ${threadId}`, String(error))
-				return null
+				return previousTranscriptPath
 			}
 		})()
 
@@ -279,6 +297,10 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 	}
 
 	amp.on('tool.call', async (event, ctx) => {
+		if (!AMP_CHECKPOINT_TOOLS.has(event.tool)) {
+			return { action: 'allow' as const }
+		}
+
 		const gitAiInstalled = await ensureGitAiInstalled()
 		if (!gitAiInstalled) {
 			return { action: 'allow' as const }
@@ -328,6 +350,9 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 		if (event.status !== 'done') {
 			return
 		}
+		const transcriptPath =
+			(await exportOrbTranscript(pending.threadId, { logger: ctx.logger })) ??
+			pending.transcriptPath
 
 		await runCheckpoint(
 			{ logger: ctx.logger },
@@ -338,7 +363,7 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 				tool_input: pending.toolInput,
 				cwd: pending.cwd,
 				thread_id: pending.threadId,
-				...(pending.transcriptPath ? { transcript_path: pending.transcriptPath } : {}),
+				...(transcriptPath ? { transcript_path: transcriptPath } : {}),
 				...(pending.editedFilepaths.length > 0
 					? { edited_filepaths: pending.editedFilepaths }
 					: {}),
