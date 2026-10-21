@@ -98,6 +98,20 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 	let exportDirPromise: Promise<string> | null = null
 	let gitAiInstalledPromise: Promise<boolean> | null = null
 
+	const getExportDir = (): Promise<string> => {
+		if (exportDirPromise) {
+			return exportDirPromise
+		}
+		const creating = mkdtemp(resolve(tmpdir(), 'git-ai-amp-'))
+		exportDirPromise = creating
+		void creating.catch(() => {
+			if (exportDirPromise === creating) {
+				exportDirPromise = null
+			}
+		})
+		return creating
+	}
+
 	const runProcess = (
 		command: string,
 		args: string[],
@@ -184,8 +198,7 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 					return previousTranscriptPath
 				}
 
-				exportDirPromise ??= mkdtemp(resolve(tmpdir(), 'git-ai-amp-'))
-				const exportDir = await exportDirPromise
+				const exportDir = await getExportDir()
 				await mkdir(exportDir, { recursive: true, mode: 0o700 })
 				const safeThreadId = threadId.replace(/[^A-Za-z0-9_-]/g, '_')
 				const transcriptPath = resolve(exportDir, `${safeThreadId}.json`)
