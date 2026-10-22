@@ -1,6 +1,6 @@
 use crate::repos::test_repo::TestRepo;
-use git_ai::authorship::authorship_log::LineRange;
 use git_ai::authorship::authorship_log::PromptRecord;
+use git_ai::authorship::authorship_log::{LineRange, SessionRecord};
 use git_ai::authorship::authorship_log_serialization::AttestationEntry;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::authorship_log_serialization::FileAttestation;
@@ -512,6 +512,402 @@ fn test_accepted_lines_basic_match() {
     // Verify per-tool breakdown contains the right key
     let expected_key = "cursor::claude-3-sonnet".to_string();
     assert_eq!(per_tool.get(&expected_key), Some(&3));
+}
+
+fn session_record(session_id: &str, model: &str) -> SessionRecord {
+    SessionRecord {
+        agent_id: AgentId {
+            tool: "mock_ai".to_string(),
+            id: session_id.to_string(),
+            model: model.to_string(),
+        },
+        human_author: None,
+        custom_attributes: None,
+    }
+}
+
+fn session_log(sessions: &[(&str, &str)], entries: &[(&str, Vec<LineRange>)]) -> AuthorshipLog {
+    let mut log = AuthorshipLog::new();
+    for (session_id, model) in sessions {
+        log.metadata
+            .sessions
+            .insert((*session_id).to_string(), session_record(session_id, model));
+    }
+    let mut file_attestation = FileAttestation::new("foo.rs".to_string());
+    for (hash, ranges) in entries {
+        file_attestation.add_entry(AttestationEntry::new((*hash).to_string(), ranges.clone()));
+    }
+    log.attestations.push(file_attestation);
+    log
+}
+
+fn accepted_counts(log: &AuthorshipLog, lines: Vec<u32>) -> (u32, u32, BTreeMap<String, u32>) {
+    let added_lines = HashMap::from([("foo.rs".to_string(), lines)]);
+    accepted_lines_from_attestations(Some(log), &added_lines, false)
+}
+
+#[test]
+fn test_accepted_lines_deduplicates_overlapping_ranges_in_one_entry() {
+    let log = session_log(
+        &[("s_same-entry", "test-model")],
+        &[(
+            "s_same-entry::t_first",
+            vec![LineRange::Range(1, 4), LineRange::Range(3, 6)],
+        )],
+    );
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 6);
+    assert_eq!(known_human, 0);
+    assert_eq!(per_tool.get("mock_ai::test-model"), Some(&6));
+}
+
+#[test]
+fn test_accepted_lines_deduplicates_same_model_sessions() {
+    let log = session_log(
+        &[
+            ("s_first-session", "test-model"),
+            ("s_second-session", "test-model"),
+        ],
+        &[
+            ("s_first-session::t_first", vec![LineRange::Range(1, 6)]),
+            ("s_second-session::t_second", vec![LineRange::Range(1, 6)]),
+        ],
+    );
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 6);
+    assert_eq!(known_human, 0);
+    assert_eq!(per_tool.get("mock_ai::test-model"), Some(&6));
+}
+
+#[test]
+fn test_accepted_lines_preserves_distinct_model_overlap_in_breakdown() {
+    let log = session_log(
+        &[("s_model-a", "model-a"), ("s_model-b", "model-b")],
+        &[
+            ("s_model-a::t_first", vec![LineRange::Range(1, 4)]),
+            ("s_model-b::t_second", vec![LineRange::Range(3, 6)]),
+        ],
+    );
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(
+        accepted, 6,
+        "headline AI count uses the union of covered lines"
+    );
+    assert_eq!(known_human, 0);
+    // Distinct models each retain their independently covered lines.
+    assert_eq!(per_tool.get("mock_ai::model-a"), Some(&4));
+    assert_eq!(per_tool.get("mock_ai::model-b"), Some(&4));
+}
+
+#[test]
+fn test_accepted_lines_deduplicates_duplicate_file_attestations() {
+    let mut log = session_log(
+        &[("s_duplicate-file", "test-model")],
+        &[("s_duplicate-file::t_first", vec![LineRange::Range(1, 6)])],
+    );
+    log.attestations.push(log.attestations[0].clone());
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 6);
+    assert_eq!(known_human, 0);
+    assert_eq!(per_tool.get("mock_ai::test-model"), Some(&6));
+}
+
+#[test]
+fn test_accepted_lines_deduplicates_duplicate_known_human_ranges() {
+    let mut log = AuthorshipLog::new();
+    for _ in 0..2 {
+        let mut file_attestation = FileAttestation::new("foo.rs".to_string());
+        file_attestation.add_entry(AttestationEntry::new(
+            "h_known-human".to_string(),
+            vec![LineRange::Range(1, 6)],
+        ));
+        log.attestations.push(file_attestation);
+    }
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 0);
+    assert_eq!(known_human, 6);
+    assert!(per_tool.is_empty());
+}
+
+#[test]
+fn test_accepted_lines_deduplicates_legacy_prompt_and_session_for_same_model() {
+    let mut log = session_log(
+        &[("s_current", "test-model")],
+        &[
+            ("s_current::t_current", vec![LineRange::Range(1, 6)]),
+            ("legacy-prompt", vec![LineRange::Range(1, 6)]),
+        ],
+    );
+    log.metadata.prompts.insert(
+        "legacy-prompt".to_string(),
+        PromptRecord {
+            agent_id: AgentId {
+                tool: "mock_ai".to_string(),
+                id: "legacy-prompt".to_string(),
+                model: "test-model".to_string(),
+            },
+            human_author: None,
+            total_additions: 0,
+            total_deletions: 0,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            custom_attributes: None,
+            messages_url: None,
+        },
+    );
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 6);
+    assert_eq!(known_human, 0);
+    assert_eq!(per_tool.get("mock_ai::test-model"), Some(&6));
+}
+
+#[test]
+fn test_accepted_lines_without_session_metadata_still_counts_ai() {
+    let log = session_log(
+        &[],
+        &[("s_missing-session::t_missing", vec![LineRange::Range(1, 6)])],
+    );
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 6);
+    assert_eq!(known_human, 0);
+    assert!(per_tool.is_empty());
+}
+
+#[test]
+fn test_accepted_lines_counts_only_sparse_added_lines_in_large_range() {
+    let log = session_log(
+        &[("s_sparse", "test-model")],
+        &[(
+            "s_sparse::t_large-range",
+            vec![LineRange::Range(1, u32::MAX)],
+        )],
+    );
+    let sparse_lines = vec![2, 500, u32::MAX];
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, sparse_lines);
+
+    assert_eq!(accepted, 3);
+    assert_eq!(known_human, 0);
+    assert_eq!(per_tool.get("mock_ai::test-model"), Some(&3));
+}
+
+#[test]
+fn test_accepted_lines_is_invariant_to_attestation_order() {
+    let sessions = [("s_first", "test-model"), ("s_second", "test-model")];
+    let mut in_forward_order = session_log(
+        &sessions,
+        &[("s_first::t_first", vec![LineRange::Range(1, 4)])],
+    );
+    let mut in_reverse_order = session_log(
+        &sessions,
+        &[("s_second::t_second", vec![LineRange::Range(3, 6)])],
+    );
+    let mut first_file_record = FileAttestation::new("foo.rs".to_string());
+    first_file_record.add_entry(AttestationEntry::new(
+        "s_first::t_first".to_string(),
+        vec![LineRange::Range(1, 4)],
+    ));
+    let mut second_file_record = FileAttestation::new("foo.rs".to_string());
+    second_file_record.add_entry(AttestationEntry::new(
+        "s_second::t_second".to_string(),
+        vec![LineRange::Range(3, 6)],
+    ));
+    in_forward_order.attestations.push(second_file_record);
+    in_reverse_order.attestations.push(first_file_record);
+
+    let forward = accepted_counts(&in_forward_order, (1..=6).collect());
+    let reverse = accepted_counts(&in_reverse_order, (1..=6).collect());
+
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.0, 6);
+    assert_eq!(forward.2.get("mock_ai::test-model"), Some(&6));
+}
+
+#[test]
+fn test_accepted_lines_human_first_model_unions_oracle() {
+    let log = session_log(
+        &[("s_model-x", "model-x"), ("s_model-y", "model-y")],
+        &[
+            (
+                "h_known-human",
+                vec![
+                    LineRange::Single(2),
+                    LineRange::Single(3),
+                    LineRange::Single(5),
+                ],
+            ),
+            (
+                "s_model-x::t_first",
+                vec![
+                    LineRange::Single(1),
+                    LineRange::Single(2),
+                    LineRange::Single(4),
+                ],
+            ),
+            (
+                "s_model-y::t_second",
+                vec![LineRange::Single(3), LineRange::Single(4)],
+            ),
+        ],
+    );
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+    let unknown = 6 - accepted - known_human;
+
+    assert_eq!(accepted, 2);
+    assert_eq!(known_human, 3);
+    assert_eq!(unknown, 1);
+    assert_eq!(per_tool.get("mock_ai::model-x"), Some(&2));
+    assert_eq!(per_tool.get("mock_ai::model-y"), Some(&1));
+}
+
+#[test]
+fn test_accepted_lines_human_coverage_removes_all_overlapped_ai() {
+    let log = session_log(
+        &[("s_model-x", "model-x")],
+        &[
+            ("h_known-human", vec![LineRange::Range(1, 6)]),
+            ("s_model-x::t_first", vec![LineRange::Range(1, 6)]),
+        ],
+    );
+
+    let (accepted, known_human, per_tool) = accepted_counts(&log, (1..=6).collect());
+
+    assert_eq!(accepted, 0);
+    assert_eq!(known_human, 6);
+    assert!(per_tool.is_empty());
+}
+
+fn mask_ranges(mask: u8, added_positions: &[u32; 4]) -> Vec<LineRange> {
+    added_positions
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| mask & (1u8 << index) != 0)
+        .map(|(_, line)| LineRange::Single(*line))
+        .collect()
+}
+
+fn three_mask_log(
+    human_mask: u8,
+    model_x_mask: u8,
+    model_y_mask: u8,
+    added_positions: &[u32; 4],
+    reverse_and_duplicate: bool,
+) -> AuthorshipLog {
+    let mut entries = vec![
+        ("h_known-human", mask_ranges(human_mask, added_positions)),
+        (
+            "s_model-x::t_first",
+            mask_ranges(model_x_mask, added_positions),
+        ),
+        (
+            "s_model-y::t_second",
+            mask_ranges(model_y_mask, added_positions),
+        ),
+    ];
+    if reverse_and_duplicate {
+        entries.reverse();
+    }
+    let mut log = session_log(
+        &[("s_model-x", "model-x"), ("s_model-y", "model-y")],
+        &entries,
+    );
+    if reverse_and_duplicate {
+        log.attestations.push(log.attestations[0].clone());
+    }
+    log
+}
+
+#[test]
+fn test_accepted_lines_matches_independent_small_mask_oracle() {
+    let added_positions = [10, 20, 30, 40];
+    for human_mask in 0..16u8 {
+        for model_x_mask in 0..16u8 {
+            for model_y_mask in 0..16u8 {
+                let expected_human = human_mask.count_ones();
+                let expected_ai = ((model_x_mask | model_y_mask) & !human_mask).count_ones();
+                let expected_model_x = (model_x_mask & !human_mask).count_ones();
+                let expected_model_y = (model_y_mask & !human_mask).count_ones();
+                let expected_unknown =
+                    (!(human_mask | model_x_mask | model_y_mask) & 0b1111).count_ones();
+
+                for reverse_and_duplicate in [false, true] {
+                    let log = three_mask_log(
+                        human_mask,
+                        model_x_mask,
+                        model_y_mask,
+                        &added_positions,
+                        reverse_and_duplicate,
+                    );
+                    let (accepted, known_human, per_tool) =
+                        accepted_counts(&log, added_positions.to_vec());
+
+                    assert_eq!(accepted, expected_ai);
+                    assert_eq!(known_human, expected_human);
+                    assert_eq!(
+                        accepted + known_human + expected_unknown,
+                        4,
+                        "all actual added positions remain in one headline bucket"
+                    );
+                    assert_eq!(
+                        per_tool.get("mock_ai::model-x").copied(),
+                        (expected_model_x > 0).then_some(expected_model_x)
+                    );
+                    assert_eq!(
+                        per_tool.get("mock_ai::model-y").copied(),
+                        (expected_model_y > 0).then_some(expected_model_y)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_accepted_lines_isolates_file_paths_and_repeated_text_positions() {
+    let mut log = AuthorshipLog::new();
+    for (session_id, model) in [("s_model-x", "model-x"), ("s_model-y", "model-y")] {
+        log.metadata
+            .sessions
+            .insert(session_id.to_string(), session_record(session_id, model));
+    }
+    for (file_path, hash, line) in [
+        ("first.txt", "s_model-x::t_first", 1),
+        ("second.txt", "s_model-y::t_second", 1),
+        ("repeated.txt", "s_model-x::t_repeated-first", 1),
+        ("repeated.txt", "s_model-y::t_repeated-second", 2),
+    ] {
+        let mut file = FileAttestation::new(file_path.to_string());
+        file.add_entry(AttestationEntry::new(
+            hash.to_string(),
+            vec![LineRange::Single(line)],
+        ));
+        log.attestations.push(file);
+    }
+    let added_lines = HashMap::from([
+        ("first.txt".to_string(), vec![1]),
+        ("second.txt".to_string(), vec![1]),
+        ("repeated.txt".to_string(), vec![1, 2]),
+    ]);
+
+    let (accepted, known_human, per_tool) =
+        accepted_lines_from_attestations(Some(&log), &added_lines, false);
+
+    assert_eq!(accepted, 4);
+    assert_eq!(known_human, 0);
+    assert_eq!(per_tool.get("mock_ai::model-x"), Some(&2));
+    assert_eq!(per_tool.get("mock_ai::model-y"), Some(&2));
 }
 
 // --- line_range_overlap_len tests ---

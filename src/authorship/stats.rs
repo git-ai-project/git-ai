@@ -17,25 +17,27 @@ const WAIT_MESSAGE: &str = "Waiting for git-ai to process this commit";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolModelHeadlineStats {
     #[serde(default)]
-    pub ai_additions: u32, // Number of lines committed with AI attribution
+    pub ai_additions: u32, // Distinct model-attributed additions without known-human attribution
     #[serde(default)]
-    pub ai_accepted: u32, // Number of AI-generated lines that were accepted by the user without any human edits
+    pub ai_accepted: u32, // Same qualifying added-line count as ai_additions
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CommitStats {
     #[serde(default)]
-    pub human_additions: u32, // Number of lines committed with human attribution
+    pub human_additions: u32, // Distinct additions with explicit known-human attribution
     #[serde(default)]
     pub unknown_additions: u32, // Number of lines with no attestation at all
     #[serde(default)]
-    pub ai_additions: u32, // Number of lines committed with AI attribution
+    pub ai_additions: u32, // Distinct AI-attributed additions without known-human attribution
     #[serde(default)]
-    pub ai_accepted: u32, // Number of AI-generated lines that were accepted by the user without any human edits
+    pub ai_accepted: u32, // Same qualifying added-line count as ai_additions
     #[serde(default)]
     pub git_diff_deleted_lines: u32,
     #[serde(default)]
     pub git_diff_added_lines: u32,
+    /// Distinct AI-attributed additions per tool/model, excluding known-human
+    /// additions. Models may cover the same line, so these counts are not additive.
     #[serde(default)]
     pub tool_model_breakdown: BTreeMap<String, ToolModelHeadlineStats>,
 }
@@ -516,77 +518,163 @@ pub fn stats_for_commit_stats_with_parent_and_authorship(
     stats_for_commit_stats_from_hunks(repo, commit_sha, ignore_patterns, &hunks, authorship_log)
 }
 
+fn merge_added_line_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+fn count_added_line_spans_without_human(
+    spans: Vec<(usize, usize)>,
+    human_spans: &[(usize, usize)],
+) -> u32 {
+    merge_added_line_spans(spans)
+        .into_iter()
+        .map(|(start, end)| {
+            let first = human_spans.partition_point(|&(_, human_end)| human_end <= start);
+            let excluded: usize = human_spans[first..]
+                .iter()
+                .take_while(|&&(human_start, _)| human_start < end)
+                .map(|&(human_start, human_end)| end.min(human_end) - start.max(human_start))
+                .sum();
+            (end - start - excluded) as u32
+        })
+        .sum()
+}
+
+/// Count distinct added lines, with explicit known-human attribution taking
+/// precedence over AI attribution. Tool/model counts are independent unions,
+/// not an exclusive allocation of multi-model provenance.
 #[doc(hidden)]
 pub fn accepted_lines_from_attestations(
     authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
     added_lines_by_file: &HashMap<String, Vec<u32>>,
     is_merge_commit: bool,
 ) -> (u32, u32, BTreeMap<String, u32>) {
-    // returns (ai_accepted, known_human_accepted, per_tool_model)
+    let (ai, human, per_tool, _) =
+        accepted_line_counts(authorship_log, added_lines_by_file, is_merge_commit);
+    (ai, human, per_tool)
+}
+
+fn accepted_line_counts(
+    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+    added_lines_by_file: &HashMap<String, Vec<u32>>,
+    is_merge_commit: bool,
+) -> (u32, u32, BTreeMap<String, u32>, u32) {
+    // Headline AI, known human, per-model coverage, and mock-exclusive AI.
     if is_merge_commit {
-        return (0, 0, BTreeMap::new());
+        return (0, 0, BTreeMap::new(), 0);
     }
 
     let mut total_ai_accepted = 0u32;
     let mut known_human_accepted = 0u32;
     let mut per_tool_model = BTreeMap::new();
+    let mut mock_only_ai = 0;
 
     let Some(log) = authorship_log else {
-        return (0, 0, per_tool_model);
+        return (0, 0, per_tool_model, 0);
     };
 
-    for file_attestation in &log.attestations {
-        let Some(added_lines) = added_lines_by_file.get(&file_attestation.file_path) else {
-            continue;
-        };
+    // Group repeated file records before counting: notes can retain overlapping
+    // provenance after a rewrite. Spans index actual additions, never every line
+    // in an attested numeric range.
+    let mut entries_by_file: HashMap<&str, Vec<_>> = HashMap::new();
+    for file in &log.attestations {
+        if added_lines_by_file.contains_key(&file.file_path) {
+            entries_by_file
+                .entry(&file.file_path)
+                .or_default()
+                .extend(&file.entries);
+        }
+    }
 
-        for entry in &file_attestation.entries {
-            // KnownHuman entries (h_ prefix): count as known-human-attested lines.
-            if entry.hash.starts_with("h_") {
-                let accepted = entry
-                    .line_ranges
-                    .iter()
-                    .map(|line_range| line_range_overlap_len(line_range, added_lines))
-                    .sum::<u32>();
-                if accepted > 0 {
-                    known_human_accepted += accepted;
-                }
-                continue;
-            }
+    for (file_path, entries) in entries_by_file {
+        let added_lines = &added_lines_by_file[file_path];
+        let mut ai_spans = Vec::new();
+        let mut non_mock_ai_spans = Vec::new();
+        let mut human_spans = Vec::new();
+        let mut spans_by_tool_model: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
 
-            let accepted = entry
+        for entry in entries {
+            let spans: Vec<_> = entry
                 .line_ranges
                 .iter()
-                .map(|line_range| line_range_overlap_len(line_range, added_lines))
-                .sum::<u32>();
+                .filter_map(|range| {
+                    let (start, end) = match range {
+                        LineRange::Single(line) => (*line, *line),
+                        LineRange::Range(start, end) => (*start, *end),
+                    };
+                    let start_idx = added_lines.partition_point(|line| *line < start);
+                    let end_idx = added_lines.partition_point(|line| *line <= end);
+                    (start_idx < end_idx).then_some((start_idx, end_idx))
+                })
+                .collect();
 
-            if accepted == 0 {
+            if entry.hash.starts_with("h_") {
+                human_spans.extend(spans);
                 continue;
             }
 
-            total_ai_accepted += accepted;
+            if spans.is_empty() {
+                continue;
+            }
+            ai_spans.extend_from_slice(&spans);
 
-            // Session entries (s_ prefix): look up in sessions map
-            if entry.hash.starts_with("s_") {
+            let agent_id = if entry.hash.starts_with("s_") {
                 let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
-                if let Some(session_record) = log.metadata.sessions.get(session_key) {
-                    let tool_model = format!(
-                        "{}::{}",
-                        session_record.agent_id.tool, session_record.agent_id.model
-                    );
-                    *per_tool_model.entry(tool_model).or_insert(0) += accepted;
-                }
-            } else if let Some(prompt_record) = log.metadata.prompts.get(&entry.hash) {
-                let tool_model = format!(
-                    "{}::{}",
-                    prompt_record.agent_id.tool, prompt_record.agent_id.model
-                );
+                log.metadata.sessions.get(session_key).map(|s| &s.agent_id)
+            } else {
+                log.metadata.prompts.get(&entry.hash).map(|p| &p.agent_id)
+            };
+            let tool_model = agent_id.map(|agent| format!("{}::{}", agent.tool, agent.model));
+            // Missing metadata is not evidence that an AI attestation is mock.
+            // Use the same key classification as the telemetry mapper.
+            if tool_model
+                .as_ref()
+                .is_none_or(|key| !key.starts_with("mock_ai::"))
+            {
+                non_mock_ai_spans.extend_from_slice(&spans);
+            }
+            if let Some(tool_model) = tool_model {
+                spans_by_tool_model
+                    .entry(tool_model)
+                    .or_default()
+                    .extend(spans);
+            }
+        }
+
+        let human_spans = merge_added_line_spans(human_spans);
+        known_human_accepted += human_spans
+            .iter()
+            .map(|(start, end)| (end - start) as u32)
+            .sum::<u32>();
+        let file_ai = count_added_line_spans_without_human(ai_spans, &human_spans);
+        let non_mock_ai = count_added_line_spans_without_human(non_mock_ai_spans, &human_spans);
+        total_ai_accepted += file_ai;
+        mock_only_ai += file_ai - non_mock_ai;
+        for (tool_model, spans) in spans_by_tool_model {
+            let accepted = count_added_line_spans_without_human(spans, &human_spans);
+            if accepted > 0 {
                 *per_tool_model.entry(tool_model).or_insert(0) += accepted;
             }
         }
     }
 
-    (total_ai_accepted, known_human_accepted, per_tool_model)
+    (
+        total_ai_accepted,
+        known_human_accepted,
+        per_tool_model,
+        mock_only_ai,
+    )
 }
 
 #[doc(hidden)]
@@ -628,6 +716,23 @@ pub(crate) fn stats_for_commit_stats_from_hunks_with_merge_flag(
     authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
     is_merge_commit: bool,
 ) -> CommitStats {
+    stats_for_commit_stats_and_mock_counts_from_hunks(
+        ignore_patterns,
+        hunks,
+        authorship_log,
+        is_merge_commit,
+    )
+    .0
+}
+
+/// Return mock-exclusive coverage separately for telemetry. Per-model marginal
+/// counts cannot be subtracted from headline unions when models overlap.
+pub(crate) fn stats_for_commit_stats_and_mock_counts_from_hunks(
+    ignore_patterns: &[String],
+    hunks: &[crate::commands::diff::DiffHunk],
+    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+    is_merge_commit: bool,
+) -> (CommitStats, ToolModelHeadlineStats) {
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     let mut git_diff_added_lines = 0u32;
@@ -654,16 +759,23 @@ pub(crate) fn stats_for_commit_stats_from_hunks_with_merge_flag(
         lines.dedup();
     }
 
-    let (ai_accepted, known_human_accepted, ai_accepted_by_tool) =
-        accepted_lines_from_attestations(authorship_log, &added_lines_by_file, is_merge_commit);
+    let (ai_accepted, known_human_accepted, ai_accepted_by_tool, mock_only_ai) =
+        accepted_line_counts(authorship_log, &added_lines_by_file, is_merge_commit);
 
-    stats_from_authorship_log(
+    let stats = stats_from_authorship_log(
         authorship_log,
         git_diff_added_lines,
         git_diff_deleted_lines,
         ai_accepted,
         known_human_accepted,
         &ai_accepted_by_tool,
+    );
+    (
+        stats,
+        ToolModelHeadlineStats {
+            ai_additions: mock_only_ai,
+            ai_accepted: mock_only_ai,
+        },
     )
 }
 
@@ -713,6 +825,112 @@ pub fn get_git_diff_stats(
 mod tests {
     use super::*;
     use insta::assert_debug_snapshot;
+
+    #[test]
+    fn test_stats_mock_exclusive_counts_match_independent_mask_oracle() {
+        use crate::authorship::authorship_log::SessionRecord;
+        use crate::authorship::authorship_log_serialization::{AttestationEntry, AuthorshipLog};
+        use crate::authorship::post_commit::committed_metric_values;
+        use crate::authorship::working_log::AgentId;
+        use crate::metrics::{PosEncoded, events::committed_pos};
+
+        let positions = [10, 20, 30];
+        let hunks = vec![crate::commands::diff::DiffHunk {
+            file_path: "file.txt".to_string(),
+            old_file_path: None,
+            old_start: 0,
+            old_count: 0,
+            new_start: 10,
+            new_count: 21,
+            deleted_lines: vec![],
+            added_lines: positions.to_vec(),
+            deleted_contents: vec![],
+            added_contents: vec!["same text".to_string(); 3],
+        }];
+        let mut base = AuthorshipLog::new();
+        for (id, tool) in [
+            ("s_real", "codex"),
+            ("s_mock_a", "mock_ai"),
+            ("s_mock_b", "mock_ai"),
+        ] {
+            base.metadata.sessions.insert(
+                id.to_string(),
+                SessionRecord {
+                    agent_id: AgentId {
+                        tool: tool.to_string(),
+                        id: id.to_string(),
+                        model: id.to_string(),
+                    },
+                    human_author: Some("Test Author".to_string()),
+                    custom_attributes: None,
+                },
+            );
+        }
+        for human in 0..8u8 {
+            for real in 0..8u8 {
+                for mock in 0..8u8 {
+                    for unresolved in 0..8u8 {
+                        let mut log = base.clone();
+                        for (hash, mask) in [
+                            ("h_human", human),
+                            ("s_real::t", real),
+                            ("s_mock_a::t", mock),
+                            ("s_mock_b::t", mock),
+                            ("s_missing::t", unresolved),
+                        ] {
+                            let ranges = positions
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| mask & (1 << i) != 0)
+                                .map(|(_, line)| LineRange::Single(*line))
+                                .collect();
+                            log.get_or_create_file("file.txt")
+                                .add_entry(AttestationEntry::new(hash.to_string(), ranges));
+                        }
+                        let (stats, mock_only) = stats_for_commit_stats_and_mock_counts_from_hunks(
+                            &[],
+                            &hunks,
+                            Some(&log),
+                            false,
+                        );
+                        let qualifying = (real | mock | unresolved) & !human;
+                        let expected_mock_only = (mock & !(real | unresolved | human)).count_ones();
+                        let expected_non_mock = ((real | unresolved) & !human).count_ones();
+                        assert_eq!(stats.ai_accepted, qualifying.count_ones());
+                        assert_eq!(stats.human_additions, human.count_ones());
+                        assert_eq!(mock_only.ai_additions, expected_mock_only);
+                        assert_eq!(mock_only.ai_accepted, expected_mock_only);
+                        assert_eq!(stats.ai_accepted - mock_only.ai_accepted, expected_non_mock);
+
+                        let metric = committed_metric_values(&stats, &mock_only);
+                        let pure_mock = (mock & !human) != 0 && expected_non_mock == 0;
+                        if pure_mock {
+                            assert!(metric.is_none());
+                        } else {
+                            let values = metric.unwrap().to_sparse();
+                            let expected_real = (real & !human).count_ones();
+                            let mut expected_counts = vec![expected_non_mock];
+                            let mut expected_models = vec!["all"];
+                            if expected_real > 0 {
+                                expected_counts.push(expected_real);
+                                expected_models.push("codex::s_real");
+                            }
+                            for pos in [committed_pos::AI_ADDITIONS, committed_pos::AI_ACCEPTED] {
+                                assert_eq!(
+                                    values.get(&pos.to_string()),
+                                    Some(&serde_json::json!(expected_counts))
+                                );
+                            }
+                            assert_eq!(
+                                values.get(&committed_pos::TOOL_MODEL_PAIRS.to_string()),
+                                Some(&serde_json::json!(expected_models))
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_terminal_stats_display() {

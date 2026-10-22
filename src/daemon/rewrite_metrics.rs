@@ -265,13 +265,14 @@ fn build_rewrite_committed_metric_event(
     if should_skip_rewrite_metric_stats(&diff_hunks, &batch_context.ignore_patterns) {
         return Ok(None);
     }
-    let stats = crate::authorship::stats::stats_for_commit_stats_from_hunks_with_merge_flag(
-        &batch_context.ignore_patterns,
-        &diff_hunks,
-        Some(&authorship_log),
-        false,
-    );
-    let Some(breakdown) = metric_tool_model_breakdown(&stats) else {
+    let (stats, mock_only) =
+        crate::authorship::stats::stats_for_commit_stats_and_mock_counts_from_hunks(
+            &batch_context.ignore_patterns,
+            &diff_hunks,
+            Some(&authorship_log),
+            false,
+        );
+    let Some(breakdown) = metric_tool_model_breakdown(&stats, &mock_only) else {
         return Ok(None);
     };
 
@@ -603,6 +604,155 @@ mod tests {
                 .get(&crate::metrics::attrs::attr_pos::BASE_COMMIT_SHA.to_string()),
             Some(&serde_json::json!("parent"))
         );
+    }
+
+    #[test]
+    fn rewrite_metric_event_keeps_real_lines_overlapping_mock_attribution() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let mut log = AuthorshipLog::deserialize_from_string(&note_for_ai_line("file.txt", 2))
+            .expect("parse fixture");
+        let mut mock = log.metadata.prompts["prompt1"].clone();
+        mock.agent_id.tool = "mock_ai".to_string();
+        for hash in ["mock1", "mock2"] {
+            log.metadata.prompts.insert(hash.to_string(), mock.clone());
+            log.get_or_create_file("file.txt")
+                .add_entry(AttestationEntry::new(
+                    hash.to_string(),
+                    vec![LineRange::Range(2, 3)],
+                ));
+        }
+        log.get_or_create_file("file.txt")
+            .add_entry(AttestationEntry::new(
+                "h_human".to_string(),
+                vec![LineRange::Single(1)],
+            ));
+        let note = log.serialize_to_string().expect("serialize note");
+        let parent_diff = DiffTreeResult {
+            hunks_by_file: HashMap::from([(
+                "file.txt".to_string(),
+                vec![crate::authorship::hunk_shift::DiffHunk {
+                    old_start: 0,
+                    old_count: 0,
+                    new_start: 1,
+                    new_count: 3,
+                }],
+            )]),
+            added_lines_by_file: HashMap::new(),
+            renames: Vec::new(),
+        };
+        let commit = metric_commit("new", &["old"], RewriteMetricOperation::Rebase)
+            .with_parent_sha("parent")
+            .with_authorship_note(note.clone())
+            .with_parent_diff(parent_diff);
+        let context = RewriteMetricBatchContext::new(tmp.gitai_repo());
+        let event = build_rewrite_committed_metric_event(&commit, &context)
+            .expect("metric build")
+            .expect("real coverage should emit an event");
+        for pos in [
+            rewrite_committed_pos::AI_ADDITIONS,
+            rewrite_committed_pos::AI_ACCEPTED,
+        ] {
+            assert_eq!(
+                event.values.get(&pos.to_string()),
+                Some(&serde_json::json!([1, 1]))
+            );
+        }
+        assert_eq!(
+            event
+                .values
+                .get(&rewrite_committed_pos::HUMAN_ADDITIONS.to_string()),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            event
+                .values
+                .get(&rewrite_committed_pos::TOOL_MODEL_PAIRS.to_string()),
+            Some(&serde_json::json!(["all", "codex::gpt-5"]))
+        );
+        assert_eq!(
+            event
+                .values
+                .get(&rewrite_committed_pos::AUTHORSHIP_NOTE.to_string()),
+            Some(&serde_json::json!(note))
+        );
+    }
+
+    #[test]
+    fn rewrite_metric_event_preserves_mock_suppression_and_unresolved_coverage() {
+        let tmp = crate::git::test_utils::TmpRepo::new().expect("tmp repo");
+        let context = RewriteMetricBatchContext::new(tmp.gitai_repo());
+        for (real, unresolved, expected) in [
+            (true, false, Some(3)),
+            (false, false, None),
+            (false, true, Some(1)),
+        ] {
+            let mut log = AuthorshipLog::deserialize_from_string(&note_for_ai_line("file.txt", 1))
+                .expect("parse fixture");
+            log.attestations.clear();
+            let mut mock = log.metadata.prompts["prompt1"].clone();
+            mock.agent_id.tool = "mock_ai".to_string();
+            log.metadata.prompts.insert("mock".to_string(), mock);
+            log.get_or_create_file("file.txt")
+                .add_entry(AttestationEntry::new(
+                    "mock".to_string(),
+                    vec![LineRange::Range(1, 3)],
+                ));
+            if real {
+                log.get_or_create_file("file.txt")
+                    .add_entry(AttestationEntry::new(
+                        "prompt1".to_string(),
+                        vec![LineRange::Range(1, 3)],
+                    ));
+            }
+            if unresolved {
+                log.get_or_create_file("file.txt")
+                    .add_entry(AttestationEntry::new(
+                        "s_missing::t".to_string(),
+                        vec![LineRange::Single(2)],
+                    ));
+            }
+            let parent_diff = DiffTreeResult {
+                hunks_by_file: HashMap::from([(
+                    "file.txt".to_string(),
+                    vec![crate::authorship::hunk_shift::DiffHunk {
+                        old_start: 0,
+                        old_count: 0,
+                        new_start: 1,
+                        new_count: 3,
+                    }],
+                )]),
+                added_lines_by_file: HashMap::new(),
+                renames: Vec::new(),
+            };
+            let commit = metric_commit("new", &["old"], RewriteMetricOperation::Rebase)
+                .with_parent_sha("parent")
+                .with_authorship_note(log.serialize_to_string().expect("serialize note"))
+                .with_parent_diff(parent_diff);
+            let event =
+                build_rewrite_committed_metric_event(&commit, &context).expect("metric build");
+            if let Some(count) = expected {
+                let event = event.expect("retained coverage should emit an event");
+                let counts = if real {
+                    vec![count, count]
+                } else {
+                    vec![count]
+                };
+                for pos in [
+                    rewrite_committed_pos::AI_ADDITIONS,
+                    rewrite_committed_pos::AI_ACCEPTED,
+                ] {
+                    assert_eq!(
+                        event.values.get(&pos.to_string()),
+                        Some(&serde_json::json!(counts))
+                    );
+                }
+            } else {
+                assert!(
+                    event.is_none(),
+                    "entirely mock-only event must remain suppressed"
+                );
+            }
+        }
     }
 
     #[test]

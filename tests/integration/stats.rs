@@ -1,7 +1,14 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use crate::test_utils::extract_json_object;
+use git_ai::authorship::authorship_log::{LineRange, SessionRecord};
+use git_ai::authorship::authorship_log_serialization::{
+    AttestationEntry, AuthorshipLog, FileAttestation,
+};
 use git_ai::authorship::stats::CommitStats;
+use git_ai::authorship::working_log::AgentId;
+use git_ai::git::notes_api::write_note;
+use git_ai::git::repository::find_repository_in_path;
 use insta::assert_debug_snapshot;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -16,6 +23,16 @@ fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
     let raw = repo.git_ai(args).expect("git-ai stats should succeed");
     let json = extract_json_object(&raw);
     serde_json::from_str(&json).expect("valid stats json")
+}
+
+fn attach_authorship_log(repo: &TestRepo, commit_sha: &str, log: &AuthorshipLog) -> String {
+    let note = log
+        .serialize_to_string()
+        .expect("serialize authorship note");
+    let git_ai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("find test repository");
+    write_note(&git_ai_repo, commit_sha, &note).expect("attach synthetic authorship note");
+    note
 }
 
 fn range_stats_from_args_with_env(
@@ -334,6 +351,176 @@ fn test_authorship_log_stats() {
             .unwrap()
             .ai_accepted,
         5
+    );
+}
+
+#[test]
+fn test_stats_deduplicates_overlapping_sessions_for_same_model() {
+    let repo = TestRepo::new();
+    let mut app = repo.filename("app.txt");
+    let ten_lines = (1..=10)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(repo.path().join("app.txt"), format!("{ten_lines}\n")).unwrap();
+    let commit = repo.stage_all_and_commit("Add ten lines").unwrap();
+    app.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "line 2".unattributed_human(),
+        "line 3".unattributed_human(),
+        "line 4".unattributed_human(),
+        "line 5".unattributed_human(),
+        "line 6".unattributed_human(),
+        "line 7".unattributed_human(),
+        "line 8".unattributed_human(),
+        "line 9".unattributed_human(),
+        "line 10".unattributed_human(),
+    ]);
+
+    let mut log = AuthorshipLog::new();
+    log.metadata.base_commit_sha = commit.commit_sha.clone();
+    for session_id in ["s_first-session", "s_second-session"] {
+        log.metadata.sessions.insert(
+            session_id.to_string(),
+            SessionRecord {
+                agent_id: AgentId {
+                    tool: "mock_ai".to_string(),
+                    id: session_id.to_string(),
+                    model: "test-model".to_string(),
+                },
+                human_author: None,
+                custom_attributes: None,
+            },
+        );
+    }
+    let mut file_attestation = FileAttestation::new("app.txt".to_string());
+    for (session_id, trace_id) in [
+        ("s_first-session", "t_first"),
+        ("s_second-session", "t_second"),
+    ] {
+        file_attestation.add_entry(AttestationEntry::new(
+            format!("{session_id}::{trace_id}"),
+            vec![LineRange::Range(1, 10)],
+        ));
+    }
+    log.attestations.push(file_attestation);
+    let note = attach_authorship_log(&repo, &commit.commit_sha, &log);
+
+    let stats = stats_from_args(&repo, &["stats", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 10);
+    assert_eq!(stats.ai_additions, 10);
+    assert_eq!(stats.ai_accepted, 10);
+    assert_eq!(stats.human_additions, 0);
+    assert_eq!(stats.unknown_additions, 0);
+    assert_eq!(
+        stats.ai_additions + stats.human_additions + stats.unknown_additions,
+        stats.git_diff_added_lines,
+        "each added line must occupy exactly one headline bucket"
+    );
+    let same_model = stats
+        .tool_model_breakdown
+        .get("mock_ai::test-model")
+        .expect("same-model sessions should have one breakdown entry");
+    assert_eq!(same_model.ai_additions, 10);
+    assert_eq!(same_model.ai_accepted, 10);
+    assert_eq!(
+        repo.read_authorship_note(&commit.commit_sha)
+            .expect("stats should not remove the authorship note"),
+        note,
+        "stats must not mutate authorship-note bytes"
+    );
+}
+
+#[test]
+fn test_stats_counts_mixed_human_and_overlapping_models_without_mutating_note() {
+    let repo = TestRepo::new();
+    let mut app = repo.filename("app.txt");
+    let six_lines = (1..=6)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(repo.path().join("app.txt"), format!("{six_lines}\n")).unwrap();
+    let commit = repo.stage_all_and_commit("Add six lines").unwrap();
+    app.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "line 2".unattributed_human(),
+        "line 3".unattributed_human(),
+        "line 4".unattributed_human(),
+        "line 5".unattributed_human(),
+        "line 6".unattributed_human(),
+    ]);
+
+    let mut log = AuthorshipLog::new();
+    log.metadata.base_commit_sha = commit.commit_sha.clone();
+    for (session_id, model) in [("s_model-x", "model-x"), ("s_model-y", "model-y")] {
+        log.metadata.sessions.insert(
+            session_id.to_string(),
+            SessionRecord {
+                agent_id: AgentId {
+                    tool: "mock_ai".to_string(),
+                    id: session_id.to_string(),
+                    model: model.to_string(),
+                },
+                human_author: None,
+                custom_attributes: None,
+            },
+        );
+    }
+
+    let mut file_attestation = FileAttestation::new("app.txt".to_string());
+    file_attestation.add_entry(AttestationEntry::new(
+        "h_known-human".to_string(),
+        vec![
+            LineRange::Single(2),
+            LineRange::Single(3),
+            LineRange::Single(5),
+        ],
+    ));
+    file_attestation.add_entry(AttestationEntry::new(
+        "s_model-x::t_first".to_string(),
+        vec![
+            LineRange::Single(1),
+            LineRange::Single(2),
+            LineRange::Single(4),
+        ],
+    ));
+    file_attestation.add_entry(AttestationEntry::new(
+        "s_model-y::t_second".to_string(),
+        vec![LineRange::Single(3), LineRange::Single(4)],
+    ));
+    log.attestations.push(file_attestation);
+
+    let note = attach_authorship_log(&repo, &commit.commit_sha, &log);
+
+    let stats = stats_from_args(&repo, &["stats", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 6);
+    assert_eq!(stats.ai_additions, 2);
+    assert_eq!(stats.ai_accepted, 2);
+    assert_eq!(stats.human_additions, 3);
+    assert_eq!(stats.unknown_additions, 1);
+    assert_eq!(
+        stats.ai_additions + stats.human_additions + stats.unknown_additions,
+        stats.git_diff_added_lines,
+        "each added line must occupy exactly one headline bucket"
+    );
+
+    let model_x = stats
+        .tool_model_breakdown
+        .get("mock_ai::model-x")
+        .expect("model-x should have a breakdown entry");
+    assert_eq!(model_x.ai_additions, 2);
+    assert_eq!(model_x.ai_accepted, 2);
+    let model_y = stats
+        .tool_model_breakdown
+        .get("mock_ai::model-y")
+        .expect("model-y should have a breakdown entry");
+    assert_eq!(model_y.ai_additions, 1);
+    assert_eq!(model_y.ai_accepted, 1);
+    assert_eq!(
+        repo.read_authorship_note(&commit.commit_sha)
+            .expect("stats should not remove the authorship note"),
+        note,
+        "stats must not mutate authorship-note bytes"
     );
 }
 
