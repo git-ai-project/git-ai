@@ -2,7 +2,8 @@ use crate::config::{CodexHooksFormat, Config};
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, codex_home_dir, generate_diff, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, codex_home_dir, generate_diff, is_git_ai_checkpoint_command,
+    update_toml_preserving_format, write_atomic,
 };
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
@@ -782,9 +783,8 @@ impl HookInstaller for CodexInstaller {
             let mut diff_output = Vec::new();
 
             if config_changed {
-                let new_config_content = toml::to_string_pretty(&merged_config).map_err(|e| {
-                    GitAiError::Generic(format!("Failed to serialize Codex config.toml: {e}"))
-                })?;
+                let new_config_content =
+                    update_toml_preserving_format(&existing_config_content, &merged_config)?;
                 diff_output.push(generate_diff(
                     &config_path,
                     &existing_config_content,
@@ -830,9 +830,8 @@ impl HookInstaller for CodexInstaller {
 
         // Write config.toml FIRST (contains the replacement inline hooks)
         if config_changed {
-            let new_config_content = toml::to_string_pretty(&merged_config).map_err(|e| {
-                GitAiError::Generic(format!("Failed to serialize Codex config.toml: {e}"))
-            })?;
+            let new_config_content =
+                update_toml_preserving_format(&existing_config_content, &merged_config)?;
             diff_output.push(generate_diff(
                 &config_path,
                 &existing_config_content,
@@ -912,9 +911,8 @@ impl HookInstaller for CodexInstaller {
 
         // Write config.toml changes first
         if config_changed || inline_hooks_changed {
-            let new_config_content = toml::to_string_pretty(&merged_config).map_err(|e| {
-                GitAiError::Generic(format!("Failed to serialize Codex config.toml: {e}"))
-            })?;
+            let new_config_content =
+                update_toml_preserving_format(&existing_config_content, &merged_config)?;
             diff_output.push(generate_diff(
                 &config_path,
                 &existing_config_content,
@@ -2467,6 +2465,92 @@ trusted_hash = "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef123
 
             let content_after_second = fs::read_to_string(&config_path).unwrap();
             assert_eq!(content_after_first, content_after_second);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_preserves_comments_and_formatting() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            let original = r#"# My Codex settings
+model = "o3" # pinned on purpose
+approval_policy = "on-request"
+
+# Sandbox tweaks
+[sandbox_workspace_write]
+network_access = true # needed for cargo
+"#;
+            fs::write(&config_path, original).unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+
+            let content = fs::read_to_string(&config_path).unwrap();
+            assert!(
+                content.starts_with(original),
+                "existing content, comments and key order should be kept verbatim, got:\n{content}"
+            );
+            let parsed = CodexInstaller::parse_config_toml(&content).unwrap();
+            assert!(CodexInstaller::config_hooks_feature_enabled(&parsed));
+            assert!(CodexInstaller::config_has_inline_hooks(&parsed));
+
+            installer
+                .uninstall_hooks(&params, false)
+                .expect("uninstall should succeed");
+            assert_eq!(
+                fs::read_to_string(&config_path).unwrap(),
+                original,
+                "uninstall should restore the original file"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_keeps_comments_inside_updated_tables() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            fs::write(
+                &config_path,
+                r#"model = "o3"
+
+[features]
+# keep web search on
+web_search_request = true
+codex_hooks = true # legacy flag
+"#,
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+
+            let content = fs::read_to_string(&config_path).unwrap();
+            assert!(
+                content.contains("# keep web search on\nweb_search_request = true\n"),
+                "comments inside an updated table should be kept, got:\n{content}"
+            );
+            let parsed = CodexInstaller::parse_config_toml(&content).unwrap();
+            let features = parsed.get("features").unwrap();
+            assert_eq!(features.get("hooks").and_then(|v| v.as_bool()), Some(true));
+            assert!(features.get("codex_hooks").is_none());
         });
     }
 }
