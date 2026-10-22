@@ -261,7 +261,7 @@ impl Drop for MockApiServer {
 }
 
 fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
-    let Some((path, body)) = read_http_request(&mut stream) else {
+    let Some((path, api_key, body)) = read_http_request(&mut stream) else {
         return;
     };
 
@@ -290,7 +290,11 @@ fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
             .to_string()
         }
         "/worker/metrics/upload" => {
-            let _ = tx.send(json!({ "path": path, "body": request_json }));
+            let _ = tx.send(json!({
+                "path": path,
+                "api_key": api_key,
+                "body": request_json
+            }));
             json!({ "errors": [] }).to_string()
         }
         "/worker/logs/upload" => {
@@ -322,7 +326,7 @@ fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
     write_http_response(&mut stream, response_body.as_bytes());
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
+fn read_http_request(stream: &mut TcpStream) -> Option<(String, Option<String>, Vec<u8>)> {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("failed to set mock API read timeout");
@@ -343,6 +347,12 @@ fn read_http_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
     let headers = String::from_utf8_lossy(&buffer[..header_end]);
     let request_line = headers.lines().next()?;
     let path = request_line.split_whitespace().nth(1)?.to_string();
+    let api_key = headers.lines().find_map(|line| {
+        line.split_once(':').and_then(|(name, value)| {
+            name.eq_ignore_ascii_case("x-api-key")
+                .then(|| value.trim().to_string())
+        })
+    });
     let content_length = headers
         .lines()
         .find_map(|line| {
@@ -365,6 +375,7 @@ fn read_http_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
 
     Some((
         path,
+        api_key,
         buffer[header_end..header_end + content_length].to_vec(),
     ))
 }
@@ -7805,6 +7816,68 @@ fn commit_attribution_unaffected_by_stalled_telemetry_uploads() {
     repo.stage_all_and_commit("commit under stalled telemetry")
         .unwrap();
     file.assert_lines_and_blame(lines!["human line".human(), "ai line".ai()]);
+}
+
+/// Metrics-only routing must not leak primary API credentials or send metric
+/// batches to the primary API.
+#[test]
+#[cfg(not(windows))]
+fn metrics_use_dedicated_endpoint_and_credentials() {
+    let mut primary_api = MockApiServer::start();
+    let mut metrics_api = MockApiServer::start();
+    let metrics_db_dir = tempfile::tempdir().expect("failed to create metrics db dir");
+    let metrics_db_path = metrics_db_dir.path().join("metrics.db");
+    let mut repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_API_BASE_URL", primary_api.base_url()),
+        ("GIT_AI_API_KEY", "primary-api-key"),
+        ("GIT_AI_METRICS_API_BASE_URL", metrics_api.base_url()),
+        ("GIT_AI_METRICS_API_KEY", "metrics-api-key"),
+        (
+            "GIT_AI_TEST_METRICS_DB_PATH",
+            metrics_db_path.to_str().unwrap(),
+        ),
+    ]);
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+        patch.prompt_storage = Some("default".to_string());
+        patch.telemetry_oss_disabled = Some(true);
+    });
+
+    let file_path = repo.canonical_path().join("test.ts");
+    fs::write(&file_path, "const value = 1;\n").expect("failed to write initial file");
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.ts"])
+        .expect("known-human checkpoint should succeed");
+    fs::write(&file_path, "const value = 2;\n").expect("failed to write update");
+    repo.git_ai(&["checkpoint", "mock_ai", "test.ts"])
+        .expect("AI checkpoint should succeed");
+    repo.git(&["add", "-A"]).expect("add should succeed");
+    repo.git(&["commit", "-m", "Commit with dedicated metrics"])
+        .expect("commit should succeed");
+    repo.git_ai(&["await", "--timeout", "60"])
+        .expect("await should flush metrics");
+
+    let dedicated_metrics = metrics_api
+        .collect_requests()
+        .into_iter()
+        .filter(|request| request["path"] == "/worker/metrics/upload")
+        .collect::<Vec<_>>();
+    assert!(
+        !dedicated_metrics.is_empty(),
+        "dedicated endpoint received no metrics uploads"
+    );
+    assert!(
+        dedicated_metrics
+            .iter()
+            .all(|request| request["api_key"] == "metrics-api-key"),
+        "dedicated endpoint did not receive the metrics API key: {dedicated_metrics:?}"
+    );
+    assert!(
+        primary_api
+            .collect_requests()
+            .iter()
+            .all(|request| request["path"] != "/worker/metrics/upload"),
+        "primary endpoint received a metrics upload"
+    );
 }
 
 /// An awaited flush must not certify completion while metric batches still
