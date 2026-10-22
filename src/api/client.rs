@@ -306,6 +306,28 @@ impl ApiContext {
         }
     }
 
+    /// Create a context for metrics delivery without changing any other API traffic.
+    pub fn for_metrics() -> Self {
+        let cfg = config::Config::fresh();
+        let api_key = cfg.metrics_api_key().map(str::to_string);
+        let author_identity = if api_key.is_some() {
+            resolve_git_identity()
+        } else {
+            None
+        };
+        Self {
+            base_url: cfg.metrics_api_base_url().to_string(),
+            auth_token: if cfg.has_dedicated_metrics_endpoint() {
+                None
+            } else {
+                try_load_auth_token()
+            },
+            api_key,
+            author_identity,
+            timeout_secs: Some(30),
+        }
+    }
+
     /// Create a new API context explicitly without authentication
     /// Use this when you need to ensure no auth token is sent
     /// Uses Config::fresh() to support runtime config updates (daemon mode)

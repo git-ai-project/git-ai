@@ -24,6 +24,12 @@ transcript file --(incremental read, cursor in token-usage DB)-->
 --> TokenUsage MetricEvent --> telemetry queue --> POST /worker/metrics/upload
 ```
 
+Metrics use the primary API URL and credentials by default. Deployments that
+send metrics to a separate service can set `GIT_AI_METRICS_API_BASE_URL` and
+`GIT_AI_METRICS_API_KEY`; both values are required. A dedicated endpoint never
+inherits primary API or OAuth credentials. These overrides affect only metrics
+uploads, not notes, CAS, logs, authentication, or update checks.
+
 Driven by `TokenUsageWorker` (`src/daemon/token_usage_worker.rs`):
 
 - **Triggers:** a non-blocking ping from the stream worker after it

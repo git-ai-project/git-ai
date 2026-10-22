@@ -179,10 +179,13 @@ pub struct Config {
     update_channel: UpdateChannel,
     feature_flags: FeatureFlags,
     api_base_url: String,
+    metrics_api_base_url: Option<String>,
     prompt_storage: String,
     default_prompt_storage: Option<String>,
     #[serde(serialize_with = "serialize_masked_api_key")]
     api_key: Option<String>,
+    #[serde(serialize_with = "serialize_masked_api_key")]
+    metrics_api_key: Option<String>,
     quiet: bool,
     allow_superuser: bool,
     author: AuthorConfig,
@@ -568,6 +571,13 @@ impl Config {
         &self.api_base_url
     }
 
+    /// Metrics-only API URL, falling back to the primary API URL.
+    pub fn metrics_api_base_url(&self) -> &str {
+        self.metrics_api_base_url
+            .as_deref()
+            .unwrap_or(&self.api_base_url)
+    }
+
     /// Returns the prompt storage mode: "default", "notes", or "local"
     /// - "default": Messages uploaded via CAS API
     /// - "notes": Messages stored in git notes
@@ -640,6 +650,19 @@ impl Config {
     /// Returns the API key if configured
     pub fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
+    }
+
+    /// Metrics-only API key. A dedicated endpoint never inherits primary credentials.
+    pub fn metrics_api_key(&self) -> Option<&str> {
+        if self.metrics_api_base_url.is_some() {
+            self.metrics_api_key.as_deref()
+        } else {
+            self.api_key.as_deref()
+        }
+    }
+
+    pub fn has_dedicated_metrics_endpoint(&self) -> bool {
+        self.metrics_api_base_url.is_some()
     }
 
     /// Returns the notes backend config.
@@ -1086,6 +1109,9 @@ fn build_config() -> Config {
         .and_then(|c| c.api_base_url.clone())
         .or_else(|| env::var("GIT_AI_API_BASE_URL").ok())
         .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
+    let metrics_api_base_url = env::var("GIT_AI_METRICS_API_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     // Get prompt_storage setting (defaults to "default")
     // Valid values: "default", "notes", "local"
@@ -1131,6 +1157,9 @@ fn build_config() -> Config {
                 .and_then(|c| c.api_key.clone())
                 .filter(|s| !s.is_empty())
         });
+    let metrics_api_key = env::var("GIT_AI_METRICS_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty());
 
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
@@ -1278,9 +1307,11 @@ fn build_config() -> Config {
             update_channel,
             feature_flags,
             api_base_url,
+            metrics_api_base_url,
             prompt_storage,
             default_prompt_storage,
             api_key,
+            metrics_api_key,
             quiet,
             allow_superuser,
             author,
@@ -1313,9 +1344,11 @@ fn build_config() -> Config {
         update_channel,
         feature_flags,
         api_base_url,
+        metrics_api_base_url,
         prompt_storage,
         default_prompt_storage,
         api_key,
+        metrics_api_key,
         quiet,
         allow_superuser,
         author,
@@ -1865,9 +1898,11 @@ mod tests {
             update_channel: UpdateChannel::Latest,
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
+            metrics_api_base_url: None,
             prompt_storage: "default".to_string(),
             default_prompt_storage: None,
             api_key: None,
+            metrics_api_key: None,
             quiet: false,
             allow_superuser: false,
             author: AuthorConfig::default(),
@@ -1881,6 +1916,24 @@ mod tests {
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
             daemon_memory_limit_mb: None,
         }
+    }
+
+    #[test]
+    fn dedicated_metrics_credentials_override_primary_api_settings() {
+        let mut config = create_test_config(vec![], vec![]);
+        config.api_base_url = "https://primary.example".to_string();
+        config.api_key = Some("primary-key".to_string());
+
+        assert_eq!(config.metrics_api_base_url(), "https://primary.example");
+        assert_eq!(config.metrics_api_key(), Some("primary-key"));
+        assert!(!config.has_dedicated_metrics_endpoint());
+
+        config.metrics_api_base_url = Some("https://metrics.example".to_string());
+        assert_eq!(config.metrics_api_key(), None);
+        config.metrics_api_key = Some("metrics-key".to_string());
+        assert_eq!(config.metrics_api_base_url(), "https://metrics.example");
+        assert_eq!(config.metrics_api_key(), Some("metrics-key"));
+        assert!(config.has_dedicated_metrics_endpoint());
     }
 
     #[test]
@@ -2133,9 +2186,11 @@ mod tests {
             update_channel: UpdateChannel::Latest,
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
+            metrics_api_base_url: None,
             prompt_storage: "default".to_string(),
             default_prompt_storage: None,
             api_key: None,
+            metrics_api_key: None,
             quiet: false,
             allow_superuser: false,
             author: AuthorConfig::default(),
@@ -2283,9 +2338,11 @@ mod tests {
             update_channel: UpdateChannel::Latest,
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
+            metrics_api_base_url: None,
             prompt_storage: prompt_storage.to_string(),
             default_prompt_storage: default_prompt_storage.map(|s| s.to_string()),
             api_key: None,
+            metrics_api_key: None,
             quiet: false,
             allow_superuser: false,
             author: AuthorConfig::default(),

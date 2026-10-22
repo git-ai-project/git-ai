@@ -944,7 +944,7 @@ fn count_pending_metrics_for_await() -> usize {
 }
 
 fn flush_metrics(events: &[MetricEvent], pace: bool) {
-    let context = ApiContext::new(None);
+    let context = ApiContext::for_metrics();
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
 
@@ -977,7 +977,7 @@ fn flush_metrics(events: &[MetricEvent], pace: bool) {
 }
 
 fn flush_pending_metrics(pace: bool) {
-    let context = ApiContext::new(None);
+    let context = ApiContext::for_metrics();
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
 

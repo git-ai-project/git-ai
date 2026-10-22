@@ -27,6 +27,8 @@ pub fn handle_whoami(args: &[String]) {
     let auth = collect_auth_status();
     let api_ctx = ApiContext::new(None);
     let api_client = ApiClient::new(api_ctx.clone());
+    let metrics_ctx = ApiContext::for_metrics();
+    let metrics_client = ApiClient::new(metrics_ctx.clone());
     let metrics_status = collect_metrics_status();
 
     print!(
@@ -36,6 +38,7 @@ pub fn handle_whoami(args: &[String]) {
             &auth,
             &api_ctx,
             &api_client,
+            &metrics_client,
             metrics_status.as_ref().map_err(String::as_str),
             telemetry_oss_disabled,
         )
@@ -59,6 +62,7 @@ fn render_whoami(
     auth: &AuthStatus,
     api_ctx: &ApiContext,
     api_client: &ApiClient,
+    metrics_client: &ApiClient,
     metrics_status: Result<&MetricsStatus, &str>,
     telemetry_oss_disabled: bool,
 ) -> String {
@@ -145,7 +149,13 @@ fn render_whoami(
     writeln!(
         out,
         "  Metrics delivery: {}",
-        metrics_delivery_status(api_base_url, api_client)
+        metrics_delivery_status(&metrics_client.context().base_url, metrics_client)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  Metrics endpoint: {}",
+        metrics_client.context().base_url
     )
     .unwrap();
     writeln!(
@@ -335,7 +345,15 @@ mod tests {
         let client = ApiClient::new(ctx.clone());
         let metrics = metrics_status();
 
-        let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), false);
+        let output = render_whoami(
+            &ctx.base_url,
+            &auth,
+            &ctx,
+            &client,
+            &client,
+            Ok(&metrics),
+            false,
+        );
 
         assert!(output.contains("API access: connected via API key"));
         assert!(output.contains("API key: configured (gita...7890)"));
@@ -370,7 +388,15 @@ mod tests {
         let client = ApiClient::new(ctx.clone());
         let metrics = metrics_status();
 
-        let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), true);
+        let output = render_whoami(
+            &ctx.base_url,
+            &auth,
+            &ctx,
+            &client,
+            &client,
+            Ok(&metrics),
+            true,
+        );
 
         assert!(output.contains("API access: connected via login"));
         assert!(output.contains("API key: unset"));
@@ -395,7 +421,15 @@ mod tests {
         let client = ApiClient::new(ctx.clone());
         let metrics = metrics_status();
 
-        let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), false);
+        let output = render_whoami(
+            &ctx.base_url,
+            &auth,
+            &ctx,
+            &client,
+            &client,
+            Ok(&metrics),
+            false,
+        );
 
         assert!(output.contains("API key: unset"));
         assert!(output.contains("Login: not logged in"));
@@ -425,7 +459,15 @@ mod tests {
         let client = ApiClient::new(ctx.clone());
         let metrics = metrics_status();
 
-        let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), false);
+        let output = render_whoami(
+            &ctx.base_url,
+            &auth,
+            &ctx,
+            &client,
+            &client,
+            Ok(&metrics),
+            false,
+        );
 
         assert!(output.contains(
             "API access: not connected (login credentials found, but no usable access token)"

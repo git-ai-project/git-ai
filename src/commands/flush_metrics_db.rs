@@ -11,7 +11,7 @@ const MAX_BATCH_SIZE: usize = 1000;
 
 /// Handle the flush-metrics-db command
 pub fn handle_flush_metrics_db(_args: &[String]) {
-    let context = ApiContext::new(None);
+    let context = ApiContext::for_metrics();
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
 
