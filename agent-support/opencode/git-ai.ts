@@ -223,6 +223,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
 
     const child = spawn(GIT_AI_BIN, CHECKPOINT_ARGS, {
       stdio: ["pipe", "ignore", "pipe"],
+      windowsHide: true,
     })
 
     timeout = setTimeout(() => {

@@ -88,6 +88,7 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 		return new Promise((resolve, reject) => {
 			const child = spawn(command, args, {
 				stdio: ['pipe', 'pipe', 'pipe'],
+				windowsHide: true,
 			})
 
 			let stdout = ''
