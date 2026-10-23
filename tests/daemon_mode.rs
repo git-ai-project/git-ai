@@ -1084,7 +1084,7 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     // Manually restart the daemon (production auto-start is disabled in test builds)
     start_daemon_for_repo(&repo);
 
-    let completion_baseline = repo.daemon_total_completion_count();
+    let checkpoint_baseline = repo.daemon_checkpoint_completion_count();
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", "delegate-fallback.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
@@ -1092,7 +1092,7 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     .expect("checkpoint should delegate to daemon and succeed");
 
     // Wait for the fire-and-forget checkpoint to complete
-    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
+    repo.wait_for_next_daemon_checkpoint_completion(checkpoint_baseline);
 
     let status = send_control_request(
         &daemon_control_socket_path(&repo),
@@ -1290,12 +1290,12 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
         "base\nchanged through daemon mode\n",
     )
     .expect("failed to write updated file");
-    let completion_baseline = repo.daemon_total_completion_count();
+    let checkpoint_baseline = repo.daemon_checkpoint_completion_count();
 
     repo.git_ai(&["checkpoint", "mock_ai", "daemon-mode-checkpoint.txt"])
         .expect("daemon-mode checkpoint should succeed");
 
-    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
+    repo.wait_for_next_daemon_checkpoint_completion(checkpoint_baseline);
 
     let checkpoints = repo
         .current_working_logs()
@@ -1322,28 +1322,15 @@ fn daemon_test_mode_human_checkpoint_with_explicit_preset_queues_via_daemon() {
 
     fs::write(repo.path().join("human-direct-path.txt"), "base\nhuman\n")
         .expect("failed to write human change");
-    let completion_baseline = repo.daemon_total_completion_count();
+    let checkpoint_baseline = repo.daemon_checkpoint_completion_count();
 
     repo.git_ai(&["checkpoint", "human", "human-direct-path.txt"])
         .expect("human checkpoint with preset should succeed");
 
-    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
+    repo.wait_for_next_daemon_checkpoint_completion(checkpoint_baseline);
 
-    let git_ai_repo = git_ai::git::repository::find_repository_in_path(
-        repo.path()
-            .to_str()
-            .expect("repo path should be valid UTF-8"),
-    )
-    .expect("repository should still be discoverable");
-    let base_commit = git_ai_repo
-        .head()
-        .ok()
-        .and_then(|head| head.target().ok())
-        .unwrap_or_else(|| "initial".to_string());
-    let checkpoints = git_ai_repo
-        .storage
-        .working_log_for_base_commit(&base_commit)
-        .unwrap()
+    let checkpoints = repo
+        .current_working_logs()
         .read_all_checkpoints()
         .expect("checkpoints should be readable");
     assert!(
@@ -1396,7 +1383,7 @@ fn daemon_symlink_repo_path_trace_and_status_use_same_family() {
     .expect("daemon status request should succeed for aliased path");
     assert!(status.ok, "aliased path daemon status should be ok");
 
-    let checkpoint_baseline = repo.daemon_total_completion_count();
+    let checkpoint_baseline = repo.daemon_checkpoint_completion_count();
     fs::write(repo.path().join("alias.txt"), "alias\nhuman\n")
         .expect("failed writing human aliased file");
     repo.git_ai(&["checkpoint", "human"])
