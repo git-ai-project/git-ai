@@ -780,6 +780,7 @@ async fn telemetry_flush_loop(
             let requeue_daemon_logs = if let Some(snapshot) = snapshot {
                 flush_telemetry_batch(snapshot, &daemon_id_for_flush, pace)
             } else {
+                flush_notes();
                 flush_pending_metrics(pace);
                 Vec::new()
             };
