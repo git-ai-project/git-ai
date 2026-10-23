@@ -1023,7 +1023,41 @@ fn extract_model_from_opencode_sqlite(
                 .map(String::from)
         });
 
-    Ok(result)
+    if result.is_some() {
+        return Ok(result);
+    }
+
+    // OpenCode 2.x keeps new sessions in `session_v2` and their messages in `session_message`;
+    // the `message` table above has no rows for them.
+    Ok(session_id.and_then(|sid| extract_opencode_v2_model(&conn, sid)))
+}
+
+/// Model of an OpenCode 2.x session: `data.model.id` of its most recent assistant row.
+/// That is the model that served the call (`session_v2.model` is only the session's current
+/// selection and can differ after a model switch). Only the id is read, never message text.
+fn extract_opencode_v2_model(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_message')",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if !has_table {
+        return None;
+    }
+    let model: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row(
+        "SELECT json_extract(data, '$.model.id') FROM session_message \
+         WHERE session_id = ? AND type = 'assistant' AND json_extract(data, '$.model.id') IS NOT NULL \
+         ORDER BY seq DESC LIMIT 1",
+        [session_id],
+        |row| row.get::<_, Option<String>>(0),
+    ))
+    .ok()?
+    .flatten();
+    model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
 }
 
 #[cfg(test)]
@@ -1459,6 +1493,62 @@ model = "profile-only-model"
 
         let result = extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("sess-1")).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_opencode_v2_latest_assistant_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+             INSERT INTO session_message VALUES ('a', 'ses-1', 'user', 1, 0, 0, '{\"model\":{\"id\":\"user-row-model\"}}');
+             INSERT INTO session_message VALUES ('b', 'ses-1', 'assistant', 2, 0, 0, '{\"model\":{\"id\":\"anthropic/claude-sonnet-5-5\",\"providerID\":\"p\"}}');
+             INSERT INTO session_message VALUES ('c', 'ses-1', 'assistant', 5, 0, 0, '{\"model\":{\"id\":\"openai/gpt-5.6-sol\",\"providerID\":\"p\"}}');
+             INSERT INTO session_message VALUES ('d', 'ses-1', 'user', 9, 0, 0, '{\"model\":{\"id\":\"later-user-row-model\"}}');
+             INSERT INTO session_message VALUES ('e', 'ses-2', 'assistant', 1, 0, 0, '{\"model\":{\"id\":\"other-session\"}}');
+             INSERT INTO session_message VALUES ('f', 'ses-3', 'assistant', 1, 0, 0, '{\"model\":{\"id\":\"  \"}}');
+             INSERT INTO session_message VALUES ('g', 'ses-4', 'assistant', 1, 0, 0, '{\"model\":{}}');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let model =
+            |sid: &str| extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some(sid)).unwrap();
+        assert_eq!(model("ses-1"), Some("openai/gpt-5.6-sol".to_string()));
+        assert_eq!(model("ses-2"), Some("other-session".to_string()));
+        assert_eq!(model("ses-3"), None, "a blank id is not a model");
+        assert_eq!(model("ses-4"), None, "an assistant row without a model id");
+        assert_eq!(model("ses-missing"), None);
+    }
+
+    #[test]
+    fn test_extract_model_opencode_v1_message_wins_over_v2() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+             INSERT INTO message VALUES ('m1', 'ses-1', 1, 1, '{\"role\":\"assistant\",\"modelID\":\"claude-opus-4-6\"}');
+             INSERT INTO session_message VALUES ('s1', 'ses-1', 'assistant', 1, 0, 0, '{\"model\":{\"id\":\"v2-model\"}}');",
+        )
+        .unwrap();
+        drop(conn);
+        let result = extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("ses-1")).unwrap();
+        assert_eq!(result, Some("claude-opus-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_opencode_without_any_message_table_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id TEXT);")
+            .unwrap();
+        drop(conn);
+        let result = extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("ses-1")).unwrap();
+        assert_eq!(result, None);
     }
 
     #[test]
