@@ -23,7 +23,7 @@
  * @see https://opencode.ai/v2/docs/build/plugins
  */
 
-import { Plugin } from "@opencode/plugin"
+import type { Plugin } from "@opencode/plugin"
 import { spawn } from "child_process"
 import { readFile, stat } from "fs/promises"
 import { dirname, isAbsolute, join, resolve } from "path"
@@ -517,7 +517,7 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
  * Hooks are registered on the tool domain; the callback receives a single event
  * (`id`, `input`, `tool`, `sessionID`, and `status`/`result` after execution).
  */
-export const GitAiPlugin = Plugin.define({
+export const GitAiPlugin: Plugin.Plugin = {
   id: "git-ai",
   async setup(ctx) {
     try {
@@ -547,7 +547,7 @@ export const GitAiPlugin = Plugin.define({
       debugLog("failed to initialize plugin", error)
     }
   },
-})
+}
 
 /**
  * OpenCode V1 plugin implementation (`@opencode-ai/plugin`).
