@@ -10019,6 +10019,36 @@ fn disable_trace2_for_daemon_process() {
     }
 }
 
+/// The daemon has no user to answer a credential prompt. A git child that
+/// prompts (a notes fetch from an HTTPS remote with no stored credentials,
+/// with GIT_ASKPASS inherited from the shell that started the daemon) waits
+/// forever, holds one of the two side-effect permits, and stalls every family
+/// behind it while their queued work accumulates in memory. Make every git the
+/// daemon spawns fail fast instead of prompting.
+///
+/// GIT_ASKPASS is set to the empty string rather than removed: git then skips
+/// core.askPass and SSH_ASKPASS too, and with terminal prompts disabled the
+/// credential request fails immediately.
+const DAEMON_NONINTERACTIVE_GIT_ENV_SET: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", ""),
+    ("GCM_INTERACTIVE", "never"),
+];
+const DAEMON_NONINTERACTIVE_GIT_ENV_REMOVE: &[&str] = &["SSH_ASKPASS"];
+
+fn make_git_noninteractive_for_daemon_process() {
+    // SAFETY: daemon startup is single-threaded at this point -- the tokio
+    // runtime is not yet running and no other threads exist.
+    unsafe {
+        for key in DAEMON_NONINTERACTIVE_GIT_ENV_REMOVE {
+            std::env::remove_var(key);
+        }
+        for (key, value) in DAEMON_NONINTERACTIVE_GIT_ENV_SET {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
 /// How often the daemon wakes up to evaluate whether an update check is due.
 const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 
@@ -10663,6 +10693,7 @@ pub(crate) fn daemon_run_pending_self_update() -> DaemonSelfUpdateOutcome {
 pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction, GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
+    make_git_noninteractive_for_daemon_process();
     config.ensure_parent_dirs()?;
     remove_stale_daemon_files(&config);
     let _lock = DaemonLock::acquire(&config.lock_path)?;
@@ -11806,6 +11837,91 @@ mod tests {
         assert!(
             !map.contains_key("family-idle"),
             "GC should evict idle exec locks to bound the map"
+        );
+    }
+
+    /// A git network command under the daemon's environment must fail fast on an
+    /// HTTPS remote that asks for credentials, even when the inherited
+    /// GIT_ASKPASS points at a program that never answers. Before the fix such a
+    /// fetch blocked forever and stalled every family queued behind it.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_git_env_fails_fast_on_credential_prompt() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Answer every connection (git retries after a credential prompt) with a
+        // Basic-auth challenge, each on its own thread so none is left unanswered.
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 65536];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let askpass = dir.path().join("askpass-hangs");
+        let called = dir.path().join("askpass-called");
+        std::fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho called >> '{}'\nsleep 600\n",
+                called.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut cmd = std::process::Command::new("git");
+        cmd.args([
+            "-c",
+            "credential.helper=",
+            "ls-remote",
+            &format!("http://127.0.0.1:{port}/owner/repo.git"),
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GIT_ASKPASS", &askpass)
+        .env("HOME", dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+        for key in DAEMON_NONINTERACTIVE_GIT_ENV_REMOVE {
+            cmd.env_remove(key);
+        }
+        for (key, value) in DAEMON_NONINTERACTIVE_GIT_ENV_SET {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn git");
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if started.elapsed() > std::time::Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let status = status.expect(
+            "git waited on a credential prompt: the daemon's git environment must not prompt",
+        );
+        assert!(!status.success(), "an unauthenticated fetch must fail");
+        assert!(
+            !called.exists(),
+            "the daemon's git environment must never run an askpass program"
         );
     }
 
