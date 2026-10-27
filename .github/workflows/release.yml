@@ -367,13 +367,13 @@ jobs:
           persist-credentials: false
 
       - name: Download Windows x64 binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: git-ai-windows-x64
           path: artifacts
 
       - name: Download Windows ARM64 binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: git-ai-windows-arm64
           path: artifacts
@@ -428,13 +428,13 @@ jobs:
           persist-credentials: false
 
       - name: Download macOS ARM64 binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: git-ai-macos-arm64
           path: artifacts
 
       - name: Download macOS x64 binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: git-ai-macos-x64
           path: artifacts
@@ -532,7 +532,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download MSI artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: git-ai-windows-msi
           path: release
@@ -598,7 +598,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Download PKG artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: macos-pkg
           path: release
@@ -694,7 +694,7 @@ jobs:
           echo "channel_label=$CHANNEL" >> "$GITHUB_OUTPUT"
 
       - name: Download release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: git-ai-*
           path: artifacts
@@ -965,7 +965,7 @@ jobs:
       attestations: write
     steps:
       - name: Download notarized PKG artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: macos-pkg
           path: release
