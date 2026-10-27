@@ -16,11 +16,16 @@ on:
         required: false
         default: false
         type: boolean
+      internal_build:
+        description: 'Build internal npm binaries with automatic updates disabled (dry run only)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   release-prod-approval:
     name: Approve production release
-    if: inputs.release_production == true && inputs.dry_run != true
+    if: inputs.release_production == true && inputs.dry_run != true && inputs.internal_build != true
     runs-on: ubuntu-latest
     environment: release-prod
     permissions:
@@ -98,7 +103,7 @@ jobs:
             -e DEBIAN_FRONTEND=noninteractive \
             -e SENTRY_OSS="${{ secrets.SENTRY_OSS }}" \
             -e POSTHOG_API_KEY="${{ secrets.POSTHOG_API_KEY }}" \
-            -e OSS_BUILD="1" \
+            -e OSS_BUILD="${{ inputs.internal_build && '0' || '1' }}" \
             ${{ matrix.docker_image }} \
             bash -c "
               apt-get update && \
@@ -135,7 +140,7 @@ jobs:
           CARGO_INCREMENTAL: 0
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
+          OSS_BUILD: ${{ inputs.internal_build && '0' || '1' }}
 
       - name: Build release binary (Windows ARM64 with LLVM strip)
         if: matrix.os == 'windows-11-arm'
@@ -145,7 +150,7 @@ jobs:
           CARGO_INCREMENTAL: 0
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
+          OSS_BUILD: ${{ inputs.internal_build && '0' || '1' }}
           RUSTFLAGS: "-C strip=symbols"
 
       - name: Verify binary architecture (Linux)
@@ -192,7 +197,7 @@ jobs:
           cp target/${{ matrix.target }}/release/git-ai release/${{ matrix.artifact_name }}
 
       - name: Sign macOS binary
-        if: contains(matrix.os, 'macos')
+        if: contains(matrix.os, 'macos') && inputs.internal_build != true
         shell: bash
         env:
           DRY_RUN: ${{ inputs.dry_run }}
@@ -291,7 +296,7 @@ jobs:
           CARGO_INCREMENTAL: 0
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
+          OSS_BUILD: ${{ inputs.internal_build && '0' || '1' }}
 
       - name: Verify binary architecture
         run: |
@@ -311,6 +316,7 @@ jobs:
           cp target/x86_64-apple-darwin/release/git-ai release/git-ai-macos-x64
 
       - name: Sign macOS binary
+        if: inputs.internal_build != true
         shell: bash
         env:
           DRY_RUN: ${{ inputs.dry_run }}
@@ -354,7 +360,7 @@ jobs:
   package-msi:
     name: Build Windows MSI installers
     needs: build
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && inputs.internal_build != true && needs.build.result == 'success' }}
     runs-on: windows-latest
     environment: release
     permissions:
@@ -417,6 +423,7 @@ jobs:
     needs: [build, build-macos-intel]
     if: >-
       !cancelled() &&
+      inputs.internal_build != true &&
       needs.build.result == 'success' &&
       needs.build-macos-intel.result == 'success'
     runs-on: macos-latest
@@ -653,6 +660,7 @@ jobs:
     if: >-
       !cancelled() &&
       inputs.dry_run != true &&
+      inputs.internal_build != true &&
       needs.build.result == 'success' &&
       needs.build-macos-intel.result == 'success' &&
       needs.package-msi.result == 'success' &&
@@ -954,6 +962,7 @@ jobs:
     if: >-
       !cancelled() &&
       inputs.dry_run != true &&
+      inputs.internal_build != true &&
       needs.create-release.result == 'success' &&
       needs.package-pkg.result == 'success' &&
       needs.test-pkg.result == 'success'
