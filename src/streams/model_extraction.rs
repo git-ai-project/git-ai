@@ -988,32 +988,31 @@ fn extract_model_from_opencode_sqlite(
         Err(_) => return Ok(None),
     };
 
-    // V2 keeps the currently selected model on the session, with `id` rather
-    // than V1's `modelID`. Consult it before older assistant messages after a
-    // model switch. V1 and V2 sessions can coexist in the same database.
+    // V2 publishes the assistant's model before executing its tools. Prefer it
+    // over the mutable session selection, which can change while a tool runs.
+    // V1 and V2 sessions can coexist in the same database.
     if let Some(session_id) = session_id
         && crate::streams::agents::opencode::is_v2_session(&conn, session_id)
     {
         let model = conn
             .query_row(
-                "SELECT model FROM session_v2 WHERE id = ?1",
+                "SELECT json_extract(data, '$.model.id') FROM session_message \
+                 WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq DESC LIMIT 1",
                 [session_id],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .ok()
-            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
-            .and_then(|model| model.get("id").and_then(|id| id.as_str()).map(String::from))
+            .flatten()
             .or_else(|| {
-                // A session using its agent's default may not have an explicit
-                // selection; the latest assistant message records the model used.
+                // Before the first assistant response, only the selection exists.
                 conn.query_row(
-                    "SELECT json_extract(data, '$.model.id') FROM session_message \
-                     WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq DESC LIMIT 1",
+                    "SELECT model FROM session_v2 WHERE id = ?1",
                     [session_id],
-                    |row| row.get::<_, Option<String>>(0),
+                    |row| row.get::<_, String>(0),
                 )
                 .ok()
-                .flatten()
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .and_then(|model| model.get("id").and_then(|id| id.as_str()).map(String::from))
             });
         return Ok(model);
     }
