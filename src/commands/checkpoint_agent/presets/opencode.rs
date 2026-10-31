@@ -154,8 +154,13 @@ impl OpenCodePreset {
 
     fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
         let conn = crate::streams::agents::opencode::open_sqlite_readonly(db_path).ok()?;
+        let table = if crate::streams::agents::opencode::is_v2_session(&conn, session_id) {
+            "session_v2"
+        } else {
+            "session"
+        };
         conn.query_row(
-            "SELECT parent_id FROM session WHERE id = ?",
+            &format!("SELECT parent_id FROM {table} WHERE id = ?"),
             [session_id],
             |row| row.get::<_, Option<String>>(0),
         )
