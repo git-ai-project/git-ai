@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 //🐰🥚 @todo use actual date Git AI was installed in each repo
 pub static OLDEST_AI_BLAME_DATE: LazyLock<DateTime<FixedOffset>> = LazyLock::new(|| {
@@ -435,12 +435,33 @@ impl Repository {
         ))
     }
 
-    fn blame_requested_abbrev_len(options: &GitAiBlameOptions, is_boundary: bool) -> usize {
+    fn blame_marker_width(&self, hunks: &[BlameHunk], options: &GitAiBlameOptions) -> usize {
+        if !options.blank_boundary
+            && !options.show_root
+            && hunks.iter().any(|hunk| hunk.is_boundary)
+        {
+            return 1;
+        }
+
+        // Git 2.56 only reserves marker columns when a marker is displayed.
+        // Git's configured binary is process-global; query its version at most once.
+        static USES_DYNAMIC_MARKER_WIDTH: OnceLock<bool> = OnceLock::new();
+        usize::from(!*USES_DYNAMIC_MARKER_WIDTH.get_or_init(|| {
+            self.git_version()
+                .is_some_and(|version| version >= (2, 56, 0))
+        }))
+    }
+
+    fn blame_requested_abbrev_len(
+        options: &GitAiBlameOptions,
+        is_boundary: bool,
+        marker_width: usize,
+    ) -> usize {
         let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
         if is_boundary && !options.show_root {
             base_len
         } else {
-            (base_len + 1).min(40)
+            (base_len + marker_width).min(40)
         }
     }
 
@@ -513,9 +534,11 @@ impl Repository {
 
         let mut requests_by_len: HashMap<usize, Vec<String>> = HashMap::new();
         let mut seen_by_len: HashMap<usize, HashSet<String>> = HashMap::new();
+        let marker_width = self.blame_marker_width(hunks, options);
 
         for hunk in hunks.iter() {
-            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            let requested_len =
+                Self::blame_requested_abbrev_len(options, hunk.is_boundary, marker_width);
             let seen = seen_by_len.entry(requested_len).or_default();
             if seen.insert(hunk.commit_sha.clone()) {
                 requests_by_len
@@ -528,7 +551,8 @@ impl Repository {
         let resolved = self.resolve_blame_abbrev_shas_batched(&requests_by_len);
 
         for hunk in hunks.iter_mut() {
-            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            let requested_len =
+                Self::blame_requested_abbrev_len(options, hunk.is_boundary, marker_width);
             hunk.abbrev_sha = resolved
                 .get(&(hunk.commit_sha.clone(), requested_len))
                 .cloned()
@@ -1736,7 +1760,8 @@ fn output_default_format(
     let blank_boundary_hash_width = if options.long_rev {
         40
     } else {
-        ((options.abbrev.unwrap_or(7).max(1) as usize) + 1).min(40)
+        ((options.abbrev.unwrap_or(7).max(1) as usize) + repo.blame_marker_width(&hunks, options))
+            .min(40)
     };
 
     for line_num in requested_lines {
