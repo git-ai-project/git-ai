@@ -4,25 +4,17 @@ use std::fs;
 
 #[test]
 fn attribution_self_checks_do_not_timeout() {
-    let repo = TestRepo::new();
+    let mut repo = TestRepo::new();
     let slow_git = repo.test_home_path().join(if cfg!(windows) {
         "slow-git.exe"
     } else {
         "slow-git"
     });
     fs::copy(env!("CARGO_BIN_EXE_git-ai-test-git-shim"), &slow_git).unwrap();
-    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
-    fs::write(
-        config_path,
-        serde_json::json!({
-            "git_path": slow_git,
-            "prompt_storage": "notes",
-            "exclude_prompts_in_repositories": [],
-            "disable_version_checks": true
-        })
-        .to_string(),
-    )
-    .unwrap();
+    repo.patch_git_ai_config(|patch| {
+        patch.git_path = Some(slow_git.to_string_lossy().into_owned());
+        patch.disable_version_checks = Some(true);
+    });
     let trace2_target =
         DaemonConfig::trace2_event_target_for_path(&repo.daemon_trace_socket_path());
 

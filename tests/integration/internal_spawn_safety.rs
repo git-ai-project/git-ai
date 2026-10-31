@@ -97,7 +97,7 @@ fn internal_spawn_helper_calls_must_provide_guard_env() {
 #[cfg(unix)]
 #[test]
 fn internal_git_spawns_disable_trace2_env() {
-    let repo = TestRepo::new();
+    let mut repo = TestRepo::new();
     fs::write(repo.path().join("plain.txt"), "plain log content\n").unwrap();
     repo.stage_all_and_commit("feat: plain log").unwrap();
     let mut file = repo.filename("plain.txt");
@@ -122,18 +122,10 @@ exec "$GIT_AI_REAL_GIT" "$@"
     permissions.set_mode(0o755);
     fs::set_permissions(&wrapper_path, permissions).unwrap();
 
-    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
-    fs::write(
-        &config_path,
-        serde_json::json!({
-            "git_path": wrapper_path,
-            "prompt_storage": "notes",
-            "exclude_prompts_in_repositories": [],
-            "disable_version_checks": true
-        })
-        .to_string(),
-    )
-    .unwrap();
+    repo.patch_git_ai_config(|patch| {
+        patch.git_path = Some(wrapper_path.to_string_lossy().into_owned());
+        patch.disable_version_checks = Some(true);
+    });
 
     let env_log = env_log_path.to_string_lossy().to_string();
     let real_git = real_git_executable().to_string();
