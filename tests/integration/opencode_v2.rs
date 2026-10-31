@@ -314,7 +314,8 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         assert!(
             Instant::now() < deadline,
             "All V2 transcript messages should reach the daemon's session events: received {} of {}",
-            session_records.len(), expected_event_ids.len()
+            session_records.len(),
+            expected_event_ids.len()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
