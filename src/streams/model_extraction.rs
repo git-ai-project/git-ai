@@ -988,6 +988,35 @@ fn extract_model_from_opencode_sqlite(
         Err(_) => return Ok(None),
     };
 
+    // V2 publishes the assistant's model before executing its tools. Prefer it
+    // over the mutable session selection, which can change while a tool runs.
+    // V1 and V2 sessions can coexist in the same database.
+    if let Some(session_id) = session_id
+        && crate::streams::agents::opencode::is_v2_session(&conn, session_id)
+    {
+        let model = conn
+            .query_row(
+                "SELECT json_extract(data, '$.model.id') FROM session_message \
+                 WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq DESC LIMIT 1",
+                [session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .or_else(|| {
+                // Before the first assistant response, only the selection exists.
+                conn.query_row(
+                    "SELECT model FROM session_v2 WHERE id = ?1",
+                    [session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .and_then(|model| model.get("id").and_then(|id| id.as_str()).map(String::from))
+            });
+        return Ok(model);
+    }
+
     // OpenCode stores model info in two places depending on message role:
     //   User messages:     data.model.modelID  (nested object)
     //   Assistant messages: data.modelID        (top-level string)
@@ -1459,6 +1488,29 @@ model = "profile-only-model"
 
         let result = extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("sess-1")).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_opencode_v2_selection_before_first_assistant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, model TEXT);
+             CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+             INSERT INTO session_v2 VALUES ('sess-1', '{\"providerID\":\"openai\",\"id\":\"selected-model\"}');",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("sess-1")).unwrap(),
+            Some("selected-model".into())
+        );
+        conn.execute("UPDATE session_v2 SET model = NULL", [])
+            .unwrap();
+        assert_eq!(
+            extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("sess-1")).unwrap(),
+            None
+        );
     }
 
     #[test]

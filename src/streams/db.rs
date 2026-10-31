@@ -118,6 +118,20 @@ const MIGRATIONS: &[&str] = &[
     INSERT INTO schema_version (version) VALUES (4);
     COMMIT;
     "#,
+    // Version 5: OpenCode pagination needs an ID to retain millisecond ties.
+    // Replay the old timestamp boundary once rather than skip unseen rows.
+    r#"
+    BEGIN;
+    UPDATE tracked_streams
+    SET watermark_type = 'TimestampCursor',
+        watermark_value = CAST(COALESCE(
+            CAST(strftime('%s', watermark_value) AS INTEGER) * 1000
+            + CAST(substr(strftime('%f', watermark_value), 4, 3) AS INTEGER),
+            0) AS TEXT) || '|'
+    WHERE stream_format = 'OpenCodeSqlite' AND watermark_type = 'Timestamp';
+    INSERT INTO schema_version (version) VALUES (5);
+    COMMIT;
+    "#,
 ];
 
 /// Record representing a tracked stream cursor in the database.
@@ -734,7 +748,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 4); // Current schema version
+        assert_eq!(version, MIGRATIONS.len() as u32);
     }
 
     #[test]
@@ -986,6 +1000,69 @@ mod tests {
         let result = db_arc.get_stream("session-1", "transcript", "/path/to/transcript.jsonl");
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_opencode_timestamp_cursor_migration_preserves_progress() {
+        use crate::streams::watermark::{TimestampCursorWatermark, WatermarkType};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("opencode_migration.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        for migration in &MIGRATIONS[..4] {
+            conn.execute_batch(migration).unwrap();
+        }
+        let old_db = StreamsDatabase {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        let mut legacy = create_test_stream("legacy-opencode");
+        legacy.tool = "opencode".into();
+        legacy.stream_format = "OpenCodeSqlite".into();
+        legacy.watermark_type = "Timestamp".into();
+        legacy.watermark_value = "2023-11-14T17:13:20.123-05:00".into();
+        legacy.last_known_size = 12345;
+        legacy.repo_work_dir = Some("/work/project".into());
+        old_db.insert_stream(&legacy).unwrap();
+
+        let mut initial = legacy.clone();
+        initial.session_id = "initial-opencode".into();
+        initial.watermark_value = "1970-01-01T00:00:00+00:00".into();
+        old_db.insert_stream(&initial).unwrap();
+        let unrelated = create_test_stream("unrelated");
+        old_db.insert_stream(&unrelated).unwrap();
+        let mut cursor = legacy.clone();
+        cursor.session_id = "cursor-opencode".into();
+        cursor.watermark_type = "TimestampCursor".into();
+        cursor.watermark_value = "1700000000123|msg-last".into();
+        old_db.insert_stream(&cursor).unwrap();
+        drop(old_db);
+
+        legacy.watermark_type = "TimestampCursor".into();
+        legacy.watermark_value = "1700000000123|".into();
+        initial.watermark_type = "TimestampCursor".into();
+        initial.watermark_value = "0|".into();
+        // Reopening twice verifies migration and restart retain both cursor
+        // fields and leave other streams and session metadata unchanged.
+        for _ in 0..2 {
+            let db = StreamsDatabase::open(&db_path).unwrap();
+            for expected in [&legacy, &initial, &unrelated, &cursor] {
+                assert_eq!(
+                    db.get_stream(&expected.session_id, "transcript", &expected.stream_path)
+                        .unwrap()
+                        .as_ref(),
+                    Some(expected)
+                );
+            }
+            let watermark = WatermarkType::TimestampCursor
+                .deserialize(&legacy.watermark_value)
+                .unwrap();
+            let watermark = watermark
+                .as_any()
+                .downcast_ref::<TimestampCursorWatermark>()
+                .unwrap();
+            assert_eq!(watermark.timestamp_millis, 1_700_000_000_123.0);
+            assert!(watermark.last_id.is_empty(), "replay the legacy boundary");
+        }
     }
 
     #[test]
