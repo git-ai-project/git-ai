@@ -1,13 +1,20 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use chrono::{DateTime, Utc};
-use git_ai::metrics::{attrs::attr_pos, db::MetricsDatabase, types::MetricEventId};
+use git_ai::metrics::{
+    PosEncoded, SessionEventValues, attrs::attr_pos, db::MetricsDatabase, types::MetricEventId,
+};
 use git_ai::streams::{agent::Agent, agents::OpenCodeAgent, watermark::TimestampWatermark};
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::fs;
 use std::time::{Duration, Instant};
 
-fn assert_opencode_v2_transcript_and_checkpoint(with_legacy_tables: bool, separate_parts: bool) {
+fn assert_opencode_v2_transcript_and_checkpoint(
+    with_legacy_tables: bool,
+    separate_parts: bool,
+    message_count: usize,
+) {
     let storage = tempfile::tempdir().unwrap();
     let db_path = storage.path().join("opencode.db");
     if with_legacy_tables {
@@ -179,6 +186,24 @@ fn assert_opencode_v2_transcript_and_checkpoint(with_legacy_tables: bool, separa
         );
     }
 
+    let mut expected_event_ids = BTreeSet::from(["msg_v2".to_string()]);
+    if message_count > 1 {
+        // A session can exceed the reader's 1000-row batch while many messages
+        // share a millisecond. The daemon must persist the entire tied group.
+        let mut conn = git_ai::sqlite::open_with_memory_limits(&db_path).unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 1..message_count {
+            let id = format!("msg_v2_{index:04}");
+            tx.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_v2', 'assistant', ?2, ?3, ?3, ?4)",
+                rusqlite::params![id, index + 1, 1_700_000_000_000_i64, message.to_string()],
+            )
+            .unwrap();
+            expected_event_ids.insert(id);
+        }
+        tx.commit().unwrap();
+    }
+
     let checkpoint = |event: &str| {
         let hook_input = json!({
             "hook_event_name": event, "session_id": "ses_v2", "tool_use_id": "call_v2",
@@ -218,14 +243,32 @@ fn assert_opencode_v2_transcript_and_checkpoint(with_legacy_tables: bool, separa
         let records = metrics
             .get_metric_history(0, None, &[MetricEventId::SessionEvent as u16])
             .unwrap();
-        if let Some(record) = records.iter().find(|record| {
-            record
-                .event
-                .attrs
-                .get(&attr_pos::EXTERNAL_SESSION_ID.to_string())
-                .and_then(|v| v.as_str())
-                == Some("ses_v2")
-        }) {
+        let session_records: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                record
+                    .event
+                    .attrs
+                    .get(&attr_pos::EXTERNAL_SESSION_ID.to_string())
+                    .and_then(|v| v.as_str())
+                    == Some("ses_v2")
+            })
+            .collect();
+        if session_records.len() == message_count {
+            let event_ids: BTreeSet<_> = session_records
+                .iter()
+                .map(|record| {
+                    SessionEventValues::from_sparse(&record.event.values)
+                        .external_event_id
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(event_ids, expected_event_ids);
+            let record = session_records[0];
+            assert_eq!(
+                record.event.timestamp, 1_700_000_000,
+                "Session events use the message creation time, not the database file time"
+            );
             assert_eq!(
                 record
                     .event
@@ -238,7 +281,8 @@ fn assert_opencode_v2_transcript_and_checkpoint(with_legacy_tables: bool, separa
         }
         assert!(
             Instant::now() < deadline,
-            "V2 transcript should reach the daemon's session events"
+            "All V2 transcript messages should reach the daemon's session events: received {} of {message_count}",
+            session_records.len()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -246,15 +290,69 @@ fn assert_opencode_v2_transcript_and_checkpoint(with_legacy_tables: bool, separa
 
 #[test]
 fn test_opencode_v2_transcript_checkpoint_and_parent() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1);
 }
 
 #[test]
 fn test_opencode_v2_transcript_with_legacy_tables() {
-    assert_opencode_v2_transcript_and_checkpoint(true, false);
+    assert_opencode_v2_transcript_and_checkpoint(true, false, 1);
 }
 
 #[test]
 fn test_opencode_v2_transcript_with_separate_parts() {
-    assert_opencode_v2_transcript_and_checkpoint(true, true);
+    assert_opencode_v2_transcript_and_checkpoint(true, true, 1);
+}
+
+#[test]
+fn test_opencode_v2_transcript_tied_timestamp_pagination() {
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1001);
+}
+
+#[test]
+fn test_opencode_message_timestamp_fallbacks() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let metadata = file.as_file().metadata().unwrap();
+    let reader = OpenCodeAgent::new();
+    let cases = [
+        (
+            json!({"message": {
+                "time_created": 1_700_000_000_123_u64,
+                "time_updated": 1_700_000_100_456_u64,
+                "data": {"time": {"created": 1_600_000_000_000_u64}}
+            }}),
+            1_700_000_000,
+        ),
+        (
+            json!({"message": {"data": {"time": {"created": 1_700_000_001_999_u64}}}}),
+            1_700_000_001,
+        ),
+        (
+            json!({"message": {
+                "time_created": "invalid",
+                "data": {"time": {"created": 1_700_000_002_000_u64}}
+            }}),
+            1_700_000_002,
+        ),
+        (
+            json!({"timestamp": "2023-11-14T22:13:23Z"}),
+            1_700_000_003,
+        ),
+    ];
+    for (event, expected) in cases {
+        for is_first_event in [true, false] {
+            assert_eq!(
+                reader.extract_event_timestamp(&event, &metadata, is_first_event),
+                expected,
+                "Unexpected message timestamp for {event}"
+            );
+        }
+    }
+    let missing_timestamp = json!({"message": {"data": {}}});
+    for is_first_event in [true, false] {
+        assert_eq!(
+            reader.extract_event_timestamp(&missing_timestamp, &metadata, is_first_event),
+            git_ai::streams::agent::file_time_fallback(&metadata, is_first_event),
+            "Messages without a creation time retain the file metadata fallback"
+        );
+    }
 }
