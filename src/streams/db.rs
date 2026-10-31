@@ -989,6 +989,69 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_timestamp_cursor_migration_preserves_progress() {
+        use crate::streams::watermark::{TimestampCursorWatermark, WatermarkType};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("opencode_migration.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        for migration in &MIGRATIONS[..4] {
+            conn.execute_batch(migration).unwrap();
+        }
+        let old_db = StreamsDatabase {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        let mut legacy = create_test_stream("legacy-opencode");
+        legacy.tool = "opencode".into();
+        legacy.stream_format = "OpenCodeSqlite".into();
+        legacy.watermark_type = "Timestamp".into();
+        legacy.watermark_value = "2023-11-14T17:13:20.123-05:00".into();
+        legacy.last_known_size = 12345;
+        legacy.repo_work_dir = Some("/work/project".into());
+        old_db.insert_stream(&legacy).unwrap();
+
+        let mut initial = legacy.clone();
+        initial.session_id = "initial-opencode".into();
+        initial.watermark_value = "1970-01-01T00:00:00+00:00".into();
+        old_db.insert_stream(&initial).unwrap();
+        let unrelated = create_test_stream("unrelated");
+        old_db.insert_stream(&unrelated).unwrap();
+        let mut cursor = legacy.clone();
+        cursor.session_id = "cursor-opencode".into();
+        cursor.watermark_type = "TimestampCursor".into();
+        cursor.watermark_value = "1700000000123|msg-last".into();
+        old_db.insert_stream(&cursor).unwrap();
+        drop(old_db);
+
+        legacy.watermark_type = "TimestampCursor".into();
+        legacy.watermark_value = "1700000000123|".into();
+        initial.watermark_type = "TimestampCursor".into();
+        initial.watermark_value = "0|".into();
+        // Reopening twice verifies migration and restart retain both cursor
+        // fields and leave other streams and session metadata unchanged.
+        for _ in 0..2 {
+            let db = StreamsDatabase::open(&db_path).unwrap();
+            for expected in [&legacy, &initial, &unrelated, &cursor] {
+                assert_eq!(
+                    db.get_stream(&expected.session_id, "transcript", &expected.stream_path)
+                        .unwrap()
+                        .as_ref(),
+                    Some(expected)
+                );
+            }
+            let watermark = WatermarkType::TimestampCursor
+                .deserialize(&legacy.watermark_value)
+                .unwrap();
+            let watermark = watermark
+                .as_any()
+                .downcast_ref::<TimestampCursorWatermark>()
+                .unwrap();
+            assert_eq!(watermark.timestamp_millis, 1_700_000_000_123.0);
+            assert!(watermark.last_id.is_empty(), "replay the legacy boundary");
+        }
+    }
+
+    #[test]
     fn test_migration_v3_to_v4_preserves_data() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("migration_test.db");
