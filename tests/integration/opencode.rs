@@ -677,3 +677,212 @@ fn test_opencode_checkpoint_sets_parent_session_id_from_db() {
 }
 
 crate::reuse_tests_in_worktree!(test_opencode_raw_event_fidelity,);
+
+/// Exercise the standalone plugin template with the same Node 22 runtime used in CI.
+/// The plugin's subprocesses inherit the TestRepo daemon/config isolation.
+fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
+    use crate::repos::test_file::ExpectedLineExt;
+    use crate::repos::test_repo::TestRepo;
+    use std::process::Command;
+
+    let mut repo = if scenario == "worktree" {
+        TestRepo::new_worktree()
+    } else {
+        TestRepo::new()
+    };
+    repo.patch_git_ai_config(|patch| {
+        patch.exclude_prompts_in_repositories = Some(vec![]);
+    });
+    let root = repo.canonical_path();
+    let directory = if scenario == "subdir" {
+        root.join("nested")
+    } else {
+        root.clone()
+    };
+    fs::create_dir_all(&directory).unwrap();
+    for name in ["first.ts", "second.ts", "unrelated.ts"] {
+        fs::write(directory.join(name), "// baseline\n").unwrap();
+    }
+    if scenario == "subdir" {
+        fs::write(root.join("first.ts"), "// untouched root file\n").unwrap();
+    }
+    repo.stage_all_and_commit("Initial files").unwrap();
+    let relative_name = |name: &str| {
+        directory
+            .join(name)
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut first = repo.filename(&relative_name("first.ts"));
+    let mut second = repo.filename(&relative_name("second.ts"));
+    let mut unrelated = repo.filename(&relative_name("unrelated.ts"));
+    first.assert_committed_lines(crate::lines!["// baseline".unattributed_human()]);
+    second.assert_committed_lines(crate::lines!["// baseline".unattributed_human()]);
+    unrelated.assert_committed_lines(crate::lines!["// baseline".unattributed_human()]);
+    if scenario == "subdir" {
+        repo.filename("first.ts")
+            .assert_committed_lines(crate::lines!["// untouched root file".unattributed_human(),]);
+    }
+
+    // Exercise human edits on both sides of an AI edit in the same files.
+    fs::write(directory.join("first.ts"), "// baseline\n// manual first\n").unwrap();
+    if scenario != "metadata" {
+        fs::write(
+            directory.join("second.ts"),
+            "// baseline\n// manual second\n",
+        )
+        .unwrap();
+    }
+
+    if scenario != "untracked" {
+        repo.git_ai(&[
+            "checkpoint",
+            "mock_known_human",
+            directory.join("first.ts").to_str().unwrap(),
+            directory.join("second.ts").to_str().unwrap(),
+        ])
+        .unwrap();
+    }
+
+    let isolated = tempfile::tempdir().unwrap();
+    let command_env = repo.git_ai_command_without_pre_sync_for_test(&[], &[]);
+    let binary_path = command_env.get_program().to_str().unwrap();
+    let escaped_binary = serde_json::to_string(binary_path).unwrap();
+    let plugin_source = include_str!("../../agent-support/opencode/git-ai.ts")
+        .replace("\"__GIT_AI_BINARY_PATH__\"", &escaped_binary);
+    // .mts forces ESM without installing either OpenCode SDK alongside the plugin.
+    let plugin_path = isolated.path().join("git-ai.mts");
+    fs::write(&plugin_path, plugin_source).unwrap();
+    let storage_path = isolated.path().join("storage");
+    fs::create_dir(&storage_path).unwrap();
+    fs::copy(
+        opencode_sqlite_fixture_path().join("opencode.db"),
+        storage_path.join("opencode.db"),
+    )
+    .unwrap();
+
+    let mut command = Command::new("node");
+    for (key, value) in command_env.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    let output = command
+        .arg("--experimental-strip-types")
+        .arg(fixture_path("opencode-plugin-harness.mjs"))
+        .arg(&plugin_path)
+        .arg(&directory)
+        .arg(api)
+        .arg(repo.base_repo_path().unwrap_or(&root))
+        .arg(scenario)
+        .arg(binary_path)
+        .env("GIT_AI_OPENCODE_STORAGE_PATH", &storage_path)
+        .env("GIT_AI_OPENCODE_DEBUG", "1")
+        .current_dir(isolated.path())
+        .output()
+        .expect("OpenCode plugin tests require Node.js 22.6 or newer");
+    assert!(
+        output.status.success(),
+        "Standalone {api} plugin failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    repo.sync_daemon_force();
+    let checkpoints = repo.current_working_logs().read_all_checkpoints().unwrap();
+    let ai_checkpoints: Vec<_> = checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.kind == git_ai::authorship::working_log::CheckpointKind::AiAgent
+        })
+        .collect();
+    assert_eq!(
+        ai_checkpoints.len(),
+        2,
+        "Each completion must produce exactly one AI checkpoint"
+    );
+    let tool_ids: std::collections::BTreeSet<_> = ai_checkpoints
+        .iter()
+        .filter_map(|checkpoint| checkpoint.agent_metadata.as_ref()?.get("tool_use_id"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        tool_ids,
+        std::collections::BTreeSet::from(["call-first", "call-second"])
+    );
+    if scenario == "untracked" {
+        // Commit-time adjacent-edge recovery intentionally extends AI attribution into
+        // nearby unknown lines. Check the raw hook snapshots before that separate policy.
+        for checkpoint in ai_checkpoints {
+            for entry in &checkpoint.entries {
+                assert_eq!(entry.line_attributions.len(), 1);
+                assert_eq!(entry.line_attributions[0].start_line, 3);
+                assert_eq!(entry.line_attributions[0].end_line, 3);
+            }
+        }
+        return;
+    }
+    let commit = repo.stage_all_and_commit("OpenCode plugin edits").unwrap();
+    first.assert_committed_lines(crate::lines![
+        "// baseline".unattributed_human(),
+        "// manual first".human(),
+        "// AI first".ai(),
+        "// manual after".human(),
+    ]);
+    let mut expected_second = crate::lines!["// baseline".unattributed_human()];
+    if scenario != "metadata" {
+        expected_second.push("// manual second".human());
+    }
+    expected_second.push("// AI second".ai());
+    second.assert_committed_lines(expected_second);
+    unrelated.assert_committed_lines(crate::lines![
+        "// baseline".unattributed_human(),
+        "// unrelated manual".unattributed_human(),
+    ]);
+    if scenario == "subdir" {
+        repo.filename("first.ts")
+            .assert_committed_lines(crate::lines!["// untouched root file".unattributed_human(),]);
+    }
+    let session_id = generate_session_id("test-session-123", "opencode");
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .get(&session_id)
+        .unwrap();
+    assert_eq!(session.agent_id.tool, "opencode");
+    assert_eq!(session.agent_id.id, "test-session-123");
+    assert_eq!(session.agent_id.model, "gpt-5");
+}
+
+#[test]
+fn test_opencode_plugin_v2_callbacks_attribute_edits() {
+    assert_opencode_plugin_callbacks("v2", "default");
+}
+
+#[test]
+fn test_opencode_plugin_v1_callbacks_attribute_edits() {
+    assert_opencode_plugin_callbacks("v1", "default");
+}
+
+#[test]
+fn test_opencode_plugin_v2_uses_active_worktree_directory() {
+    assert_opencode_plugin_callbacks("v2", "worktree");
+}
+
+#[test]
+fn test_opencode_plugin_v2_uses_active_subdirectory() {
+    assert_opencode_plugin_callbacks("v2", "subdir");
+}
+
+#[test]
+fn test_opencode_plugin_v2_scopes_result_metadata_files() {
+    assert_opencode_plugin_callbacks("v2", "metadata");
+}
+
+#[test]
+fn test_opencode_plugin_v2_pre_snapshot_excludes_untracked_edits() {
+    assert_opencode_plugin_callbacks("v2", "untracked");
+}
