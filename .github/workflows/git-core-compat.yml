@@ -113,13 +113,16 @@ jobs:
           set -euo pipefail
           # test-lib.sh changes HOME, so git-ai also needs its normal fallback
           # location to contain the same Git version as the pinned test suite.
-          make -C /tmp/git-core-tests -j"$(nproc)" prefix=/usr/local NO_CURL=YesPlease NO_GETTEXT=YesPlease
-          sudo make -C /tmp/git-core-tests prefix=/usr/local NO_CURL=YesPlease NO_GETTEXT=YesPlease install
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+          make -C /tmp/git-core-tests -j"$(nproc)" prefix=/usr/local NO_GETTEXT=YesPlease
+          sudo make -C /tmp/git-core-tests prefix=/usr/local NO_GETTEXT=YesPlease install
           hash -r
           test "$(command -v git)" = /usr/local/bin/git
           test "$(git --version)" = "$(/tmp/git-core-tests/git --version)"
           test "$(git --exec-path)" = /usr/local/libexec/git-core
           test -x /usr/local/libexec/git-core/git-upload-pack
+          test -x /usr/local/libexec/git-core/git-remote-https
 
       - name: Build git-ai
         run: cargo build --release --bin git-ai
