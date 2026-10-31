@@ -333,10 +333,7 @@ fn test_opencode_message_timestamp_fallbacks() {
             }}),
             1_700_000_002,
         ),
-        (
-            json!({"timestamp": "2023-11-14T22:13:23Z"}),
-            1_700_000_003,
-        ),
+        (json!({"timestamp": "2023-11-14T22:13:23Z"}), 1_700_000_003),
     ];
     for (event, expected) in cases {
         for is_first_event in [true, false] {

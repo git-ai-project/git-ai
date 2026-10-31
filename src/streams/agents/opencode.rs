@@ -3,8 +3,7 @@
 use crate::streams::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::streams::sweep::{DiscoveredSession, StreamFormat, SweepStrategy};
 use crate::streams::types::{StreamBatch, StreamError};
-use crate::streams::watermark::{TimestampWatermark, WatermarkStrategy};
-use chrono::DateTime;
+use crate::streams::watermark::{TimestampCursorWatermark, TimestampWatermark, WatermarkStrategy};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::Path;
@@ -57,6 +56,7 @@ fn read_session_messages_raw_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
+    after_id: &str,
     limit: usize,
     v2: bool,
 ) -> Result<Vec<(String, i64, serde_json::Value)>, StreamError> {
@@ -65,35 +65,38 @@ fn read_session_messages_raw_with_limit(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, session_id, time_created, time_updated, data{extra_columns} FROM {table} \
-             WHERE session_id = ? AND time_updated > ? \
+             WHERE session_id = ?1 AND (time_updated > ?2 OR (time_updated = ?2 AND id > ?3)) \
              ORDER BY time_updated ASC, id ASC \
-             LIMIT ?",
+             LIMIT ?4",
         ))
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
-            let id: String = row.get(0)?;
-            let row_session_id: String = row.get(1)?;
-            let time_created: i64 = row.get(2)?;
-            let time_updated: i64 = row.get(3)?;
-            let data: String = row.get(4)?;
-            let v2_fields = if v2 {
-                Some((row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
-            } else {
-                None
-            };
-            Ok((
-                id,
-                row_session_id,
-                time_created,
-                time_updated,
-                data,
-                v2_fields,
-            ))
-        })
+        .query_map(
+            rusqlite::params![session_id, after_updated, after_id, limit],
+            |row| {
+                let id: String = row.get(0)?;
+                let row_session_id: String = row.get(1)?;
+                let time_created: i64 = row.get(2)?;
+                let time_updated: i64 = row.get(3)?;
+                let data: String = row.get(4)?;
+                let v2_fields = if v2 {
+                    Some((row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
+                } else {
+                    None
+                };
+                Ok((
+                    id,
+                    row_session_id,
+                    time_created,
+                    time_updated,
+                    data,
+                    v2_fields,
+                ))
+            },
+        )
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to query messages: {}", e),
         })?;
@@ -145,6 +148,7 @@ fn read_parts_for_messages_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
+    after_id: &str,
     limit: usize,
     v2: bool,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, StreamError> {
@@ -177,7 +181,9 @@ fn read_parts_for_messages_with_limit(
         .prepare(&format!(
             "SELECT {identity}, message_id, session_id, time_created, time_updated, data{extra_columns} FROM {table} \
              WHERE message_id IN ( \
-                 SELECT id FROM {message_table} WHERE session_id = ? AND time_updated > ? ORDER BY time_updated ASC, id ASC LIMIT ? \
+                 SELECT id FROM {message_table} \
+                 WHERE session_id = ?1 AND (time_updated > ?2 OR (time_updated = ?2 AND id > ?3)) \
+                 ORDER BY time_updated ASC, id ASC LIMIT ?4 \
              ) \
              ORDER BY message_id ASC, {order}",
         ))
@@ -186,32 +192,35 @@ fn read_parts_for_messages_with_limit(
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
-            let id = if v2 {
-                serde_json::Value::Number(row.get::<_, i64>(0)?.into())
-            } else {
-                serde_json::Value::String(row.get(0)?)
-            };
-            let message_id: String = row.get(1)?;
-            let row_session_id: String = row.get(2)?;
-            let time_created: i64 = row.get(3)?;
-            let time_updated: i64 = row.get(4)?;
-            let data: String = row.get(5)?;
-            let v2_fields = if v2 {
-                Some((row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))
-            } else {
-                None
-            };
-            Ok((
-                id,
-                message_id,
-                row_session_id,
-                time_created,
-                time_updated,
-                data,
-                v2_fields,
-            ))
-        })
+        .query_map(
+            rusqlite::params![session_id, after_updated, after_id, limit],
+            |row| {
+                let id = if v2 {
+                    serde_json::Value::Number(row.get::<_, i64>(0)?.into())
+                } else {
+                    serde_json::Value::String(row.get(0)?)
+                };
+                let message_id: String = row.get(1)?;
+                let row_session_id: String = row.get(2)?;
+                let time_created: i64 = row.get(3)?;
+                let time_updated: i64 = row.get(4)?;
+                let data: String = row.get(5)?;
+                let v2_fields = if v2 {
+                    Some((row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))
+                } else {
+                    None
+                };
+                Ok((
+                    id,
+                    message_id,
+                    row_session_id,
+                    time_created,
+                    time_updated,
+                    data,
+                    v2_fields,
+                ))
+            },
+        )
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to query parts: {}", e),
         })?;
@@ -288,31 +297,42 @@ impl Agent for OpenCodeAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<StreamBatch, StreamError> {
-        // Downcast to TimestampWatermark
-        let ts_watermark = watermark
+        let mut cursor = if let Some(cursor) = watermark
             .as_any()
-            .downcast_ref::<TimestampWatermark>()
-            .ok_or_else(|| StreamError::Fatal {
+            .downcast_ref::<TimestampCursorWatermark>()
+        {
+            cursor.clone()
+        } else if let Some(legacy) = watermark.as_any().downcast_ref::<TimestampWatermark>() {
+            // Legacy watermarks did not record the last ID at their timestamp.
+            // Replay that boundary once so migration cannot skip tied messages.
+            TimestampCursorWatermark::new(legacy.0.timestamp_millis() as f64, String::new())
+        } else {
+            return Err(StreamError::Fatal {
                 message: format!(
-                    "OpenCode reader requires TimestampWatermark, got incompatible type for session {}",
+                    "OpenCode reader requires TimestampCursorWatermark, got incompatible type for session {}",
                     session_id
                 ),
-            })?;
+            });
+        };
 
-        let watermark_millis = ts_watermark.0.timestamp_millis();
+        let watermark_millis = cursor.timestamp_millis as i64;
 
-        // Open SQLite read-only
+        // Keep both selectors on the same snapshot: OpenCode can update a
+        // message and its parts while this bounded batch is being read.
         let conn = open_sqlite_readonly(path)?;
-        let v2 = is_v2_session(&conn, session_id);
+        let snapshot = conn
+            .unchecked_transaction()
+            .map_err(|e| StreamError::Fatal {
+                message: format!("Failed to start OpenCode read snapshot: {}", e),
+            })?;
+        let v2 = is_v2_session(&snapshot, session_id);
 
-        // LIMIT applied for memory safety. Uses strict > to avoid re-reading.
-        // Note: messages sharing exact same millisecond as watermark boundary could
-        // theoretically be skipped, but OpenCode writes are interactive (not concurrent)
-        // so millisecond collisions are effectively impossible in practice.
+        // The ID breaks timestamp ties without dropping messages at the limit.
         let messages = read_session_messages_raw_with_limit(
-            &conn,
+            &snapshot,
             session_id,
             watermark_millis,
+            &cursor.last_id,
             self.batch_size,
             v2,
         )?;
@@ -320,26 +340,27 @@ impl Agent for OpenCodeAgent {
         if messages.is_empty() {
             return Ok(StreamBatch {
                 events: Vec::new(),
-                new_watermark: Box::new(TimestampWatermark::new(ts_watermark.0)),
+                new_watermark: Box::new(cursor),
             });
         }
 
         // Read only parts for the matched messages (IN-subquery, single scan).
         let mut parts_by_message = read_parts_for_messages_with_limit(
-            &conn,
+            &snapshot,
             session_id,
             watermark_millis,
+            &cursor.last_id,
             self.batch_size,
             v2,
         )?;
+        snapshot.commit().map_err(|e| StreamError::Fatal {
+            message: format!("Failed to finish OpenCode read snapshot: {}", e),
+        })?;
 
-        let mut max_updated: i64 = watermark_millis;
         let mut events = Vec::with_capacity(messages.len());
 
         for (msg_id, time_updated, msg_data) in messages {
-            if time_updated > max_updated {
-                max_updated = time_updated;
-            }
+            cursor = TimestampCursorWatermark::new(time_updated as f64, msg_id.clone());
 
             // Use .remove() to move parts out of the HashMap instead of cloning via .get()
             let mut map = serde_json::Map::with_capacity(2);
@@ -351,13 +372,9 @@ impl Agent for OpenCodeAgent {
             events.push(serde_json::Value::Object(map));
         }
 
-        let new_watermark_ts =
-            DateTime::from_timestamp_millis(max_updated).unwrap_or(ts_watermark.0);
-        let new_watermark = Box::new(TimestampWatermark::new(new_watermark_ts));
-
         Ok(StreamBatch {
             events,
-            new_watermark,
+            new_watermark: Box::new(cursor),
         })
     }
 
@@ -414,6 +431,18 @@ impl Agent for OpenCodeAgent {
         is_first_event: bool,
     ) -> u32 {
         crate::daemon::stream_worker::extract_event_timestamp(event)
+            .or_else(|| {
+                let message = event.get("message")?;
+                message
+                    .get("time_created")
+                    .and_then(|value| value.as_u64())
+                    .or_else(|| {
+                        message
+                            .pointer("/data/time/created")
+                            .and_then(|value| value.as_u64())
+                    })
+                    .map(|millis| (millis / 1000) as u32)
+            })
             .unwrap_or_else(|| crate::streams::agent::file_time_fallback(file_meta, is_first_event))
     }
 
@@ -584,7 +613,8 @@ mod tests {
         let db_path = dir.path().join("test.db");
         create_test_db(&db_path, 3);
         let agent = OpenCodeAgent::with_batch_size(1);
-        let legacy = TimestampWatermark::new(chrono::DateTime::from_timestamp_millis(2000).unwrap());
+        let legacy =
+            TimestampWatermark::new(chrono::DateTime::from_timestamp_millis(2000).unwrap());
         let first = agent
             .read_incremental(&db_path, Box::new(legacy), "test-session")
             .unwrap();
@@ -761,7 +791,8 @@ mod tests {
         let conn = open_sqlite_readonly(&db_path).unwrap();
         // watermark=0 matches all messages in the fixture
         let parts =
-            read_parts_for_messages_with_limit(&conn, "test-session-123", 0, 1000, false).unwrap();
+            read_parts_for_messages_with_limit(&conn, "test-session-123", 0, "", 1000, false)
+                .unwrap();
         // Verify IN-subquery loading returns parts grouped by message_id.
         // Single query with IN-subquery instead of one per message,
         // prevents full-table-scan memory blowup on large unindexed databases.

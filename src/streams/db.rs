@@ -118,6 +118,20 @@ const MIGRATIONS: &[&str] = &[
     INSERT INTO schema_version (version) VALUES (4);
     COMMIT;
     "#,
+    // Version 5: OpenCode pagination needs an ID to retain millisecond ties.
+    // Replay the old timestamp boundary once rather than skip unseen rows.
+    r#"
+    BEGIN;
+    UPDATE tracked_streams
+    SET watermark_type = 'TimestampCursor',
+        watermark_value = CAST(COALESCE(
+            CAST(strftime('%s', watermark_value) AS INTEGER) * 1000
+            + CAST(substr(strftime('%f', watermark_value), 4, 3) AS INTEGER),
+            0) AS TEXT) || '|'
+    WHERE stream_format = 'OpenCodeSqlite' AND watermark_type = 'Timestamp';
+    INSERT INTO schema_version (version) VALUES (5);
+    COMMIT;
+    "#,
 ];
 
 /// Record representing a tracked stream cursor in the database.
@@ -734,7 +748,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 4); // Current schema version
+        assert_eq!(version, MIGRATIONS.len() as u32);
     }
 
     #[test]
