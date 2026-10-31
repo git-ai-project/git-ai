@@ -691,18 +691,26 @@ fn test_blame_blank_boundary() {
     file.set_contents(crate::lines!["Line 1", "Line 2".ai()]);
 
     repo.stage_all_and_commit("Initial commit").unwrap();
+    file.assert_committed_lines(crate::lines!["Line 1".human(), "Line 2".ai()]);
 
-    let git_output = repo.git(&["blame", "-b", "test.txt"]).unwrap();
-    let git_ai_output = repo.git_ai(&["blame", "-b", "test.txt"]).unwrap();
+    let cases: &[(&[&str], &[&str])] = &[
+        (&[], &[]),
+        (&["--abbrev=4"], &["--abbrev", "4"]),
+        (&["-l"], &["-l"]),
+        (&["--root"], &["--root"]),
+    ];
+    for (git_flags, git_ai_flags) in cases {
+        let git_args = [&["blame", "-b"][..], git_flags, &["test.txt"]].concat();
+        let git_ai_args = [&["blame", "-b"][..], git_ai_flags, &["test.txt"]].concat();
+        let git_output = repo.git(&git_args).unwrap();
+        let git_ai_output = repo.git_ai(&git_ai_args).unwrap();
 
-    let git_norm = normalize_for_snapshot(&git_output);
-    let git_ai_norm = normalize_for_snapshot(&git_ai_output);
-    println!("\n[DEBUG] Normalized git blame output:\n{}", git_norm);
-    println!("\n[DEBUG] Normalized git-ai blame output:\n{}", git_ai_norm);
-    assert_eq!(
-        git_norm, git_ai_norm,
-        "Normalized blame outputs should match exactly"
-    );
+        assert_eq!(
+            normalize_for_snapshot(&git_output),
+            normalize_for_snapshot(&git_ai_output),
+            "Normalized blame outputs should match exactly for {git_args:?}"
+        );
+    }
 }
 
 #[test]
