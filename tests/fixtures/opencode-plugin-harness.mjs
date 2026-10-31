@@ -1,11 +1,25 @@
 import assert from "node:assert/strict"
-import { execFile } from "node:child_process"
+import childProcess, { execFile } from "node:child_process"
+import { syncBuiltinESMExports } from "node:module"
 import { promisify } from "node:util"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
 const [pluginPath, repository, api, projectDirectory, scenario, gitAiBinary] = process.argv.slice(2)
+const metadataTarget = scenario.startsWith("metadata")
+if (scenario === "failed-pre") {
+  const spawn = childProcess.spawn
+  let first = true
+  childProcess.spawn = (command, args, options) => {
+    const child = first
+      ? spawn(process.execPath, ["-e", "process.exit(23)"], options)
+      : spawn(command, args, options)
+    first = false
+    return child
+  }
+  syncBuiltinESMExports()
+}
 const { default: plugin } = await import(pathToFileURL(pluginPath).href)
 let before
 let after
@@ -33,23 +47,25 @@ const first = {
   input: api === "v2" ? { path: "first.ts" } : { filePath: "first.ts" },
 }
 const second = {
-  id: "call-second", sessionID: "test-session-123", tool: scenario === "metadata" ? "patch" : "write",
-  input: scenario === "metadata" ? { patchText: "@@ -1 +1 @@\n-old\n+new" } : api === "v2" ? { path: "second.ts" } : { filePath: "second.ts" },
+  id: "call-second", sessionID: "test-session-123", tool: metadataTarget ? "patch" : "write",
+  input: metadataTarget ? { patchText: "@@ -1 +1 @@\n-old\n+new" } : api === "v2" ? { path: "second.ts" } : { filePath: "second.ts" },
 }
 await before(first)
 await before(second)
 await writeFile(join(repository, "first.ts"), "// baseline\n// manual first\n// AI first\n")
-await writeFile(join(repository, "second.ts"), scenario === "metadata"
-  ? "// baseline\n// AI second\n"
-  : "// baseline\n// manual second\n// AI second\n")
+await writeFile(join(repository, "second.ts"), "// baseline\n// manual second\n// AI second\n")
 await writeFile(join(repository, "unrelated.ts"), "// baseline\n// unrelated manual\n")
 // Completions can arrive in a different order from their before hooks.
-await after({ ...second, status: "completed", result: { metadata: { files: [{ file: "second.ts" }] } } })
-await after({ ...first, status: "completed", result: { metadata: {} } })
+await after({ ...second, status: "completed", result: {
+  metadata: scenario === "metadata-extra" ? {} : { files: [{ file: "second.ts" }] },
+} })
+await after({ ...first, status: "completed", result: {
+  metadata: scenario === "metadata-extra" ? { files: [{ file: "second.ts" }] } : {},
+} })
 // An unmatched or duplicate completion must not claim a subsequent manual edit.
 await writeFile(join(repository, "first.ts"), "// baseline\n// manual first\n// AI first\n// manual after\n")
 await after({ ...first, status: "completed", result: { metadata: {} } })
 
-if (scenario !== "untracked") {
+if (scenario !== "untracked" && scenario !== "failed-pre") {
   await promisify(execFile)(gitAiBinary, ["checkpoint", "mock_known_human", join(repository, "first.ts")])
 }
