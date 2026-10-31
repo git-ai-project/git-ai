@@ -1492,6 +1492,29 @@ model = "profile-only-model"
     }
 
     #[test]
+    fn test_extract_model_opencode_v2_selection_before_first_assistant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, model TEXT);
+             CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+             INSERT INTO session_v2 VALUES ('sess-1', '{\"providerID\":\"openai\",\"id\":\"selected-model\"}');",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("sess-1")).unwrap(),
+            Some("selected-model".into())
+        );
+        conn.execute("UPDATE session_v2 SET model = NULL", [])
+            .unwrap();
+        assert_eq!(
+            extract_model(&db_path, StreamFormat::OpenCodeSqlite, Some("sess-1")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn test_extract_model_copilot_cli() {
         let path = fixture_path("copilot_cli_session_events.jsonl");
         let result = extract_model(&path, StreamFormat::CopilotEventStreamJsonl, None).unwrap();

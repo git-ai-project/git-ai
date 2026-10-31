@@ -34,8 +34,8 @@ fn assert_opencode_v2_transcript_and_checkpoint(
              time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
     )
     .unwrap();
-    // The selected model is optional until explicitly chosen. Once selected,
-    // it takes precedence over a previous assistant message after a switch.
+    // The selected model is optional until explicitly chosen. The assistant
+    // records the model that actually produced its tool call.
     let selected_model =
         with_legacy_tables.then(|| json!({"providerID": "openai", "id": "gpt-5"}).to_string());
     conn.execute(
@@ -45,7 +45,7 @@ fn assert_opencode_v2_transcript_and_checkpoint(
     .unwrap();
     let mut message = json!({
         "agent": "build",
-        "model": {"providerID": "openai", "id": if with_legacy_tables { "previous-model" } else { "gpt-5" }},
+        "model": {"providerID": "openai", "id": "gpt-5"},
         "time": {"created": 1_700_000_000_000_i64},
         "content": [{
             "type": "tool", "id": "call_v2", "name": "edit",
@@ -220,6 +220,27 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         .unwrap();
     };
     checkpoint("PreToolUse");
+    if with_legacy_tables {
+        // Session.switchModel remains available while a tool runs. Its
+        // ModelSelected projector changes the selection and appends a switch
+        // message without changing the active assistant's recorded model.
+        let mut conn = git_ai::sqlite::open_with_memory_limits(&db_path).unwrap();
+        let tx = conn.transaction().unwrap();
+        let selected = json!({"providerID": "openai", "id": "next-model"});
+        tx.execute(
+            "UPDATE session_v2 SET model = ?1 WHERE id = 'ses_v2'",
+            [selected.to_string()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO session_message VALUES ('msg_model_selected', 'ses_v2', 'model-switched', ?1, ?2, ?2, ?3)",
+            rusqlite::params![message_count + 1, 1_700_000_001_000_i64,
+                json!({"model": selected, "previous": {"providerID": "openai", "id": "gpt-5"}}).to_string()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        expected_event_ids.insert("msg_model_selected".into());
+    }
     fs::write(&path, "// baseline\n// V2 edit\n").unwrap();
     checkpoint("PostToolUse");
     let commit = repo.stage_all_and_commit("OpenCode V2 edit").unwrap();
@@ -234,7 +255,10 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         .values()
         .next()
         .unwrap();
-    assert_eq!(session.agent_id.model, "gpt-5");
+    assert_eq!(
+        session.agent_id.model, "gpt-5",
+        "The active tool belongs to its producing assistant, even after a model selection change"
+    );
     assert_eq!(session.agent_id.tool, "opencode");
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -254,7 +278,7 @@ fn assert_opencode_v2_transcript_and_checkpoint(
                     == Some("ses_v2")
             })
             .collect();
-        if session_records.len() == message_count {
+        if session_records.len() == expected_event_ids.len() {
             let event_ids: BTreeSet<_> = session_records
                 .iter()
                 .map(|record| {
@@ -264,7 +288,15 @@ fn assert_opencode_v2_transcript_and_checkpoint(
                 })
                 .collect();
             assert_eq!(event_ids, expected_event_ids);
-            let record = session_records[0];
+            let record = session_records
+                .iter()
+                .find(|record| {
+                    SessionEventValues::from_sparse(&record.event.values)
+                        .external_event_id
+                        .as_deref()
+                        == Some("msg_v2")
+                })
+                .unwrap();
             assert_eq!(
                 record.event.timestamp, 1_700_000_000,
                 "Session events use the message creation time, not the database file time"
@@ -281,8 +313,8 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         }
         assert!(
             Instant::now() < deadline,
-            "All V2 transcript messages should reach the daemon's session events: received {} of {message_count}",
-            session_records.len()
+            "All V2 transcript messages should reach the daemon's session events: received {} of {}",
+            session_records.len(), expected_event_ids.len()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -294,7 +326,7 @@ fn test_opencode_v2_transcript_checkpoint_and_parent() {
 }
 
 #[test]
-fn test_opencode_v2_transcript_with_legacy_tables() {
+fn test_opencode_v2_active_tool_model_survives_selection_change() {
     assert_opencode_v2_transcript_and_checkpoint(true, false, 1);
 }
 
