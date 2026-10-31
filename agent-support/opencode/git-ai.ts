@@ -158,7 +158,6 @@ type CheckpointEvent = {
   sessionID?: unknown
   callID?: unknown
   toolInput?: unknown
-  metadata?: unknown
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined => {
@@ -271,7 +270,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
 
 const createGitAiCheckpoints = (defaultCwd: string) => {
   // Track pending calls by callID so we can reference them in the after hook
-  const pendingCalls = new Map<string, { repoDir: string; toolCwd: string; sessionID: string; toolInput: unknown }>()
+  const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
 
   const nearestExistingDirectory = async (pathHint: string): Promise<string | null> => {
     let candidate = pathHint
@@ -395,53 +394,6 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
     return null
   }
 
-  const extractMetadataFilePaths = (metadata: unknown, cwd?: string): string[] => {
-    if (!metadata || typeof metadata !== "object") {
-      return []
-    }
-
-    const files = (metadata as { files?: unknown }).files
-    if (!Array.isArray(files)) {
-      return []
-    }
-
-    const paths = new Set<string>()
-    for (const file of files) {
-      if (!file || typeof file !== "object") {
-        continue
-      }
-
-      const entry = file as { filePath?: unknown; path?: unknown; file?: unknown }
-      const filePath = entry.filePath ?? entry.path ?? entry.file
-      if (typeof filePath === "string") {
-        const normalized = normalizePath(filePath, cwd ?? defaultCwd)
-        if (normalized) {
-          paths.add(normalized)
-        }
-      }
-    }
-
-    return [...paths]
-  }
-
-  const withMetadataFilePaths = (toolInput: unknown, filePaths: string[], cwd: string): unknown => {
-    if (filePaths.length === 0) {
-      return toolInput
-    }
-
-    if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
-      return {
-        ...toolInput,
-        file_paths: [...new Set([...extractFilePaths(toolInput, cwd), ...filePaths])],
-      }
-    }
-
-    return {
-      input: toolInput,
-      file_paths: filePaths,
-    }
-  }
-
   const before = swallowHookErrors(
     "pre-tool checkpoint failed",
     async (event: CheckpointEvent) => {
@@ -453,6 +405,7 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
       }
 
       const callID = hookString(event.callID)
+      pendingCalls.delete(callID)
       const sessionID = hookString(event.sessionID)
       const toolInput = event.toolInput
       const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
@@ -466,7 +419,6 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
       // to OpenCode's active directory. Send only resolved paths for edit tools so
       // the preset cannot also interpret the original paths relative to the root.
       const checkpointInput = isTrackedEdit ? { file_paths: filePaths } : toolInput
-      pendingCalls.set(callID, { repoDir, toolCwd, sessionID, toolInput: checkpointInput })
 
       const hookInput = JSON.stringify({
         hook_event_name: "PreToolUse",
@@ -477,6 +429,7 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
         tool_input: checkpointInput,
       })
       await runCheckpoint(hookInput)
+      pendingCalls.set(callID, { repoDir, sessionID, toolInput: checkpointInput })
     },
   )
 
@@ -497,16 +450,15 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
         return
       }
 
-      const metadataFilePaths = extractMetadataFilePaths(event.metadata, callInfo.toolCwd)
-      const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths, callInfo.toolCwd)
-
+      // Only attribute paths captured by the successful before hook. Result
+      // metadata can name additional files with no baseline for their prior edits.
       const hookInput = JSON.stringify({
         hook_event_name: "PostToolUse",
         session_id: callInfo.sessionID,
         tool_use_id: callID,
         cwd: callInfo.repoDir,
         tool_name: toolName,
-        tool_input: toolInput,
+        tool_input: callInfo.toolInput,
       })
       await runCheckpoint(hookInput)
     },
@@ -543,8 +495,6 @@ export const GitAiPlugin: Plugin.Plugin = {
           tool: event.tool,
           sessionID: event.sessionID,
           callID: event.id,
-          toolInput: event.input,
-          metadata: event.status === "completed" ? event.result?.metadata : undefined,
         })
       })
     } catch (error) {
@@ -583,13 +533,11 @@ export const GitAiPluginV1 = (ctx?: V1PluginContext) => {
         callID: input.callID,
         toolInput: output?.args ?? input.args,
       }),
-    "tool.execute.after": (input: V1ToolHookInput, output?: { metadata?: unknown }) =>
+    "tool.execute.after": (input: V1ToolHookInput) =>
       after({
         tool: input.tool,
         sessionID: input.sessionID,
         callID: input.callID,
-        toolInput: input.args,
-        metadata: output?.metadata,
       }),
   }
 }
