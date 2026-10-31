@@ -271,7 +271,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
 
 const createGitAiCheckpoints = (defaultCwd: string) => {
   // Track pending calls by callID so we can reference them in the after hook
-  const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
+  const pendingCalls = new Map<string, { repoDir: string; toolCwd: string; sessionID: string; toolInput: unknown }>()
 
   const nearestExistingDirectory = async (pathHint: string): Promise<string | null> => {
     let candidate = pathHint
@@ -411,7 +411,8 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
         continue
       }
 
-      const filePath = (file as { filePath?: unknown; path?: unknown }).filePath ?? (file as { path?: unknown }).path
+      const entry = file as { filePath?: unknown; path?: unknown; file?: unknown }
+      const filePath = entry.filePath ?? entry.path ?? entry.file
       if (typeof filePath === "string") {
         const normalized = normalizePath(filePath, cwd ?? defaultCwd)
         if (normalized) {
@@ -423,7 +424,7 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
     return [...paths]
   }
 
-  const withMetadataFilePaths = (toolInput: unknown, filePaths: string[]): unknown => {
+  const withMetadataFilePaths = (toolInput: unknown, filePaths: string[], cwd: string): unknown => {
     if (filePaths.length === 0) {
       return toolInput
     }
@@ -431,7 +432,7 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
     if (toolInput && typeof toolInput === "object" && !Array.isArray(toolInput)) {
       return {
         ...toolInput,
-        file_paths: filePaths,
+        file_paths: [...new Set([...extractFilePaths(toolInput, cwd), ...filePaths])],
       }
     }
 
@@ -461,7 +462,11 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
         return
       }
 
-      pendingCalls.set(callID, { repoDir, sessionID, toolInput })
+      // The checkpoint runs at the repository root, while tool paths are relative
+      // to OpenCode's active directory. Send only resolved paths for edit tools so
+      // the preset cannot also interpret the original paths relative to the root.
+      const checkpointInput = isTrackedEdit ? { file_paths: filePaths } : toolInput
+      pendingCalls.set(callID, { repoDir, toolCwd, sessionID, toolInput: checkpointInput })
 
       const hookInput = JSON.stringify({
         hook_event_name: "PreToolUse",
@@ -469,7 +474,7 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
         tool_use_id: callID,
         cwd: repoDir,
         tool_name: toolName,
-        tool_input: toolInput,
+        tool_input: checkpointInput,
       })
       await runCheckpoint(hookInput)
     },
@@ -492,9 +497,8 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
         return
       }
 
-      const toolCwd = resolveCwd(extractToolCwd(asRecord(event.toolInput)))
-      const metadataFilePaths = extractMetadataFilePaths(event.metadata, toolCwd)
-      const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths)
+      const metadataFilePaths = extractMetadataFilePaths(event.metadata, callInfo.toolCwd)
+      const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths, callInfo.toolCwd)
 
       const hookInput = JSON.stringify({
         hook_event_name: "PostToolUse",
@@ -522,7 +526,7 @@ export const GitAiPlugin: Plugin.Plugin = {
   async setup(ctx) {
     try {
       const defaultCwd =
-        ctx.location?.project?.directory ?? ctx.location?.directory ?? process.cwd()
+        ctx.location?.directory ?? ctx.location?.project?.directory ?? process.cwd()
       const { before, after } = createGitAiCheckpoints(defaultCwd)
 
       await ctx.tool.hook("execute.before", (event) => {
