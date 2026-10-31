@@ -79,8 +79,7 @@ impl StreamFormat {
             Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
                 WatermarkType::RecordIndex
             }
-            Self::OpenCodeSqlite => WatermarkType::Timestamp,
-            Self::CopilotOtelSqlite => WatermarkType::TimestampCursor,
+            Self::OpenCodeSqlite | Self::CopilotOtelSqlite => WatermarkType::TimestampCursor,
         }
     }
 }
