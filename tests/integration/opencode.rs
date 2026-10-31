@@ -685,6 +685,8 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
     use crate::repos::test_repo::TestRepo;
     use std::process::Command;
 
+    let metadata_target = scenario.starts_with("metadata");
+    let raw_checkpoints = matches!(scenario, "untracked" | "failed-pre");
     let mut repo = if scenario == "worktree" {
         TestRepo::new_worktree()
     } else {
@@ -728,22 +730,20 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
 
     // Exercise human edits on both sides of an AI edit in the same files.
     fs::write(directory.join("first.ts"), "// baseline\n// manual first\n").unwrap();
-    if scenario != "metadata" {
-        fs::write(
-            directory.join("second.ts"),
-            "// baseline\n// manual second\n",
-        )
-        .unwrap();
-    }
+    fs::write(
+        directory.join("second.ts"),
+        "// baseline\n// manual second\n",
+    )
+    .unwrap();
 
-    if scenario != "untracked" {
-        repo.git_ai(&[
-            "checkpoint",
-            "mock_known_human",
-            directory.join("first.ts").to_str().unwrap(),
-            directory.join("second.ts").to_str().unwrap(),
-        ])
-        .unwrap();
+    if !raw_checkpoints {
+        let mut paths = vec![directory.join("first.ts")];
+        if !metadata_target {
+            paths.push(directory.join("second.ts"));
+        }
+        let mut args = vec!["checkpoint", "mock_known_human"];
+        args.extend(paths.iter().map(|path| path.to_str().unwrap()));
+        repo.git_ai(&args).unwrap();
     }
 
     let isolated = tempfile::tempdir().unwrap();
@@ -800,19 +800,36 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
         .collect();
     assert_eq!(
         ai_checkpoints.len(),
-        2,
-        "Each completion must produce exactly one AI checkpoint"
+        if metadata_target || scenario == "failed-pre" {
+            1
+        } else {
+            2
+        },
+        "Only completions with a successful pre-edit baseline may produce AI checkpoints"
     );
     let tool_ids: std::collections::BTreeSet<_> = ai_checkpoints
         .iter()
         .filter_map(|checkpoint| checkpoint.agent_metadata.as_ref()?.get("tool_use_id"))
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        tool_ids,
+    let expected_tools = if metadata_target {
+        std::collections::BTreeSet::from(["call-first"])
+    } else if scenario == "failed-pre" {
+        std::collections::BTreeSet::from(["call-second"])
+    } else {
         std::collections::BTreeSet::from(["call-first", "call-second"])
-    );
-    if scenario == "untracked" {
+    };
+    assert_eq!(tool_ids, expected_tools);
+    if metadata_target {
+        assert!(
+            ai_checkpoints
+                .iter()
+                .flat_map(|checkpoint| &checkpoint.entries)
+                .all(|entry| entry.file == relative_name("first.ts")),
+            "Result metadata must not expand attribution to a file absent from the pre snapshot"
+        );
+    }
+    if raw_checkpoints {
         // Commit-time adjacent-edge recovery intentionally extends AI attribution into
         // nearby unknown lines. Check the raw hook snapshots before that separate policy.
         for checkpoint in ai_checkpoints {
@@ -831,12 +848,19 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
         "// AI first".ai(),
         "// manual after".human(),
     ]);
-    let mut expected_second = crate::lines!["// baseline".unattributed_human()];
-    if scenario != "metadata" {
-        expected_second.push("// manual second".human());
+    if metadata_target {
+        second.assert_committed_lines(crate::lines![
+            "// baseline".unattributed_human(),
+            "// manual second".unattributed_human(),
+            "// AI second".unattributed_human(),
+        ]);
+    } else {
+        second.assert_committed_lines(crate::lines![
+            "// baseline".unattributed_human(),
+            "// manual second".human(),
+            "// AI second".ai(),
+        ]);
     }
-    expected_second.push("// AI second".ai());
-    second.assert_committed_lines(expected_second);
     unrelated.assert_committed_lines(crate::lines![
         "// baseline".unattributed_human(),
         "// unrelated manual".unattributed_human(),
@@ -878,11 +902,21 @@ fn test_opencode_plugin_v2_uses_active_subdirectory() {
 }
 
 #[test]
-fn test_opencode_plugin_v2_scopes_result_metadata_files() {
+fn test_opencode_plugin_v2_skips_metadata_targets_without_pre_snapshot() {
     assert_opencode_plugin_callbacks("v2", "metadata");
 }
 
 #[test]
 fn test_opencode_plugin_v2_pre_snapshot_excludes_untracked_edits() {
     assert_opencode_plugin_callbacks("v2", "untracked");
+}
+
+#[test]
+fn test_opencode_plugin_v2_metadata_cannot_expand_pre_snapshot_scope() {
+    assert_opencode_plugin_callbacks("v2", "metadata-extra");
+}
+
+#[test]
+fn test_opencode_plugin_v2_failed_pre_does_not_attribute_post() {
+    assert_opencode_plugin_callbacks("v2", "failed-pre");
 }
