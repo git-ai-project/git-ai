@@ -108,14 +108,38 @@ jobs:
           git -C /tmp/git-core-tests rev-parse HEAD
           git -C /tmp/git-core-tests describe --tags --always --dirty
 
+      - name: Install pinned Git for compatibility tests
+        run: |
+          set -euo pipefail
+          # test-lib.sh changes HOME, so git-ai also needs its normal fallback
+          # location to contain the same Git version as the pinned test suite.
+          make -C /tmp/git-core-tests -j"$(nproc)" prefix=/usr/local NO_CURL=YesPlease NO_GETTEXT=YesPlease
+          sudo make -C /tmp/git-core-tests prefix=/usr/local NO_CURL=YesPlease NO_GETTEXT=YesPlease install
+          hash -r
+          test "$(command -v git)" = /usr/local/bin/git
+          test "$(git --version)" = "$(/tmp/git-core-tests/git --version)"
+          test "$(git --exec-path)" = /usr/local/libexec/git-core
+          test -x /usr/local/libexec/git-core/git-upload-pack
+
       - name: Build git-ai
         run: cargo build --release --bin git-ai
+
+      - name: Verify git-ai uses pinned Git without a config
+        run: |
+          set -euo pipefail
+          compat_home="$(mktemp -d)"
+          trap 'rm -rf "$compat_home"' EXIT
+          expected_version="$(/tmp/git-core-tests/git --version)"
+          actual_version="$(env HOME="$compat_home" _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 bash -c 'exec -a git ./target/release/git-ai --version')"
+          printf 'Pinned Git: %s\nGit AI proxy: %s\n' "$expected_version" "$actual_version"
+          test "$actual_version" = "$expected_version"
 
       - name: Run core Git compatibility tests
         timeout-minutes: 10
         env:
           PYTHONUNBUFFERED: "1"
-        run: python3 tests/git-compat/run-core-tests.py
+        # The checkout was already cleaned and the matching Git build installed.
+        run: python3 tests/git-compat/run-core-tests.py --no-clean-git-source
 
       - name: Clean git source before cache save
         run: |
