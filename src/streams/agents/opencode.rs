@@ -41,21 +41,34 @@ pub fn open_sqlite_readonly(path: &Path) -> Result<Connection, StreamError> {
     Ok(conn)
 }
 
-/// Read messages from the database, returning each row as a complete JSON object
-/// containing all columns (id, session_id, time_created, time_updated, data).
+/// Upgraded databases can contain both schemas, so select by session rather
+/// than by the presence of the V2 tables. Older databases have no session_v2.
+pub(crate) fn is_v2_session(conn: &Connection, session_id: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id = ?1)",
+        [session_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Read messages as native database rows, including V2's type and sequence.
 fn read_session_messages_raw_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
     limit: usize,
+    v2: bool,
 ) -> Result<Vec<(String, i64, serde_json::Value)>, StreamError> {
+    let table = if v2 { "session_message" } else { "message" };
+    let extra_columns = if v2 { ", type, seq" } else { "" };
     let mut stmt = conn
-        .prepare(
-            "SELECT id, session_id, time_created, time_updated, data FROM message \
+        .prepare(&format!(
+            "SELECT id, session_id, time_created, time_updated, data{extra_columns} FROM {table} \
              WHERE session_id = ? AND time_updated > ? \
              ORDER BY time_updated ASC, id ASC \
              LIMIT ?",
-        )
+        ))
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
@@ -67,7 +80,19 @@ fn read_session_messages_raw_with_limit(
             let time_created: i64 = row.get(2)?;
             let time_updated: i64 = row.get(3)?;
             let data: String = row.get(4)?;
-            Ok((id, row_session_id, time_created, time_updated, data))
+            let v2_fields = if v2 {
+                Some((row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
+            } else {
+                None
+            };
+            Ok((
+                id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+                v2_fields,
+            ))
         })
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to query messages: {}", e),
@@ -75,7 +100,7 @@ fn read_session_messages_raw_with_limit(
 
     let mut messages = Vec::new();
     for row in rows {
-        let (id, row_session_id, time_created, time_updated, data) =
+        let (id, row_session_id, time_created, time_updated, data, v2_fields) =
             row.map_err(|e| StreamError::Fatal {
                 message: format!("Failed to read message row: {}", e),
             })?;
@@ -102,6 +127,10 @@ fn read_session_messages_raw_with_limit(
             serde_json::Value::Number(time_updated.into()),
         );
         map.insert("data".into(), parsed_data);
+        if let Some((message_type, seq)) = v2_fields {
+            map.insert("type".into(), serde_json::Value::String(message_type));
+            map.insert("seq".into(), serde_json::Value::Number(seq.into()));
+        }
 
         messages.push((id, time_updated, serde_json::Value::Object(map)));
     }
@@ -110,35 +139,69 @@ fn read_session_messages_raw_with_limit(
 }
 
 /// Read parts for the matched messages only, using an IN-subquery to avoid loading
-/// all parts for the entire session. Returns each row as a complete JSON object
-/// containing all columns (id, message_id, session_id, time_created, time_updated, data),
-/// grouped by message_id.
+/// all parts for the entire session. Returns native V1 or V2 rows grouped by
+/// message_id, preserving V2's ordinal and call_id instead of inventing a part ID.
 fn read_parts_for_messages_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
     limit: usize,
+    v2: bool,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, StreamError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
-             WHERE message_id IN ( \
-                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? ORDER BY time_updated ASC, id ASC LIMIT ? \
-             ) \
-             ORDER BY message_id ASC, time_updated ASC, id ASC",
+    // V2.1 embeds content in the message; V2.2 can move it to session_part.
+    if v2
+        && !conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| StreamError::Fatal {
+                message: format!("Failed to detect OpenCode part schema: {}", e),
+            })?
+    {
+        return Ok(HashMap::new());
+    }
+    let (table, message_table, identity, extra_columns, order) = if v2 {
+        (
+            "session_part",
+            "session_message",
+            "ordinal",
+            ", type, call_id",
+            "ordinal ASC",
         )
+    } else {
+        ("part", "message", "id", "", "time_updated ASC, id ASC")
+    };
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {identity}, message_id, session_id, time_created, time_updated, data{extra_columns} FROM {table} \
+             WHERE message_id IN ( \
+                 SELECT id FROM {message_table} WHERE session_id = ? AND time_updated > ? ORDER BY time_updated ASC, id ASC LIMIT ? \
+             ) \
+             ORDER BY message_id ASC, {order}",
+        ))
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to prepare part query: {}", e),
         })?;
 
     let rows = stmt
         .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
-            let id: String = row.get(0)?;
+            let id = if v2 {
+                serde_json::Value::Number(row.get::<_, i64>(0)?.into())
+            } else {
+                serde_json::Value::String(row.get(0)?)
+            };
             let message_id: String = row.get(1)?;
             let row_session_id: String = row.get(2)?;
             let time_created: i64 = row.get(3)?;
             let time_updated: i64 = row.get(4)?;
             let data: String = row.get(5)?;
+            let v2_fields = if v2 {
+                Some((row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))
+            } else {
+                None
+            };
             Ok((
                 id,
                 message_id,
@@ -146,6 +209,7 @@ fn read_parts_for_messages_with_limit(
                 time_created,
                 time_updated,
                 data,
+                v2_fields,
             ))
         })
         .map_err(|e| StreamError::Fatal {
@@ -154,14 +218,14 @@ fn read_parts_for_messages_with_limit(
 
     let mut parts_by_message: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for row in rows {
-        let (id, message_id, row_session_id, time_created, time_updated, data) =
-            row.map_err(|e| StreamError::Fatal {
+        let (id, message_id, row_session_id, time_created, time_updated, data, v2_fields) = row
+            .map_err(|e| StreamError::Fatal {
                 message: format!("Failed to read part row: {}", e),
             })?;
 
         if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
             let mut map = serde_json::Map::with_capacity(6);
-            map.insert("id".into(), serde_json::Value::String(id));
+            map.insert(identity.into(), id);
             map.insert(
                 "message_id".into(),
                 serde_json::Value::String(message_id.clone()),
@@ -179,6 +243,15 @@ fn read_parts_for_messages_with_limit(
                 serde_json::Value::Number(time_updated.into()),
             );
             map.insert("data".into(), parsed_data);
+            if let Some((part_type, call_id)) = v2_fields {
+                map.insert("type".into(), serde_json::Value::String(part_type));
+                map.insert(
+                    "call_id".into(),
+                    call_id
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
             parts_by_message
                 .entry(message_id)
                 .or_default()
@@ -230,6 +303,7 @@ impl Agent for OpenCodeAgent {
 
         // Open SQLite read-only
         let conn = open_sqlite_readonly(path)?;
+        let v2 = is_v2_session(&conn, session_id);
 
         // LIMIT applied for memory safety. Uses strict > to avoid re-reading.
         // Note: messages sharing exact same millisecond as watermark boundary could
@@ -240,6 +314,7 @@ impl Agent for OpenCodeAgent {
             session_id,
             watermark_millis,
             self.batch_size,
+            v2,
         )?;
 
         if messages.is_empty() {
@@ -249,12 +324,13 @@ impl Agent for OpenCodeAgent {
             });
         }
 
-        // Read only parts for the matched messages (IN-subquery, single scan)
+        // Read only parts for the matched messages (IN-subquery, single scan).
         let mut parts_by_message = read_parts_for_messages_with_limit(
             &conn,
             session_id,
             watermark_millis,
             self.batch_size,
+            v2,
         )?;
 
         let mut max_updated: i64 = watermark_millis;
@@ -309,9 +385,23 @@ impl Agent for OpenCodeAgent {
                 arr.iter().find_map(|part| {
                     part.get("data")
                         .and_then(|d| d.get("callID"))
+                        .or_else(|| part.get("call_id"))
                         .and_then(|v| v.as_str())
                         .map(String::from)
                 })
+            })
+            .or_else(|| {
+                message?
+                    .get("data")?
+                    .get("content")?
+                    .as_array()?
+                    .iter()
+                    .find_map(|part| {
+                        if part.get("type")?.as_str()? != "tool" {
+                            return None;
+                        }
+                        part.get("id")?.as_str().map(String::from)
+                    })
             });
 
         (event_id, parent_event_id, tool_use_id)
@@ -591,7 +681,8 @@ mod tests {
             .join("tests/fixtures/opencode-sqlite/opencode.db");
         let conn = open_sqlite_readonly(&db_path).unwrap();
         // watermark=0 matches all messages in the fixture
-        let parts = read_parts_for_messages_with_limit(&conn, "test-session-123", 0, 1000).unwrap();
+        let parts =
+            read_parts_for_messages_with_limit(&conn, "test-session-123", 0, 1000, false).unwrap();
         // Verify IN-subquery loading returns parts grouped by message_id.
         // Single query with IN-subquery instead of one per message,
         // prevents full-table-scan memory blowup on large unindexed databases.

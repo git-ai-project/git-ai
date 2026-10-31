@@ -988,6 +988,36 @@ fn extract_model_from_opencode_sqlite(
         Err(_) => return Ok(None),
     };
 
+    // V2 keeps the currently selected model on the session, with `id` rather
+    // than V1's `modelID`. Consult it before older assistant messages after a
+    // model switch. V1 and V2 sessions can coexist in the same database.
+    if let Some(session_id) = session_id
+        && crate::streams::agents::opencode::is_v2_session(&conn, session_id)
+    {
+        let model = conn
+            .query_row(
+                "SELECT model FROM session_v2 WHERE id = ?1",
+                [session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .and_then(|model| model.get("id").and_then(|id| id.as_str()).map(String::from))
+            .or_else(|| {
+                // A session using its agent's default may not have an explicit
+                // selection; the latest assistant message records the model used.
+                conn.query_row(
+                    "SELECT json_extract(data, '$.model.id') FROM session_message \
+                     WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq DESC LIMIT 1",
+                    [session_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+            });
+        return Ok(model);
+    }
+
     // OpenCode stores model info in two places depending on message role:
     //   User messages:     data.model.modelID  (nested object)
     //   Assistant messages: data.modelID        (top-level string)
