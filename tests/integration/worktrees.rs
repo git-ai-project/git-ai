@@ -168,9 +168,11 @@ crate::worktree_test_wrappers! {
         let mut file = repo.filename("boundary.txt");
         file.set_contents(crate::lines!["root line".human(), "line to change".human()]);
         repo.stage_all_and_commit("root commit").unwrap();
+        file.assert_committed_lines(crate::lines!["root line".human(), "line to change".human()]);
 
         file.set_contents(crate::lines!["root line".human(), "updated line".human()]);
         repo.stage_all_and_commit("second commit").unwrap();
+        file.assert_committed_lines(crate::lines!["root line".human(), "updated line".human()]);
 
         let git_output = repo
             .git(&["blame", "--abbrev=12", "-b", "boundary.txt"])
