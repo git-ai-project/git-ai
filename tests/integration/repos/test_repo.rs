@@ -1314,6 +1314,8 @@ impl TestRepo {
 
     fn apply_default_config_patch(&mut self) {
         self.patch_git_ai_config(|patch| {
+            // Raw Git and git-ai must use the same selected executable. Tests
+            // that need a shim can override it with patch_git_ai_config.
             patch
                 .git_path
                 .get_or_insert_with(|| real_git_executable().to_string());
