@@ -500,12 +500,16 @@ mod tests {
             Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
         loop {
             let batch = agent.read_incremental(path, wm, "test-session").unwrap();
+            // Exercise the same serialization/deserialization boundary as the
+            // worker when it saves a batch and later resumes the stream.
+            wm = agent.streams()[0]
+                .watermark_type
+                .deserialize(&batch.new_watermark.serialize())
+                .unwrap();
             if batch.events.is_empty() {
-                wm = batch.new_watermark;
                 break;
             }
             all.extend(batch.events);
-            wm = batch.new_watermark;
         }
         (all, wm)
     }
@@ -525,6 +529,81 @@ mod tests {
             .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
             .collect();
         assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_opencode_batches_preserve_equal_timestamp_messages_and_parts() {
+        for v2 in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("test.db");
+            create_test_db(&db_path, 5);
+            let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
+            conn.execute("UPDATE message SET time_updated = 1000", [])
+                .unwrap();
+            if v2 {
+                conn.execute_batch(
+                    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY);
+                     INSERT INTO session_v2 VALUES ('test-session');
+                     ALTER TABLE message RENAME TO session_message;
+                     ALTER TABLE session_message ADD COLUMN type TEXT NOT NULL DEFAULT 'user';
+                     ALTER TABLE session_message ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE part RENAME TO session_part;
+                     ALTER TABLE session_part ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE session_part ADD COLUMN type TEXT NOT NULL DEFAULT 'text';
+                     ALTER TABLE session_part ADD COLUMN call_id TEXT;",
+                )
+                .unwrap();
+            }
+            drop(conn);
+
+            let agent = OpenCodeAgent::with_batch_size(2);
+            let (events, watermark) = drain_all(&agent, &db_path);
+            let ids: Vec<_> = events
+                .iter()
+                .map(|event| event["message"]["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, ["msg-0", "msg-1", "msg-2", "msg-3", "msg-4"]);
+            for (index, event) in events.iter().enumerate() {
+                assert_eq!(event["parts"].as_array().unwrap().len(), 1);
+                assert_eq!(event["parts"][0]["message_id"], event["message"]["id"]);
+                assert_eq!(event["parts"][0]["data"]["text"], format!("part-{index}"));
+            }
+            assert!(
+                agent
+                    .read_incremental(&db_path, watermark, "test-session")
+                    .unwrap()
+                    .events
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn test_opencode_legacy_timestamp_replays_boundary_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 3);
+        let agent = OpenCodeAgent::with_batch_size(1);
+        let legacy = TimestampWatermark::new(chrono::DateTime::from_timestamp_millis(2000).unwrap());
+        let first = agent
+            .read_incremental(&db_path, Box::new(legacy), "test-session")
+            .unwrap();
+        assert_eq!(first.events[0]["message"]["id"], "msg-1");
+        let resumed = agent.streams()[0]
+            .watermark_type
+            .deserialize(&first.new_watermark.serialize())
+            .unwrap();
+        let second = agent
+            .read_incremental(&db_path, resumed, "test-session")
+            .unwrap();
+        assert_eq!(second.events[0]["message"]["id"], "msg-2");
+        assert!(
+            agent
+                .read_incremental(&db_path, second.new_watermark, "test-session")
+                .unwrap()
+                .events
+                .is_empty()
+        );
     }
 
     #[test]
