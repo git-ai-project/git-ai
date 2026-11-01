@@ -66,6 +66,13 @@ const second = {
   id: "call-second", messageID: "message-second", sessionID: "test-session-123", tool: metadataTarget ? "patch" : "write",
   input: metadataTarget ? { patchText: "@@ -1 +1 @@\n-old\n+new" } : api === "v2" ? { path: "second.ts" } : { filePath: "second.ts" },
 }
+if (scenario === "large-input") {
+  // A patch can contain a very large body but only a few file headers. Path
+  // discovery must not allocate an array/string object for every body line.
+  first.tool = "patch"
+  first.input = { patchText: "not a patch line\n".repeat(2_000_000)
+    + "\t*** Update File: 'first.ts'\r\n" }
+}
 await before(first)
 await before(second)
 if (scenario.startsWith("lifecycle")) {
