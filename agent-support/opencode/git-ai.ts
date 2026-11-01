@@ -313,6 +313,10 @@ type PendingCall = {
   cancelled: boolean
 }
 
+// V8 can represent a short string as a slice retaining a much larger input.
+// Copy only admitted canonical values; UTF-16 preserves every JS code unit.
+const ownString = (value: string): string => Buffer.from(value, "utf16le").toString("utf16le")
+
 const createGitAiCheckpoints = (defaultCwd: string, onPendingChange: (active: boolean) => void = () => {}) => {
   const pendingCalls = new Map<string, PendingCall>()
   let pendingBytes = 0
@@ -519,9 +523,13 @@ const createGitAiCheckpoints = (defaultCwd: string, onPendingChange: (active: bo
       warnLimit()
       return Promise.resolve()
     }
+    const ownedPaths = filePaths.map(ownString)
     const call: PendingCall = {
-      key, sessionID, callID, messageID: hookString(event.messageID), toolName,
-      toolCwd, filePaths, toolInput, bytes, phase: "pre", cancelled: false,
+      key, sessionID: ownString(sessionID), callID: ownString(callID),
+      messageID: ownString(hookString(event.messageID)), toolName: ownString(toolName),
+      toolCwd: ownString(toolCwd), filePaths: ownedPaths,
+      toolInput: edit ? { file_paths: ownedPaths } : { command: ownString(command) },
+      bytes, phase: "pre", cancelled: false,
     }
     pendingCalls.set(key, call)
     pendingBytes += bytes
