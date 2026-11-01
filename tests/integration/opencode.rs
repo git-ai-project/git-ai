@@ -686,6 +686,7 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
     use std::process::Command;
 
     let metadata_target = scenario.starts_with("metadata");
+    let lifecycle = scenario.starts_with("lifecycle");
     let raw_checkpoints = matches!(scenario, "untracked" | "failed-pre");
     let mut repo = if scenario == "worktree" {
         TestRepo::new_worktree()
@@ -800,7 +801,7 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
         .collect();
     assert_eq!(
         ai_checkpoints.len(),
-        if metadata_target || scenario == "failed-pre" {
+        if metadata_target || lifecycle || scenario == "failed-pre" {
             1
         } else {
             2
@@ -814,7 +815,7 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
         .collect();
     let expected_tools = if metadata_target {
         std::collections::BTreeSet::from(["call-first"])
-    } else if scenario == "failed-pre" {
+    } else if lifecycle || scenario == "failed-pre" {
         std::collections::BTreeSet::from(["call-second"])
     } else {
         std::collections::BTreeSet::from(["call-first", "call-second"])
@@ -845,7 +846,11 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
     first.assert_committed_lines(crate::lines![
         "// baseline".unattributed_human(),
         "// manual first".human(),
-        "// AI first".ai(),
+        if lifecycle {
+            "// AI first".human()
+        } else {
+            "// AI first".ai()
+        },
         "// manual after".human(),
     ]);
     if metadata_target {
@@ -919,4 +924,19 @@ fn test_opencode_plugin_v2_metadata_cannot_expand_pre_snapshot_scope() {
 #[test]
 fn test_opencode_plugin_v2_failed_pre_does_not_attribute_post() {
     assert_opencode_plugin_callbacks("v2", "failed-pre");
+}
+
+#[test]
+fn test_opencode_plugin_v2_cancelled_call_cannot_claim_later_human_edits() {
+    assert_opencode_plugin_callbacks("v2", "lifecycle-cancel");
+}
+
+#[test]
+fn test_opencode_plugin_v2_declined_call_cannot_claim_later_human_edits() {
+    assert_opencode_plugin_callbacks("v2", "lifecycle-decline");
+}
+
+#[test]
+fn test_opencode_plugin_v1_cancelled_call_cannot_claim_later_human_edits() {
+    assert_opencode_plugin_callbacks("v1", "lifecycle-cancel");
 }

@@ -23,17 +23,33 @@ if (scenario === "failed-pre") {
 const { default: plugin } = await import(pathToFileURL(pluginPath).href)
 let before
 let after
+let terminal
+let cleanup
+let deliver
+let events = []
 if (api === "v2") {
   const hooks = new Map()
-  await plugin.setup({
+  cleanup = await plugin.setup({
     location: { directory: repository, project: { directory: projectDirectory } },
     tool: { hook: async (name, callback) => { hooks.set(name, callback) } },
+    event: { subscribe: ({ signal }) => ({
+      [Symbol.asyncIterator]() {
+        signal.addEventListener("abort", () => { deliver?.({ done: true }); deliver = undefined }, { once: true })
+        return { next: () => events.length ? Promise.resolve({ value: events.shift(), done: false }) : new Promise((resolve) => { deliver = resolve }) }
+      },
+    }) },
   })
   assert.equal(hooks.size, 2)
+  terminal = async (event) => {
+    if (deliver) { const resolve = deliver; deliver = undefined; resolve({ value: event, done: false }) }
+    else events.push(event)
+    await new Promise(setImmediate)
+  }
   before = (event) => hooks.get("execute.before")(event)
   after = (event) => hooks.get("execute.after")(event)
 } else {
   const hooks = await plugin.server({ worktree: repository, directory: process.cwd() })
+  terminal = async (event) => hooks.event?.({ event })
   before = (event) => hooks["tool.execute.before"]({
     tool: event.tool, sessionID: event.sessionID, callID: event.id,
   }, { args: event.input })
@@ -43,15 +59,27 @@ if (api === "v2") {
 }
 
 const first = {
-  id: "call-first", sessionID: "test-session-123", tool: "edit",
+  id: "call-first", messageID: "message-first", sessionID: "test-session-123", tool: "edit",
   input: api === "v2" ? { path: "first.ts" } : { filePath: "first.ts" },
 }
 const second = {
-  id: "call-second", sessionID: "test-session-123", tool: metadataTarget ? "patch" : "write",
+  id: "call-second", messageID: "message-second", sessionID: "test-session-123", tool: metadataTarget ? "patch" : "write",
   input: metadataTarget ? { patchText: "@@ -1 +1 @@\n-old\n+new" } : api === "v2" ? { path: "second.ts" } : { filePath: "second.ts" },
 }
 await before(first)
 await before(second)
+if (scenario.startsWith("lifecycle")) {
+  await terminal(api === "v2" ? {
+    type: "session.tool.failed", data: {
+      sessionID: first.sessionID, assistantMessageID: first.messageID, id: first.id,
+      error: { name: scenario === "lifecycle-decline" ? "PermissionDeniedError" : "AbortError", message: "Stopped" },
+    },
+  } : {
+    type: "message.part.updated", properties: { part: {
+      type: "tool", sessionID: first.sessionID, callID: first.id, state: { status: "error" },
+    } },
+  })
+}
 await writeFile(join(repository, "first.ts"), "// baseline\n// manual first\n// AI first\n")
 await writeFile(join(repository, "second.ts"), "// baseline\n// manual second\n// AI second\n")
 await writeFile(join(repository, "unrelated.ts"), "// baseline\n// unrelated manual\n")
@@ -69,3 +97,5 @@ await after({ ...first, status: "completed", result: { metadata: {} } })
 if (scenario !== "untracked" && scenario !== "failed-pre") {
   await promisify(execFile)(gitAiBinary, ["checkpoint", "mock_known_human", join(repository, "first.ts")])
 }
+
+await cleanup?.()
