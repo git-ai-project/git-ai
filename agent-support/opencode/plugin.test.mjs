@@ -269,3 +269,47 @@ test("timeout settles and closes owned pipes even if an exited child's descendan
   await pre
   assert.deepEqual(observed, { settled: true, stdin: true, stderr: true })
 })
+
+test("disposal during pre checkpoints cannot restart lifecycle subscriptions", async (t) => {
+  const f = await fixture(t, () => {})
+  const first = f.before(f.event("first"))
+  const second = f.before(f.event("second"))
+  while (f.children.length < 2) await new Promise(setImmediate)
+  await f.cleanup()
+  f.children[0].emit("close", 0)
+  await new Promise(setImmediate)
+  const subscriptions = f.subscriptions()
+  f.children[1].emit("close", 0)
+  await Promise.all([first, second])
+  assert.equal(subscriptions, 1)
+})
+
+test("sessions can use the same call ID without overwriting each other's baseline", async (t) => {
+  const f = await fixture(t)
+  const first = f.event("shared", { path: "a.ts" }, "first")
+  const second = f.event("shared", { path: "b.ts" }, "second")
+  await f.before(first)
+  await f.before(second)
+  await f.after(first)
+  await f.after(second)
+  assert.deepEqual(f.calls.filter((x) => x.hook_event_name === "PostToolUse").map((x) => x.session_id), ["first", "second"])
+})
+
+test("accepted long-running tools do not expire", async (t) => {
+  const f = await fixture(t)
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  await f.before(f.event())
+  t.mock.timers.tick(24 * 60 * 60 * 1000)
+  await f.after(f.event())
+  assert.equal(f.calls.length, 2)
+})
+
+test("a repeated pre must retire the old baseline even when its replacement fails", async (t) => {
+  let attempts = 0
+  const f = await fixture(t, (child) => child.emit("close", ++attempts === 2 ? 23 : 0))
+  const event = f.event()
+  await f.before(event)
+  await f.before(event)
+  await f.after(event)
+  assert.deepEqual(f.calls.map((x) => x.hook_event_name), ["PreToolUse", "PreToolUse"])
+})
