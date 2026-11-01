@@ -226,8 +226,6 @@ impl Default for GitAiBlameOptions {
 }
 
 impl Repository {
-    const BLAME_ABBREV_BATCH_SIZE: usize = 256;
-
     fn normalize_blame_file_path(&self, file_path: &str) -> Result<String, GitAiError> {
         let repo_root = self.workdir().map_err(|e| {
             GitAiError::Generic(format!("Repository has no working directory: {}", e))
@@ -469,75 +467,49 @@ impl Repository {
         }
     }
 
-    fn blame_requested_abbrev_len(
-        options: &GitAiBlameOptions,
-        hunk: &BlameHunk,
-        marker_width: usize,
-    ) -> usize {
-        let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
-        (base_len + marker_width)
-            .min(40)
-            .saturating_sub(Self::blame_hunk_marker_width(hunk, options))
-            .max(1)
-    }
-
-    fn fallback_blame_abbrev_sha(commit_sha: &str, requested_len: usize) -> String {
-        if requested_len < commit_sha.len() {
-            commit_sha[..requested_len].to_string()
-        } else {
-            commit_sha.to_string()
-        }
-    }
-
-    fn resolve_blame_abbrev_shas_batched(
-        &self,
-        requests_by_len: &HashMap<usize, Vec<String>>,
-    ) -> HashMap<(String, usize), String> {
-        let mut resolved: HashMap<(String, usize), String> = HashMap::new();
-
-        for (&requested_len, commit_shas) in requests_by_len {
-            if commit_shas.is_empty() {
-                continue;
-            }
-
-            for commit_sha_batch in commit_shas.chunks(Self::BLAME_ABBREV_BATCH_SIZE) {
-                let mut args = self.global_args_for_exec();
-                args.push("rev-parse".to_string());
-                args.push(format!("--short={requested_len}"));
-                args.extend(commit_sha_batch.iter().cloned());
-
-                let batched_result = exec_git(&args)
-                    .ok()
-                    .and_then(|output| String::from_utf8(output.stdout).ok())
-                    .map(|stdout| {
-                        stdout
-                            .lines()
-                            .map(str::trim)
-                            .filter(|line| !line.is_empty())
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    });
-
-                if let Some(short_shas) = batched_result
-                    && short_shas.len() == commit_sha_batch.len()
-                {
-                    for (commit_sha, short_sha) in commit_sha_batch.iter().zip(short_shas) {
-                        resolved.insert((commit_sha.clone(), requested_len), short_sha);
-                    }
-                    continue;
-                }
-
-                for commit_sha in commit_sha_batch {
-                    resolved
-                        .entry((commit_sha.clone(), requested_len))
-                        .or_insert_with(|| {
-                            Self::fallback_blame_abbrev_sha(commit_sha, requested_len)
-                        });
-                }
-            }
+    fn resolve_blame_abbrev_width_batched(&self, hunks: &[BlameHunk]) -> usize {
+        let commit_shas: HashSet<&str> = hunks
+            .iter()
+            .map(|hunk| hunk.commit_sha.as_str())
+            // Uncommitted lines have a zero object ID, not a readable commit.
+            .filter(|sha| !sha.bytes().all(|byte| byte == b'0'))
+            .collect();
+        if commit_shas.is_empty() {
+            return 7;
         }
 
-        resolved
+        // One stdin batch avoids argv limits and per-commit/marker spawns.
+        // %h uses Git's own unique abbreviation and core.abbrev configuration.
+        let mut args = self.global_args_for_exec();
+        args.extend([
+            "log".to_string(),
+            "--no-walk=unsorted".to_string(),
+            "--format=%H%x00%h".to_string(),
+            "--no-show-signature".to_string(),
+            "--no-notes".to_string(),
+            "--no-patch".to_string(),
+            "--no-decorate".to_string(),
+            "--no-color".to_string(),
+            "--stdin".to_string(),
+        ]);
+        let mut input = commit_shas.iter().copied().collect::<Vec<_>>().join("\n");
+        input.push('\n');
+        exec_git_stdin(&args, input.as_bytes())
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|stdout| {
+                stdout
+                    .lines()
+                    .filter_map(|line| {
+                        let (full_sha, short_sha) = line.split_once('\0')?;
+                        (commit_shas.contains(full_sha)
+                            && short_sha.len() >= 4
+                            && full_sha.starts_with(short_sha))
+                        .then_some(short_sha.len())
+                    })
+                    .max()
+            })
+            .unwrap_or(7)
     }
 
     fn populate_hunk_abbrev_shas(&self, hunks: &mut [BlameHunk], options: &GitAiBlameOptions) {
@@ -548,31 +520,16 @@ impl Repository {
             return;
         }
 
-        let mut requests_by_len: HashMap<usize, Vec<String>> = HashMap::new();
-        let mut seen_by_len: HashMap<usize, HashSet<String>> = HashMap::new();
-        let marker_width = self.blame_marker_width(hunks, options);
-
-        for hunk in hunks.iter() {
-            let requested_len = Self::blame_requested_abbrev_len(options, hunk, marker_width);
-            let seen = seen_by_len.entry(requested_len).or_default();
-            if seen.insert(hunk.commit_sha.clone()) {
-                requests_by_len
-                    .entry(requested_len)
-                    .or_default()
-                    .push(hunk.commit_sha.clone());
-            }
-        }
-
-        let resolved = self.resolve_blame_abbrev_shas_batched(&requests_by_len);
-
+        let base_width = match options.abbrev {
+            Some(0) => 40,
+            Some(width) => width.clamp(4, 40) as usize,
+            None => self.resolve_blame_abbrev_width_batched(hunks),
+        };
+        let column_width = (base_width + self.blame_marker_width(hunks, options)).min(40);
         for hunk in hunks.iter_mut() {
-            let requested_len = Self::blame_requested_abbrev_len(options, hunk, marker_width);
-            hunk.abbrev_sha = resolved
-                .get(&(hunk.commit_sha.clone(), requested_len))
-                .cloned()
-                .unwrap_or_else(|| {
-                    Self::fallback_blame_abbrev_sha(&hunk.commit_sha, requested_len)
-                });
+            let hash_width =
+                column_width.saturating_sub(Self::blame_hunk_marker_width(hunk, options));
+            hunk.abbrev_sha = hunk.commit_sha[..hash_width.min(hunk.commit_sha.len())].to_string();
         }
     }
 
@@ -1788,8 +1745,11 @@ fn output_default_format(
     let hash_column_width = if options.long_rev {
         40
     } else {
-        ((options.abbrev.unwrap_or(7).max(1) as usize) + repo.blame_marker_width(&hunks, options))
-            .min(40)
+        hunks
+            .iter()
+            .map(|hunk| hunk.abbrev_sha.len() + Repository::blame_hunk_marker_width(hunk, options))
+            .max()
+            .unwrap_or(0)
     };
 
     for line_num in requested_lines {
