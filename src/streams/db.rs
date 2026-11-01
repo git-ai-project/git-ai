@@ -356,11 +356,14 @@ impl StreamsDatabase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Utc::now().timestamp();
+        let watermark_type = watermark.watermark_type().to_string();
         let watermark_value = watermark.serialize();
 
+        // Readers may upgrade a legacy strategy. Persist its type and value
+        // together so the next batch or daemon restart can deserialize it.
         let rows_changed = conn.execute(
-            "UPDATE tracked_streams SET watermark_value = ?1, last_processed_at = ?2 WHERE session_id = ?3 AND stream_kind = ?4 AND stream_path = ?5",
-            params![watermark_value, now, session_id, stream_kind, stream_path],
+            "UPDATE tracked_streams SET watermark_value = ?1, last_processed_at = ?2, watermark_type = ?6 WHERE session_id = ?3 AND stream_kind = ?4 AND stream_path = ?5",
+            params![watermark_value, now, session_id, stream_kind, stream_path, watermark_type],
         )
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to update watermark: {}", e),
