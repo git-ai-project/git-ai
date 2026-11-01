@@ -176,9 +176,10 @@ impl OpenCodePreset {
         {
             return Ok(PathBuf::from(xdg_data).join("opencode"));
         }
-        // Match Node's os.homedir(): USERPROFILE on Windows, HOME on POSIX.
+        // OpenCode's Bun runtime uses the OS profile when the override is empty.
         let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         let home = std::env::var_os(home_variable)
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(dirs::home_dir)
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
@@ -326,7 +327,10 @@ mod tests {
         const CHILD: &str = "GIT_AI_OPENCODE_EMPTY_HOME_PROBE";
         if std::env::var_os(CHILD).is_some() {
             let actual = super::OpenCodePreset::opencode_data_path().unwrap();
-            assert!(actual.is_absolute(), "Empty home must not resolve relative to cwd");
+            assert!(
+                actual.is_absolute(),
+                "Empty home must not resolve relative to cwd"
+            );
             assert_eq!(
                 actual,
                 dirs::home_dir().unwrap().join(".local/share/opencode")
