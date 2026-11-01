@@ -1327,6 +1327,64 @@ fn test_blame_configured_markers_match_native_git() {
             );
         }
     }
+
+    // Legacy Git reserves its extra marker column even when automatic
+    // abbreviation resolves to a full hash. Newer Git caps the total width.
+    repo.git(&["config", "core.abbrev", "false"]).unwrap();
+    for path in ["markers.txt", "boundary.txt"] {
+        for flags in [&[][..], &["-b"][..], &["--root"][..]] {
+            let native_args = [
+                &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                flags,
+                &["--", path],
+            ]
+            .concat();
+            let custom_args = [
+                &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                flags,
+                &[path],
+            ]
+            .concat();
+            let native = repo.git(&native_args).unwrap();
+            let actual = repo.git_ai(&custom_args).unwrap();
+            assert_eq!(
+                actual, native,
+                "automatic full-hash width: {path}, {flags:?}"
+            );
+        }
+    }
+    repo.git(&["config", "core.abbrev", "12"]).unwrap();
+
+    // A complete uncommitted rewrite has no real commit to send to git log.
+    // It must still honor the configured width without extra per-line work.
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "entirely new uncommitted content\nanother completely replaced line\n",
+    )
+    .unwrap();
+    let porcelain = repo
+        .git(&["blame", "--line-porcelain", "markers.txt"])
+        .unwrap();
+    assert_eq!(
+        porcelain
+            .lines()
+            .filter(|line| line.starts_with("0000000000000000000000000000000000000000 "))
+            .count(),
+        2,
+        "fixture must attribute both replacement lines to the zero OID",
+    );
+    let (_, baseline_logs, baseline_rev_parses) =
+        run_measured_blame(&["blame", "-s", "-l", "markers.txt"]);
+    let native = repo.git(&["blame", "-s", "markers.txt"]).unwrap();
+    let (actual, log_count, rev_parse_count) = run_measured_blame(&["blame", "-s", "markers.txt"]);
+    assert_eq!(
+        actual, native,
+        "configured width for wholly uncommitted content"
+    );
+    assert_eq!(
+        log_count + rev_parse_count,
+        baseline_logs + baseline_rev_parses + 2
+    );
 }
 
 #[test]
