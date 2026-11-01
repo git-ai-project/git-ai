@@ -15,9 +15,12 @@ fn assert_opencode_v2_transcript_and_checkpoint(
     separate_parts: bool,
     message_count: usize,
     large_payloads: bool,
+    use_xdg_data_home: bool,
 ) {
     let storage = tempfile::tempdir().unwrap();
-    let db_path = storage.path().join("opencode.db");
+    let opencode_root = storage.path().join("opencode");
+    fs::create_dir(&opencode_root).unwrap();
+    let db_path = opencode_root.join("opencode.db");
     if with_legacy_tables {
         fs::copy(
             crate::test_utils::fixture_path("opencode-sqlite/opencode.db"),
@@ -308,10 +311,11 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         .to_string();
         repo.git_ai_with_env(
             &["checkpoint", "opencode", "--hook-input", &hook_input],
-            &[(
-                "GIT_AI_OPENCODE_STORAGE_PATH",
-                storage.path().to_str().unwrap(),
-            )],
+            &[if use_xdg_data_home {
+                ("XDG_DATA_HOME", storage.path().to_str().unwrap())
+            } else {
+                ("GIT_AI_OPENCODE_STORAGE_PATH", opencode_root.to_str().unwrap())
+            }],
         )
         .unwrap();
     };
@@ -419,32 +423,32 @@ fn assert_opencode_v2_transcript_and_checkpoint(
 
 #[test]
 fn test_opencode_v2_transcript_checkpoint_and_parent() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 1, false);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1, false, false);
 }
 
 #[test]
 fn test_opencode_v2_active_tool_model_survives_selection_change() {
-    assert_opencode_v2_transcript_and_checkpoint(true, false, 1, false);
+    assert_opencode_v2_transcript_and_checkpoint(true, false, 1, false, false);
 }
 
 #[test]
 fn test_opencode_v2_transcript_with_separate_parts() {
-    assert_opencode_v2_transcript_and_checkpoint(true, true, 1, false);
+    assert_opencode_v2_transcript_and_checkpoint(true, true, 1, false, false);
 }
 
 #[test]
 fn test_opencode_v2_transcript_tied_timestamp_pagination() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 1001, false);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1001, false, false);
 }
 
 #[test]
 fn test_opencode_v2_byte_budget_preserves_large_messages() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 4, true);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 4, true, false);
 }
 
 #[test]
 fn test_opencode_v2_byte_budget_preserves_all_parts() {
-    assert_opencode_v2_transcript_and_checkpoint(false, true, 4, true);
+    assert_opencode_v2_transcript_and_checkpoint(false, true, 4, true, false);
 }
 
 #[test]
@@ -491,4 +495,10 @@ fn test_opencode_message_timestamp_fallbacks() {
             "Messages without a creation time retain the file metadata fallback"
         );
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn test_opencode_v2_xdg_data_home_preserves_model_and_transcript() {
+    assert_opencode_v2_transcript_and_checkpoint(false, true, 1, false, true);
 }
