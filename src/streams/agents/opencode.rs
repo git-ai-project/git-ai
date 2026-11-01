@@ -9,6 +9,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+// Bound source JSON plus row overhead, not RSS: parsing expands JSON. A single
+// oversized event is returned alone so its message/parts are never truncated.
+const BATCH_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const ROW_OVERHEAD_BYTES: u64 = 256;
+
 /// OpenCode agent that reads from an OpenCode SQLite database.
 pub struct OpenCodeAgent {
     batch_size: usize,
@@ -51,13 +56,106 @@ pub(crate) fn is_v2_session(conn: &Connection, session_id: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Read messages as native database rows, including V2's type and sequence.
-fn read_session_messages_raw_with_limit(
+/// Sort only IDs. Native OpenCode indexes narrow by session but do not index
+/// time_updated, so putting JSON or its length here would touch old payloads.
+fn select_message_ids(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
     after_id: &str,
     limit: usize,
+    v2: bool,
+) -> Result<Vec<String>, StreamError> {
+    let table = if v2 { "session_message" } else { "message" };
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT id FROM {table} WHERE session_id = ?1 \
+             AND time_updated >= ?2 AND (time_updated > ?2 OR id > ?3) \
+             ORDER BY time_updated ASC, id ASC LIMIT ?4"
+        ))
+        .map_err(|e| StreamError::Fatal {
+            message: format!("Failed to prepare message selection: {e}"),
+        })?;
+    stmt.query_map(
+        rusqlite::params![session_id, after_updated, after_id, limit],
+        |row| row.get(0),
+    )
+    .and_then(|rows| rows.collect())
+    .map_err(|e| StreamError::Fatal {
+        message: format!("Failed to select messages: {e}"),
+    })
+}
+
+fn message_ids_json(ids: &[String]) -> Result<String, StreamError> {
+    serde_json::to_string(ids).map_err(|e| StreamError::Fatal {
+        message: format!("Failed to encode selected message IDs: {e}"),
+    })
+}
+
+/// Size only selected rows. SQLite's octet_length reads byte lengths without
+/// loading overflow payload pages (unlike length(CAST(data AS BLOB))). All
+/// queries share a snapshot, so selected messages cannot disappear mid-read.
+fn bound_message_ids(
+    conn: &Connection,
+    ids: &mut Vec<String>,
+    v2: bool,
+    has_parts: bool,
+) -> Result<String, StreamError> {
+    let message_table = if v2 { "session_message" } else { "message" };
+    let part_table = if v2 { "session_part" } else { "part" };
+    let part_sizes = if has_parts {
+        format!(
+            "UNION ALL SELECT message_id, SUM(octet_length(data) \
+             + octet_length(message_id) + octet_length(session_id) \
+             + {ROW_OVERHEAD_BYTES}) FROM {part_table} \
+             WHERE message_id IN (SELECT value FROM json_each(?1)) GROUP BY message_id"
+        )
+    } else {
+        String::new()
+    };
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT message_id, SUM(bytes) FROM ( \
+         SELECT id AS message_id, octet_length(data) \
+         + octet_length(id) + octet_length(session_id) \
+         + {ROW_OVERHEAD_BYTES} AS bytes FROM {message_table} \
+         WHERE id IN (SELECT value FROM json_each(?1)) {part_sizes} \
+         ) GROUP BY message_id"
+        ))
+        .map_err(|e| StreamError::Fatal {
+            message: format!("Failed to prepare transcript sizes: {e}"),
+        })?;
+    let sizes: HashMap<String, u64> = stmt
+        .query_map([message_ids_json(ids)?], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .and_then(|rows| rows.collect())
+        .map_err(|e| StreamError::Fatal {
+            message: format!("Failed to read transcript sizes: {e}"),
+        })?;
+    let mut bytes = 0_u64;
+    let mut count = 0;
+    for id in ids.iter() {
+        let size = sizes.get(id).ok_or_else(|| StreamError::Fatal {
+            message: format!("Selected OpenCode message disappeared: {id}"),
+        })?;
+        if count > 0 && bytes.saturating_add(*size) > BATCH_SOURCE_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(*size);
+        count += 1;
+        if bytes >= BATCH_SOURCE_BYTES {
+            break;
+        }
+    }
+    ids.truncate(count);
+    message_ids_json(ids)
+}
+
+/// Read messages as native database rows, including V2's type and sequence.
+fn read_messages(
+    conn: &Connection,
+    ids_json: &str,
     v2: bool,
 ) -> Result<Vec<(String, i64, serde_json::Value)>, StreamError> {
     let table = if v2 { "session_message" } else { "message" };
@@ -65,38 +163,33 @@ fn read_session_messages_raw_with_limit(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, session_id, time_created, time_updated, data{extra_columns} FROM {table} \
-             WHERE session_id = ?1 AND (time_updated > ?2 OR (time_updated = ?2 AND id > ?3)) \
-             ORDER BY time_updated ASC, id ASC \
-             LIMIT ?4",
+             WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY time_updated ASC, id ASC"
         ))
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(
-            rusqlite::params![session_id, after_updated, after_id, limit],
-            |row| {
-                let id: String = row.get(0)?;
-                let row_session_id: String = row.get(1)?;
-                let time_created: i64 = row.get(2)?;
-                let time_updated: i64 = row.get(3)?;
-                let data: String = row.get(4)?;
-                let v2_fields = if v2 {
-                    Some((row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
-                } else {
-                    None
-                };
-                Ok((
-                    id,
-                    row_session_id,
-                    time_created,
-                    time_updated,
-                    data,
-                    v2_fields,
-                ))
-            },
-        )
+        .query_map([ids_json], |row| {
+            let id: String = row.get(0)?;
+            let row_session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let time_updated: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            let v2_fields = if v2 {
+                Some((row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
+            } else {
+                None
+            };
+            Ok((
+                id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+                v2_fields,
+            ))
+        })
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to query messages: {}", e),
         })?;
@@ -141,50 +234,23 @@ fn read_session_messages_raw_with_limit(
     Ok(messages)
 }
 
-/// Read parts for the matched messages only, using an IN-subquery to avoid loading
-/// all parts for the entire session. Returns native V1 or V2 rows grouped by
+/// Fetch parts by the selected IDs without repeating the session scan/sort.
+/// Returns native V1 or V2 rows grouped by
 /// message_id, preserving V2's ordinal and call_id instead of inventing a part ID.
-fn read_parts_for_messages_with_limit(
+fn read_parts_for_messages(
     conn: &Connection,
-    session_id: &str,
-    after_updated: i64,
-    after_id: &str,
-    limit: usize,
+    ids_json: &str,
     v2: bool,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, StreamError> {
-    // V2.1 embeds content in the message; V2.2 can move it to session_part.
-    if v2
-        && !conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|e| StreamError::Fatal {
-                message: format!("Failed to detect OpenCode part schema: {}", e),
-            })?
-    {
-        return Ok(HashMap::new());
-    }
-    let (table, message_table, identity, extra_columns, order) = if v2 {
-        (
-            "session_part",
-            "session_message",
-            "ordinal",
-            ", type, call_id",
-            "ordinal ASC",
-        )
+    let (table, identity, extra_columns, order) = if v2 {
+        ("session_part", "ordinal", ", type, call_id", "ordinal ASC")
     } else {
-        ("part", "message", "id", "", "time_updated ASC, id ASC")
+        ("part", "id", "", "time_updated ASC, id ASC")
     };
     let mut stmt = conn
         .prepare(&format!(
             "SELECT {identity}, message_id, session_id, time_created, time_updated, data{extra_columns} FROM {table} \
-             WHERE message_id IN ( \
-                 SELECT id FROM {message_table} \
-                 WHERE session_id = ?1 AND (time_updated > ?2 OR (time_updated = ?2 AND id > ?3)) \
-                 ORDER BY time_updated ASC, id ASC LIMIT ?4 \
-             ) \
+             WHERE message_id IN (SELECT value FROM json_each(?1)) \
              ORDER BY message_id ASC, {order}",
         ))
         .map_err(|e| StreamError::Fatal {
@@ -192,35 +258,32 @@ fn read_parts_for_messages_with_limit(
         })?;
 
     let rows = stmt
-        .query_map(
-            rusqlite::params![session_id, after_updated, after_id, limit],
-            |row| {
-                let id = if v2 {
-                    serde_json::Value::Number(row.get::<_, i64>(0)?.into())
-                } else {
-                    serde_json::Value::String(row.get(0)?)
-                };
-                let message_id: String = row.get(1)?;
-                let row_session_id: String = row.get(2)?;
-                let time_created: i64 = row.get(3)?;
-                let time_updated: i64 = row.get(4)?;
-                let data: String = row.get(5)?;
-                let v2_fields = if v2 {
-                    Some((row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))
-                } else {
-                    None
-                };
-                Ok((
-                    id,
-                    message_id,
-                    row_session_id,
-                    time_created,
-                    time_updated,
-                    data,
-                    v2_fields,
-                ))
-            },
-        )
+        .query_map([ids_json], |row| {
+            let id = if v2 {
+                serde_json::Value::Number(row.get::<_, i64>(0)?.into())
+            } else {
+                serde_json::Value::String(row.get(0)?)
+            };
+            let message_id: String = row.get(1)?;
+            let row_session_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            let data: String = row.get(5)?;
+            let v2_fields = if v2 {
+                Some((row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?))
+            } else {
+                None
+            };
+            Ok((
+                id,
+                message_id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+                v2_fields,
+            ))
+        })
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to query parts: {}", e),
         })?;
@@ -328,7 +391,7 @@ impl Agent for OpenCodeAgent {
         let v2 = is_v2_session(&snapshot, session_id);
 
         // The ID breaks timestamp ties without dropping messages at the limit.
-        let messages = read_session_messages_raw_with_limit(
+        let mut ids = select_message_ids(
             &snapshot,
             session_id,
             watermark_millis,
@@ -337,31 +400,36 @@ impl Agent for OpenCodeAgent {
             v2,
         )?;
 
-        if messages.is_empty() {
+        if ids.is_empty() {
             return Ok(StreamBatch {
                 events: Vec::new(),
                 new_watermark: Box::new(cursor),
             });
         }
 
-        // Read only parts for the matched messages (IN-subquery, single scan).
-        let mut parts_by_message = read_parts_for_messages_with_limit(
-            &snapshot,
-            session_id,
-            watermark_millis,
-            &cursor.last_id,
-            self.batch_size,
-            v2,
-        )?;
+        // V2.1 embeds content in messages; V2.2 can move it to session_part.
+        let has_parts = !v2 || snapshot.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part')",
+            [], |row| row.get::<_, bool>(0),
+        ).map_err(|e| StreamError::Fatal { message: format!("Failed to detect OpenCode part schema: {e}") })?;
+        let ids_json = bound_message_ids(&snapshot, &mut ids, v2, has_parts)?;
+        let messages = read_messages(&snapshot, &ids_json, v2)?;
+        let mut parts_by_message = if has_parts {
+            read_parts_for_messages(&snapshot, &ids_json, v2)?
+        } else {
+            HashMap::new()
+        };
         snapshot.commit().map_err(|e| StreamError::Fatal {
             message: format!("Failed to finish OpenCode read snapshot: {}", e),
         })?;
 
         let mut events = Vec::with_capacity(messages.len());
 
-        for (msg_id, time_updated, msg_data) in messages {
-            cursor = TimestampCursorWatermark::new(time_updated as f64, msg_id.clone());
+        if let Some((id, updated, _)) = messages.last() {
+            cursor = TimestampCursorWatermark::new(*updated as f64, id.clone());
+        }
 
+        for (msg_id, _, msg_data) in messages {
             // Use .remove() to move parts out of the HashMap instead of cloning via .get()
             let mut map = serde_json::Map::with_capacity(2);
             map.insert("message".into(), msg_data);
@@ -938,13 +1006,10 @@ mod tests {
         let db_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/opencode-sqlite/opencode.db");
         let conn = open_sqlite_readonly(&db_path).unwrap();
-        // watermark=0 matches all messages in the fixture
+        let ids = select_message_ids(&conn, "test-session-123", 0, "", 1000, false).unwrap();
         let parts =
-            read_parts_for_messages_with_limit(&conn, "test-session-123", 0, "", 1000, false)
-                .unwrap();
-        // Verify IN-subquery loading returns parts grouped by message_id.
-        // Single query with IN-subquery instead of one per message,
-        // prevents full-table-scan memory blowup on large unindexed databases.
+            read_parts_for_messages(&conn, &message_ids_json(&ids).unwrap(), false).unwrap();
+        // A single batched query fetches only these messages' parts.
         assert!(
             !parts.is_empty(),
             "batch parts query must return data from fixture"
