@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { test } from "node:test"
 import { pathToFileURL } from "node:url"
 import ts from "typescript"
@@ -132,6 +132,26 @@ for (const type of ["session.tool.failed", "session.tool.success", "session.dele
     await f.cleanup?.()
   })
 }
+
+test("patch headers preserve order and ignore inline or added-line lookalikes", async (t) => {
+  const f = await fixture(t)
+  const event = { ...f.event(), tool: "patch", input: { patchText: [
+    "inline *** Update File: wrong.ts",
+    "*** Begin Patch",
+    "  *** Update File: 'a.ts'",
+    "+*** Add File: ignored.ts",
+    "\t*** Add File: b.ts",
+    "*** Delete File: c.ts",
+    "*** Move to: d.ts",
+    "*** End Patch",
+  ].join("\r\n") } }
+  await f.before(event)
+  await f.after(event)
+  assert.deepEqual(f.calls.map((call) => call.tool_input.file_paths.map((path) => basename(path))), [
+    ["a.ts", "b.ts", "c.ts", "d.ts"],
+    ["a.ts", "b.ts", "c.ts", "d.ts"],
+  ])
+})
 
 test("cancellation during pre checkpoint cannot resurrect a pending call", async (t) => {
   const f = await fixture(t, () => {})

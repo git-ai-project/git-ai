@@ -83,16 +83,25 @@ const normalizePath = (rawPath: string, cwd?: string): string | null => {
 }
 
 const collectApplyPatchPaths = (raw: string, out: Set<string>): void => {
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim()
-    for (const prefix of APPLY_PATCH_FILE_PREFIXES) {
-      if (trimmed.startsWith(prefix)) {
-        const path = trimmed.slice(prefix.length).trim().replace(/^['"]|['"]$/g, "")
-        if (path) {
-          out.add(path)
+  // Scan header candidates only. Splitting a large edit/patch body creates a
+  // separate array entry and string for every line even when it has no paths.
+  let offset = raw.indexOf("*** ")
+  while (offset !== -1) {
+    const lineStart = raw.lastIndexOf("\n", offset - 1) + 1
+    const newline = raw.indexOf("\n", offset)
+    const lineEnd = newline === -1 ? raw.length : newline
+    if (raw.slice(lineStart, offset).trim() === "") {
+      const header = raw.slice(offset, lineEnd).trim()
+      for (const prefix of APPLY_PATCH_FILE_PREFIXES) {
+        if (header.startsWith(prefix)) {
+          const path = header.slice(prefix.length).trim().replace(/^['"]|['"]$/g, "")
+          if (path) {
+            out.add(path)
+          }
         }
       }
     }
+    offset = newline === -1 ? -1 : raw.indexOf("*** ", newline + 1)
   }
 }
 
