@@ -648,6 +648,59 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_late_legacy_watermark_update_preserves_restart() {
+        use crate::streams::watermark::{TimestampCursorWatermark, WatermarkType};
+
+        let (db, temp) = create_test_db();
+        // An older daemon can insert a Timestamp stream after V5 has run.
+        // No startup migration can repair a row added after this connection opened.
+        let mut legacy = create_test_stream("late-legacy-opencode");
+        legacy.tool = "opencode".into();
+        legacy.stream_format = "OpenCodeSqlite".into();
+        legacy.watermark_type = "Timestamp".into();
+        legacy.watermark_value = DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .to_rfc3339();
+        db.insert_stream(&legacy).unwrap();
+        let unrelated = create_test_stream("unrelated-claude");
+        db.insert_stream(&unrelated).unwrap();
+
+        let cursor = TimestampCursorWatermark::new(1_700_000_000_123.0, "msg-last".into());
+        db.update_watermark(
+            &legacy.session_id,
+            &legacy.stream_kind,
+            &legacy.stream_path,
+            &cursor,
+        )
+        .unwrap();
+        drop(db);
+
+        let reopened = StreamsDatabase::open(temp.path()).unwrap();
+        let persisted = reopened
+            .get_stream(&legacy.session_id, &legacy.stream_kind, &legacy.stream_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.watermark_type, "TimestampCursor");
+        let kind: WatermarkType = persisted.watermark_type.parse().unwrap();
+        assert_eq!(
+            kind.deserialize(&persisted.watermark_value)
+                .unwrap()
+                .serialize(),
+            cursor.serialize()
+        );
+        assert_eq!(
+            reopened
+                .get_stream(
+                    &unrelated.session_id,
+                    &unrelated.stream_kind,
+                    &unrelated.stream_path
+                )
+                .unwrap(),
+            Some(unrelated)
+        );
+    }
+
+    #[test]
     fn test_update_file_metadata() {
         let (db, _temp) = create_test_db();
         let stream = create_test_stream("session-1");

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use git_ai::metrics::{
     PosEncoded, SessionEventValues, attrs::attr_pos, db::MetricsDatabase, types::MetricEventId,
 };
+use git_ai::streams::{StreamRecord, StreamsDatabase};
 use git_ai::streams::{agent::Agent, agents::OpenCodeAgent, watermark::TimestampWatermark};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -15,6 +16,212 @@ enum StorageLocation {
     Override,
     Xdg,
     Home,
+}
+
+fn assert_late_legacy_watermark_recovers(initially_empty: bool) {
+    use git_ai::authorship::authorship_log_serialization::generate_session_id;
+    use git_ai::streams::watermark::WatermarkType;
+
+    let storage = tempfile::tempdir().unwrap();
+    let source_path = storage.path().join("opencode.db");
+    let source = git_ai::sqlite::open_with_memory_limits(&source_path).unwrap();
+    source.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, model TEXT);
+         CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+             type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+             time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+         CREATE INDEX session_message_session_time_created_id_idx ON session_message(session_id, time_created, id);",
+    ).unwrap();
+    source
+        .execute(
+            "INSERT INTO session_v2 VALUES ('ses_late_legacy', NULL, ?1)",
+            [json!({"providerID": "openai", "id": "gpt-5"}).to_string()],
+        )
+        .unwrap();
+    let append_message = |index: i64| {
+        source.execute(
+            "INSERT INTO session_message VALUES (?1, 'ses_late_legacy', 'assistant', ?2, ?3, ?3, ?4)",
+            rusqlite::params![format!("msg_{index}"), index + 1, 1_700_000_000_000_i64 + index,
+                json!({"model": {"providerID": "openai", "id": "gpt-5"}, "content": []}).to_string()],
+        ).unwrap();
+    };
+    // This message was already consumed by the older binary. Neither recovery
+    // nor a subsequent daemon restart may reset progress and replay it.
+    append_message(-1);
+    if !initially_empty {
+        append_message(0);
+    }
+
+    let metrics_path = storage.path().join("metrics.db");
+    let daemon_env = [(
+        "GIT_AI_TEST_METRICS_DB_PATH",
+        metrics_path.to_str().unwrap(),
+    )];
+    let mut repo = TestRepo::new_with_daemon_env(&daemon_env);
+    repo.patch_git_ai_config(|patch| patch.exclude_prompts_in_repositories = Some(vec![]));
+    let path = repo.canonical_path().join("example.ts");
+    fs::write(&path, "// baseline\n").unwrap();
+    repo.stage_all_and_commit("Baseline").unwrap();
+    repo.filename("example.ts")
+        .assert_committed_lines(crate::lines!["// baseline".unattributed_human()]);
+
+    let tracking_path = git_ai::daemon::DaemonConfig::from_home(&repo.daemon_home_path())
+        .internal_dir
+        .join("transcripts-db");
+    let tracking = StreamsDatabase::open(&tracking_path).unwrap();
+    let session_id = generate_session_id("ses_late_legacy", "opencode");
+    let canonical_source = source_path.canonicalize().unwrap().display().to_string();
+    // Simulate an older daemon writing a new stream after the current daemon
+    // has opened the already-migrated database, as during rollback/re-upgrade.
+    tracking
+        .insert_stream(&StreamRecord {
+            session_id: session_id.clone(),
+            stream_kind: "transcript".into(),
+            tool: "opencode".into(),
+            stream_path: canonical_source.clone(),
+            stream_format: "OpenCodeSqlite".into(),
+            watermark_type: "Timestamp".into(),
+            watermark_value: DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000)
+                .unwrap()
+                .to_rfc3339(),
+            external_session_id: "ses_late_legacy".into(),
+            external_parent_session_id: None,
+            first_seen_at: 1_700_000_000,
+            last_processed_at: 0,
+            last_known_size: 0,
+            last_modified: None,
+            processing_errors: 0,
+            last_error: None,
+            repo_work_dir: Some(repo.canonical_path().display().to_string()),
+        })
+        .unwrap();
+
+    let checkpoint = |repo: &TestRepo, event: &str| {
+        let hook_input = json!({
+            "hook_event_name": event, "session_id": "ses_late_legacy", "tool_use_id": "call_legacy",
+            "cwd": repo.canonical_path(), "tool_name": "edit", "tool_input": {"path": path}
+        })
+        .to_string();
+        repo.git_ai_with_env(
+            &["checkpoint", "opencode", "--hook-input", &hook_input],
+            &[(
+                "GIT_AI_OPENCODE_STORAGE_PATH",
+                storage.path().to_str().unwrap(),
+            )],
+        )
+        .unwrap();
+    };
+    let wait_for_cursor = |expected: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let stream = tracking
+                .get_stream(&session_id, "transcript", &canonical_source)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stream.processing_errors, 0, "{:?}", stream.last_error);
+            if stream.last_processed_at > 0 && stream.watermark_value == expected {
+                assert_eq!(stream.watermark_type, "TimestampCursor");
+                let kind: WatermarkType = stream.watermark_type.parse().unwrap();
+                kind.deserialize(&stream.watermark_value).unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Stream did not advance to {expected}: {stream:?}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+
+    checkpoint(&repo, "PreToolUse");
+    // OpenCode attaches its transcript source only to post-tool checkpoints.
+    // A completed no-op edit triggers the first read without adding a message.
+    checkpoint(&repo, "PostToolUse");
+    wait_for_cursor(if initially_empty {
+        "1700000000000|"
+    } else {
+        "1700000000000|msg_0"
+    });
+    checkpoint(&repo, "PreToolUse");
+    append_message(1);
+    fs::write(&path, "// baseline\n// first edit\n").unwrap();
+    checkpoint(&repo, "PostToolUse");
+    repo.stage_all_and_commit("First edit after legacy stream")
+        .unwrap();
+    repo.filename("example.ts")
+        .assert_committed_lines(crate::lines![
+            "// baseline".unattributed_human(),
+            "// first edit".ai()
+        ]);
+    wait_for_cursor("1700000000001|msg_1");
+
+    repo.sync_daemon();
+    repo.git_ai(&["await", "--timeout", "60"]).unwrap();
+    repo.restart_dedicated_daemon_with_env_for_test(&daemon_env);
+    checkpoint(&repo, "PreToolUse");
+    append_message(2);
+    fs::write(&path, "// baseline\n// first edit\n// after restart\n").unwrap();
+    checkpoint(&repo, "PostToolUse");
+    repo.stage_all_and_commit("Edit after daemon restart")
+        .unwrap();
+    repo.filename("example.ts")
+        .assert_committed_lines(crate::lines![
+            "// baseline".unattributed_human(),
+            "// first edit".ai(),
+            "// after restart".ai()
+        ]);
+    wait_for_cursor("1700000000002|msg_2");
+
+    let expected: BTreeSet<_> = (usize::from(initially_empty)..=2)
+        .map(|index| format!("msg_{index}"))
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let metrics = MetricsDatabase::open_at_path(&metrics_path).unwrap();
+        let records = metrics
+            .get_metric_history(0, None, &[MetricEventId::SessionEvent as u16])
+            .unwrap();
+        let ids: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                record
+                    .event
+                    .attrs
+                    .get(&attr_pos::EXTERNAL_SESSION_ID.to_string())
+                    .and_then(|value| value.as_str())
+                    == Some("ses_late_legacy")
+            })
+            .map(|record| {
+                SessionEventValues::from_sparse(&record.event.values)
+                    .external_event_id
+                    .unwrap()
+            })
+            .collect();
+        if ids.len() >= expected.len() {
+            assert_eq!(
+                ids.len(),
+                expected.len(),
+                "No historical replay or duplicates after restart"
+            );
+            assert_eq!(ids.into_iter().collect::<BTreeSet<_>>(), expected);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Transcript events missing after restart: {ids:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn test_opencode_late_legacy_watermark_nonempty_batch_and_restart() {
+    assert_late_legacy_watermark_recovers(false);
+}
+
+#[test]
+fn test_opencode_late_legacy_watermark_empty_batch_and_restart() {
+    assert_late_legacy_watermark_recovers(true);
 }
 
 fn assert_opencode_v2_transcript_and_checkpoint(
