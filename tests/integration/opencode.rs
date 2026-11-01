@@ -765,8 +765,9 @@ fn assert_opencode_plugin_callbacks(api: &str, scenario: &str) {
     .unwrap();
 
     let mut command = Command::new("node");
-    if scenario == "large-input" {
+    if scenario == "large-input" || scenario == "sliced-input" {
         command.arg("--max-old-space-size=96");
+        command.arg("--expose-gc");
     }
     for (key, value) in command_env.get_envs() {
         match value {
@@ -947,4 +948,9 @@ fn test_opencode_plugin_v1_cancelled_call_cannot_claim_later_human_edits() {
 #[test]
 fn test_opencode_plugin_large_patch_path_discovery_is_memory_bounded() {
     assert_opencode_plugin_callbacks("v2", "large-input");
+}
+
+#[test]
+fn test_opencode_plugin_pending_paths_do_not_retain_patch_bodies() {
+    assert_opencode_plugin_callbacks("v2", "sliced-input");
 }

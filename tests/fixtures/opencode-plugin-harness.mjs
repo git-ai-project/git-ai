@@ -73,6 +73,18 @@ if (scenario === "large-input") {
   first.input = { patchText: "not a patch line\n".repeat(2_000_000)
     + "\t*** Update File: 'first.ts'\r\n" }
 }
+if (scenario === "sliced-input") {
+  // Short absolute paths can be slices backed by an entire patch body. Keep
+  // several calls pending under the heap limit to exercise retained storage.
+  for (let i = 0; i < 8; i++) {
+    await before({ ...first, id: `pending-${i}`, tool: "patch", input: {
+      patchText: "not a patch line\n".repeat(1_000_000)
+        + `*** Update File: ${join(repository, "first.ts")}\n`,
+    } })
+    await new Promise(setImmediate)
+    global.gc()
+  }
+}
 await before(first)
 await before(second)
 if (scenario.startsWith("lifecycle")) {
