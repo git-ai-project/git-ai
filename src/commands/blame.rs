@@ -54,6 +54,11 @@ pub struct BlameHunk {
     pub committer_tz: String,
     /// Whether this is a boundary commit
     pub is_boundary: bool,
+    /// Native porcelain emits these flags only when their display config is enabled.
+    #[serde(skip)]
+    pub is_ignored: bool,
+    #[serde(skip)]
+    pub is_unblamable: bool,
     /// The filename at the blamed commit (may differ from current if file was renamed)
     #[serde(default)]
     pub orig_filename: Option<String>,
@@ -435,34 +440,45 @@ impl Repository {
         ))
     }
 
+    fn blame_hunk_marker_width(hunk: &BlameHunk, options: &GitAiBlameOptions) -> usize {
+        usize::from(hunk.is_boundary && !options.blank_boundary && !options.show_root)
+            + usize::from(hunk.is_unblamable)
+            + usize::from(hunk.is_ignored)
+    }
+
     fn blame_marker_width(&self, hunks: &[BlameHunk], options: &GitAiBlameOptions) -> usize {
-        if !options.blank_boundary
-            && !options.show_root
-            && hunks.iter().any(|hunk| hunk.is_boundary)
-        {
+        let marker_width = hunks
+            .iter()
+            .map(|hunk| Self::blame_hunk_marker_width(hunk, options))
+            .max()
+            .unwrap_or(0);
+        if marker_width == 1 {
             return 1;
         }
 
-        // Git 2.56 only reserves marker columns when a marker is displayed.
+        // Git 2.56 reserves the largest displayed combination of ^, *, and ?.
         // Git's configured binary is process-global; query its version at most once.
         static USES_DYNAMIC_MARKER_WIDTH: OnceLock<bool> = OnceLock::new();
-        usize::from(!*USES_DYNAMIC_MARKER_WIDTH.get_or_init(|| {
+        if *USES_DYNAMIC_MARKER_WIDTH.get_or_init(|| {
             self.git_version()
                 .is_some_and(|version| version >= (2, 56, 0))
-        }))
+        }) {
+            marker_width
+        } else {
+            1
+        }
     }
 
     fn blame_requested_abbrev_len(
         options: &GitAiBlameOptions,
-        is_boundary: bool,
+        hunk: &BlameHunk,
         marker_width: usize,
     ) -> usize {
         let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
-        if is_boundary && !options.show_root {
-            base_len
-        } else {
-            (base_len + marker_width).min(40)
-        }
+        (base_len + marker_width)
+            .min(40)
+            .saturating_sub(Self::blame_hunk_marker_width(hunk, options))
+            .max(1)
     }
 
     fn fallback_blame_abbrev_sha(commit_sha: &str, requested_len: usize) -> String {
@@ -537,8 +553,7 @@ impl Repository {
         let marker_width = self.blame_marker_width(hunks, options);
 
         for hunk in hunks.iter() {
-            let requested_len =
-                Self::blame_requested_abbrev_len(options, hunk.is_boundary, marker_width);
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk, marker_width);
             let seen = seen_by_len.entry(requested_len).or_default();
             if seen.insert(hunk.commit_sha.clone()) {
                 requests_by_len
@@ -551,8 +566,7 @@ impl Repository {
         let resolved = self.resolve_blame_abbrev_shas_batched(&requests_by_len);
 
         for hunk in hunks.iter_mut() {
-            let requested_len =
-                Self::blame_requested_abbrev_len(options, hunk.is_boundary, marker_width);
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk, marker_width);
             hunk.abbrev_sha = resolved
                 .get(&(hunk.commit_sha.clone(), requested_len))
                 .cloned()
@@ -764,6 +778,8 @@ impl Repository {
             committer_time: i64,
             committer_tz: String,
             boundary: bool,
+            ignored: bool,
+            unblamable: bool,
             filename: Option<String>,
         }
 
@@ -834,6 +850,14 @@ impl Repository {
                 cur_meta.boundary = true;
                 continue;
             }
+            if line == "ignored" {
+                cur_meta.ignored = true;
+                continue;
+            }
+            if line == "unblamable" {
+                cur_meta.unblamable = true;
+                continue;
+            }
             if let Some(rest) = line.strip_prefix("filename ") {
                 cur_meta.filename = Some(crate::utils::unescape_git_path(rest));
                 continue;
@@ -887,6 +911,8 @@ impl Repository {
                         committer_time: cur_meta.committer_time,
                         committer_tz: cur_meta.committer_tz.clone(),
                         is_boundary: cur_meta.boundary,
+                        is_ignored: cur_meta.ignored,
+                        is_unblamable: cur_meta.unblamable,
                         orig_filename,
                     });
                 }
@@ -947,6 +973,8 @@ impl Repository {
                 committer_time: cur_meta.committer_time,
                 committer_tz: cur_meta.committer_tz.clone(),
                 is_boundary: cur_meta.boundary,
+                is_ignored: cur_meta.ignored,
+                is_unblamable: cur_meta.unblamable,
                 orig_filename,
             });
         }
@@ -1757,7 +1785,7 @@ fn output_default_format(
         max_author_width = max_author_width.max(author_display.len());
     }
 
-    let blank_boundary_hash_width = if options.long_rev {
+    let hash_column_width = if options.long_rev {
         40
     } else {
         ((options.abbrev.unwrap_or(7).max(1) as usize) + repo.blame_marker_width(&hunks, options))
@@ -1775,19 +1803,25 @@ fn output_default_format(
         if let Some(hunk) = line_to_hunk.get(&line_num) {
             let sha = &hunk.abbrev_sha;
 
-            // Match git blame boundary formatting:
-            // - default boundary: prefix abbreviated hash with '^'
-            // - -b/--blank-boundary: print a blank hash column
-            let full_sha = if hunk.is_boundary && options.blank_boundary && !options.show_root {
-                " ".repeat(blank_boundary_hash_width)
+            // Markers share the hash column, including -l and blank boundaries.
+            let mut full_sha = String::new();
+            if hunk.is_boundary && !options.blank_boundary && !options.show_root {
+                full_sha.push('^');
+            }
+            if hunk.is_unblamable {
+                full_sha.push('*');
+            }
+            if hunk.is_ignored {
+                full_sha.push('?');
+            }
+            let remaining_width = hash_column_width.saturating_sub(full_sha.len());
+            if hunk.is_boundary && options.blank_boundary && !options.show_root {
+                full_sha.push_str(&" ".repeat(remaining_width));
+            } else if options.long_rev {
+                full_sha.push_str(&sha[..sha.len().min(remaining_width)]);
             } else {
-                let boundary_marker = if hunk.is_boundary && !options.show_root {
-                    "^"
-                } else {
-                    ""
-                };
-                format!("{}{}", boundary_marker, sha)
-            };
+                full_sha.push_str(sha);
+            }
 
             // Get the author for this line (AI authorship or original)
             let author = line_authors.get(&line_num).unwrap_or(&hunk.original_author);
