@@ -31,6 +31,11 @@ import { dirname, isAbsolute, join, resolve } from "path"
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
 const CHECKPOINT_TIMEOUT_MS = 10_000
+const CHECKPOINT_KILL_GRACE_MS = 250
+const MAX_STDERR_BYTES = 64 * 1024
+const MAX_PENDING_CALLS = 64
+const MAX_PENDING_BYTES = 8 * 1024 * 1024
+const MAX_CALL_BYTES = 1024 * 1024
 const CHECKPOINT_ARGS = ["checkpoint", "opencode", "--hook-input", "stdin"]
 
 // Tools that modify files and should be tracked
@@ -157,6 +162,7 @@ type CheckpointEvent = {
   tool?: unknown
   sessionID?: unknown
   callID?: unknown
+  messageID?: unknown
   toolInput?: unknown
 }
 
@@ -213,64 +219,126 @@ const swallowHookErrors = <Args extends unknown[]>(
 
 const runCheckpoint = (hookInput: string): Promise<void> => {
   return new Promise((resolve, reject) => {
-    let settled = false
     let timeout: ReturnType<typeof setTimeout> | undefined
+    let killTimeout: ReturnType<typeof setTimeout> | undefined
+    let timeoutError: Error | undefined
+    let closed = false
+    let exited = false
+    let stderr: Buffer | undefined
+    let stderrBytes = 0
+    let stderrTruncated = false
     const finish = (error: Error | null): void => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      if (timeout) {
-        clearTimeout(timeout)
-      }
-      if (error) {
-        reject(error)
-      } else {
-        resolve()
-      }
+      if (closed) return
+      closed = true
+      clearTimeout(timeout)
+      clearTimeout(killTimeout)
+      stderr = undefined
+      if (error) reject(error)
+      else resolve()
     }
 
     const child = spawn(GIT_AI_BIN, CHECKPOINT_ARGS, {
       stdio: ["pipe", "ignore", "pipe"],
     })
-
+    const closeTimedOut = (): void => {
+      // A descendant can inherit stderr after the checkpoint itself has exited.
+      // Close only our pipes; never signal an unrelated process group or daemon.
+      child.stdin.destroy()
+      child.stderr.destroy()
+      finish(timeoutError ?? null)
+    }
     timeout = setTimeout(() => {
-      try {
-        child.kill("SIGTERM")
-      } catch (error) {
-        debugLog("failed to kill timed-out checkpoint command", error)
+      timeoutError = new Error(`git-ai checkpoint opencode timed out after ${CHECKPOINT_TIMEOUT_MS}ms`)
+      if (exited) return closeTimedOut()
+      child.kill("SIGTERM")
+      if (!closed) {
+        killTimeout = setTimeout(() => {
+          child.kill("SIGKILL")
+          closeTimedOut()
+        }, CHECKPOINT_KILL_GRACE_MS)
       }
-      finish(new Error(`git-ai checkpoint opencode timed out after ${CHECKPOINT_TIMEOUT_MS}ms`))
     }, CHECKPOINT_TIMEOUT_MS)
 
-    const stderr: Buffer[] = []
-
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
-    child.stderr.on("error", (error) => {
-      debugLog("failed to read checkpoint stderr", error)
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (closed) return
+      const remaining = MAX_STDERR_BYTES - stderrBytes
+      const length = Math.min(chunk.length, remaining)
+      if (length > 0) {
+        stderr ??= Buffer.allocUnsafe(MAX_STDERR_BYTES)
+        chunk.copy(stderr, stderrBytes, 0, length)
+        stderrBytes += length
+      }
+      stderrTruncated ||= chunk.length > remaining
     })
+    child.stderr.on("error", (error) => debugLog("failed to read checkpoint stderr", error))
     child.stdin.on("error", () => {
-      // The child may exit before stdin is fully written; close/error handling below reports failures.
+      // Early exit/EPIPE is reported through close/error, without an unhandled event.
+    })
+    child.on("exit", () => {
+      exited = true
+      if (timeoutError) closeTimedOut()
     })
     child.on("error", finish)
     child.on("close", (code) => {
-      if (code === 0) {
-        finish(null)
-        return
-      }
-
-      const stderrText = Buffer.concat(stderr).toString().trim()
-      finish(new Error(`git-ai checkpoint opencode exited with ${code}${stderrText ? `: ${stderrText}` : ""}`))
+      const detail = stderr?.toString("utf8", 0, stderrBytes).trim() ?? ""
+      finish(timeoutError ?? (code === 0 ? null : new Error(
+        `git-ai checkpoint opencode exited with ${code}${detail ? `: ${detail}` : ""}${stderrTruncated ? " [stderr truncated]" : ""}`,
+      )))
     })
-
     child.stdin.end(hookInput)
   })
 }
 
-const createGitAiCheckpoints = (defaultCwd: string) => {
-  // Track pending calls by callID so we can reference them in the after hook
-  const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
+type PendingCall = {
+  key: string
+  sessionID: string
+  callID: string
+  messageID: string
+  toolName: string
+  toolCwd: string
+  filePaths: string[]
+  toolInput: { file_paths: string[] } | { command?: string }
+  bytes: number
+  repoDir?: string
+  phase: "pre" | "ready" | "post"
+  cancelled: boolean
+}
+
+const createGitAiCheckpoints = (defaultCwd: string, onPendingChange: (active: boolean) => void = () => {}) => {
+  const pendingCalls = new Map<string, PendingCall>()
+  let pendingBytes = 0
+  let warned = false
+  let disposed = false
+  const warnLimit = (): void => {
+    if (!warned) {
+      warned = true
+      console.error("[git-ai opencode] Checkpoint capacity limit reached; this tool call will not be attributed. Existing calls remain tracked.")
+    }
+  }
+  const release = (call: PendingCall): void => {
+    if (pendingCalls.get(call.key) !== call) return
+    pendingCalls.delete(call.key)
+    pendingBytes -= call.bytes
+    warned = false
+    onPendingChange(!disposed && pendingCalls.size > 0)
+  }
+  const cancel = (call: PendingCall): void => {
+    call.cancelled = true
+    // In-flight pre/post checkpoints still own their reservation until close.
+    if (call.phase === "ready") release(call)
+  }
+  const terminal = (sessionID: string, callID?: string, messageID?: string): void => {
+    if (callID !== undefined) {
+      const call = pendingCalls.get(JSON.stringify([sessionID, callID]))
+      if (call && (messageID === undefined || call.messageID === messageID)) cancel(call)
+    } else {
+      for (const call of pendingCalls.values()) if (call.sessionID === sessionID) cancel(call)
+    }
+  }
+  const dispose = (): void => {
+    disposed = true
+    for (const call of pendingCalls.values()) cancel(call)
+  }
 
   const nearestExistingDirectory = async (pathHint: string): Promise<string | null> => {
     let candidate = pathHint
@@ -394,77 +462,88 @@ const createGitAiCheckpoints = (defaultCwd: string) => {
     return null
   }
 
-  const before = swallowHookErrors(
-    "pre-tool checkpoint failed",
-    async (event: CheckpointEvent) => {
-      const toolName = hookString(event.tool)
-      const isTrackedEdit = isEditTool(toolName)
-      const isTrackedBash = isBashTool(toolName)
-      if (!isTrackedEdit && !isTrackedBash) {
-        return
-      }
+  const captureBefore = swallowHookErrors("pre-tool checkpoint failed", async (call: PendingCall) => {
+    try {
+      const repoDir = await resolveRepoDir(call.filePaths, call.toolCwd)
+      if (!repoDir || call.cancelled) return
+      call.repoDir = repoDir
+      await runCheckpoint(JSON.stringify({
+        hook_event_name: "PreToolUse", session_id: call.sessionID, tool_use_id: call.callID,
+        cwd: repoDir, tool_name: call.toolName, tool_input: call.toolInput,
+      }))
+      if (!call.cancelled) call.phase = "ready"
+    } finally {
+      if (call.phase !== "ready") release(call)
+    }
+  })
 
-      const callID = hookString(event.callID)
-      pendingCalls.delete(callID)
-      const sessionID = hookString(event.sessionID)
-      const toolInput = event.toolInput
-      const toolCwd = resolveCwd(extractToolCwd(asRecord(toolInput)))
-      const filePaths = isTrackedEdit ? extractFilePaths(toolInput, toolCwd) : []
-      const repoDir = await resolveRepoDir(filePaths, toolCwd)
-      if (!repoDir) {
-        return
-      }
+  // Canonicalize synchronously before entering an async function, so suspended
+  // checkpoints do not retain the original tool event, file contents or metadata.
+  const prepareBefore = (event: CheckpointEvent): Promise<void> => {
+    if (disposed) return Promise.resolve()
+    const toolName = hookString(event.tool)
+    const edit = isEditTool(toolName)
+    if (!edit && !isBashTool(toolName)) return Promise.resolve()
+    const sessionID = hookString(event.sessionID)
+    const callID = hookString(event.callID)
+    const key = JSON.stringify([sessionID, callID])
+    const previous = pendingCalls.get(key)
+    if (previous) {
+      cancel(previous)
+      if (previous.phase !== "ready") return Promise.resolve()
+    }
+    if (pendingCalls.size >= MAX_PENDING_CALLS) {
+      warnLimit()
+      return Promise.resolve()
+    }
+    const toolCwd = resolveCwd(extractToolCwd(asRecord(event.toolInput)))
+    const filePaths = edit ? extractFilePaths(event.toolInput, toolCwd) : []
+    const input = asRecord(event.toolInput)
+    const command = hookString(input?.command ?? input?.cmd)
+    if (Buffer.byteLength(command) > MAX_CALL_BYTES) {
+      warnLimit()
+      return Promise.resolve()
+    }
+    const toolInput = edit ? { file_paths: filePaths } : { command }
+    const bytes = Buffer.byteLength(JSON.stringify(toolInput)) + Buffer.byteLength(key + toolCwd + hookString(event.messageID))
+    if (bytes > MAX_CALL_BYTES || pendingBytes + bytes > MAX_PENDING_BYTES) {
+      warnLimit()
+      return Promise.resolve()
+    }
+    const call: PendingCall = {
+      key, sessionID, callID, messageID: hookString(event.messageID), toolName,
+      toolCwd, filePaths, toolInput, bytes, phase: "pre", cancelled: false,
+    }
+    pendingCalls.set(key, call)
+    pendingBytes += bytes
+    onPendingChange(true)
+    return captureBefore(call)
+  }
 
-      // The checkpoint runs at the repository root, while tool paths are relative
-      // to OpenCode's active directory. Send only resolved paths for edit tools so
-      // the preset cannot also interpret the original paths relative to the root.
-      const checkpointInput = isTrackedEdit ? { file_paths: filePaths } : toolInput
+  const before = (event: CheckpointEvent): Promise<void> => {
+    try { return prepareBefore(event) }
+    catch (error) {
+      debugLog("pre-tool checkpoint failed", error)
+      return Promise.resolve()
+    }
+  }
 
-      const hookInput = JSON.stringify({
-        hook_event_name: "PreToolUse",
-        session_id: sessionID,
-        tool_use_id: callID,
-        cwd: repoDir,
-        tool_name: toolName,
-        tool_input: checkpointInput,
-      })
-      await runCheckpoint(hookInput)
-      pendingCalls.set(callID, { repoDir, sessionID, toolInput: checkpointInput })
-    },
-  )
+  const after = swallowHookErrors("post-tool checkpoint failed", async (event: CheckpointEvent) => {
+    const key = JSON.stringify([hookString(event.sessionID), hookString(event.callID)])
+    const call = pendingCalls.get(key)
+    if (!call || call.phase !== "ready" || call.cancelled || call.messageID !== hookString(event.messageID)) return
+    call.phase = "post"
+    try {
+      await runCheckpoint(JSON.stringify({
+        hook_event_name: "PostToolUse", session_id: call.sessionID, tool_use_id: call.callID,
+        cwd: call.repoDir, tool_name: call.toolName, tool_input: call.toolInput,
+      }))
+    } finally {
+      release(call)
+    }
+  })
 
-  const after = swallowHookErrors(
-    "post-tool checkpoint failed",
-    async (event: CheckpointEvent) => {
-      const toolName = hookString(event.tool)
-      if (!isEditTool(toolName) && !isBashTool(toolName)) {
-        return
-      }
-
-      const callID = hookString(event.callID)
-      const callInfo = pendingCalls.get(callID)
-      pendingCalls.delete(callID)
-
-      if (!callInfo) {
-        debugLog(`skipping post-tool checkpoint without matching pre-tool call for ${callID}`)
-        return
-      }
-
-      // Only attribute paths captured by the successful before hook. Result
-      // metadata can name additional files with no baseline for their prior edits.
-      const hookInput = JSON.stringify({
-        hook_event_name: "PostToolUse",
-        session_id: callInfo.sessionID,
-        tool_use_id: callID,
-        cwd: callInfo.repoDir,
-        tool_name: toolName,
-        tool_input: callInfo.toolInput,
-      })
-      await runCheckpoint(hookInput)
-    },
-  )
-
-  return { before, after }
+  return { before, after, terminal, dispose }
 }
 
 /**
@@ -479,24 +558,49 @@ export const GitAiPlugin: Plugin.Plugin = {
     try {
       const defaultCwd =
         ctx.location?.directory ?? ctx.location?.project?.directory ?? process.cwd()
-      const { before, after } = createGitAiCheckpoints(defaultCwd)
-
-      await ctx.tool.hook("execute.before", (event) => {
-        return before({
-          tool: event.tool,
-          sessionID: event.sessionID,
-          callID: event.id,
-          toolInput: event.input,
+      let controller: AbortController | undefined
+      const { before, after, terminal, dispose } = createGitAiCheckpoints(defaultCwd, (active) => {
+        if (!active) {
+          controller?.abort()
+          controller = undefined
+          return
+        }
+        if (controller || !ctx.event?.subscribe) return
+        const current = new AbortController()
+        controller = current
+        // 2.2 filters before encoding; 2.1 supports signal but ignores types.
+        // Subscribe only while calls are pending, and do no async work per event.
+        void (async () => {
+          const options = {
+            signal: current.signal,
+            types: ["session.tool.success", "session.tool.failed", "session.deleted"] as const,
+          }
+          for await (const event of ctx.event.subscribe(options)) {
+            if (current.signal.aborted) break
+            const data = asRecord(event.data)
+            const sessionID = hookString(data?.sessionID)
+            if (event.type === "session.deleted") terminal(sessionID)
+            else if (event.type === "session.tool.success" || event.type === "session.tool.failed") {
+              terminal(sessionID, hookString(data?.id), hookString(data?.assistantMessageID))
+            }
+          }
+        })().catch((error) => debugLog("lifecycle subscription failed", error)).finally(() => {
+          if (controller === current) controller = undefined
         })
       })
 
-      await ctx.tool.hook("execute.after", (event) => {
-        return after({
-          tool: event.tool,
-          sessionID: event.sessionID,
-          callID: event.id,
-        })
-      })
+      await ctx.tool.hook("execute.before", (event) => before({
+        tool: event.tool, sessionID: event.sessionID, callID: event.id,
+        messageID: event.messageID, toolInput: event.input,
+      }))
+      await ctx.tool.hook("execute.after", (event) => after({
+        tool: event.tool, sessionID: event.sessionID, callID: event.id, messageID: event.messageID,
+      }))
+      return () => {
+        controller?.abort()
+        controller = undefined
+        dispose()
+      }
     } catch (error) {
       debugLog("failed to initialize plugin", error)
     }
@@ -523,9 +627,20 @@ type V1ToolHookInput = {
 
 export const GitAiPluginV1 = (ctx?: V1PluginContext) => {
   const defaultCwd = ctx?.worktree || ctx?.directory || process.cwd()
-  const { before, after } = createGitAiCheckpoints(defaultCwd)
+  const { before, after, terminal } = createGitAiCheckpoints(defaultCwd)
 
   return {
+    event: async ({ event }: { event: { type?: string; properties?: Record<string, unknown> } }) => {
+      const properties = event.properties
+      if (event.type === "session.deleted") terminal(hookString(asRecord(properties?.info)?.id))
+      if (event.type === "message.part.updated") {
+        const part = asRecord(properties?.part)
+        const state = asRecord(part?.state)
+        if (part?.type === "tool" && (state?.status === "completed" || state?.status === "error")) {
+          terminal(hookString(part.sessionID), hookString(part.callID))
+        }
+      }
+    },
     "tool.execute.before": (input: V1ToolHookInput, output?: { args?: unknown }) =>
       before({
         tool: input.tool,
