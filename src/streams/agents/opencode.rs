@@ -95,12 +95,11 @@ fn message_ids_json(ids: &[String]) -> Result<String, StreamError> {
 /// Size only selected rows. SQLite's octet_length reads byte lengths without
 /// loading overflow payload pages (unlike length(CAST(data AS BLOB))). All
 /// queries share a snapshot, so selected messages cannot disappear mid-read.
-fn bound_message_ids(
+fn prepare_message_sizes(
     conn: &Connection,
-    ids: &mut Vec<String>,
     v2: bool,
     has_parts: bool,
-) -> Result<String, StreamError> {
+) -> Result<rusqlite::Statement<'_>, StreamError> {
     let message_table = if v2 { "session_message" } else { "message" };
     let part_table = if v2 { "session_part" } else { "part" };
     let part_sizes = if has_parts {
@@ -113,8 +112,7 @@ fn bound_message_ids(
     } else {
         String::new()
     };
-    let mut stmt = conn
-        .prepare(&format!(
+    conn.prepare(&format!(
             "SELECT message_id, SUM(bytes) FROM ( \
          SELECT id AS message_id, octet_length(data) \
          + octet_length(id) + octet_length(session_id) \
@@ -124,7 +122,23 @@ fn bound_message_ids(
         ))
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to prepare transcript sizes: {e}"),
-        })?;
+        })
+}
+
+fn bound_message_ids(
+    conn: &Connection,
+    ids: &mut Vec<String>,
+    v2: bool,
+    has_parts: bool,
+) -> Result<String, StreamError> {
+    let mut stmt = prepare_message_sizes(conn, v2, has_parts)?;
+    bound_message_ids_from_statement(&mut stmt, ids)
+}
+
+fn bound_message_ids_from_statement(
+    stmt: &mut rusqlite::Statement<'_>,
+    ids: &mut Vec<String>,
+) -> Result<String, StreamError> {
     let sizes: HashMap<String, u64> = stmt
         .query_map([message_ids_json(ids)?], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -1017,6 +1031,71 @@ mod tests {
         for msg_parts in parts.values() {
             assert!(!msg_parts.is_empty());
         }
+    }
+
+    #[test]
+    fn test_opencode_size_planning_stops_after_full_batch() {
+        for v2 in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("opencode.db");
+            create_test_db(&path, 128);
+            let conn = crate::sqlite::open_with_memory_limits(&path).unwrap();
+            // Native OpenCode indexes parts by message. Future messages have
+            // many parts, but the first oversized event already fills a batch.
+            conn.execute_batch(
+                "CREATE INDEX part_message ON part(message_id);
+                 WITH RECURSIVE ord(n) AS (
+                     VALUES(1) UNION ALL SELECT n + 1 FROM ord WHERE n < 63
+                 )
+                 INSERT INTO part
+                 SELECT 'extra-' || m.id || '-' || ord.n, m.id, m.session_id,
+                        m.time_created, m.time_updated, '{}'
+                 FROM message m CROSS JOIN ord;",
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE message SET data = ?1 WHERE id = 'msg-0'",
+                [serde_json::json!({ "padding": "x".repeat(BATCH_SOURCE_BYTES as usize) })
+                    .to_string()],
+            )
+            .unwrap();
+            if v2 {
+                conn.execute_batch(
+                    "ALTER TABLE message RENAME TO session_message;
+                     ALTER TABLE part RENAME TO session_part;",
+                )
+                .unwrap();
+            }
+
+            let mut ids = select_message_ids(&conn, "test-session", 0, "", 1000, v2)
+                .unwrap();
+            assert_eq!(ids.len(), 128);
+            let mut stmt = prepare_message_sizes(&conn, v2, true).unwrap();
+            let encoded = bound_message_ids_from_statement(&mut stmt, &mut ids).unwrap();
+            assert_eq!(ids, ["msg-0"]);
+            assert_eq!(encoded, r#"["msg-0"]"#);
+            let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+            assert!(
+                steps < 10_000,
+                "sizing a full batch must not aggregate future messages' parts: {steps} VM steps"
+            );
+        }
+    }
+
+    #[test]
+    fn test_opencode_size_planning_preserves_prefix_with_reordered_rows() {
+        let conn = crate::sqlite::open_with_memory_limits(":memory:").unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT value, CASE WHEN value = 'third' THEN {} ELSE {} END
+                 FROM json_each(?1) ORDER BY key DESC",
+                BATCH_SOURCE_BYTES * 2,
+                BATCH_SOURCE_BYTES / 2,
+            ))
+            .unwrap();
+        let mut ids = vec!["first".into(), "second".into(), "third".into()];
+        bound_message_ids_from_statement(&mut stmt, &mut ids).unwrap();
+        assert_eq!(ids, ["first", "second"]);
     }
 
     #[test]
