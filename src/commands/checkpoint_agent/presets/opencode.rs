@@ -321,6 +321,36 @@ impl AgentPreset for OpenCodePreset {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_opencode_empty_home_override_uses_os_profile() {
+        const CHILD: &str = "GIT_AI_OPENCODE_EMPTY_HOME_PROBE";
+        if std::env::var_os(CHILD).is_some() {
+            let actual = super::OpenCodePreset::opencode_data_path().unwrap();
+            assert!(actual.is_absolute(), "Empty home must not resolve relative to cwd");
+            assert_eq!(
+                actual,
+                dirs::home_dir().unwrap().join(".local/share/opencode")
+            );
+            return;
+        }
+        // Isolate the environment change from parallel tests. This only
+        // resolves a path; it never reads or writes the user's OpenCode data.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("test_opencode_empty_home_override_uses_os_profile")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .env_remove("XDG_DATA_HOME")
+            .env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     use super::*;
     use crate::commands::checkpoint_agent::presets::*;
     use serde_json::json;
