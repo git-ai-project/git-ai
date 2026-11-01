@@ -1112,6 +1112,157 @@ fn test_blame_mark_unknown_backward_compatible() {
 // =============================================================================
 
 #[test]
+fn test_blame_configured_markers_match_native_git() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("markers.txt");
+    let mut boundary_file = repo.filename("boundary.txt");
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "old expression\nold neighbor\n",
+    )
+    .unwrap();
+    std::fs::write(repo.path().join("boundary.txt"), "boundary expression\n").unwrap();
+    repo.stage_all_and_commit("root baseline").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "old expression".unattributed_human(),
+        "old neighbor".unattributed_human(),
+    ]);
+    boundary_file
+        .assert_committed_lines(crate::lines!["boundary expression".unattributed_human(),]);
+
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "let value = 1;\nordinary neighbor from second commit\n",
+    )
+    .unwrap();
+    let prior = repo.stage_all_and_commit("non-root content").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "let value = 1;".unattributed_human(),
+        "ordinary neighbor from second commit".unattributed_human(),
+    ]);
+    boundary_file
+        .assert_committed_lines(crate::lines!["boundary expression".unattributed_human(),]);
+
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "  let value = 1;\nordinary neighbor from second commit\nzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n",
+    )
+    .unwrap();
+    std::fs::write(repo.path().join("boundary.txt"), "  boundary expression\n").unwrap();
+    let ignored = repo
+        .stage_all_and_commit("format and add unrelated text")
+        .unwrap();
+    file.assert_committed_lines(crate::lines![
+        "  let value = 1;".unattributed_human(),
+        "ordinary neighbor from second commit".unattributed_human(),
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".unattributed_human(),
+    ]);
+    boundary_file
+        .assert_committed_lines(crate::lines!["  boundary expression".unattributed_human(),]);
+
+    repo.git(&["config", "blame.markIgnoredLines", "true"])
+        .unwrap();
+    repo.git(&["config", "blame.markUnblamableLines", "true"])
+        .unwrap();
+    let porcelain = repo
+        .git(&[
+            "blame",
+            "--line-porcelain",
+            "--ignore-rev",
+            &ignored.commit_sha,
+            "--",
+            "markers.txt",
+        ])
+        .unwrap();
+    assert!(
+        porcelain.contains("\nignored\n"),
+        "fixture must contain an ignored line:\n{porcelain}"
+    );
+    assert!(
+        porcelain.contains("\nunblamable\n"),
+        "fixture must contain an unblamable line:\n{porcelain}"
+    );
+    assert!(
+        !porcelain.contains("\nboundary\n"),
+        "ordinary-neighbor case must have no boundary:\n{porcelain}"
+    );
+    assert!(porcelain.contains(&format!("{} 2 2", prior.commit_sha)));
+
+    let boundary_porcelain = repo
+        .git(&[
+            "blame",
+            "--line-porcelain",
+            "--ignore-rev",
+            &ignored.commit_sha,
+            "--",
+            "boundary.txt",
+        ])
+        .unwrap();
+    assert!(boundary_porcelain.contains("\nboundary\n"));
+    assert!(boundary_porcelain.contains("\nignored\n"));
+
+    for flags in [&[][..], &["-b"][..], &["--root"][..], &["-l"][..]] {
+        for (mark_ignored, mark_unblamable) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            repo.git(&[
+                "config",
+                "blame.markIgnoredLines",
+                &mark_ignored.to_string(),
+            ])
+            .unwrap();
+            repo.git(&[
+                "config",
+                "blame.markUnblamableLines",
+                &mark_unblamable.to_string(),
+            ])
+            .unwrap();
+            for path in ["markers.txt", "boundary.txt"] {
+                let git_args = [
+                    &[
+                        "blame",
+                        "-s",
+                        "--abbrev=12",
+                        "--ignore-rev",
+                        &ignored.commit_sha,
+                    ][..],
+                    flags,
+                    &["--", path],
+                ]
+                .concat();
+                let git_ai_args = [
+                    &[
+                        "blame",
+                        "-s",
+                        "--abbrev",
+                        "12",
+                        "--ignore-rev",
+                        &ignored.commit_sha,
+                    ][..],
+                    flags,
+                    &[path],
+                ]
+                .concat();
+                let native = repo.git(&git_args).unwrap();
+                let actual = repo.git_ai(&git_ai_args).unwrap();
+                if path == "markers.txt" {
+                    assert_eq!(
+                        actual.lines().nth(1),
+                        native.lines().nth(1),
+                        "ordinary neighbor must retain native width with ignored={mark_ignored}, unblamable={mark_unblamable}, flags={flags:?}"
+                    );
+                }
+                // Preserve every hash character, marker, and padding column.
+                assert_eq!(
+                    actual, native,
+                    "native blame parity for {path}, ignored={mark_ignored}, unblamable={mark_unblamable}, flags={flags:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn test_blame_auto_detects_git_blame_ignore_revs_file() {
     // Test that git-ai blame automatically uses .git-blame-ignore-revs when present
     let repo = TestRepo::new();
