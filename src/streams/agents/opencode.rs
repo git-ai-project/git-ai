@@ -637,6 +637,59 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_resume_observes_updated_and_deleted_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        create_test_db(&path, 5);
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let first = agent
+            .read_incremental(
+                &path,
+                Box::new(TimestampCursorWatermark::initial()),
+                "test-session",
+            )
+            .unwrap();
+        assert_eq!(first.events.len(), 2);
+        let conn = crate::sqlite::open_with_memory_limits(&path).unwrap();
+        conn.execute("DELETE FROM message WHERE id = 'msg-2'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE message SET time_updated = 6000 WHERE id = 'msg-0'",
+            [],
+        )
+        .unwrap();
+        // An orphaned old part cannot leak into another selected message.
+        drop(conn);
+        let second = agent
+            .read_incremental(&path, first.new_watermark, "test-session")
+            .unwrap();
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .map(|event| event["message"]["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["msg-3", "msg-4"]
+        );
+        let third = agent
+            .read_incremental(&path, second.new_watermark, "test-session")
+            .unwrap();
+        assert_eq!(third.events.len(), 1);
+        assert_eq!(third.events[0]["message"]["id"], "msg-0");
+        for event in second.events.iter().chain(&third.events) {
+            assert_eq!(event["parts"].as_array().unwrap().len(), 1);
+            assert_eq!(event["parts"][0]["message_id"], event["message"]["id"]);
+        }
+        assert!(
+            agent
+                .read_incremental(&path, third.new_watermark, "test-session")
+                .unwrap()
+                .events
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn test_append_one_record_after_full_read() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -782,6 +835,102 @@ mod tests {
             "single call must not exceed batch_size (got {})",
             batch.events.len()
         );
+    }
+
+    /// Manual before/after RSS and catch-up probe. Run through `task test` with
+    /// TEST_FILTER=opencode_reader_stress_probe EXTRA_TEST_BINARY_ARGS=--ignored.
+    #[test]
+    #[ignore = "manual transcript memory and query scaling probe"]
+    fn test_opencode_reader_stress_probe() {
+        let setting = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let count = setting("GIT_AI_OPENCODE_PROBE_MESSAGES", 1000);
+        let payload_bytes = setting("GIT_AI_OPENCODE_PROBE_PAYLOAD_BYTES", 64 * 1024);
+        let passes = setting("GIT_AI_OPENCODE_PROBE_PASSES", 5);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let mut conn = crate::sqlite::open_with_memory_limits(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY);
+             INSERT INTO session_v2 VALUES ('probe');
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message(session_id,seq);
+             CREATE INDEX session_message_session_type_seq_idx ON session_message(session_id,type,seq);
+             CREATE INDEX session_message_session_time_created_id_idx ON session_message(session_id,time_created,id);
+             CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL, type TEXT NOT NULL, call_id TEXT,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL,
+                PRIMARY KEY(message_id,ordinal));"
+        ).unwrap();
+        let payload = serde_json::json!({"padding": "x".repeat(payload_bytes)}).to_string();
+        let tx = conn.transaction().unwrap();
+        for index in 0..count {
+            let id = format!("msg-{index:08}");
+            tx.execute(
+                "INSERT INTO session_message VALUES(?1,'probe','assistant',?2,1000,1000,?3)",
+                rusqlite::params![id, index, payload],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO session_part VALUES(?1,'probe',0,'text',NULL,1000,1000,?2)",
+                rusqlite::params![id, payload],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        drop(conn);
+        drop(payload);
+        eprintln!(
+            "OPENCODE_PROBE_READY pid={} messages={count} payload_bytes={payload_bytes}",
+            std::process::id()
+        );
+        let reader = OpenCodeAgent::new();
+        for pass in 0..passes {
+            let start = std::time::Instant::now();
+            let mut watermark: Box<dyn WatermarkStrategy> =
+                Box::new(TimestampCursorWatermark::initial());
+            let mut seen = std::collections::BTreeSet::new();
+            let mut max_batch_bytes = 0;
+            let mut batches = 0;
+            loop {
+                let batch = reader.read_incremental(&path, watermark, "probe").unwrap();
+                watermark = batch.new_watermark;
+                if batch.events.is_empty() {
+                    break;
+                }
+                batches += 1;
+                max_batch_bytes = max_batch_bytes.max(
+                    batch
+                        .events
+                        .iter()
+                        .map(|event| serde_json::to_vec(event).unwrap().len())
+                        .sum::<usize>(),
+                );
+                for event in batch.events {
+                    assert!(seen.insert(event["message"]["id"].as_str().unwrap().to_owned()));
+                    assert_eq!(
+                        event["message"]["data"]["padding"].as_str().unwrap().len(),
+                        payload_bytes
+                    );
+                    assert_eq!(
+                        event["parts"][0]["data"]["padding"].as_str().unwrap().len(),
+                        payload_bytes
+                    );
+                }
+            }
+            assert_eq!(seen.len(), count);
+            eprintln!(
+                "OPENCODE_PROBE_PASS pass={pass} events={} batches={batches} max_batch_bytes={max_batch_bytes} elapsed_ms={}",
+                seen.len(),
+                start.elapsed().as_millis()
+            );
+        }
     }
 
     #[test]

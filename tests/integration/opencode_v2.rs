@@ -14,6 +14,7 @@ fn assert_opencode_v2_transcript_and_checkpoint(
     with_legacy_tables: bool,
     separate_parts: bool,
     message_count: usize,
+    large_payloads: bool,
 ) {
     let storage = tempfile::tempdir().unwrap();
     let db_path = storage.path().join("opencode.db");
@@ -31,7 +32,10 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, model TEXT);
          CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
              type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
-             time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+             time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+         CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message(session_id, seq);
+         CREATE INDEX session_message_session_type_seq_idx ON session_message(session_id, type, seq);
+         CREATE INDEX session_message_session_time_created_id_idx ON session_message(session_id, time_created, id);",
     )
     .unwrap();
     // The selected model is optional until explicitly chosen. The assistant
@@ -194,14 +198,106 @@ fn assert_opencode_v2_transcript_and_checkpoint(
         let tx = conn.transaction().unwrap();
         for index in 1..message_count {
             let id = format!("msg_v2_{index:04}");
+            let payload_bytes = if large_payloads {
+                if index == 1 {
+                    6 * 1024 * 1024
+                } else {
+                    2 * 1024 * 1024
+                }
+            } else {
+                0
+            };
+            let mut data = message.clone();
+            if large_payloads && !separate_parts {
+                // The budget counts UTF-8 bytes, not SQLite text characters.
+                data["padding"] = json!("🦀".repeat(payload_bytes / 4));
+            }
             tx.execute(
                 "INSERT INTO session_message VALUES (?1, 'ses_v2', 'assistant', ?2, ?3, ?3, ?4)",
-                rusqlite::params![id, index + 1, 1_700_000_000_000_i64, message.to_string()],
+                rusqlite::params![id, index + 1, 1_700_000_000_000_i64, data.to_string()],
             )
             .unwrap();
+            if large_payloads && separate_parts {
+                for ordinal in 0..payload_bytes / (64 * 1024) {
+                    tx.execute(
+                        "INSERT INTO session_part VALUES (?1, 'ses_v2', ?2, 'text', NULL, ?3, ?3, ?4)",
+                        rusqlite::params![id, ordinal, 1_700_000_000_000_i64,
+                            json!({"type": "text", "padding": "x".repeat(64 * 1024)}).to_string()],
+                    ).unwrap();
+                }
+            }
             expected_event_ids.insert(id);
         }
         tx.commit().unwrap();
+    }
+
+    if large_payloads {
+        let mut watermark = reader.streams()[0]
+            .watermark_type
+            .create_initial_watermark();
+        let mut seen = BTreeSet::new();
+        let mut batches = 0;
+        loop {
+            let batch = reader
+                .read_incremental(&db_path, watermark, "ses_v2")
+                .unwrap();
+            watermark = reader.streams()[0]
+                .watermark_type
+                .deserialize(&batch.new_watermark.serialize())
+                .unwrap();
+            if batch.events.is_empty() {
+                break;
+            }
+            batches += 1;
+            let bytes: usize = batch
+                .events
+                .iter()
+                .map(|event| serde_json::to_vec(event).unwrap().len())
+                .sum();
+            assert!(
+                bytes <= 4 * 1024 * 1024 || batch.events.len() == 1,
+                "A batch must fit the byte budget, or contain exactly one complete oversized event: {} events, {bytes} bytes",
+                batch.events.len()
+            );
+            for event in batch.events {
+                let id = event["message"]["id"].as_str().unwrap();
+                assert!(
+                    seen.insert(id.to_string()),
+                    "No duplicate messages while draining"
+                );
+                if id == "msg_v2" {
+                    continue;
+                }
+                let expected_bytes = if id == "msg_v2_0001" {
+                    6 * 1024 * 1024
+                } else {
+                    2 * 1024 * 1024
+                };
+                if separate_parts {
+                    let parts = event["parts"].as_array().unwrap();
+                    assert_eq!(parts.len(), expected_bytes / (64 * 1024));
+                    for (ordinal, part) in parts.iter().enumerate() {
+                        assert_eq!(part["ordinal"], ordinal);
+                        assert_eq!(part["message_id"], id);
+                        let padding = part["data"]["padding"].as_str().unwrap();
+                        assert_eq!(padding.len(), 64 * 1024);
+                        assert!(padding.bytes().all(|byte| byte == b'x'));
+                    }
+                } else {
+                    let padding = event["message"]["data"]["padding"].as_str().unwrap();
+                    assert_eq!(padding.len(), expected_bytes);
+                    assert!(padding.chars().all(|character| character == '🦀'));
+                }
+            }
+        }
+        assert!(
+            batches >= 3,
+            "Large transcripts must drain through multiple batches"
+        );
+        assert_eq!(
+            seen, expected_event_ids,
+            "No message may be skipped by the byte budget"
+        );
     }
 
     let checkpoint = |event: &str| {
@@ -323,22 +419,32 @@ fn assert_opencode_v2_transcript_and_checkpoint(
 
 #[test]
 fn test_opencode_v2_transcript_checkpoint_and_parent() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 1);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1, false);
 }
 
 #[test]
 fn test_opencode_v2_active_tool_model_survives_selection_change() {
-    assert_opencode_v2_transcript_and_checkpoint(true, false, 1);
+    assert_opencode_v2_transcript_and_checkpoint(true, false, 1, false);
 }
 
 #[test]
 fn test_opencode_v2_transcript_with_separate_parts() {
-    assert_opencode_v2_transcript_and_checkpoint(true, true, 1);
+    assert_opencode_v2_transcript_and_checkpoint(true, true, 1, false);
 }
 
 #[test]
 fn test_opencode_v2_transcript_tied_timestamp_pagination() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 1001);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1001, false);
+}
+
+#[test]
+fn test_opencode_v2_byte_budget_preserves_large_messages() {
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 4, true);
+}
+
+#[test]
+fn test_opencode_v2_byte_budget_preserves_all_parts() {
+    assert_opencode_v2_transcript_and_checkpoint(false, true, 4, true);
 }
 
 #[test]
