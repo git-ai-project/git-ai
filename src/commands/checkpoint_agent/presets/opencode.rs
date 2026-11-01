@@ -176,7 +176,11 @@ impl OpenCodePreset {
         {
             return Ok(PathBuf::from(xdg_data).join("opencode"));
         }
-        let home = dirs::home_dir()
+        // Match Node's os.homedir(): USERPROFILE on Windows, HOME on POSIX.
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let home = std::env::var_os(home_variable)
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
         Ok(home.join(".local").join("share").join("opencode"))
     }
