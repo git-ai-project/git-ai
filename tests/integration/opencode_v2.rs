@@ -314,7 +314,10 @@ fn assert_opencode_v2_transcript_and_checkpoint(
             &[if use_xdg_data_home {
                 ("XDG_DATA_HOME", storage.path().to_str().unwrap())
             } else {
-                ("GIT_AI_OPENCODE_STORAGE_PATH", opencode_root.to_str().unwrap())
+                (
+                    "GIT_AI_OPENCODE_STORAGE_PATH",
+                    opencode_root.to_str().unwrap(),
+                )
             }],
         )
         .unwrap();
@@ -497,8 +500,9 @@ fn test_opencode_message_timestamp_fallbacks() {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+#[serial_test::serial]
 fn test_opencode_v2_xdg_data_home_preserves_model_and_transcript() {
+    // Other OpenCode tests temporarily set the process-wide storage override.
     assert_opencode_v2_transcript_and_checkpoint(false, true, 1, false, true);
 }

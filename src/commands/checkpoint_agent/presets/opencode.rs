@@ -169,45 +169,16 @@ impl OpenCodePreset {
     }
 
     fn opencode_data_path() -> Result<PathBuf, GitAiError> {
-        #[cfg(target_os = "macos")]
+        // OpenCode V1 (xdg-basedir) and V2 use this layout on every OS,
+        // including Windows. An empty XDG_DATA_HOME falls back to home.
+        if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME")
+            && !xdg_data.is_empty()
         {
-            let home = dirs::home_dir().ok_or_else(|| {
-                GitAiError::Generic("Could not determine home directory".to_string())
-            })?;
-            Ok(home.join(".local").join("share").join("opencode"))
+            return Ok(PathBuf::from(xdg_data).join("opencode"));
         }
-
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
-                Ok(PathBuf::from(xdg_data).join("opencode"))
-            } else {
-                let home = dirs::home_dir().ok_or_else(|| {
-                    GitAiError::Generic("Could not determine home directory".to_string())
-                })?;
-                Ok(home.join(".local").join("share").join("opencode"))
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(app_data) = std::env::var("APPDATA") {
-                Ok(PathBuf::from(app_data).join("opencode"))
-            } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                Ok(PathBuf::from(local_app_data).join("opencode"))
-            } else {
-                Err(GitAiError::Generic(
-                    "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
-                ))
-            }
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            Err(GitAiError::PresetError(
-                "OpenCode storage path not supported on this platform".to_string(),
-            ))
-        }
+        let home = dirs::home_dir()
+            .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
+        Ok(home.join(".local").join("share").join("opencode"))
     }
 
     fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
