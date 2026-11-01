@@ -1330,27 +1330,30 @@ fn test_blame_configured_markers_match_native_git() {
 
     // Legacy Git reserves its extra marker column even when automatic
     // abbreviation resolves to a full hash. Newer Git caps the total width.
-    repo.git(&["config", "core.abbrev", "false"]).unwrap();
-    for path in ["markers.txt", "boundary.txt"] {
-        for flags in [&[][..], &["-b"][..], &["--root"][..]] {
-            let native_args = [
-                &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
-                flags,
-                &["--", path],
-            ]
-            .concat();
-            let custom_args = [
-                &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
-                flags,
-                &[path],
-            ]
-            .concat();
-            let native = repo.git(&native_args).unwrap();
-            let actual = repo.git_ai(&custom_args).unwrap();
-            assert_eq!(
-                actual, native,
-                "automatic full-hash width: {path}, {flags:?}"
-            );
+    for configured_width in ["false", "40"] {
+        repo.git(&["config", "core.abbrev", configured_width])
+            .unwrap();
+        for path in ["markers.txt", "boundary.txt"] {
+            for flags in [&[][..], &["-b"][..], &["--root"][..]] {
+                let native_args = [
+                    &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                    flags,
+                    &["--", path],
+                ]
+                .concat();
+                let custom_args = [
+                    &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                    flags,
+                    &[path],
+                ]
+                .concat();
+                let native = repo.git(&native_args).unwrap();
+                let actual = repo.git_ai(&custom_args).unwrap();
+                assert_eq!(
+                    actual, native,
+                    "automatic full-hash width: {path}, {flags:?}, core.abbrev={configured_width}"
+                );
+            }
         }
     }
     repo.git(&["config", "core.abbrev", "12"]).unwrap();

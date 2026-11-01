@@ -455,16 +455,20 @@ impl Repository {
         }
 
         // Git 2.56 reserves the largest displayed combination of ^, *, and ?.
-        // Git's configured binary is process-global; query its version at most once.
-        static USES_DYNAMIC_MARKER_WIDTH: OnceLock<bool> = OnceLock::new();
-        if *USES_DYNAMIC_MARKER_WIDTH.get_or_init(|| {
-            self.git_version()
-                .is_some_and(|version| version >= (2, 56, 0))
-        }) {
+        if self.blame_uses_dynamic_marker_width() {
             marker_width
         } else {
             1
         }
+    }
+
+    fn blame_uses_dynamic_marker_width(&self) -> bool {
+        // Git's configured binary is process-global; query its version at most once.
+        static USES_DYNAMIC_MARKER_WIDTH: OnceLock<bool> = OnceLock::new();
+        *USES_DYNAMIC_MARKER_WIDTH.get_or_init(|| {
+            self.git_version()
+                .is_some_and(|version| version >= (2, 56, 0))
+        })
     }
 
     fn resolve_blame_abbrev_width_batched(&self, hunks: &[BlameHunk]) -> usize {
@@ -475,7 +479,26 @@ impl Repository {
             .filter(|sha| !sha.bytes().all(|byte| byte == b'0'))
             .collect();
         if commit_shas.is_empty() {
-            return 7;
+            let Some(hunk) = hunks.first() else {
+                return 7;
+            };
+            // rev-parse accepts a full zero OID without requiring a commit.
+            // One lookup preserves core.abbrev for wholly uncommitted content.
+            let mut args = self.global_args_for_exec();
+            args.extend([
+                "rev-parse".to_string(),
+                "--short".to_string(),
+                hunk.commit_sha.clone(),
+            ]);
+            return exec_git(&args)
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .and_then(|stdout| {
+                    let short_sha = stdout.trim();
+                    (short_sha.len() >= 4 && hunk.commit_sha.starts_with(short_sha))
+                        .then_some(short_sha.len())
+                })
+                .unwrap_or(7);
         }
 
         // One stdin batch avoids argv limits and per-commit/marker spawns.
@@ -525,7 +548,19 @@ impl Repository {
             Some(width) => width.clamp(4, 40) as usize,
             None => self.resolve_blame_abbrev_width_batched(hunks),
         };
-        let column_width = (base_width + self.blame_marker_width(hunks, options)).min(40);
+        let column_width = if options.abbrev.is_none() && base_width == 40 {
+            // Git treats false as GIT_MAX_HEXSZ (64), while numeric 40 stays
+            // 40. Legacy Git reserves another column even for full hashes.
+            let full_hashes = self
+                .get_git_config_file()
+                .ok()
+                .and_then(|config| config.boolean("core.abbrev").and_then(Result::ok))
+                == Some(false);
+            let native_width = if full_hashes { 64 } else { 40 };
+            native_width + usize::from(!self.blame_uses_dynamic_marker_width())
+        } else {
+            (base_width + self.blame_marker_width(hunks, options)).min(40)
+        };
         for hunk in hunks.iter_mut() {
             let hash_width =
                 column_width.saturating_sub(Self::blame_hunk_marker_width(hunk, options));
@@ -1776,7 +1811,7 @@ fn output_default_format(
             }
             let remaining_width = hash_column_width.saturating_sub(full_sha.len());
             if hunk.is_boundary && options.blank_boundary && !options.show_root {
-                full_sha.push_str(&" ".repeat(remaining_width));
+                full_sha.push_str(&" ".repeat(remaining_width.min(sha.len())));
             } else if options.long_rev {
                 full_sha.push_str(&sha[..sha.len().min(remaining_width)]);
             } else {
