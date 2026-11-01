@@ -61,6 +61,8 @@ async function fixture(t, childBehavior = (child) => child.emit("close", 0)) {
     const child = new EventEmitter()
     child.stderr = new EventEmitter()
     child.stdin = new EventEmitter()
+    child.stdin.destroy = () => { child.stdin.destroyed = true }
+    child.stderr.destroy = () => { child.stderr.destroyed = true }
     child.stdin.end = (input) => {
       calls.push(JSON.parse(input))
       queueMicrotask(() => childBehavior(child))
@@ -250,4 +252,20 @@ test("cancelled pre calls keep their capacity reservation until their child exit
   await Promise.all([...pending, extra])
   assert.equal(childCount, 64, "cancelled but running children must still consume admission capacity")
   await f.cleanup?.()
+})
+
+
+test("timeout settles and closes owned pipes even if an exited child's descendant holds them", async (t) => {
+  const f = await fixture(t, (child) => child.emit("exit", 0))
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  let settled = false
+  const pre = f.before(f.event()).then(() => { settled = true })
+  while (f.children.length === 0) await new Promise(setImmediate)
+  await new Promise(setImmediate)
+  t.mock.timers.tick(10_250)
+  await new Promise(setImmediate)
+  const observed = { settled, stdin: f.children[0].stdin.destroyed, stderr: f.children[0].stderr.destroyed }
+  f.children[0].emit("close", 0)
+  await pre
+  assert.deepEqual(observed, { settled: true, stdin: true, stderr: true })
 })
