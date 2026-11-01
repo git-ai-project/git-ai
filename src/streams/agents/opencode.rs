@@ -93,8 +93,10 @@ fn message_ids_json(ids: &[String]) -> Result<String, StreamError> {
 }
 
 /// Size only selected rows. SQLite's octet_length reads byte lengths without
-/// loading overflow payload pages (unlike length(CAST(data AS BLOB))). All
-/// queries share a snapshot, so selected messages cannot disappear mid-read.
+/// loading overflow payload pages (unlike length(CAST(data AS BLOB))). One
+/// batched statement lazily aggregates indexed parts for each needed message;
+/// no outer sort/group may force sizing future messages before yielding a row.
+/// All queries share a snapshot, so selected messages cannot disappear mid-read.
 fn prepare_message_sizes(
     conn: &Connection,
     v2: bool,
@@ -104,25 +106,24 @@ fn prepare_message_sizes(
     let part_table = if v2 { "session_part" } else { "part" };
     let part_sizes = if has_parts {
         format!(
-            "UNION ALL SELECT message_id, SUM(octet_length(data) \
-             + octet_length(message_id) + octet_length(session_id) \
-             + {ROW_OVERHEAD_BYTES}) FROM {part_table} \
-             WHERE message_id IN (SELECT value FROM json_each(?1)) GROUP BY message_id"
+            "+ COALESCE((SELECT SUM(octet_length(p.data) \
+             + octet_length(p.message_id) + octet_length(p.session_id) \
+             + {ROW_OVERHEAD_BYTES}) FROM {part_table} p \
+             WHERE p.message_id = m.id), 0)"
         )
     } else {
         String::new()
     };
     conn.prepare(&format!(
-            "SELECT message_id, SUM(bytes) FROM ( \
-         SELECT id AS message_id, octet_length(data) \
-         + octet_length(id) + octet_length(session_id) \
-         + {ROW_OVERHEAD_BYTES} AS bytes FROM {message_table} \
-         WHERE id IN (SELECT value FROM json_each(?1)) {part_sizes} \
-         ) GROUP BY message_id"
-        ))
-        .map_err(|e| StreamError::Fatal {
-            message: format!("Failed to prepare transcript sizes: {e}"),
-        })
+        "SELECT m.id, octet_length(m.data) \
+         + octet_length(m.id) + octet_length(m.session_id) \
+         + {ROW_OVERHEAD_BYTES} {part_sizes} \
+         FROM json_each(?1) selected CROSS JOIN {message_table} m \
+         WHERE m.id = selected.value"
+    ))
+    .map_err(|e| StreamError::Fatal {
+        message: format!("Failed to prepare transcript sizes: {e}"),
+    })
 }
 
 fn bound_message_ids(
@@ -139,24 +140,38 @@ fn bound_message_ids_from_statement(
     stmt: &mut rusqlite::Statement<'_>,
     ids: &mut Vec<String>,
 ) -> Result<String, StreamError> {
-    let sizes: HashMap<String, u64> = stmt
+    let mut rows = stmt
         .query_map([message_ids_json(ids)?], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })
-        .and_then(|rows| rows.collect())
         .map_err(|e| StreamError::Fatal {
             message: format!("Failed to read transcript sizes: {e}"),
         })?;
+    let mut sizes = HashMap::new();
     let mut bytes = 0_u64;
     let mut count = 0;
     for id in ids.iter() {
-        let size = sizes.get(id).ok_or_else(|| StreamError::Fatal {
-            message: format!("Selected OpenCode message disappeared: {id}"),
-        })?;
-        if count > 0 && bytes.saturating_add(*size) > BATCH_SOURCE_BYTES {
+        // The JSON-driven join normally yields IDs in the selected order, but
+        // correctness must not depend on SQL row order. Buffer any early rows
+        // and advance only the contiguous prefix of the original selection.
+        let size = loop {
+            if let Some(size) = sizes.remove(id) {
+                break size;
+            }
+            let (row_id, size) = rows
+                .next()
+                .ok_or_else(|| StreamError::Fatal {
+                    message: format!("Selected OpenCode message disappeared: {id}"),
+                })?
+                .map_err(|e| StreamError::Fatal {
+                    message: format!("Failed to read transcript sizes: {e}"),
+                })?;
+            sizes.insert(row_id, size);
+        };
+        if count > 0 && bytes.saturating_add(size) > BATCH_SOURCE_BYTES {
             break;
         }
-        bytes = bytes.saturating_add(*size);
+        bytes = bytes.saturating_add(size);
         count += 1;
         if bytes >= BATCH_SOURCE_BYTES {
             break;
@@ -1055,8 +1070,10 @@ mod tests {
             .unwrap();
             conn.execute(
                 "UPDATE message SET data = ?1 WHERE id = 'msg-0'",
-                [serde_json::json!({ "padding": "x".repeat(BATCH_SOURCE_BYTES as usize) })
-                    .to_string()],
+                [
+                    serde_json::json!({ "padding": "x".repeat(BATCH_SOURCE_BYTES as usize) })
+                        .to_string(),
+                ],
             )
             .unwrap();
             if v2 {
@@ -1067,8 +1084,7 @@ mod tests {
                 .unwrap();
             }
 
-            let mut ids = select_message_ids(&conn, "test-session", 0, "", 1000, v2)
-                .unwrap();
+            let mut ids = select_message_ids(&conn, "test-session", 0, "", 1000, v2).unwrap();
             assert_eq!(ids.len(), 128);
             let mut stmt = prepare_message_sizes(&conn, v2, true).unwrap();
             let encoded = bound_message_ids_from_statement(&mut stmt, &mut ids).unwrap();
