@@ -10,16 +10,26 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy)]
+enum StorageLocation {
+    Override,
+    Xdg,
+    Home,
+}
+
 fn assert_opencode_v2_transcript_and_checkpoint(
     with_legacy_tables: bool,
     separate_parts: bool,
     message_count: usize,
     large_payloads: bool,
-    use_xdg_data_home: bool,
+    storage_location: StorageLocation,
 ) {
     let storage = tempfile::tempdir().unwrap();
-    let opencode_root = storage.path().join("opencode");
-    fs::create_dir(&opencode_root).unwrap();
+    let opencode_root = match storage_location {
+        StorageLocation::Home => storage.path().join(".local/share/opencode"),
+        _ => storage.path().join("opencode"),
+    };
+    fs::create_dir_all(&opencode_root).unwrap();
     let db_path = opencode_root.join("opencode.db");
     if with_legacy_tables {
         fs::copy(
@@ -309,16 +319,23 @@ fn assert_opencode_v2_transcript_and_checkpoint(
             "cwd": repo.canonical_path(), "tool_name": "edit", "tool_input": {"path": path}
         })
         .to_string();
+        let envs = match storage_location {
+            StorageLocation::Override => vec![(
+                "GIT_AI_OPENCODE_STORAGE_PATH",
+                opencode_root.to_str().unwrap(),
+            )],
+            StorageLocation::Xdg => vec![("XDG_DATA_HOME", storage.path().to_str().unwrap())],
+            StorageLocation::Home => vec![
+                ("XDG_DATA_HOME", ""),
+                (
+                    if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+                    storage.path().to_str().unwrap(),
+                ),
+            ],
+        };
         repo.git_ai_with_env(
             &["checkpoint", "opencode", "--hook-input", &hook_input],
-            &[if use_xdg_data_home {
-                ("XDG_DATA_HOME", storage.path().to_str().unwrap())
-            } else {
-                (
-                    "GIT_AI_OPENCODE_STORAGE_PATH",
-                    opencode_root.to_str().unwrap(),
-                )
-            }],
+            &envs,
         )
         .unwrap();
     };
@@ -426,32 +443,38 @@ fn assert_opencode_v2_transcript_and_checkpoint(
 
 #[test]
 fn test_opencode_v2_transcript_checkpoint_and_parent() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 1, false, false);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 1, false, StorageLocation::Override);
 }
 
 #[test]
 fn test_opencode_v2_active_tool_model_survives_selection_change() {
-    assert_opencode_v2_transcript_and_checkpoint(true, false, 1, false, false);
+    assert_opencode_v2_transcript_and_checkpoint(true, false, 1, false, StorageLocation::Override);
 }
 
 #[test]
 fn test_opencode_v2_transcript_with_separate_parts() {
-    assert_opencode_v2_transcript_and_checkpoint(true, true, 1, false, false);
+    assert_opencode_v2_transcript_and_checkpoint(true, true, 1, false, StorageLocation::Override);
 }
 
 #[test]
 fn test_opencode_v2_transcript_tied_timestamp_pagination() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 1001, false, false);
+    assert_opencode_v2_transcript_and_checkpoint(
+        false,
+        false,
+        1001,
+        false,
+        StorageLocation::Override,
+    );
 }
 
 #[test]
 fn test_opencode_v2_byte_budget_preserves_large_messages() {
-    assert_opencode_v2_transcript_and_checkpoint(false, false, 4, true, false);
+    assert_opencode_v2_transcript_and_checkpoint(false, false, 4, true, StorageLocation::Override);
 }
 
 #[test]
 fn test_opencode_v2_byte_budget_preserves_all_parts() {
-    assert_opencode_v2_transcript_and_checkpoint(false, true, 4, true, false);
+    assert_opencode_v2_transcript_and_checkpoint(false, true, 4, true, StorageLocation::Override);
 }
 
 #[test]
@@ -504,5 +527,11 @@ fn test_opencode_message_timestamp_fallbacks() {
 #[serial_test::serial]
 fn test_opencode_v2_xdg_data_home_preserves_model_and_transcript() {
     // Other OpenCode tests temporarily set the process-wide storage override.
-    assert_opencode_v2_transcript_and_checkpoint(false, true, 1, false, true);
+    assert_opencode_v2_transcript_and_checkpoint(false, true, 1, false, StorageLocation::Xdg);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_opencode_v2_empty_xdg_data_home_uses_native_home_directory() {
+    assert_opencode_v2_transcript_and_checkpoint(false, true, 1, false, StorageLocation::Home);
 }
