@@ -3362,7 +3362,7 @@ impl ActorDaemonCoordinator {
                 recovery_file_timestamps
                     .iter()
                     .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
-                    .flat_map(|(_, values)| values.iter().copied())
+                    .flat_map(|(_, values)| values.match_ns.iter().copied())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -3373,7 +3373,7 @@ impl ActorDaemonCoordinator {
             timestamps = fallback_timestamps
                 .iter()
                 .filter(|(file_path, _)| unknown_files.contains(file_path.as_str()))
-                .flat_map(|(_, values)| values.iter().copied())
+                .flat_map(|(_, values)| values.match_ns.iter().copied())
                 .collect::<Vec<_>>();
         }
         if timestamps.is_empty() {
@@ -3381,7 +3381,7 @@ impl ActorDaemonCoordinator {
                 .map(|recovery_file_timestamps| {
                     recovery_file_timestamps
                         .values()
-                        .flat_map(|values| values.iter().copied())
+                        .flat_map(|values| values.match_ns.iter().copied())
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -3392,7 +3392,7 @@ impl ActorDaemonCoordinator {
         {
             timestamps = fallback_timestamps
                 .values()
-                .flat_map(|values| values.iter().copied())
+                .flat_map(|values| values.match_ns.iter().copied())
                 .collect::<Vec<_>>();
         }
         if timestamps.is_empty() {
