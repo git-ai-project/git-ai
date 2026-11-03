@@ -566,6 +566,87 @@ fn test_bash_recovery_does_not_attribute_manual_edit_after_unrelated_bash() {
     file.assert_committed_lines(lines!["manual after bash".unattributed_human()]);
 }
 
+/// Windows regression: an agent bash call that *creates* a file leaves a sticky
+/// creation timestamp inside that call's window. Later in-place human edits only
+/// bump mtime. Recovery must not keep attributing those unknown lines to the
+/// closed bash session (creation time never moves on Windows).
+#[cfg(windows)]
+#[test]
+fn test_bash_recovery_does_not_attribute_later_edit_via_sticky_creation_time() {
+    use git_ai::daemon::bash_history_db::{BashCallEnd, BashCallStart};
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+
+    let file_path = repo_root.join("Program.cs");
+    let create_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    fs::write(&file_path, "using System;\n").unwrap();
+
+    let agent = AgentId {
+        tool: "github-copilot-cli".to_string(),
+        id: "sticky-creation-session".to_string(),
+        model: "gpt-5".to_string(),
+    };
+    let repo_work_dir = repo_root.to_string_lossy().to_string();
+    let mut db = BashHistoryDatabase::open_at_path(Path::new(&bash_db_path)).unwrap();
+    db.record_start(&BashCallStart {
+        original_cwd: repo_work_dir.clone(),
+        repo_work_dir: Some(repo_work_dir.clone()),
+        repo_discovery_error: None,
+        session_id: agent.id.clone(),
+        tool_use_id: "sticky-creation-tool".to_string(),
+        agent_id: agent.clone(),
+        start_trace_id: "t_sticky_start".to_string(),
+        started_at_ns: create_ns.saturating_sub(500_000_000),
+        command: Some("dotnet new webapi".to_string()),
+        metadata: HashMap::new(),
+    })
+    .unwrap();
+    db.record_end(&BashCallEnd {
+        original_cwd: repo_work_dir.clone(),
+        repo_work_dir: Some(repo_work_dir),
+        repo_discovery_error: None,
+        session_id: agent.id.clone(),
+        tool_use_id: "sticky-creation-tool".to_string(),
+        agent_id: agent,
+        start_trace_id: Some("t_sticky_start".to_string()),
+        end_trace_id: "t_sticky_end".to_string(),
+        started_at_ns: Some(create_ns.saturating_sub(500_000_000)),
+        ended_at_ns: create_ns.saturating_add(500_000_000),
+        command: Some("dotnet new webapi".to_string()),
+        metadata: HashMap::new(),
+    })
+    .unwrap();
+
+    // Ensure the later edit's mtime is clearly outside the bash window (+3s margin).
+    thread::sleep(Duration::from_millis(4500));
+    fs::write(
+        &file_path,
+        "using System;\nnamespace Demo;\n// human edit\n",
+    )
+    .unwrap();
+
+    repo.stage_all_and_commit("Human edit long after agent created file")
+        .unwrap();
+
+    let mut file = repo.filename("Program.cs");
+    file.assert_committed_lines(lines![
+        "using System;".unattributed_human(),
+        "namespace Demo;".unattributed_human(),
+        "// human edit".unattributed_human(),
+    ]);
+}
+
 #[test]
 fn test_bash_recovery_does_not_attribute_manual_edit_before_unrelated_bash() {
     let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();

@@ -1384,6 +1384,12 @@ pub(crate) fn file_timestamps_for_path(path: &Path) -> Vec<u128> {
     if let Some(mtime) = stat.mtime {
         timestamps.push(system_time_to_ns(mtime));
     }
+    // On Windows, StatEntry::ctime is file creation time (sticky across in-place
+    // edits). Including it here would let bash_mtime / session_event_mtime match
+    // an old bash call that created the file long after later human edits.
+    // Unix ctime is inode change time and moves on writes, so it remains useful
+    // (e.g. `cp` preserving mtime).
+    #[cfg(unix)]
     if let Some(ctime) = stat.ctime {
         timestamps.push(system_time_to_ns(ctime));
     }
@@ -1404,9 +1410,18 @@ fn select_best_bash_candidate<'a>(
     existing_commit_sessions: &HashSet<String>,
     target_repo_work_dir: &str,
 ) -> Option<BashCandidateSelection<'a>> {
+    let latest_timestamp = timestamps.iter().copied().max()?;
     candidates
         .iter()
         .filter_map(|candidate| {
+            // A later mtime/ctime means the file was modified after the bash
+            // call ended. Creation time alone must not attribute those edits:
+            // on Windows it is sticky across in-place writes, so a file an
+            // agent created keeps a creation time inside that bash window
+            // forever. Allow the same ±window used elsewhere for coarse FS.
+            if file_modified_after_bash_call(latest_timestamp, candidate) {
+                return None;
+            }
             let distance = timestamps
                 .iter()
                 .filter_map(|ts| recovery_distance_to_call_window(*ts, candidate))
@@ -1442,6 +1457,13 @@ fn select_best_bash_candidate<'a>(
                 })
                 .then_with(|| right.candidate.id.cmp(&left.candidate.id))
         })
+}
+
+fn file_modified_after_bash_call(latest_timestamp_ns: u128, call: &BashCheckpointCall) -> bool {
+    let end = call
+        .end_time_ns
+        .unwrap_or_else(|| call.start_time_ns.saturating_add(BASH_RECOVERY_WINDOW_NS));
+    latest_timestamp_ns > end.saturating_add(BASH_RECOVERY_WINDOW_NS)
 }
 
 struct BashCandidateSelection<'a> {
@@ -2479,6 +2501,64 @@ mod tests {
             selection.is_none(),
             "nearby candidates outside their matching bash time range must not recover attribution"
         );
+    }
+
+    #[test]
+    fn bash_candidate_rejects_sticky_creation_time_when_mtime_is_after_call() {
+        // Windows StatEntry::ctime is file creation time, which does not move on
+        // in-place edits. A file created during a bash call keeps that creation
+        // timestamp forever; later human edits only bump mtime. Matching any
+        // timestamp (including sticky creation) would falsely attribute those
+        // later unknown lines to the closed bash session for up to 30 days.
+        let creation_during_bash = 1_000_000_000u128;
+        let mtime_after_bash = 10_000_000_000u128;
+        let candidates = vec![bash_call(
+            1,
+            "sticky-creation-session",
+            "tool-sticky",
+            "/repo",
+            900_000_000,
+            Some(1_100_000_000),
+        )];
+
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &[creation_during_bash, mtime_after_bash],
+            &HashSet::new(),
+            "/repo",
+        );
+
+        assert!(
+            selection.is_none(),
+            "sticky creation-time inside a bash window must not attribute later edits"
+        );
+    }
+
+    #[test]
+    fn bash_candidate_accepts_ctime_during_call_when_mtime_is_older() {
+        // `cp` / CopyFile can preserve source mtime while ctime/creation lands
+        // inside the bash window. That case should still recover.
+        let preserved_mtime = 500_000_000u128;
+        let ctime_during_bash = 1_000_000_000u128;
+        let candidates = vec![bash_call(
+            1,
+            "copy-session",
+            "tool-copy",
+            "/repo",
+            900_000_000,
+            Some(1_100_000_000),
+        )];
+
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &[preserved_mtime, ctime_during_bash],
+            &HashSet::new(),
+            "/repo",
+        )
+        .expect("ctime during bash with older preserved mtime should match");
+
+        assert_eq!(selection.candidate.tool_use_id, "tool-copy");
+        assert_eq!(selection.distance_ns, 0);
     }
 
     #[test]

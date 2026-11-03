@@ -206,7 +206,10 @@ impl StatEntry {
 
     #[cfg(not(unix))]
     fn extract_ctime(meta: &fs::Metadata) -> Option<SystemTime> {
-        // On Windows, use creation time as a proxy for ctime
+        // Windows has no Unix-style ctime. Creation time is sticky across
+        // in-place edits, so attribution recovery deliberately ignores this
+        // field (see file_timestamps_for_path). Kept here only for StatEntry
+        // completeness / snapshot serialization.
         meta.created().ok()
     }
 }
