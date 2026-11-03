@@ -157,13 +157,19 @@ const KNOWN_COMMIT_AGENT_KINDS: &[CommitAgentKind] = &[
 
 /// Per-file timestamps captured for attribution recovery.
 ///
-/// `mtime_ns` is the content last-write time and is the only signal used to
-/// veto a bash match when the file was edited after the call ended.
-/// `match_ns` is the full proximity-matching set (mtime plus optional ctime /
-/// Windows creation-when-newer-than-mtime).
+/// - `mtime_ns`: content last-write time. A value after the bash call vetoes
+///   the match (in-place content edit).
+/// - `ctime_ns`: Unix inode change time when available. A value after the bash
+///   call also vetoes: without content fingerprints we cannot tell a metadata
+///   chmod from a timestamp-preserving content replacement, and AI-misattributing
+///   the latter is worse. Not populated on Windows (creation time is sticky and
+///   handled separately in `match_ns`).
+/// - `match_ns`: proximity-matching set (mtime plus optional Unix ctime /
+///   Windows creation-when-newer-than-mtime).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileRecoveryTimestamps {
     pub mtime_ns: Option<u128>,
+    pub ctime_ns: Option<u128>,
     pub match_ns: Vec<u128>,
 }
 
@@ -416,8 +422,7 @@ fn recover_bash_mtime(
         };
         let Some(selection) = select_best_bash_candidate(
             &candidates,
-            &timestamps.match_ns,
-            timestamps.mtime_ns,
+            timestamps,
             &existing_commit_sessions,
             &repo_work_dir,
         ) else {
@@ -1419,29 +1424,36 @@ fn recovery_timestamps_from_stat(stat: &StatEntry) -> FileRecoveryTimestamps {
         match_ns.push(mtime_ns);
     }
 
+    let mut ctime_ns = None;
     if let Some(ctime) = stat.ctime {
-        let ctime_ns = system_time_to_ns(ctime);
+        let ts = system_time_to_ns(ctime);
         #[cfg(unix)]
         {
-            // Unix ctime moves on writes and metadata changes; useful when
-            // `cp` preserves mtime. Content-after-bash veto uses mtime only,
-            // so a later chmod cannot erase bash attribution.
-            match_ns.push(ctime_ns);
+            // Unix ctime moves on writes and metadata changes. Useful for
+            // matching `cp` that preserves mtime; also used to veto post-call
+            // inode changes (see file_changed_after_bash_call).
+            ctime_ns = Some(ts);
+            match_ns.push(ts);
         }
         #[cfg(not(unix))]
         {
             // Windows "ctime" is creation time. Keep it only when newer than
             // mtime — the preserved-mtime copy case — so recovery can still
-            // see when the destination entered the tree.
-            if mtime_ns.is_none_or(|mtime_ns| ctime_ns > mtime_ns) {
-                match_ns.push(ctime_ns);
+            // see when the destination entered the tree. Do not set ctime_ns:
+            // sticky creation must not veto as a "post-call change".
+            if mtime_ns.is_none_or(|mtime_ns| ts > mtime_ns) {
+                match_ns.push(ts);
             }
         }
     }
 
     match_ns.sort_unstable();
     match_ns.dedup();
-    FileRecoveryTimestamps { mtime_ns, match_ns }
+    FileRecoveryTimestamps {
+        mtime_ns,
+        ctime_ns,
+        match_ns,
+    }
 }
 
 fn system_time_to_ns(time: SystemTime) -> u128 {
@@ -1452,22 +1464,18 @@ fn system_time_to_ns(time: SystemTime) -> u128 {
 
 fn select_best_bash_candidate<'a>(
     candidates: &'a [BashCheckpointCall],
-    timestamps: &[u128],
-    content_mtime_ns: Option<u128>,
+    file_timestamps: &FileRecoveryTimestamps,
     existing_commit_sessions: &HashSet<String>,
     target_repo_work_dir: &str,
 ) -> Option<BashCandidateSelection<'a>> {
     candidates
         .iter()
         .filter_map(|candidate| {
-            // Veto only on content mtime. Unix ctime also moves on chmod/chown,
-            // and Windows creation time is sticky — neither proves the unknown
-            // lines were rewritten after the bash call. Allow the same ±window
-            // used elsewhere for coarse filesystems.
-            if content_modified_after_bash_call(content_mtime_ns, candidate) {
+            if file_changed_after_bash_call(file_timestamps, candidate) {
                 return None;
             }
-            let distance = timestamps
+            let distance = file_timestamps
+                .match_ns
                 .iter()
                 .filter_map(|ts| recovery_distance_to_call_window(*ts, candidate))
                 .min()?;
@@ -1504,17 +1512,37 @@ fn select_best_bash_candidate<'a>(
         })
 }
 
-fn content_modified_after_bash_call(
-    content_mtime_ns: Option<u128>,
+fn bash_call_end_ns(call: &BashCheckpointCall) -> u128 {
+    call.end_time_ns
+        .unwrap_or_else(|| call.start_time_ns.saturating_add(BASH_RECOVERY_WINDOW_NS))
+}
+
+fn timestamp_after_bash_window(timestamp_ns: u128, call: &BashCheckpointCall) -> bool {
+    timestamp_ns > bash_call_end_ns(call).saturating_add(BASH_RECOVERY_WINDOW_NS)
+}
+
+/// Whether the working-tree file shows evidence of changing after the bash call.
+///
+/// - Later **mtime** ⇒ content was rewritten after the call.
+/// - Later **Unix ctime** ⇒ the inode changed after the call. That covers both
+///   metadata-only updates (chmod) and timestamp-preserving content replacements.
+///   Without content fingerprints we cannot tell them apart, so we veto: AI-
+///   misattributing a human replacement is worse than losing bash_mtime after
+///   chmod (those lines fall through to later recovery).
+/// - Windows creation time is intentionally not used here (sticky across edits).
+fn file_changed_after_bash_call(
+    file_timestamps: &FileRecoveryTimestamps,
     call: &BashCheckpointCall,
 ) -> bool {
-    let Some(mtime_ns) = content_mtime_ns else {
-        return false;
-    };
-    let end = call
-        .end_time_ns
-        .unwrap_or_else(|| call.start_time_ns.saturating_add(BASH_RECOVERY_WINDOW_NS));
-    mtime_ns > end.saturating_add(BASH_RECOVERY_WINDOW_NS)
+    if file_timestamps
+        .mtime_ns
+        .is_some_and(|mtime_ns| timestamp_after_bash_window(mtime_ns, call))
+    {
+        return true;
+    }
+    file_timestamps
+        .ctime_ns
+        .is_some_and(|ctime_ns| timestamp_after_bash_window(ctime_ns, call))
 }
 
 struct BashCandidateSelection<'a> {
@@ -2310,6 +2338,21 @@ mod tests {
         }
     }
 
+    fn file_ts(
+        mtime_ns: Option<u128>,
+        ctime_ns: Option<u128>,
+        match_ns: &[u128],
+    ) -> FileRecoveryTimestamps {
+        let mut match_ns = match_ns.to_vec();
+        match_ns.sort_unstable();
+        match_ns.dedup();
+        FileRecoveryTimestamps {
+            mtime_ns,
+            ctime_ns,
+            match_ns,
+        }
+    }
+
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
         let mut log = AuthorshipLog::new();
@@ -2340,8 +2383,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_050],
-            Some(1_050),
+            &file_ts(Some(1_050), None, &[1_050]),
             &existing_sessions,
             "/repo",
         )
@@ -2364,8 +2406,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_050],
-            Some(1_050),
+            &file_ts(Some(1_050), None, &[1_050]),
             &existing_sessions,
             "/repo",
         )
@@ -2391,8 +2432,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_050],
-            Some(1_050),
+            &file_ts(Some(1_050), None, &[1_050]),
             &HashSet::new(),
             "/tmp/work/repo",
         )
@@ -2425,8 +2465,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_050],
-            Some(1_050),
+            &file_ts(Some(1_050), None, &[1_050]),
             &HashSet::new(),
             "/tmp/work/repo",
         )
@@ -2452,8 +2491,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_050],
-            Some(1_050),
+            &file_ts(Some(1_050), None, &[1_050]),
             &HashSet::new(),
             "/tmp/work/repo",
         )
@@ -2472,8 +2510,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_050],
-            Some(1_050),
+            &file_ts(Some(1_050), None, &[1_050]),
             &HashSet::new(),
             "/repo",
         )
@@ -2578,8 +2615,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[1_500],
-            Some(1_500),
+            &file_ts(Some(1_500), None, &[1_500]),
             &existing_sessions,
             "/repo",
         );
@@ -2610,8 +2646,13 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[creation_during_bash, mtime_after_bash],
-            Some(mtime_after_bash),
+            // Windows sticky creation is not stored in ctime_ns (None); the
+            // later mtime alone must veto.
+            &file_ts(
+                Some(mtime_after_bash),
+                None,
+                &[creation_during_bash, mtime_after_bash],
+            ),
             &HashSet::new(),
             "/repo",
         );
@@ -2639,8 +2680,11 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[preserved_mtime, ctime_during_bash],
-            Some(preserved_mtime),
+            &file_ts(
+                Some(preserved_mtime),
+                Some(ctime_during_bash),
+                &[preserved_mtime, ctime_during_bash],
+            ),
             &HashSet::new(),
             "/repo",
         )
@@ -2651,15 +2695,16 @@ mod tests {
     }
 
     #[test]
-    fn bash_candidate_accepts_mtime_match_when_ctime_moves_after_call() {
-        // chmod/chown bump Unix ctime without rewriting content. A later ctime
-        // must not veto a bash call whose content mtime still falls in-window.
+    fn bash_candidate_rejects_preserved_mtime_when_ctime_moves_after_call() {
+        // A timestamp-preserving content replacement restores the bash-era
+        // mtime while advancing Unix ctime. Without content fingerprints that
+        // looks identical to chmod — veto to avoid AI-misattributing human edits.
         let mtime_during_bash = 1_000_000_000u128;
         let ctime_after_bash = 10_000_000_000u128;
         let candidates = vec![bash_call(
             1,
-            "chmod-session",
-            "tool-chmod",
+            "preserved-mtime-session",
+            "tool-preserved-mtime",
             "/repo",
             900_000_000,
             Some(1_100_000_000),
@@ -2667,15 +2712,19 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[mtime_during_bash, ctime_after_bash],
-            Some(mtime_during_bash),
+            &file_ts(
+                Some(mtime_during_bash),
+                Some(ctime_after_bash),
+                &[mtime_during_bash, ctime_after_bash],
+            ),
             &HashSet::new(),
             "/repo",
-        )
-        .expect("metadata-only ctime after bash must not erase content attribution");
+        );
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-chmod");
-        assert_eq!(selection.distance_ns, 0);
+        assert!(
+            selection.is_none(),
+            "post-call Unix ctime must veto even when mtime still matches the bash window"
+        );
     }
 
     #[cfg(not(unix))]
@@ -2695,6 +2744,10 @@ mod tests {
         };
         let preserved = recovery_timestamps_from_stat(&preserved_mtime_stat);
         assert_eq!(preserved.mtime_ns, Some(system_time_to_ns(older)));
+        assert_eq!(
+            preserved.ctime_ns, None,
+            "Windows creation time must not populate ctime_ns (sticky; not a change signal)"
+        );
         assert!(
             preserved.match_ns.contains(&system_time_to_ns(newer)),
             "creation newer than mtime (preserved-mtime copy) must remain matchable"
@@ -2710,6 +2763,7 @@ mod tests {
         };
         let sticky = recovery_timestamps_from_stat(&sticky_creation_stat);
         assert_eq!(sticky.mtime_ns, Some(system_time_to_ns(newer)));
+        assert_eq!(sticky.ctime_ns, None);
         assert!(
             !sticky.match_ns.contains(&system_time_to_ns(older)),
             "sticky creation older than a later edit must not be a match candidate"
@@ -2729,8 +2783,7 @@ mod tests {
 
         let selection = select_best_bash_candidate(
             &candidates,
-            &[2_000_000_000],
-            Some(2_000_000_000),
+            &file_ts(Some(2_000_000_000), None, &[2_000_000_000]),
             &HashSet::new(),
             "/repo",
         )

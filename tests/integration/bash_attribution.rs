@@ -718,12 +718,13 @@ fn test_bash_recovery_attributes_copy_with_preserved_mtime() {
     file.assert_committed_lines(lines!["copied by agent".ai()]);
 }
 
-/// Unix: chmod after a bash write bumps ctime without changing content. Recovery
-/// must keep the bash attribution when content mtime still falls in-window.
+/// Unix: a post-call ctime advance from a timestamp-preserving content
+/// replacement must not AI-misattribute the human's lines. Without content
+/// fingerprints this is indistinguishable from chmod, so bash_mtime vetoes and
+/// terminal human recovery takes over.
 #[cfg(unix)]
 #[test]
-fn test_bash_recovery_keeps_attribution_after_post_bash_chmod() {
-    use std::os::unix::fs::PermissionsExt;
+fn test_bash_recovery_does_not_attribute_preserved_mtime_human_replacement() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
@@ -739,31 +740,34 @@ fn test_bash_recovery_keeps_attribution_after_post_bash_chmod() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    fs::write(&file_path, "#!/bin/sh\necho hi\n").unwrap();
+    fs::write(&file_path, "agent original\n").unwrap();
+    let preserved_mtime = filetime::FileTime::from_unix_time(
+        (write_ns / 1_000_000_000) as i64,
+        (write_ns % 1_000_000_000) as u32,
+    );
 
     let repo_work_dir = repo_root.to_string_lossy().to_string();
     insert_closed_bash_call_covering(
         &bash_db_path,
         &repo_work_dir,
-        "chmod-after-bash-session",
-        "chmod-after-bash-tool",
+        "preserved-mtime-human-session",
+        "preserved-mtime-human-tool",
         "codex",
-        "printf '#!/bin/sh\\necho hi\\n' > script.sh",
+        "printf 'agent original\\n' > script.sh",
         write_ns.saturating_sub(500_000_000),
         write_ns.saturating_add(500_000_000),
     );
 
-    // Metadata-only change after the bash window must not erase content attribution.
+    // Human replaces content after the bash window, then restores the bash-era mtime.
     thread::sleep(Duration::from_millis(4500));
-    let mut perms = fs::metadata(&file_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&file_path, perms).unwrap();
+    fs::write(&file_path, "human replacement\n").unwrap();
+    filetime::set_file_mtime(&file_path, preserved_mtime).unwrap();
 
-    repo.stage_all_and_commit("Commit after post-bash chmod")
+    repo.stage_all_and_commit("Human replacement with preserved mtime")
         .unwrap();
 
     let mut file = repo.filename("script.sh");
-    file.assert_committed_lines(lines!["#!/bin/sh".ai(), "echo hi".ai()]);
+    file.assert_committed_lines(lines!["human replacement".human()]);
 }
 
 #[test]
