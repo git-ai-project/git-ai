@@ -3,6 +3,7 @@ pub mod r#await;
 pub mod blame;
 pub mod checkpoint_agent;
 pub mod ci_handlers;
+pub mod completions;
 pub mod config;
 pub mod daemon;
 pub mod debug;
