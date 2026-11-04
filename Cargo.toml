@@ -27,7 +27,7 @@ url = "2.5"
 glob = "0.3"
 ignore = "0.4"
 ratatui = "0.30"
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 flate2 = "1.1"
 crossterm = "0.29"
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"], optional = true }
