@@ -493,12 +493,23 @@ fn with_disabled_hooks(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
+/// Notes sync runs unattended (often from the daemon). Abort an HTTP transfer
+/// that has moved less than 1 KiB/s for 60 s instead of waiting forever on a
+/// stalled server.
+fn with_stall_limits(mut args: Vec<String>) -> Vec<String> {
+    for setting in ["http.lowSpeedLimit=1024", "http.lowSpeedTime=60"] {
+        args.push("-c".to_string());
+        args.push(setting.to_string());
+    }
+    args
+}
+
 fn build_authorship_fetch_args(
     global_args: Vec<String>,
     remote_name: &str,
     fetch_refspec: &str,
 ) -> Vec<String> {
-    let mut args = with_disabled_hooks(global_args);
+    let mut args = with_stall_limits(with_disabled_hooks(global_args));
     args.push("fetch".to_string());
     args.push("--no-tags".to_string());
     args.push("--recurse-submodules=no".to_string());
@@ -511,7 +522,7 @@ fn build_authorship_fetch_args(
 }
 
 fn build_authorship_push_args(global_args: Vec<String>, remote_name: &str) -> Vec<String> {
-    let mut args = with_disabled_hooks(global_args);
+    let mut args = with_stall_limits(with_disabled_hooks(global_args));
     args.push("push".to_string());
     args.push("--quiet".to_string());
     args.push("--no-recurse-submodules".to_string());
@@ -655,6 +666,35 @@ mod tests {
                 .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
         );
         assert!(args.contains(&"fetch".to_string()));
+    }
+
+    #[test]
+    fn authorship_fetch_and_push_args_abort_stalled_transfers() {
+        let fetch = build_authorship_fetch_args(
+            vec!["-C".to_string(), "/tmp/repo".to_string()],
+            "origin",
+            "+refs/notes/ai:refs/notes/ai-remote/origin",
+        );
+        let push =
+            build_authorship_push_args(vec!["-C".to_string(), "/tmp/repo".to_string()], "origin");
+        for args in [&fetch, &push] {
+            for setting in ["http.lowSpeedLimit=1024", "http.lowSpeedTime=60"] {
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "-c" && pair[1] == setting),
+                    "missing -c {setting} in {args:?}"
+                );
+            }
+            let verb = args
+                .iter()
+                .position(|a| a == "fetch" || a == "push")
+                .unwrap();
+            let last_c = args.iter().rposition(|a| a == "-c").unwrap();
+            assert!(
+                last_c < verb,
+                "config options must come before the subcommand"
+            );
+        }
     }
 
     #[test]
