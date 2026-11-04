@@ -691,18 +691,26 @@ fn test_blame_blank_boundary() {
     file.set_contents(crate::lines!["Line 1", "Line 2".ai()]);
 
     repo.stage_all_and_commit("Initial commit").unwrap();
+    file.assert_committed_lines(crate::lines!["Line 1".human(), "Line 2".ai()]);
 
-    let git_output = repo.git(&["blame", "-b", "test.txt"]).unwrap();
-    let git_ai_output = repo.git_ai(&["blame", "-b", "test.txt"]).unwrap();
+    let cases: &[(&[&str], &[&str])] = &[
+        (&[], &[]),
+        (&["--abbrev=4"], &["--abbrev", "4"]),
+        (&["-l"], &["-l"]),
+        (&["--root"], &["--root"]),
+    ];
+    for (git_flags, git_ai_flags) in cases {
+        let git_args = [&["blame", "-b"][..], git_flags, &["test.txt"]].concat();
+        let git_ai_args = [&["blame", "-b"][..], git_ai_flags, &["test.txt"]].concat();
+        let git_output = repo.git(&git_args).unwrap();
+        let git_ai_output = repo.git_ai(&git_ai_args).unwrap();
 
-    let git_norm = normalize_for_snapshot(&git_output);
-    let git_ai_norm = normalize_for_snapshot(&git_ai_output);
-    println!("\n[DEBUG] Normalized git blame output:\n{}", git_norm);
-    println!("\n[DEBUG] Normalized git-ai blame output:\n{}", git_ai_norm);
-    assert_eq!(
-        git_norm, git_ai_norm,
-        "Normalized blame outputs should match exactly"
-    );
+        assert_eq!(
+            normalize_for_snapshot(&git_output),
+            normalize_for_snapshot(&git_ai_output),
+            "Normalized blame outputs should match exactly for {git_args:?}"
+        );
+    }
 }
 
 #[test]
@@ -1102,6 +1110,285 @@ fn test_blame_mark_unknown_backward_compatible() {
 // =============================================================================
 // Tests for .git-blame-ignore-revs auto-detection (Issue #363)
 // =============================================================================
+
+#[test]
+fn test_blame_configured_markers_match_native_git() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("markers.txt");
+    let mut boundary_file = repo.filename("boundary.txt");
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "old expression\nold neighbor\n",
+    )
+    .unwrap();
+    std::fs::write(repo.path().join("boundary.txt"), "boundary expression\n").unwrap();
+    repo.stage_all_and_commit("root baseline").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "old expression".unattributed_human(),
+        "old neighbor".unattributed_human(),
+    ]);
+    boundary_file
+        .assert_committed_lines(crate::lines!["boundary expression".unattributed_human(),]);
+
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "let value = 1;\nordinary neighbor from second commit\n",
+    )
+    .unwrap();
+    let prior = repo.stage_all_and_commit("non-root content").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "let value = 1;".unattributed_human(),
+        "ordinary neighbor from second commit".unattributed_human(),
+    ]);
+    boundary_file
+        .assert_committed_lines(crate::lines!["boundary expression".unattributed_human(),]);
+
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "  let value = 1;\nordinary neighbor from second commit\nzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n",
+    )
+    .unwrap();
+    std::fs::write(repo.path().join("boundary.txt"), "  boundary expression\n").unwrap();
+    let ignored = repo
+        .stage_all_and_commit("format and add unrelated text")
+        .unwrap();
+    file.assert_committed_lines(crate::lines![
+        "  let value = 1;".unattributed_human(),
+        "ordinary neighbor from second commit".unattributed_human(),
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".unattributed_human(),
+    ]);
+    boundary_file
+        .assert_committed_lines(crate::lines!["  boundary expression".unattributed_human(),]);
+
+    repo.git(&["config", "blame.markIgnoredLines", "true"])
+        .unwrap();
+    repo.git(&["config", "blame.markUnblamableLines", "true"])
+        .unwrap();
+    let porcelain = repo
+        .git(&[
+            "blame",
+            "--line-porcelain",
+            "--ignore-rev",
+            &ignored.commit_sha,
+            "--",
+            "markers.txt",
+        ])
+        .unwrap();
+    assert!(
+        porcelain.contains("\nignored\n"),
+        "fixture must contain an ignored line:\n{porcelain}"
+    );
+    assert!(
+        porcelain.contains("\nunblamable\n"),
+        "fixture must contain an unblamable line:\n{porcelain}"
+    );
+    assert!(
+        !porcelain.contains("\nboundary\n"),
+        "ordinary-neighbor case must have no boundary:\n{porcelain}"
+    );
+    assert!(porcelain.contains(&format!("{} 2 2", prior.commit_sha)));
+
+    let boundary_porcelain = repo
+        .git(&[
+            "blame",
+            "--line-porcelain",
+            "--ignore-rev",
+            &ignored.commit_sha,
+            "--",
+            "boundary.txt",
+        ])
+        .unwrap();
+    assert!(boundary_porcelain.contains("\nboundary\n"));
+    assert!(boundary_porcelain.contains("\nignored\n"));
+
+    let spawn_log = repo.test_home_path().join("blame-spawns.log");
+    let run_measured_blame = |args: &[&str]| {
+        std::fs::write(&spawn_log, "").unwrap();
+        let output = repo
+            .git_ai_with_env(args, &[("GIT_AI_SPAWN_LOG", spawn_log.to_str().unwrap())])
+            .unwrap();
+        let spawns = std::fs::read_to_string(&spawn_log).unwrap();
+        let log_count = spawns.lines().filter(|command| *command == "log").count();
+        let rev_parse_count = spawns
+            .lines()
+            .filter(|command| *command == "rev-parse")
+            .count();
+        (output, log_count, rev_parse_count)
+    };
+
+    for (mark_ignored, mark_unblamable) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        repo.git(&[
+            "config",
+            "blame.markIgnoredLines",
+            &mark_ignored.to_string(),
+        ])
+        .unwrap();
+        repo.git(&[
+            "config",
+            "blame.markUnblamableLines",
+            &mark_unblamable.to_string(),
+        ])
+        .unwrap();
+        for path in ["markers.txt", "boundary.txt"] {
+            // Full hashes need no abbreviation lookup. Use this control to
+            // exclude repository discovery's existing rev-parse invocations.
+            let (_, baseline_logs, baseline_rev_parses) = run_measured_blame(&[
+                "blame",
+                "-s",
+                "-l",
+                "--ignore-rev",
+                &ignored.commit_sha,
+                path,
+            ]);
+            for flags in [&[][..], &["-b"][..], &["--root"][..], &["-l"][..]] {
+                for (native_abbrev, custom_abbrev) in [
+                    (&[][..], &[][..]),
+                    (&["--abbrev=12"][..], &["--abbrev", "12"][..]),
+                    (&["--abbrev=0"][..], &["--abbrev", "0"][..]),
+                    (&["--abbrev=1"][..], &["--abbrev", "1"][..]),
+                ] {
+                    let auto_abbrev = native_abbrev.is_empty();
+                    let git_args = [
+                        &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                        native_abbrev,
+                        flags,
+                        &["--", path],
+                    ]
+                    .concat();
+                    let git_ai_args = [
+                        &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                        custom_abbrev,
+                        flags,
+                        &[path],
+                    ]
+                    .concat();
+                    let native = repo.git(&git_args).unwrap();
+                    let (actual, log_count, rev_parse_count) = run_measured_blame(&git_ai_args);
+                    if path == "markers.txt" {
+                        assert_eq!(
+                            actual.lines().nth(1),
+                            native.lines().nth(1),
+                            "ordinary neighbor must retain native width with ignored={mark_ignored}, unblamable={mark_unblamable}, flags={flags:?}, auto={auto_abbrev}"
+                        );
+                    }
+                    // Preserve every hash character, marker, and padding column.
+                    assert_eq!(
+                        actual, native,
+                        "native blame parity for {path}, ignored={mark_ignored}, unblamable={mark_unblamable}, flags={flags:?}, auto={auto_abbrev}"
+                    );
+                    // The analysis and display passes each resolve once.
+                    let expected_lookups = 2 * usize::from(auto_abbrev && !flags.contains(&"-l"));
+                    assert_eq!(
+                        log_count + rev_parse_count,
+                        baseline_logs + baseline_rev_parses + expected_lookups,
+                        "auto abbreviation must use one batch per pass regardless of commits or marker classes; explicit widths need none: {path}, flags={flags:?}, abbrev={native_abbrev:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Git's automatic width follows core.abbrev, including the padding of
+    // blank boundaries. This must use the same batch, not a config lookup.
+    repo.git(&["config", "core.abbrev", "12"]).unwrap();
+    for path in ["markers.txt", "boundary.txt"] {
+        let (_, baseline_logs, baseline_rev_parses) = run_measured_blame(&[
+            "blame",
+            "-s",
+            "-l",
+            "--ignore-rev",
+            &ignored.commit_sha,
+            path,
+        ]);
+        for flags in [&[][..], &["-b"][..]] {
+            let native_args = [
+                &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                flags,
+                &["--", path],
+            ]
+            .concat();
+            let custom_args = [
+                &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                flags,
+                &[path],
+            ]
+            .concat();
+            let native = repo.git(&native_args).unwrap();
+            let (actual, log_count, rev_parse_count) = run_measured_blame(&custom_args);
+            assert_eq!(
+                actual, native,
+                "configured automatic width: {path}, {flags:?}"
+            );
+            assert_eq!(
+                log_count + rev_parse_count,
+                baseline_logs + baseline_rev_parses + 2
+            );
+        }
+    }
+
+    // Legacy Git reserves its extra marker column even when automatic
+    // abbreviation resolves to a full hash. Newer Git caps the total width.
+    for configured_width in ["false", "40"] {
+        repo.git(&["config", "core.abbrev", configured_width])
+            .unwrap();
+        for path in ["markers.txt", "boundary.txt"] {
+            for flags in [&[][..], &["-b"][..], &["--root"][..]] {
+                let native_args = [
+                    &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                    flags,
+                    &["--", path],
+                ]
+                .concat();
+                let custom_args = [
+                    &["blame", "-s", "--ignore-rev", &ignored.commit_sha][..],
+                    flags,
+                    &[path],
+                ]
+                .concat();
+                let native = repo.git(&native_args).unwrap();
+                let actual = repo.git_ai(&custom_args).unwrap();
+                assert_eq!(
+                    actual, native,
+                    "automatic full-hash width: {path}, {flags:?}, core.abbrev={configured_width}"
+                );
+            }
+        }
+    }
+    repo.git(&["config", "core.abbrev", "12"]).unwrap();
+
+    // A complete uncommitted rewrite has no real commit to send to git log.
+    // It must still honor the configured width without extra per-line work.
+    std::fs::write(
+        repo.path().join("markers.txt"),
+        "entirely new uncommitted content\nanother completely replaced line\n",
+    )
+    .unwrap();
+    let porcelain = repo
+        .git(&["blame", "--line-porcelain", "markers.txt"])
+        .unwrap();
+    assert_eq!(
+        porcelain
+            .lines()
+            .filter(|line| line.starts_with("0000000000000000000000000000000000000000 "))
+            .count(),
+        2,
+        "fixture must attribute both replacement lines to the zero OID",
+    );
+    let (_, baseline_logs, baseline_rev_parses) =
+        run_measured_blame(&["blame", "-s", "-l", "markers.txt"]);
+    let native = repo.git(&["blame", "-s", "markers.txt"]).unwrap();
+    let (actual, log_count, rev_parse_count) = run_measured_blame(&["blame", "-s", "markers.txt"]);
+    assert_eq!(
+        actual, native,
+        "configured width for wholly uncommitted content"
+    );
+    assert_eq!(
+        log_count + rev_parse_count,
+        baseline_logs + baseline_rev_parses + 2
+    );
+}
 
 #[test]
 fn test_blame_auto_detects_git_blame_ignore_revs_file() {

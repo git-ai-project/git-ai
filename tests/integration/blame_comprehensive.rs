@@ -1104,19 +1104,21 @@ fn test_blame_abbrev_custom_length() {
 
 #[test]
 fn test_blame_long_rev() {
-    // Long rev: -l flag shows full 40-character hash
+    // Long rev uses a 40-character field, including any boundary marker.
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
     file.set_contents(crate::lines!["Line 1"]);
     repo.stage_all_and_commit("Test").unwrap();
+    file.assert_committed_lines(crate::lines!["Line 1".human()]);
 
-    let output = repo.git_ai(&["blame", "-l", "test.txt"]).unwrap();
+    let native = repo.git(&["blame", "-s", "-l", "test.txt"]).unwrap();
+    let output = repo.git_ai(&["blame", "-s", "-l", "test.txt"]).unwrap();
 
-    // Boundary commits may be prefixed with '^' in default format.
+    // Suppress author identity differences but preserve every hash character.
+    assert_eq!(output, native);
     let first_field = output.split_whitespace().next().unwrap();
-    let hash = first_field.trim_start_matches('^');
-    assert_eq!(hash.len(), 40);
+    assert_eq!(first_field.len(), 40);
 }
 
 // =============================================================================
