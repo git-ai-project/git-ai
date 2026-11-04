@@ -7,6 +7,9 @@ use std::str::FromStr;
 
 /// Strategy for tracking progress through a transcript.
 pub trait WatermarkStrategy: Send + Sync {
+    /// Type required to deserialize this watermark's serialized value.
+    fn watermark_type(&self) -> WatermarkType;
+
     /// Serialize the watermark to a string for database storage.
     fn serialize(&self) -> String;
 
@@ -93,6 +96,10 @@ impl ByteOffsetWatermark {
 }
 
 impl WatermarkStrategy for ByteOffsetWatermark {
+    fn watermark_type(&self) -> WatermarkType {
+        WatermarkType::ByteOffset
+    }
+
     fn serialize(&self) -> String {
         self.0.to_string()
     }
@@ -130,6 +137,10 @@ impl RecordIndexWatermark {
 }
 
 impl WatermarkStrategy for RecordIndexWatermark {
+    fn watermark_type(&self) -> WatermarkType {
+        WatermarkType::RecordIndex
+    }
+
     fn serialize(&self) -> String {
         self.0.to_string()
     }
@@ -167,6 +178,10 @@ impl TimestampWatermark {
 }
 
 impl WatermarkStrategy for TimestampWatermark {
+    fn watermark_type(&self) -> WatermarkType {
+        WatermarkType::Timestamp
+    }
+
     fn serialize(&self) -> String {
         self.0.to_rfc3339()
     }
@@ -221,6 +236,10 @@ impl TimestampCursorWatermark {
 }
 
 impl WatermarkStrategy for TimestampCursorWatermark {
+    fn watermark_type(&self) -> WatermarkType {
+        WatermarkType::TimestampCursor
+    }
+
     fn serialize(&self) -> String {
         format!("{}|{}", self.timestamp_millis, self.last_id)
     }
@@ -275,6 +294,10 @@ impl HybridWatermark {
 }
 
 impl WatermarkStrategy for HybridWatermark {
+    fn watermark_type(&self) -> WatermarkType {
+        WatermarkType::Hybrid
+    }
+
     fn serialize(&self) -> String {
         match &self.timestamp {
             Some(ts) => format!("{}|{}|{}", self.offset, self.record, ts.to_rfc3339()),

@@ -154,8 +154,13 @@ impl OpenCodePreset {
 
     fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
         let conn = crate::streams::agents::opencode::open_sqlite_readonly(db_path).ok()?;
+        let table = if crate::streams::agents::opencode::is_v2_session(&conn, session_id) {
+            "session_v2"
+        } else {
+            "session"
+        };
         conn.query_row(
-            "SELECT parent_id FROM session WHERE id = ?",
+            &format!("SELECT parent_id FROM {table} WHERE id = ?"),
             [session_id],
             |row| row.get::<_, Option<String>>(0),
         )
@@ -164,45 +169,21 @@ impl OpenCodePreset {
     }
 
     fn opencode_data_path() -> Result<PathBuf, GitAiError> {
-        #[cfg(target_os = "macos")]
+        // OpenCode V1 (xdg-basedir) and V2 use this layout on every OS,
+        // including Windows. An empty XDG_DATA_HOME falls back to home.
+        if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME")
+            && !xdg_data.is_empty()
         {
-            let home = dirs::home_dir().ok_or_else(|| {
-                GitAiError::Generic("Could not determine home directory".to_string())
-            })?;
-            Ok(home.join(".local").join("share").join("opencode"))
+            return Ok(PathBuf::from(xdg_data).join("opencode"));
         }
-
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
-                Ok(PathBuf::from(xdg_data).join("opencode"))
-            } else {
-                let home = dirs::home_dir().ok_or_else(|| {
-                    GitAiError::Generic("Could not determine home directory".to_string())
-                })?;
-                Ok(home.join(".local").join("share").join("opencode"))
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(app_data) = std::env::var("APPDATA") {
-                Ok(PathBuf::from(app_data).join("opencode"))
-            } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                Ok(PathBuf::from(local_app_data).join("opencode"))
-            } else {
-                Err(GitAiError::Generic(
-                    "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
-                ))
-            }
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            Err(GitAiError::PresetError(
-                "OpenCode storage path not supported on this platform".to_string(),
-            ))
-        }
+        // OpenCode's Bun runtime uses the OS profile when the override is empty.
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let home = std::env::var_os(home_variable)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
+        Ok(home.join(".local").join("share").join("opencode"))
     }
 
     fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
@@ -341,6 +322,39 @@ impl AgentPreset for OpenCodePreset {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_opencode_empty_home_override_uses_os_profile() {
+        const CHILD: &str = "GIT_AI_OPENCODE_EMPTY_HOME_PROBE";
+        if std::env::var_os(CHILD).is_some() {
+            let actual = super::OpenCodePreset::opencode_data_path().unwrap();
+            assert!(
+                actual.is_absolute(),
+                "Empty home must not resolve relative to cwd"
+            );
+            assert_eq!(
+                actual,
+                dirs::home_dir().unwrap().join(".local/share/opencode")
+            );
+            return;
+        }
+        // Isolate the environment change from parallel tests. This only
+        // resolves a path; it never reads or writes the user's OpenCode data.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("test_opencode_empty_home_override_uses_os_profile")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .env_remove("XDG_DATA_HOME")
+            .env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     use super::*;
     use crate::commands::checkpoint_agent::presets::*;
     use serde_json::json;

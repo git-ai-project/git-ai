@@ -8018,11 +8018,24 @@ fn control_peer_disconnect_not_logged_as_error() {
             .write_all(b"{\"method\":\"checkpoint.run\",\"params\":{\"body_bytes\":1000}}\n")
             .expect("failed to write checkpoint header");
         stream.flush().expect("failed to flush checkpoint header");
-        // Wait for the ready ack so the daemon is definitely inside the body
-        // read when the connection drops.
-        let mut ready = [0u8; 1];
-        use std::io::Read as _;
-        let _ = stream.read(&mut ready);
+        // Consume the complete ready response before closing: its JSON and
+        // newline are separate writes, so reading one byte can race the latter.
+        let mut reader = BufReader::new(stream);
+        let mut ready_line = String::new();
+        reader
+            .read_line(&mut ready_line)
+            .expect("failed to read checkpoint ready response");
+        assert!(
+            ready_line.ends_with('\n'),
+            "checkpoint ready response must include its newline delimiter"
+        );
+        let ready: ControlResponse =
+            serde_json::from_str(&ready_line).expect("invalid checkpoint ready response");
+        assert!(ready.ok, "daemon should reserve the declared body");
+        assert_eq!(
+            ready.data.as_ref().and_then(|data| data.get("ready")),
+            Some(&Value::Bool(true))
+        );
     }
 
     // Also hammer it with valid pings that never read their responses.
