@@ -797,6 +797,222 @@ pub fn update_vscode_chat_hook_settings(
     Ok(Some(diff_output))
 }
 
+/// Serialize `desired` as TOML while keeping the formatting of `original`.
+///
+/// `desired` is the full document as it should look after the update (usually
+/// `original` parsed with the `toml` crate and then modified). Entries whose
+/// values did not change are left untouched, so comments, whitespace and key
+/// order survive; changed values are updated in place, keys missing from
+/// `desired` are removed and new keys are appended.
+pub fn update_toml_preserving_format(
+    original: &str,
+    desired: &toml::Value,
+) -> Result<String, GitAiError> {
+    let desired = desired
+        .as_table()
+        .ok_or_else(|| GitAiError::Generic("TOML document root must be a table".to_string()))?;
+    let mut doc: toml_edit::DocumentMut = original
+        .parse()
+        .map_err(|e| GitAiError::Generic(format!("Failed to parse TOML: {e}")))?;
+    sync_toml_table(doc.as_table_mut(), desired);
+    Ok(doc.to_string())
+}
+
+fn sync_toml_table(table: &mut toml_edit::Table, desired: &toml::Table) {
+    table.retain(|key, _| desired.contains_key(key));
+    for (key, value) in desired {
+        match table.get_mut(key) {
+            Some(item) => sync_toml_item(item, value),
+            None => {
+                table.insert(key, new_toml_item(value));
+            }
+        }
+    }
+}
+
+fn sync_toml_item(item: &mut toml_edit::Item, desired: &toml::Value) {
+    match (item, desired) {
+        (toml_edit::Item::Table(table), toml::Value::Table(desired)) => {
+            sync_toml_table(table, desired)
+        }
+        (toml_edit::Item::ArrayOfTables(array), toml::Value::Array(desired))
+            if is_array_of_tables(desired) =>
+        {
+            // Drop the tables `desired` no longer has, rather than the last ones,
+            // so a table that stays keeps its own comments instead of taking
+            // over the slot (and decor) of the one before it.
+            let desired_tables: Vec<&toml::Table> =
+                desired.iter().filter_map(toml::Value::as_table).collect();
+            let mut next = 0;
+            let mut kept = vec![false; array.len()];
+            for (idx, table) in array.iter().enumerate() {
+                if next < desired_tables.len() && toml_table_eq(table, desired_tables[next]) {
+                    kept[idx] = true;
+                    next += 1;
+                }
+            }
+            for idx in (0..array.len()).rev() {
+                if array.len() <= desired.len() {
+                    break;
+                }
+                if !kept[idx] {
+                    array.remove(idx);
+                }
+            }
+            while array.len() > desired.len() {
+                array.remove(array.len() - 1);
+            }
+            for (idx, desired) in desired_tables.into_iter().enumerate() {
+                match array.get_mut(idx) {
+                    Some(table) => sync_toml_table(table, desired),
+                    None => array.push(new_toml_table(desired)),
+                }
+            }
+        }
+        (toml_edit::Item::Value(value), desired) => sync_toml_value(value, desired),
+        (item, desired) => *item = new_toml_item(desired),
+    }
+}
+
+fn sync_toml_value(value: &mut toml_edit::Value, desired: &toml::Value) {
+    match (&mut *value, desired) {
+        (toml_edit::Value::InlineTable(table), toml::Value::Table(desired)) => {
+            table.retain(|key, _| desired.contains_key(key));
+            for (key, desired) in desired {
+                match table.get_mut(key) {
+                    Some(value) => sync_toml_value(value, desired),
+                    None => {
+                        table.insert(key, new_toml_value(desired));
+                    }
+                }
+            }
+        }
+        (toml_edit::Value::Array(array), toml::Value::Array(desired)) => {
+            while array.len() > desired.len() {
+                array.remove(array.len() - 1);
+            }
+            for (idx, desired) in desired.iter().enumerate() {
+                match array.get_mut(idx) {
+                    Some(value) => sync_toml_value(value, desired),
+                    None => array.push(new_toml_value(desired)),
+                }
+            }
+        }
+        (existing, desired) if toml_scalar_eq(existing, desired) => {}
+        (existing, desired) => {
+            let decor = existing.decor().clone();
+            *existing = new_toml_value(desired);
+            *existing.decor_mut() = decor;
+        }
+    }
+}
+
+fn toml_scalar_eq(existing: &toml_edit::Value, desired: &toml::Value) -> bool {
+    match (existing, desired) {
+        (toml_edit::Value::String(a), toml::Value::String(b)) => a.value() == b,
+        (toml_edit::Value::Integer(a), toml::Value::Integer(b)) => a.value() == b,
+        (toml_edit::Value::Float(a), toml::Value::Float(b)) => a.value() == b,
+        (toml_edit::Value::Boolean(a), toml::Value::Boolean(b)) => a.value() == b,
+        (toml_edit::Value::Datetime(a), toml::Value::Datetime(b)) => a.value() == b,
+        _ => false,
+    }
+}
+
+fn toml_table_eq(table: &toml_edit::Table, desired: &toml::Table) -> bool {
+    table.len() == desired.len()
+        && desired.iter().all(|(key, desired)| {
+            table
+                .get(key)
+                .is_some_and(|item| toml_item_eq(item, desired))
+        })
+}
+
+fn toml_item_eq(item: &toml_edit::Item, desired: &toml::Value) -> bool {
+    match (item, desired) {
+        (toml_edit::Item::Value(value), desired) => toml_value_eq(value, desired),
+        (toml_edit::Item::Table(table), toml::Value::Table(desired)) => {
+            toml_table_eq(table, desired)
+        }
+        (toml_edit::Item::ArrayOfTables(array), toml::Value::Array(desired)) => {
+            array.len() == desired.len()
+                && array.iter().zip(desired).all(|(table, desired)| {
+                    desired
+                        .as_table()
+                        .is_some_and(|desired| toml_table_eq(table, desired))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn toml_value_eq(value: &toml_edit::Value, desired: &toml::Value) -> bool {
+    match (value, desired) {
+        (toml_edit::Value::InlineTable(table), toml::Value::Table(desired)) => {
+            table.len() == desired.len()
+                && desired.iter().all(|(key, desired)| {
+                    table
+                        .get(key)
+                        .is_some_and(|value| toml_value_eq(value, desired))
+                })
+        }
+        (toml_edit::Value::Array(array), toml::Value::Array(desired)) => {
+            array.len() == desired.len()
+                && array
+                    .iter()
+                    .zip(desired)
+                    .all(|(value, desired)| toml_value_eq(value, desired))
+        }
+        (value, desired) => toml_scalar_eq(value, desired),
+    }
+}
+
+fn is_array_of_tables(values: &[toml::Value]) -> bool {
+    !values.is_empty() && values.iter().all(toml::Value::is_table)
+}
+
+fn new_toml_item(value: &toml::Value) -> toml_edit::Item {
+    match value {
+        toml::Value::Table(table) => toml_edit::Item::Table(new_toml_table(table)),
+        toml::Value::Array(values) if is_array_of_tables(values) => {
+            let mut array = toml_edit::ArrayOfTables::new();
+            for table in values.iter().filter_map(toml::Value::as_table) {
+                array.push(new_toml_table(table));
+            }
+            toml_edit::Item::ArrayOfTables(array)
+        }
+        other => toml_edit::Item::Value(new_toml_value(other)),
+    }
+}
+
+fn new_toml_table(table: &toml::Table) -> toml_edit::Table {
+    let mut new_table = toml_edit::Table::new();
+    for (key, value) in table {
+        new_table.insert(key, new_toml_item(value));
+    }
+    // Skip the `[header]` line when the table only holds sub-tables.
+    new_table.set_implicit(!table.is_empty());
+    new_table
+}
+
+fn new_toml_value(value: &toml::Value) -> toml_edit::Value {
+    match value {
+        toml::Value::String(s) => s.as_str().into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(f) => (*f).into(),
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Datetime(dt) => (*dt).into(),
+        toml::Value::Array(values) => {
+            toml_edit::Value::Array(values.iter().map(new_toml_value).collect())
+        }
+        toml::Value::Table(table) => toml_edit::Value::InlineTable(
+            table
+                .iter()
+                .map(|(key, value)| (key.as_str(), new_toml_value(value)))
+                .collect(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,5 +1726,143 @@ mod tests {
         // A path with no parent component should not error
         let path = Path::new("standalone_file.txt");
         ensure_parent_dir(path).unwrap();
+    }
+
+    #[test]
+    fn test_update_toml_preserving_format_keeps_untouched_entries_verbatim() {
+        let original = r#"# top comment
+zeta = "keep" # trailing comment
+alpha = 1
+list = [1, 2] # numbers
+
+[section]
+# inside comment
+name = "old"
+drop_me = true
+inline = { a = 1, b = 2 }
+"#;
+        let mut desired: toml::Value = toml::from_str(original).unwrap();
+        let root = desired.as_table_mut().unwrap();
+        root.insert(
+            "list".to_string(),
+            toml::Value::Array(vec![1.into(), 3.into()]),
+        );
+        let section = root.get_mut("section").unwrap().as_table_mut().unwrap();
+        section.insert("name".to_string(), "new".into());
+        section.remove("drop_me");
+        root.insert(
+            "added".to_string(),
+            toml::Value::Table(toml::Table::from_iter([("flag".to_string(), true.into())])),
+        );
+
+        let updated = update_toml_preserving_format(original, &desired).unwrap();
+
+        assert_eq!(
+            updated,
+            r#"# top comment
+zeta = "keep" # trailing comment
+alpha = 1
+list = [1, 3] # numbers
+
+[section]
+# inside comment
+name = "new"
+inline = { a = 1, b = 2 }
+
+[added]
+flag = true
+"#
+        );
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), desired);
+    }
+
+    #[test]
+    fn test_update_toml_preserving_format_handles_arrays_of_tables() {
+        let original = r#"model = "o3"
+
+# my own hook
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "notify-send done"
+"#;
+        let mut desired: toml::Value = toml::from_str(original).unwrap();
+        let stop = desired
+            .get_mut("hooks")
+            .and_then(|v| v.get_mut("Stop"))
+            .and_then(|v| v.as_array_mut())
+            .unwrap();
+        let hooks = stop[0]
+            .get_mut("hooks")
+            .and_then(|v| v.as_array_mut())
+            .unwrap();
+        hooks.push(toml::Value::Table(toml::Table::from_iter([(
+            "command".to_string(),
+            "git-ai checkpoint codex".into(),
+        )])));
+
+        let updated = update_toml_preserving_format(original, &desired).unwrap();
+
+        assert!(
+            updated.starts_with(original),
+            "existing entries should be kept verbatim, got:\n{updated}"
+        );
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), desired);
+
+        // Round-trip back to the original content.
+        let original_value: toml::Value = toml::from_str(original).unwrap();
+        assert_eq!(
+            update_toml_preserving_format(&updated, &original_value).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn test_update_toml_preserving_format_removes_the_dropped_table_of_an_array() {
+        let original = r#"[[hooks.Stop]]
+command = "git-ai checkpoint codex"
+
+# my own hook
+[[hooks.Stop]]
+command = "notify-send done" # keep this note
+"#;
+        let mut desired: toml::Value = toml::from_str(original).unwrap();
+        desired
+            .get_mut("hooks")
+            .and_then(|v| v.get_mut("Stop"))
+            .and_then(|v| v.as_array_mut())
+            .unwrap()
+            .remove(0);
+
+        let updated = update_toml_preserving_format(original, &desired).unwrap();
+
+        assert!(
+            updated.contains("# my own hook") && updated.contains("# keep this note"),
+            "comments of the remaining hook should be kept, got:\n{updated}"
+        );
+        assert!(!updated.contains("git-ai"), "got:\n{updated}");
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), desired);
+    }
+
+    #[test]
+    fn test_update_toml_preserving_format_from_empty_document() {
+        let desired: toml::Value = toml::from_str(
+            r#"
+[features]
+hooks = true
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+"#,
+        )
+        .unwrap();
+
+        let updated = update_toml_preserving_format("", &desired).unwrap();
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), desired);
+        assert!(
+            !updated.contains("[hooks]\n"),
+            "tables that only hold sub-tables should not get their own header, got:\n{updated}"
+        );
     }
 }

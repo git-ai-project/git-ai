@@ -37,6 +37,7 @@ gix-index = { version = "0.51.0", features = ["sha1"] }
 rand = "0.10"
 regex = "1.12"
 toml = "0.9"
+toml_edit = "0.23"
 unicode-normalization = "0.1"
 tempfile = { version = "3.27", optional = true }
 
