@@ -155,7 +155,31 @@ const KNOWN_COMMIT_AGENT_KINDS: &[CommitAgentKind] = &[
     },
 ];
 
-pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
+/// Per-file timestamps captured for attribution recovery.
+///
+/// - `mtime_ns`: content last-write time. A value after the bash call vetoes
+///   the match (in-place content edit).
+/// - `ctime_ns`: Unix inode change time when available. A value after the bash
+///   call also vetoes: without content fingerprints we cannot tell a metadata
+///   chmod from a timestamp-preserving content replacement, and AI-misattributing
+///   the latter is worse. Not populated on Windows (creation time is sticky and
+///   handled separately in `match_ns`).
+/// - `match_ns`: proximity-matching set (mtime plus optional Unix ctime /
+///   Windows creation-when-newer-than-mtime).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FileRecoveryTimestamps {
+    pub mtime_ns: Option<u128>,
+    pub ctime_ns: Option<u128>,
+    pub match_ns: Vec<u128>,
+}
+
+impl FileRecoveryTimestamps {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.match_ns.is_empty()
+    }
+}
+
+pub(crate) type FileTimestampsByPath = HashMap<String, FileRecoveryTimestamps>;
 pub(crate) type UnknownLinesByFile = BTreeMap<String, Vec<u32>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,7 +394,7 @@ fn recover_bash_mtime(
             .cloned()
             .unwrap_or_else(|| file_timestamps_ns(&workdir, file_path));
         if !timestamps.is_empty() {
-            all_timestamps.extend(timestamps.iter().copied());
+            all_timestamps.extend(timestamps.match_ns.iter().copied());
             timestamps_by_file.insert(file_path.clone(), timestamps);
         }
     }
@@ -426,7 +450,8 @@ fn recover_bash_mtime(
             "file_path": file_path,
             "unknown_lines": unknown_lines,
             "target_repo_work_dir": repo_work_dir.as_str(),
-            "file_timestamps_ns": timestamps,
+            "file_timestamps_ns": timestamps.match_ns,
+            "file_mtime_ns": timestamps.mtime_ns,
             "selected_bash_call_id": candidate.id,
             "selected_bash_original_cwd": candidate.original_cwd.as_str(),
             "selected_bash_repo_work_dir": candidate.repo_work_dir.as_deref(),
@@ -491,7 +516,7 @@ fn recover_session_event_mtime(
             .cloned()
             .unwrap_or_else(|| file_timestamps_ns(&workdir, file_path));
         if !timestamps.is_empty() {
-            all_timestamps.extend(timestamps.iter().copied());
+            all_timestamps.extend(timestamps.match_ns.iter().copied());
             timestamps_by_file.insert(file_path.clone(), timestamps);
         }
     }
@@ -538,9 +563,11 @@ fn recover_session_event_mtime(
         let Some(timestamps) = timestamps_by_file.get(&file_path) else {
             continue;
         };
-        let Some(selection) =
-            select_best_session_event_candidate(&candidates, timestamps, &target_repo_url)
-        else {
+        let Some(selection) = select_best_session_event_candidate(
+            &candidates,
+            &timestamps.match_ns,
+            &target_repo_url,
+        ) else {
             continue;
         };
         if selection.distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
@@ -558,7 +585,7 @@ fn recover_session_event_mtime(
             "solver": "session_event_mtime",
             "file_path": file_path.as_str(),
             "unknown_lines": &unknown_lines,
-            "file_timestamps_ns": timestamps,
+            "file_timestamps_ns": &timestamps.match_ns,
             "selected_metric_row_id": candidate.row_id,
             "selected_event_ts": candidate.event_ts,
             "selected_session_id": candidate.session_id.as_str(),
@@ -680,7 +707,8 @@ fn recover_commit_metadata(
             "selected_metric_row_id": selection.metric_row_id,
             "selected_event_ts": selection.event_ts,
             "distance_ns": selection.distance_ns,
-            "file_timestamps_ns": file_timestamps,
+            "file_timestamps_ns": file_timestamps.match_ns,
+            "file_mtime_ns": file_timestamps.mtime_ns,
             "latest_file_timestamps_ns": latest_timestamps,
         });
         record_recovery_metric(RecoveryMetricInput {
@@ -929,7 +957,7 @@ fn latest_timestamps_for_unknown_files(
     workdir: &std::path::Path,
     unknown_by_file: &UnknownLinesByFile,
     captured_file_timestamps: Option<&FileTimestampsByPath>,
-) -> (HashMap<String, Vec<u128>>, Vec<u128>) {
+) -> (HashMap<String, FileRecoveryTimestamps>, Vec<u128>) {
     let mut timestamps_by_file = HashMap::new();
     let mut latest_timestamp = None;
     for file_path in unknown_by_file.keys() {
@@ -938,7 +966,7 @@ fn latest_timestamps_for_unknown_files(
             .filter(|timestamps| !timestamps.is_empty())
             .cloned()
             .unwrap_or_else(|| file_timestamps_ns(workdir, file_path));
-        if let Some(file_latest) = timestamps.iter().copied().max() {
+        if let Some(file_latest) = timestamps.match_ns.iter().copied().max() {
             latest_timestamp = Some(
                 latest_timestamp.map_or(file_latest, |current: u128| current.max(file_latest)),
             );
@@ -950,8 +978,10 @@ fn latest_timestamps_for_unknown_files(
         .map(|latest| {
             let mut timestamps = timestamps_by_file
                 .values()
-                .filter(|file_timestamps| file_timestamps.iter().copied().max() == Some(latest))
-                .flat_map(|file_timestamps| file_timestamps.iter().copied())
+                .filter(|file_timestamps| {
+                    file_timestamps.match_ns.iter().copied().max() == Some(latest)
+                })
+                .flat_map(|file_timestamps| file_timestamps.match_ns.iter().copied())
                 .collect::<Vec<_>>();
             timestamps.sort_unstable();
             timestamps.dedup();
@@ -1371,25 +1401,59 @@ fn repo_worktree_key(repo: &Repository) -> Result<String, GitAiError> {
         .to_string())
 }
 
-fn file_timestamps_ns(workdir: &std::path::Path, file_path: &str) -> Vec<u128> {
+fn file_timestamps_ns(workdir: &std::path::Path, file_path: &str) -> FileRecoveryTimestamps {
     file_timestamps_for_path(&workdir.join(file_path))
 }
 
-pub(crate) fn file_timestamps_for_path(path: &Path) -> Vec<u128> {
+pub(crate) fn file_timestamps_for_path(path: &Path) -> FileRecoveryTimestamps {
     let Ok(meta) = fs::symlink_metadata(path) else {
-        return Vec::new();
+        return FileRecoveryTimestamps::default();
     };
-    let stat = StatEntry::from_metadata(&meta);
-    let mut timestamps = Vec::new();
-    if let Some(mtime) = stat.mtime {
-        timestamps.push(system_time_to_ns(mtime));
+    recovery_timestamps_from_stat(&StatEntry::from_metadata(&meta))
+}
+
+/// Build recovery timestamps from a stat entry.
+///
+/// On Windows, creation time is included only when it is newer than mtime
+/// (copy/create that preserved source mtime). Sticky creation older than a
+/// later edit is omitted so it cannot falsely match an old bash call.
+fn recovery_timestamps_from_stat(stat: &StatEntry) -> FileRecoveryTimestamps {
+    let mtime_ns = stat.mtime.map(system_time_to_ns);
+    let mut match_ns = Vec::new();
+    if let Some(mtime_ns) = mtime_ns {
+        match_ns.push(mtime_ns);
     }
+
+    let mut ctime_ns = None;
     if let Some(ctime) = stat.ctime {
-        timestamps.push(system_time_to_ns(ctime));
+        let ts = system_time_to_ns(ctime);
+        #[cfg(unix)]
+        {
+            // Unix ctime moves on writes and metadata changes. Useful for
+            // matching `cp` that preserves mtime; also used to veto post-call
+            // inode changes (see file_changed_after_bash_call).
+            ctime_ns = Some(ts);
+            match_ns.push(ts);
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows "ctime" is creation time. Keep it only when newer than
+            // mtime — the preserved-mtime copy case — so recovery can still
+            // see when the destination entered the tree. Do not set ctime_ns:
+            // sticky creation must not veto as a "post-call change".
+            if mtime_ns.is_none_or(|mtime_ns| ts > mtime_ns) {
+                match_ns.push(ts);
+            }
+        }
     }
-    timestamps.sort_unstable();
-    timestamps.dedup();
-    timestamps
+
+    match_ns.sort_unstable();
+    match_ns.dedup();
+    FileRecoveryTimestamps {
+        mtime_ns,
+        ctime_ns,
+        match_ns,
+    }
 }
 
 fn system_time_to_ns(time: SystemTime) -> u128 {
@@ -1400,14 +1464,18 @@ fn system_time_to_ns(time: SystemTime) -> u128 {
 
 fn select_best_bash_candidate<'a>(
     candidates: &'a [BashCheckpointCall],
-    timestamps: &[u128],
+    file_timestamps: &FileRecoveryTimestamps,
     existing_commit_sessions: &HashSet<String>,
     target_repo_work_dir: &str,
 ) -> Option<BashCandidateSelection<'a>> {
     candidates
         .iter()
         .filter_map(|candidate| {
-            let distance = timestamps
+            if file_changed_after_bash_call(file_timestamps, candidate) {
+                return None;
+            }
+            let distance = file_timestamps
+                .match_ns
                 .iter()
                 .filter_map(|ts| recovery_distance_to_call_window(*ts, candidate))
                 .min()?;
@@ -1442,6 +1510,39 @@ fn select_best_bash_candidate<'a>(
                 })
                 .then_with(|| right.candidate.id.cmp(&left.candidate.id))
         })
+}
+
+fn bash_call_end_ns(call: &BashCheckpointCall) -> u128 {
+    call.end_time_ns
+        .unwrap_or_else(|| call.start_time_ns.saturating_add(BASH_RECOVERY_WINDOW_NS))
+}
+
+fn timestamp_after_bash_window(timestamp_ns: u128, call: &BashCheckpointCall) -> bool {
+    timestamp_ns > bash_call_end_ns(call).saturating_add(BASH_RECOVERY_WINDOW_NS)
+}
+
+/// Whether the working-tree file shows evidence of changing after the bash call.
+///
+/// - Later **mtime** ⇒ content was rewritten after the call.
+/// - Later **Unix ctime** ⇒ the inode changed after the call. That covers both
+///   metadata-only updates (chmod) and timestamp-preserving content replacements.
+///   Without content fingerprints we cannot tell them apart, so we veto: AI-
+///   misattributing a human replacement is worse than losing bash_mtime after
+///   chmod (those lines fall through to later recovery).
+/// - Windows creation time is intentionally not used here (sticky across edits).
+fn file_changed_after_bash_call(
+    file_timestamps: &FileRecoveryTimestamps,
+    call: &BashCheckpointCall,
+) -> bool {
+    if file_timestamps
+        .mtime_ns
+        .is_some_and(|mtime_ns| timestamp_after_bash_window(mtime_ns, call))
+    {
+        return true;
+    }
+    file_timestamps
+        .ctime_ns
+        .is_some_and(|ctime_ns| timestamp_after_bash_window(ctime_ns, call))
 }
 
 struct BashCandidateSelection<'a> {
@@ -2237,6 +2338,21 @@ mod tests {
         }
     }
 
+    fn file_ts(
+        mtime_ns: Option<u128>,
+        ctime_ns: Option<u128>,
+        match_ns: &[u128],
+    ) -> FileRecoveryTimestamps {
+        let mut match_ns = match_ns.to_vec();
+        match_ns.sort_unstable();
+        match_ns.dedup();
+        FileRecoveryTimestamps {
+            mtime_ns,
+            ctime_ns,
+            match_ns,
+        }
+    }
+
     #[test]
     fn unknown_lines_exclude_existing_attestations() {
         let mut log = AuthorshipLog::new();
@@ -2265,9 +2381,13 @@ mod tests {
             bash_call(2, "existing-session", "tool-existing", "/other", 900, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &existing_sessions, "/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_050), None, &[1_050]),
+            &existing_sessions,
+            "/repo",
+        )
+        .expect("expected candidate");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-existing");
         assert_eq!(selection.tier, BashCandidateTier::ExistingCommitSession);
@@ -2284,9 +2404,13 @@ mod tests {
             bash_call(2, "existing-near", "tool-near", "/other", 1_000, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &existing_sessions, "/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_050), None, &[1_050]),
+            &existing_sessions,
+            "/repo",
+        )
+        .expect("expected candidate");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-near");
         assert_eq!(selection.distance_ns, 50);
@@ -2306,9 +2430,13 @@ mod tests {
             bash_call(2, "closer-session", "tool-closer", "/other", 1_040, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_050), None, &[1_050]),
+            &HashSet::new(),
+            "/tmp/work/repo",
+        )
+        .expect("expected candidate");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::WorkdirAncestor);
@@ -2335,9 +2463,13 @@ mod tests {
             ),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_050), None, &[1_050]),
+            &HashSet::new(),
+            "/tmp/work/repo",
+        )
+        .expect("expected candidate");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-workdir-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::WorkdirAncestor);
@@ -2357,9 +2489,13 @@ mod tests {
             bash_call(2, "closer-session", "tool-closer", "/other", 1_040, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/tmp/work/repo")
-                .expect("expected candidate");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_050), None, &[1_050]),
+            &HashSet::new(),
+            "/tmp/work/repo",
+        )
+        .expect("expected candidate");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-cwd-ancestor");
         assert_eq!(selection.tier, BashCandidateTier::CwdAncestor);
@@ -2372,8 +2508,13 @@ mod tests {
             bash_call(2, "near-session", "tool-near", "/other-b", 1_040, None),
         ];
 
-        let selection = select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/repo")
-            .expect("expected candidate");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_050), None, &[1_050]),
+            &HashSet::new(),
+            "/repo",
+        )
+        .expect("expected candidate");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-near");
         assert_eq!(selection.tier, BashCandidateTier::TimeOnly);
@@ -2472,12 +2613,160 @@ mod tests {
             bash_call(2, "open-session", "tool-open", "/repo", 2_000, None),
         ];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[1_500], &existing_sessions, "/repo");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(1_500), None, &[1_500]),
+            &existing_sessions,
+            "/repo",
+        );
 
         assert!(
             selection.is_none(),
             "nearby candidates outside their matching bash time range must not recover attribution"
+        );
+    }
+
+    #[test]
+    fn bash_candidate_rejects_sticky_creation_time_when_mtime_is_after_call() {
+        // Windows StatEntry::ctime is file creation time, which does not move on
+        // in-place edits. A file created during a bash call keeps that creation
+        // timestamp forever; later human edits only bump mtime. Matching any
+        // timestamp (including sticky creation) would falsely attribute those
+        // later unknown lines to the closed bash session for up to 30 days.
+        let creation_during_bash = 1_000_000_000u128;
+        let mtime_after_bash = 10_000_000_000u128;
+        let candidates = vec![bash_call(
+            1,
+            "sticky-creation-session",
+            "tool-sticky",
+            "/repo",
+            900_000_000,
+            Some(1_100_000_000),
+        )];
+
+        let selection = select_best_bash_candidate(
+            &candidates,
+            // Windows sticky creation is not stored in ctime_ns (None); the
+            // later mtime alone must veto.
+            &file_ts(
+                Some(mtime_after_bash),
+                None,
+                &[creation_during_bash, mtime_after_bash],
+            ),
+            &HashSet::new(),
+            "/repo",
+        );
+
+        assert!(
+            selection.is_none(),
+            "sticky creation-time inside a bash window must not attribute later edits"
+        );
+    }
+
+    #[test]
+    fn bash_candidate_accepts_ctime_during_call_when_mtime_is_older() {
+        // `cp` / CopyFile can preserve source mtime while ctime/creation lands
+        // inside the bash window. That case should still recover.
+        let preserved_mtime = 500_000_000u128;
+        let ctime_during_bash = 1_000_000_000u128;
+        let candidates = vec![bash_call(
+            1,
+            "copy-session",
+            "tool-copy",
+            "/repo",
+            900_000_000,
+            Some(1_100_000_000),
+        )];
+
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(
+                Some(preserved_mtime),
+                Some(ctime_during_bash),
+                &[preserved_mtime, ctime_during_bash],
+            ),
+            &HashSet::new(),
+            "/repo",
+        )
+        .expect("ctime during bash with older preserved mtime should match");
+
+        assert_eq!(selection.candidate.tool_use_id, "tool-copy");
+        assert_eq!(selection.distance_ns, 0);
+    }
+
+    #[test]
+    fn bash_candidate_rejects_preserved_mtime_when_ctime_moves_after_call() {
+        // A timestamp-preserving content replacement restores the bash-era
+        // mtime while advancing Unix ctime. Without content fingerprints that
+        // looks identical to chmod — veto to avoid AI-misattributing human edits.
+        let mtime_during_bash = 1_000_000_000u128;
+        let ctime_after_bash = 10_000_000_000u128;
+        let candidates = vec![bash_call(
+            1,
+            "preserved-mtime-session",
+            "tool-preserved-mtime",
+            "/repo",
+            900_000_000,
+            Some(1_100_000_000),
+        )];
+
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(
+                Some(mtime_during_bash),
+                Some(ctime_after_bash),
+                &[mtime_during_bash, ctime_after_bash],
+            ),
+            &HashSet::new(),
+            "/repo",
+        );
+
+        assert!(
+            selection.is_none(),
+            "post-call Unix ctime must veto even when mtime still matches the bash window"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn windows_creation_time_included_only_when_newer_than_mtime() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let older = UNIX_EPOCH + Duration::from_secs(1);
+        let newer = UNIX_EPOCH + Duration::from_secs(10);
+        let preserved_mtime_stat = StatEntry {
+            exists: true,
+            mtime: Some(older),
+            ctime: Some(newer),
+            size: 1,
+            mode: 0o644,
+            file_type: crate::commands::checkpoint_agent::bash_tool::StatFileType::Regular,
+        };
+        let preserved = recovery_timestamps_from_stat(&preserved_mtime_stat);
+        assert_eq!(preserved.mtime_ns, Some(system_time_to_ns(older)));
+        assert_eq!(
+            preserved.ctime_ns, None,
+            "Windows creation time must not populate ctime_ns (sticky; not a change signal)"
+        );
+        assert!(
+            preserved.match_ns.contains(&system_time_to_ns(newer)),
+            "creation newer than mtime (preserved-mtime copy) must remain matchable"
+        );
+
+        let sticky_creation_stat = StatEntry {
+            exists: true,
+            mtime: Some(newer),
+            ctime: Some(older),
+            size: 1,
+            mode: 0o644,
+            file_type: crate::commands::checkpoint_agent::bash_tool::StatFileType::Regular,
+        };
+        let sticky = recovery_timestamps_from_stat(&sticky_creation_stat);
+        assert_eq!(sticky.mtime_ns, Some(system_time_to_ns(newer)));
+        assert_eq!(sticky.ctime_ns, None);
+        assert!(
+            !sticky.match_ns.contains(&system_time_to_ns(older)),
+            "sticky creation older than a later edit must not be a match candidate"
         );
     }
 
@@ -2492,9 +2781,13 @@ mod tests {
             Some(3_000_000_000),
         )];
 
-        let selection =
-            select_best_bash_candidate(&candidates, &[2_000_000_000], &HashSet::new(), "/repo")
-                .expect("expected coarse timestamp to match");
+        let selection = select_best_bash_candidate(
+            &candidates,
+            &file_ts(Some(2_000_000_000), None, &[2_000_000_000]),
+            &HashSet::new(),
+            "/repo",
+        )
+        .expect("expected coarse timestamp to match");
 
         assert_eq!(selection.candidate.tool_use_id, "tool-coarse");
         assert_eq!(selection.distance_ns, 500_000_000);

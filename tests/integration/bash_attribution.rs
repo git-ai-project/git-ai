@@ -566,6 +566,210 @@ fn test_bash_recovery_does_not_attribute_manual_edit_after_unrelated_bash() {
     file.assert_committed_lines(lines!["manual after bash".unattributed_human()]);
 }
 
+#[cfg(any(unix, windows))]
+fn insert_closed_bash_call_covering(
+    db_path: &str,
+    repo_work_dir: &str,
+    session_id: &str,
+    tool_use_id: &str,
+    tool: &str,
+    command: &str,
+    started_at_ns: u128,
+    ended_at_ns: u128,
+) {
+    use git_ai::daemon::bash_history_db::{BashCallEnd, BashCallStart};
+    use std::collections::HashMap;
+
+    let agent = AgentId {
+        tool: tool.to_string(),
+        id: session_id.to_string(),
+        model: "gpt-5".to_string(),
+    };
+    let mut db = BashHistoryDatabase::open_at_path(Path::new(db_path)).unwrap();
+    db.record_start(&BashCallStart {
+        original_cwd: repo_work_dir.to_string(),
+        repo_work_dir: Some(repo_work_dir.to_string()),
+        repo_discovery_error: None,
+        session_id: session_id.to_string(),
+        tool_use_id: tool_use_id.to_string(),
+        agent_id: agent.clone(),
+        start_trace_id: format!("t_start_{tool_use_id}"),
+        started_at_ns,
+        command: Some(command.to_string()),
+        metadata: HashMap::new(),
+    })
+    .unwrap();
+    db.record_end(&BashCallEnd {
+        original_cwd: repo_work_dir.to_string(),
+        repo_work_dir: Some(repo_work_dir.to_string()),
+        repo_discovery_error: None,
+        session_id: session_id.to_string(),
+        tool_use_id: tool_use_id.to_string(),
+        agent_id: agent,
+        start_trace_id: Some(format!("t_start_{tool_use_id}")),
+        end_trace_id: format!("t_end_{tool_use_id}"),
+        started_at_ns: Some(started_at_ns),
+        ended_at_ns,
+        command: Some(command.to_string()),
+        metadata: HashMap::new(),
+    })
+    .unwrap();
+}
+
+/// Windows regression: an agent bash call that *creates* a file leaves a sticky
+/// creation timestamp inside that call's window. Later in-place human edits only
+/// bump mtime. Recovery must not keep attributing those unknown lines to the
+/// closed bash session (creation time never moves on Windows).
+#[cfg(windows)]
+#[test]
+fn test_bash_recovery_does_not_attribute_later_edit_via_sticky_creation_time() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+
+    let file_path = repo_root.join("Program.cs");
+    let create_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    fs::write(&file_path, "using System;\n").unwrap();
+
+    let repo_work_dir = repo_root.to_string_lossy().to_string();
+    insert_closed_bash_call_covering(
+        &bash_db_path,
+        &repo_work_dir,
+        "sticky-creation-session",
+        "sticky-creation-tool",
+        "github-copilot-cli",
+        "dotnet new webapi",
+        create_ns.saturating_sub(500_000_000),
+        create_ns.saturating_add(500_000_000),
+    );
+
+    // Ensure the later edit's mtime is clearly outside the bash window (+3s margin).
+    thread::sleep(Duration::from_millis(4500));
+    fs::write(
+        &file_path,
+        "using System;\nnamespace Demo;\n// human edit\n",
+    )
+    .unwrap();
+
+    repo.stage_all_and_commit("Human edit long after agent created file")
+        .unwrap();
+
+    let mut file = repo.filename("Program.cs");
+    file.assert_committed_lines(lines![
+        "using System;".unattributed_human(),
+        "namespace Demo;".unattributed_human(),
+        "// human edit".unattributed_human(),
+    ]);
+}
+
+/// Windows: CopyFile-style copies can preserve source mtime while creation time
+/// lands during the bash call. Recovery must still attribute via creation time.
+#[cfg(windows)]
+#[test]
+fn test_bash_recovery_attributes_copy_with_preserved_mtime() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+
+    let dest = repo_root.join("copied.txt");
+    let create_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    fs::write(&dest, "copied by agent\n").unwrap();
+    // Simulate CopyFile preserving an older source mtime while creation is now.
+    let preserved_mtime = filetime::FileTime::from_unix_time(
+        (create_ns / 1_000_000_000).saturating_sub(3600) as i64,
+        0,
+    );
+    filetime::set_file_mtime(&dest, preserved_mtime).unwrap();
+
+    let repo_work_dir = repo_root.to_string_lossy().to_string();
+    insert_closed_bash_call_covering(
+        &bash_db_path,
+        &repo_work_dir,
+        "copy-preserved-mtime-session",
+        "copy-preserved-mtime-tool",
+        "github-copilot-cli",
+        "copy source.txt copied.txt",
+        create_ns.saturating_sub(500_000_000),
+        create_ns.saturating_add(500_000_000),
+    );
+
+    repo.stage_all_and_commit("Agent copy with preserved mtime")
+        .unwrap();
+
+    let mut file = repo.filename("copied.txt");
+    file.assert_committed_lines(lines!["copied by agent".ai()]);
+}
+
+/// Unix: a post-call ctime advance from a timestamp-preserving content
+/// replacement must not AI-misattribute the human's lines. Without content
+/// fingerprints this is indistinguishable from chmod, so bash_mtime vetoes and
+/// terminal human recovery takes over.
+#[cfg(unix)]
+#[test]
+fn test_bash_recovery_does_not_attribute_preserved_mtime_human_replacement() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+
+    repo.git(&["commit", "--allow-empty", "-m", "initial"])
+        .expect("initial commit should succeed");
+
+    let file_path = repo_root.join("script.sh");
+    let write_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    fs::write(&file_path, "agent original\n").unwrap();
+    let preserved_mtime = filetime::FileTime::from_unix_time(
+        (write_ns / 1_000_000_000) as i64,
+        (write_ns % 1_000_000_000) as u32,
+    );
+
+    let repo_work_dir = repo_root.to_string_lossy().to_string();
+    insert_closed_bash_call_covering(
+        &bash_db_path,
+        &repo_work_dir,
+        "preserved-mtime-human-session",
+        "preserved-mtime-human-tool",
+        "codex",
+        "printf 'agent original\\n' > script.sh",
+        write_ns.saturating_sub(500_000_000),
+        write_ns.saturating_add(500_000_000),
+    );
+
+    // Human replaces content after the bash window, then restores the bash-era mtime.
+    thread::sleep(Duration::from_millis(4500));
+    fs::write(&file_path, "human replacement\n").unwrap();
+    filetime::set_file_mtime(&file_path, preserved_mtime).unwrap();
+
+    repo.stage_all_and_commit("Human replacement with preserved mtime")
+        .unwrap();
+
+    let mut file = repo.filename("script.sh");
+    file.assert_committed_lines(lines!["human replacement".human()]);
+}
+
 #[test]
 fn test_bash_recovery_does_not_attribute_manual_edit_before_unrelated_bash() {
     let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
