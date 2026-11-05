@@ -366,6 +366,13 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Crush => match tool_name {
+            "edit" | "write" | "multiedit" | "lsp_replace_symbol" | "lsp_rename" => {
+                ToolClass::FileEdit
+            }
+            "bash" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
         Agent::Windsurf => match tool_name {
             "code_action" => ToolClass::FileEdit,
             "run_command" => ToolClass::Bash,
@@ -402,6 +409,7 @@ pub enum Agent {
     Firebender,
     Codex,
     Pi,
+    Crush,
     Windsurf,
     Cursor,
     Cline,

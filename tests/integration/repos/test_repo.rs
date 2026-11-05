@@ -1039,6 +1039,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "windsurf"
             | "opencode"
             | "pi"
+            | "crush"
             | "ai_tab"
             | "firebender"
             | "mock_ai"
