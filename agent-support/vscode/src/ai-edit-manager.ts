@@ -416,7 +416,7 @@ export class AIEditManager {
       console.log('[git-ai] AIEditManager: Workspace root:', workspaceRoot);
       console.log('[git-ai] AIEditManager: Hook input:', hookInput);
 
-      const proc = spawn(getGitAiBinary(), args, { cwd: workspaceRoot });
+      const proc = spawn(getGitAiBinary(), args, { cwd: workspaceRoot, windowsHide: true });
 
       let stdout = "";
       let stderr = "";
@@ -494,7 +494,7 @@ export class AIEditManager {
     }
     // TODO Consider only re-checking every X attempts
     return new Promise((resolve) => {
-      exec("git-ai --version", (error, stdout, stderr) => {
+      exec("git-ai --version", { windowsHide: true }, (error, stdout, stderr) => {
         if (error) {
           if (!this.hasShownGitAiErrorMessage) {
             // Show startup notification

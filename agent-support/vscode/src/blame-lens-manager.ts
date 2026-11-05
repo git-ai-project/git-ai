@@ -231,7 +231,7 @@ export class BlameLensManager {
     resolveGitAiBinary().then((path) => {
       if (path) {
         const { execFile } = require('child_process');
-        execFile(path, ['--version'], (err: Error | null, stdout: string) => {
+        execFile(path, ['--version'], { windowsHide: true }, (err: Error | null, stdout: string) => {
           if (!err) {
             console.log('[git-ai] Version:', stdout.trim());
           }
@@ -1514,7 +1514,8 @@ export class BlameLensManager {
       // Run git show to get the commit diff
       const diffOutput = await new Promise<string>((resolve, reject) => {
         const proc = spawn('git', ['show', '--color=never', commitSha], {
-          cwd: workspacePath
+          cwd: workspacePath,
+          windowsHide: true
         });
         
         let stdout = '';

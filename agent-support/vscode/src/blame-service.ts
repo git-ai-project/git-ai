@@ -245,6 +245,7 @@ export class BlameService {
       const proc = spawn(binary, args, {
         cwd,
         timeout: BlameService.TIMEOUT_MS,
+        windowsHide: true,
       });
       
       let stdout = '';
@@ -401,6 +402,7 @@ export class BlameService {
       const proc = spawn(getGitAiBinary(), args, {
         cwd,
         timeout: 15000,
+        windowsHide: true,
       });
 
       let stdout = '';

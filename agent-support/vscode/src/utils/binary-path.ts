@@ -38,7 +38,7 @@ export function resolveGitAiBinary(): Promise<string | null> {
 
     if (platform === "win32") {
       // Windows: use `where git-ai`
-      execFile("where", ["git-ai"], (err, stdout) => {
+      execFile("where", ["git-ai"], { windowsHide: true }, (err, stdout) => {
         if (err || !stdout.trim()) {
           console.log("[git-ai] Could not resolve git-ai binary via 'where'");
           resolve(null);
