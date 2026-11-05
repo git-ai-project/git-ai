@@ -605,6 +605,121 @@ fn test_grep_ai_notes_no_notes() {
 }
 
 #[test]
+fn test_grep_ai_notes_skips_search_on_promisor_remote() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("test.txt"), "content\n").unwrap();
+    repo.stage_all_and_commit("Commit").expect("commit");
+    let commit_sha = head_sha(&repo);
+
+    let note = "{\"tool\":\"cursor\"}";
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
+
+    // Sanity check: without a promisor remote, the note is found normally.
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(results, vec![commit_sha]);
+
+    // A partial-clone checkout marks its remote as a "promisor" remote so
+    // git knows to lazily fetch missing blobs on demand. `git grep` over
+    // refs/notes/ai walks every note blob, and on a repo with a large note
+    // history most of those blobs are typically absent locally, so it would
+    // trigger one lazy network fetch per missing blob. Skip the search
+    // entirely in that case rather than risk an unbounded number of fetches.
+    repo.git_og(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/repo.git",
+    ])
+    .expect("add remote");
+    repo.git_og(&["config", "remote.origin.promisor", "true"])
+        .expect("mark remote as promisor");
+
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(
+        results,
+        Vec::<String>::new(),
+        "grep_ai_notes should skip the search when a promisor remote is configured"
+    );
+}
+
+#[test]
+fn test_grep_ai_notes_runs_search_when_promisor_remote_is_disabled() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("test.txt"), "content\n").unwrap();
+    repo.stage_all_and_commit("Commit").expect("commit");
+    let commit_sha = head_sha(&repo);
+
+    let note = "{\"tool\":\"cursor\"}";
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
+
+    // `remote.<name>.promisor` is a boolean config key: it can be present
+    // with value `false` (e.g. a fully-materialized repo that explicitly
+    // records it is not a partial clone). The key's presence alone must not
+    // be mistaken for the value being `true` -- the search should still run.
+    repo.git_og(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/repo.git",
+    ])
+    .expect("add remote");
+    repo.git_og(&["config", "remote.origin.promisor", "false"])
+        .expect("mark remote as not a promisor");
+
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(
+        results,
+        vec![commit_sha],
+        "grep_ai_notes should still search when no remote is actually a promisor remote"
+    );
+}
+
+#[test]
+fn test_grep_ai_notes_skips_search_despite_malformed_promisor_value_on_other_remote() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("test.txt"), "content\n").unwrap();
+    repo.stage_all_and_commit("Commit").expect("commit");
+    let commit_sha = head_sha(&repo);
+
+    let note = "{\"tool\":\"cursor\"}";
+    write_note(&gitai_repo, &commit_sha, note).expect("add note");
+
+    // `git config --bool --get-regexp` fails the whole command (nonzero
+    // exit) if ANY matched value is not a valid git boolean, even when
+    // another matched value is a perfectly valid `true`. A malformed value
+    // on one remote must not hide a real promisor remote elsewhere.
+    repo.git_og(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/repo.git",
+    ])
+    .expect("add origin remote");
+    repo.git_og(&["config", "remote.origin.promisor", "true"])
+        .expect("mark origin as promisor");
+
+    repo.git_og(&[
+        "remote",
+        "add",
+        "legacy",
+        "https://example.invalid/legacy.git",
+    ])
+    .expect("add legacy remote");
+    repo.git_og(&["config", "remote.legacy.promisor", "nonsense"])
+        .expect("set malformed promisor value on legacy remote");
+
+    let results = grep_ai_notes(&gitai_repo, "cursor").expect("grep");
+    assert_eq!(
+        results,
+        Vec::<String>::new(),
+        "a malformed promisor value on one remote must not suppress detection of a real promisor remote"
+    );
+}
+
+#[test]
 fn test_get_commits_with_notes_from_list() {
     let (repo, gitai_repo) = repo_with_handle();
 
