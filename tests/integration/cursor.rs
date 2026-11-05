@@ -571,3 +571,53 @@ crate::reuse_tests_in_worktree!(
     test_cursor_e2e_with_attribution,
     test_cursor_e2e_with_resync,
 );
+
+fn cursor_hook_input(repo: &TestRepo, hook_event_name: &str, tool_name: &str) -> String {
+    serde_json::json!({
+        "conversation_id": "test-conversation-id",
+        "generation_id": "test-generation-id",
+        "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
+        "hook_event_name": hook_event_name,
+        "tool_name": tool_name,
+        "tool_input": {},
+        "model": "model-name-from-hook-test"
+    })
+    .to_string()
+}
+
+#[test]
+fn test_cursor_pre_tool_use_writes_empty_json_reply() {
+    let repo = TestRepo::new();
+
+    for tool_name in ["Write", "Grep", "MCP:getAccessibleAtlassianResources"] {
+        let output = repo
+            .git_ai_with_stdin(
+                &["checkpoint", "cursor", "--hook-input", "stdin"],
+                cursor_hook_input(&repo, "preToolUse", tool_name).as_bytes(),
+            )
+            .expect("checkpoint should succeed");
+
+        assert_eq!(
+            output.lines().next(),
+            Some("{}"),
+            "preToolUse for {tool_name} must reply with an empty JSON object. Output: {output}"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_post_tool_use_writes_no_json_reply() {
+    let repo = TestRepo::new();
+
+    let output = repo
+        .git_ai_with_stdin(
+            &["checkpoint", "cursor", "--hook-input", "stdin"],
+            cursor_hook_input(&repo, "postToolUse", "Grep").as_bytes(),
+        )
+        .expect("checkpoint should succeed");
+
+    assert!(
+        !output.lines().any(|line| line == "{}"),
+        "postToolUse is not a permission hook and needs no reply. Output: {output}"
+    );
+}

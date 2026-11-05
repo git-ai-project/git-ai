@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Write;
 
 pub fn handle_git_ai(args: &[String]) {
     let perf_entry =
@@ -54,24 +55,13 @@ pub fn handle_git_ai(args: &[String]) {
             | "uninstall"
             | "uninstall-hooks"
             | "usage"
+            // checkpoint connects after it has answered a Cursor permission
+            // hook, so a background-service failure cannot leave Cursor
+            // without a reply.
+            | "checkpoint"
     );
     if needs_daemon {
-        use crate::daemon::telemetry_handle::{
-            DaemonTelemetryInitResult, init_daemon_telemetry_handle,
-        };
-        match init_daemon_telemetry_handle() {
-            DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
-            DaemonTelemetryInitResult::Failed(err) => {
-                eprintln!(
-                    "error: failed to connect to git-ai background service: {}",
-                    err
-                );
-                if args[0].as_str() == "checkpoint" {
-                    std::process::exit(0);
-                }
-                std::process::exit(1);
-            }
-        }
+        init_daemon_telemetry_or_exit(1);
     }
 
     // Start DB warmup early for commands that need database access
@@ -472,6 +462,17 @@ fn handle_checkpoint(args: &[String]) {
 
     let effective_hook_input =
         hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, file_args));
+
+    // Cursor treats preToolUse as a permission hook, and recent Cursor builds
+    // reject an exit-0 run with empty stdout as invalid JSON, blocking the tool
+    // call. An empty object is a valid reply that makes no permission
+    // decision. Write it before any work so every later exit path is covered.
+    if preset_name == "cursor" && is_cursor_pre_tool_use(&effective_hook_input) {
+        println!("{{}}");
+        let _ = std::io::stdout().flush();
+    }
+
+    init_daemon_telemetry_or_exit(0);
 
     if perf {
         eprintln!(
@@ -1127,6 +1128,34 @@ fn handle_git_hooks(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+fn init_daemon_telemetry_or_exit(failure_exit_code: i32) {
+    use crate::daemon::telemetry_handle::{
+        DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+    };
+    match init_daemon_telemetry_handle() {
+        DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+        DaemonTelemetryInitResult::Failed(err) => {
+            eprintln!(
+                "error: failed to connect to git-ai background service: {}",
+                err
+            );
+            std::process::exit(failure_exit_code);
+        }
+    }
+}
+
+fn is_cursor_pre_tool_use(hook_input: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(hook_input)
+        .ok()
+        .and_then(|input| {
+            input
+                .get("hook_event_name")
+                .and_then(|name| name.as_str())
+                .map(|name| name == "preToolUse")
+        })
+        .unwrap_or(false)
 }
 
 /// Synthesize JSON hook_input from CLI args for mock/test presets that can be
