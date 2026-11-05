@@ -387,6 +387,26 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
                 _ => ToolClass::Skip,
             }
         }
+        Agent::Augment => match tool_name {
+            // v1 (`auggie`) tool names: kebab-case, Augment-specific.
+            "save-file" | "str-replace-editor" | "remove-files" | "apply_patch" => {
+                ToolClass::FileEdit
+            }
+            "launch-process" => ToolClass::Bash,
+            // v2 (`auggie-v2` / cosmos-agent) tool names: lowercase,
+            // Claude-Code-shaped default toolset. "read" falls through to
+            // Skip since reads are not checkpointed. No collisions with
+            // v1's kebab-case names. The documented current v2 shell tool
+            // name is "terminal" (docs.augmentcode.com/cli/permissions;
+            // "launch-process" is the legacy alias handled above for v1),
+            // but "bash" is accepted too since the ACP/session tool-call
+            // model also uses that name for shell calls -- accepting both
+            // avoids silently dropping attribution if either name reaches
+            // the hook payload.
+            "write" | "edit" => ToolClass::FileEdit,
+            "bash" | "terminal" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -405,6 +425,7 @@ pub enum Agent {
     Windsurf,
     Cursor,
     Cline,
+    Augment,
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,6 +1574,37 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+
+        // Augment Code v1 (kebab-case lowercase tool names)
+        for (tool, class) in [
+            ("save-file", ToolClass::FileEdit),
+            ("str-replace-editor", ToolClass::FileEdit),
+            ("remove-files", ToolClass::FileEdit),
+            ("apply_patch", ToolClass::FileEdit),
+            ("launch-process", ToolClass::Bash),
+            ("view", ToolClass::Skip),
+            ("grep-search", ToolClass::Skip),
+            ("web-fetch", ToolClass::Skip),
+        ] {
+            assert_eq!(classify_tool(Agent::Augment, tool), class, "tool={tool}");
+        }
+        // Capitalized Claude-shaped names must NOT match v1 (case differs);
+        // v2's lowercase names are asserted separately below.
+        assert_eq!(classify_tool(Agent::Augment, "Write"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Augment, "Bash"), ToolClass::Skip);
+
+        // Augment Code v2 (auggie-v2 / cosmos-agent): lowercase,
+        // Claude-Code-shaped default toolset.
+        for (tool, class) in [
+            ("write", ToolClass::FileEdit),
+            ("edit", ToolClass::FileEdit),
+            ("bash", ToolClass::Bash),
+            // Documented current v2 shell tool name (docs.augmentcode.com/cli/permissions).
+            ("terminal", ToolClass::Bash),
+            ("read", ToolClass::Skip),
+        ] {
+            assert_eq!(classify_tool(Agent::Augment, tool), class, "tool={tool}");
+        }
     }
 
     #[test]

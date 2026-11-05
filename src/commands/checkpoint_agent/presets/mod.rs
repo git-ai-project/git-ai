@@ -3,6 +3,7 @@ pub mod parse;
 mod agent_v1;
 mod ai_tab;
 mod amp;
+mod augment;
 mod claude;
 mod cline;
 mod codex;
@@ -162,6 +163,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "cursor-background" => Ok(Box::new(cursor::CursorBackgroundPreset)),
         "github-copilot" => Ok(Box::new(github_copilot::GithubCopilotPreset)),
         "amp" => Ok(Box::new(amp::AmpPreset)),
+        "augment" => Ok(Box::new(augment::AugmentPreset)),
         "ai_tab" => Ok(Box::new(ai_tab::AiTabPreset)),
         "firebender" => Ok(Box::new(firebender::FirebenderPreset)),
         "agent-v1" => Ok(Box::new(agent_v1::AgentV1Preset)),
