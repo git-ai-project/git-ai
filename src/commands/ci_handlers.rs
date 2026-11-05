@@ -135,11 +135,15 @@ fn handle_ci_gitlab(args: &[String]) {
     match args[0].as_str() {
         "run" => {
             let no_cleanup = args[1..].iter().any(|a| a == "--no-cleanup");
-            let ci_context = get_gitlab_ci_context();
+            let skip_push = args[1..].iter().any(|a| a == "--skip-push");
+            let ci_context = get_gitlab_ci_context(skip_push);
             match ci_context {
                 Ok(Some(ci_context)) => {
                     tracing::debug!("GitLab CI context: {:?}", ci_context);
-                    match ci_context.run() {
+                    match ci_context.run_with_options(CiRunOptions {
+                        skip_push,
+                        ..Default::default()
+                    }) {
                         Ok(result) => {
                             tracing::debug!("GitLab CI result: {:?}", result);
                             print_ci_result(&result, "GitLab CI");
@@ -391,7 +395,8 @@ fn print_ci_help_and_exit() -> ! {
     eprintln!("    run [--no-cleanup]  Run GitHub CI in current repo");
     eprintln!("    install        Install/update workflow in current repo");
     eprintln!("  gitlab           GitLab CI");
-    eprintln!("    run [--no-cleanup]  Run GitLab CI in current repo");
+    eprintln!("    run [--no-cleanup] [--skip-push]");
+    eprintln!("                   Run GitLab CI in current repo");
     eprintln!("    install        Print YAML snippet to add to .gitlab-ci.yml");
     eprintln!("  local            Run CI locally by event name and flags");
     eprintln!("                   Usage: git-ai ci local <event> [flags]");
@@ -450,8 +455,10 @@ fn print_ci_gitlab_help_and_exit() -> ! {
     eprintln!("Usage: git-ai ci gitlab <subcommand> [args...]");
     eprintln!();
     eprintln!("Subcommands:");
-    eprintln!("  run [--no-cleanup]   Run GitLab CI in current repo");
+    eprintln!("  run [--no-cleanup] [--skip-push]");
+    eprintln!("                       Run GitLab CI in current repo");
     eprintln!("                       --no-cleanup  Skip teardown after run");
+    eprintln!("                       --skip-push   Compute authorship without pushing notes");
     eprintln!("  install              Print YAML snippet to add to .gitlab-ci.yml");
     std::process::exit(1);
 }
