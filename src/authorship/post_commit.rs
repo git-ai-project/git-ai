@@ -17,6 +17,8 @@ use crate::git::repository::{Repository, batch_read_paths_at_treeishes, exec_git
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
+type FileContentsByPath = HashMap<String, String>;
+
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
 #[doc(hidden)]
@@ -412,6 +414,33 @@ where
             &commit_sha,
             context.precomputed_parent_diff,
         )?;
+        let reconciled_paths = recovery_hunks
+            .keys()
+            .filter(|path| observed_snapshot.contains_key(*path))
+            .cloned()
+            .collect::<HashSet<_>>();
+        if !reconciled_paths.is_empty() {
+            let checkpointed_contents = reconciliation_checkpoint_contents(
+                &working_log,
+                &parent_working_log,
+                &reconciled_paths,
+            )?;
+            let (parent_snapshot, committed_snapshot) = commit_tree_snapshots_for_files(
+                repo,
+                &committed_diff_base,
+                &commit_sha,
+                &reconciled_paths,
+            )?;
+            crate::authorship::stale_attribution_reconciliation::reconcile_stale_attributions(
+                &mut authorship_log,
+                &observed_snapshot,
+                &checkpointed_contents,
+                &parent_snapshot,
+                &committed_snapshot,
+                &recovery_hunks,
+                &human_author,
+            );
+        }
         crate::authorship::attribution_recovery::recover_attribution(
             repo,
             &parent_sha,
@@ -590,7 +619,7 @@ fn commit_tree_snapshot_for_files(
     repo: &Repository,
     commit_sha: &str,
     file_paths: &HashSet<String>,
-) -> Result<HashMap<String, String>, GitAiError> {
+) -> Result<FileContentsByPath, GitAiError> {
     let requests = file_paths
         .iter()
         .map(|file_path| (commit_sha.to_string(), file_path.clone()))
@@ -608,6 +637,61 @@ fn commit_tree_snapshot_for_files(
     }
 
     Ok(snapshot)
+}
+
+fn commit_tree_snapshots_for_files(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    file_paths: &HashSet<String>,
+) -> Result<(FileContentsByPath, FileContentsByPath), GitAiError> {
+    let mut requests = Vec::with_capacity(file_paths.len() * 2);
+    for file_path in file_paths {
+        requests.push((parent_sha.to_string(), file_path.clone()));
+        requests.push((commit_sha.to_string(), file_path.clone()));
+    }
+    let contents = batch_read_paths_at_treeishes(repo, &requests)?;
+    let mut parent_snapshot = HashMap::with_capacity(file_paths.len());
+    let mut committed_snapshot = HashMap::with_capacity(file_paths.len());
+    for file_path in file_paths {
+        parent_snapshot.insert(
+            file_path.clone(),
+            contents
+                .get(&(parent_sha.to_string(), file_path.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        committed_snapshot.insert(
+            file_path.clone(),
+            contents
+                .get(&(commit_sha.to_string(), file_path.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    Ok((parent_snapshot, committed_snapshot))
+}
+
+fn reconciliation_checkpoint_contents(
+    working_log: &crate::git::repo_storage::PersistedWorkingLog,
+    checkpoints: &[Checkpoint],
+    file_paths: &HashSet<String>,
+) -> Result<HashMap<String, Vec<String>>, GitAiError> {
+    let mut contents_by_path = HashMap::new();
+    for checkpoint in checkpoints {
+        if !checkpoint.kind.is_ai() {
+            continue;
+        }
+        for entry in &checkpoint.entries {
+            if file_paths.contains(&entry.file) {
+                contents_by_path
+                    .entry(entry.file.clone())
+                    .or_insert_with(Vec::new)
+                    .push(working_log.get_file_version(&entry.blob_sha)?);
+            }
+        }
+    }
+    Ok(contents_by_path)
 }
 
 fn recovery_committed_hunks(
