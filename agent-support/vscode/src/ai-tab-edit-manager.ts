@@ -71,10 +71,12 @@ export class AITabEditManager {
       return;
     }
 
+    const tool = this.ideHostConfig.kind === 'cursor' ? 'cursor-tab' : 'github-copilot-tab';
+
     // Before edit checkpoint
     await this.aiEditManager.checkpoint("ai_tab", JSON.stringify({
       hook_event_name: 'before_edit',
-      tool: 'github-copilot-tab',
+      tool,
       model: 'default',
       will_edit_filepaths: [last.document.uri.fsPath],
       dirty_files: {
@@ -86,7 +88,7 @@ export class AITabEditManager {
     // After edit checkpoint
     await this.aiEditManager.checkpoint("ai_tab", JSON.stringify({
       hook_event_name: 'after_edit',
-      tool: 'github-copilot-tab',
+      tool,
       model: 'default',
       edited_filepaths: [last.document.uri.fsPath],
       dirty_files: {
