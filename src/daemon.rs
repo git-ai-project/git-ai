@@ -3736,6 +3736,7 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.side_effect_errors_by_family.lock() {
             map.retain(|_, errors| !errors.is_empty());
         }
+        self.evict_state_for_vanished_repositories();
         if let Ok(mut map) = self.family_sequencers_by_family.lock() {
             map.retain(|_, state| !state.entries.is_empty());
         }
@@ -3774,6 +3775,77 @@ impl ActorDaemonCoordinator {
                 }
                 map.retain(|_, family_map| !family_map.is_empty());
             }
+        }
+    }
+
+    /// Drop per-repository state whose repository no longer exists on disk.
+    ///
+    /// Side-effect errors stay recorded until a later success clears them, and
+    /// the untraced-fixup caches are keyed per git dir. A repository that is
+    /// deleted (test suites and tools create and remove thousands of scratch
+    /// repositories) never produces that later success, so without this its
+    /// entries are kept for the life of the daemon. Keys are absolute git
+    /// directory paths; a key that is not absolute is left alone. Paths are
+    /// checked with every lock released, then removed under the lock only if
+    /// still absent.
+    fn evict_state_for_vanished_repositories(&self) {
+        fn vanished(key: &str) -> bool {
+            let path = Path::new(key);
+            path.is_absolute() && !path.exists()
+        }
+        fn gone_keys<'a>(keys: impl Iterator<Item = &'a String>) -> Vec<String> {
+            keys.cloned().collect()
+        }
+
+        let error_keys = self
+            .side_effect_errors_by_family
+            .lock()
+            .map(|map| gone_keys(map.keys()))
+            .unwrap_or_default();
+        let cursor_keys = self
+            .untraced_cursor_cache
+            .lock()
+            .map(|map| gone_keys(map.keys()))
+            .unwrap_or_default();
+        let blocked_keys = self
+            .untraced_persistence_blocked
+            .lock()
+            .map(|set| gone_keys(set.iter()))
+            .unwrap_or_default();
+
+        let error_gone: Vec<String> = error_keys.into_iter().filter(|k| vanished(k)).collect();
+        let cursor_gone: Vec<String> = cursor_keys.into_iter().filter(|k| vanished(k)).collect();
+        let blocked_gone: Vec<String> = blocked_keys.into_iter().filter(|k| vanished(k)).collect();
+
+        if !error_gone.is_empty()
+            && let Ok(mut map) = self.side_effect_errors_by_family.lock()
+        {
+            for key in &error_gone {
+                if vanished(key) {
+                    map.remove(key);
+                }
+            }
+            map.shrink_to_fit();
+        }
+        if !cursor_gone.is_empty()
+            && let Ok(mut map) = self.untraced_cursor_cache.lock()
+        {
+            for key in &cursor_gone {
+                if vanished(key) {
+                    map.remove(key);
+                }
+            }
+            map.shrink_to_fit();
+        }
+        if !blocked_gone.is_empty()
+            && let Ok(mut set) = self.untraced_persistence_blocked.lock()
+        {
+            for key in &blocked_gone {
+                if vanished(key) {
+                    set.remove(key);
+                }
+            }
+            set.shrink_to_fit();
         }
     }
 
@@ -11807,6 +11879,50 @@ mod tests {
             !map.contains_key("family-idle"),
             "GC should evict idle exec locks to bound the map"
         );
+    }
+
+    #[tokio::test]
+    async fn gc_evicts_state_of_deleted_repositories_and_keeps_live_ones() {
+        let coord = ActorDaemonCoordinator::new();
+        let live = tempfile::tempdir().expect("live repo dir");
+        let deleted = tempfile::tempdir().expect("deleted repo dir");
+        let live_key = live.path().join(".git");
+        let deleted_key = deleted.path().join(".git");
+        std::fs::create_dir_all(&live_key).unwrap();
+        std::fs::create_dir_all(&deleted_key).unwrap();
+        let live_key = live_key.to_string_lossy().to_string();
+        let deleted_key = deleted_key.to_string_lossy().to_string();
+
+        let error = GitAiError::Generic("git rev-parse failed".to_string());
+        for key in [&live_key, &deleted_key, &"relative-family".to_string()] {
+            coord.record_side_effect_error(key, 1, &error).unwrap();
+            coord
+                .untraced_persistence_blocked
+                .lock()
+                .unwrap()
+                .insert(key.clone());
+        }
+        drop(deleted);
+
+        coord.gc_stale_family_state();
+
+        let errors = coord.side_effect_errors_by_family.lock().unwrap();
+        assert!(
+            !errors.contains_key(&deleted_key),
+            "errors of a deleted repository must not be kept for the daemon's life"
+        );
+        assert!(
+            errors.contains_key(&live_key),
+            "a live repository keeps its errors"
+        );
+        assert!(
+            errors.contains_key("relative-family"),
+            "keys that are not absolute paths are never judged missing"
+        );
+        drop(errors);
+        let blocked = coord.untraced_persistence_blocked.lock().unwrap();
+        assert!(!blocked.contains(&deleted_key));
+        assert!(blocked.contains(&live_key));
     }
 
     #[tokio::test]
