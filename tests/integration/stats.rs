@@ -12,13 +12,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Extract the first complete JSON object from mixed stdout/stderr output.
-fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
+pub(crate) fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
     let raw = repo.git_ai(args).expect("git-ai stats should succeed");
     let json = extract_json_object(&raw);
     serde_json::from_str(&json).expect("valid stats json")
 }
 
-fn range_stats_from_args_with_env(
+pub(crate) fn range_stats_from_args_with_env(
     repo: &TestRepo,
     args: &[&str],
     envs: &[(&str, &str)],
@@ -335,6 +335,151 @@ fn test_authorship_log_stats() {
             .ai_accepted,
         5
     );
+
+    // Char/byte fields come from the committed `planets.txt` line text
+    // (payload + one synthetic LF per counted line). The file is pure ASCII,
+    // so chars == bytes for every bucket.
+    fn ascii_volume(lines: &[&str]) -> u64 {
+        lines.iter().map(|line| line.len() as u64 + 1).sum()
+    }
+    let human_volume = ascii_volume(&["Mercury", "Venus", "Jupiter", "Neptune (override)"]);
+    let ai_volume = ascii_volume(&["Earth", "Mars", "Saturn", "Uranus", "Pluto (dwarf)"]);
+    assert_eq!(stats.human_additions_chars, human_volume);
+    assert_eq!(stats.human_additions_bytes, human_volume);
+    assert_eq!(stats.unknown_additions_chars, 0);
+    assert_eq!(stats.unknown_additions_bytes, 0);
+    assert_eq!(stats.ai_additions_chars, ai_volume);
+    assert_eq!(stats.ai_additions_bytes, ai_volume);
+    assert_eq!(stats.ai_accepted_chars, ai_volume);
+    assert_eq!(stats.ai_accepted_bytes, ai_volume);
+    assert_eq!(stats.git_diff_added_chars, human_volume + ai_volume);
+    assert_eq!(stats.git_diff_added_bytes, human_volume + ai_volume);
+}
+
+/// Single-commit human / unknown / AI char/byte fields must equal the
+/// payload+LF sums of the same classified line sets used for the line buckets.
+/// Uses explicit writes + checkpoints (mock_known_human / mock_ai, plus a
+/// checkpoint-less untracked commit, including `🎉`) so the exact checkpoint
+/// flow is under test. Note: commit-time attribution recovery attributes any
+/// uncheckpointed line in a *noted* commit to the committer (h_), so the
+/// unknown bucket is exercised via a separate plain-git commit with no
+/// authorship note at all.
+#[test]
+fn test_stats_single_commit_bucket_volume() {
+    let repo = TestRepo::new();
+
+    // Commit 1: untracked-only commit made with plain git (no git-ai
+    // checkpoints, so no authorship note). Backdated so `stats <sha>` does not
+    // wait for a note to appear.
+    fs::write(repo.path().join("untracked.txt"), "Untracked line 🎉\n").unwrap();
+    repo.git_og(&["add", "untracked.txt"]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "untracked commit"],
+        &[
+            ("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z"),
+        ],
+    )
+    .unwrap();
+    let untracked_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Commit 2: known-human + AI lines via explicit checkpoints.
+    fs::write(repo.path().join("human.txt"), "Known human 🎉\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "human.txt"])
+        .unwrap();
+    fs::write(repo.path().join("ai.txt"), "AI 🎉 line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "ai.txt"]).unwrap();
+    repo.stage_all_and_commit("human and AI commit").unwrap();
+
+    // Line-level attribution after the commit must match the buckets below.
+    let mut human_file = repo.filename("human.txt");
+    human_file.assert_committed_lines(crate::lines!["Known human 🎉".human()]);
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.assert_committed_lines(crate::lines!["AI 🎉 line".ai()]);
+    let mut untracked_file = repo.filename("untracked.txt");
+    untracked_file.assert_committed_lines(crate::lines!["Untracked line 🎉".unattributed_human()]);
+
+    // Independently computed payload+LF sums (chars = Unicode scalars + 1 LF,
+    // bytes = UTF-8 length + 1 LF).
+    fn payload_volume(lines: &[&str]) -> (u64, u64) {
+        lines.iter().fold((0u64, 0u64), |(chars, bytes), line| {
+            (
+                chars + line.chars().count() as u64 + 1,
+                bytes + line.len() as u64 + 1,
+            )
+        })
+    }
+    let (human_chars, human_bytes) = payload_volume(&["Known human 🎉"]);
+    let (unknown_chars, unknown_bytes) = payload_volume(&["Untracked line 🎉"]);
+    let (ai_chars, ai_bytes) = payload_volume(&["AI 🎉 line"]);
+    // Sanity: the emoji lines really exercise multi-byte UTF-8.
+    assert!(ai_bytes > ai_chars, "🎉 is 1 scalar but 4 UTF-8 bytes");
+    assert!(human_bytes > human_chars);
+    assert!(unknown_bytes > unknown_chars);
+
+    // Commit 2 (HEAD): known-human + AI buckets.
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.human_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.ai_accepted, 1);
+    assert_eq!(stats.git_diff_added_lines, 2);
+    assert_eq!(stats.git_diff_deleted_lines, 0);
+
+    assert_eq!(stats.human_additions_chars, human_chars);
+    assert_eq!(stats.human_additions_bytes, human_bytes);
+    assert_eq!(stats.unknown_additions_chars, 0);
+    assert_eq!(stats.unknown_additions_bytes, 0);
+    assert_eq!(stats.ai_additions_chars, ai_chars);
+    assert_eq!(stats.ai_additions_bytes, ai_bytes);
+    // ai_accepted mirrors ai_additions, matching the line fields.
+    assert_eq!(stats.ai_accepted_chars, ai_chars);
+    assert_eq!(stats.ai_accepted_bytes, ai_bytes);
+    assert_eq!(stats.git_diff_added_chars, human_chars + ai_chars);
+    assert_eq!(stats.git_diff_added_bytes, human_bytes + ai_bytes);
+
+    // Per-tool char/byte fields are the payload+LF of the same per-tool
+    // accepted line set as the ai_accepted line count, keyed by the same
+    // tool key.
+    let tool_stats = stats
+        .tool_model_breakdown
+        .get("mock_ai::unknown")
+        .expect("mock_ai::unknown tool headline should exist");
+    assert_eq!(tool_stats.ai_accepted, 1);
+    assert_eq!(tool_stats.ai_additions, 1);
+    assert_eq!(tool_stats.ai_additions_chars, ai_chars);
+    assert_eq!(tool_stats.ai_additions_bytes, ai_bytes);
+    assert_eq!(tool_stats.ai_accepted_chars, ai_chars);
+    assert_eq!(tool_stats.ai_accepted_bytes, ai_bytes);
+
+    // Commit 1: no authorship note, so every added line is unattested and the
+    // unknown bucket carries the full payload+LF volume.
+    let untracked_stats = stats_from_args(&repo, &["stats", &untracked_sha, "--json"]);
+    assert_eq!(untracked_stats.human_additions, 0);
+    assert_eq!(untracked_stats.unknown_additions, 1);
+    assert_eq!(untracked_stats.ai_additions, 0);
+    assert_eq!(untracked_stats.ai_accepted, 0);
+    assert_eq!(untracked_stats.git_diff_added_lines, 1);
+
+    assert_eq!(untracked_stats.human_additions_chars, 0);
+    assert_eq!(untracked_stats.human_additions_bytes, 0);
+    assert_eq!(untracked_stats.unknown_additions_chars, unknown_chars);
+    assert_eq!(untracked_stats.unknown_additions_bytes, unknown_bytes);
+    assert_eq!(untracked_stats.ai_additions_chars, 0);
+    assert_eq!(untracked_stats.ai_additions_bytes, 0);
+    assert_eq!(untracked_stats.ai_accepted_chars, 0);
+    assert_eq!(untracked_stats.ai_accepted_bytes, 0);
+    assert_eq!(untracked_stats.git_diff_added_chars, unknown_chars);
+    assert_eq!(untracked_stats.git_diff_added_bytes, unknown_bytes);
+    // No authorship note means no per-tool breakdown either.
+    assert!(
+        untracked_stats.tool_model_breakdown.is_empty(),
+        "commit with no authorship note should have no per-tool breakdown"
+    );
 }
 
 #[test]
@@ -499,6 +644,7 @@ fn test_markdown_stats_deletion_only() {
         git_diff_deleted_lines: 5,
         git_diff_added_lines: 0,
         tool_model_breakdown: BTreeMap::new(),
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -520,6 +666,7 @@ fn test_markdown_stats_all_human() {
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 10,
         tool_model_breakdown: BTreeMap::new(),
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -541,6 +688,7 @@ fn test_markdown_stats_all_ai() {
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 15,
         tool_model_breakdown: BTreeMap::new(),
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -562,6 +710,7 @@ fn test_markdown_stats_mixed() {
         git_diff_deleted_lines: 5,
         git_diff_added_lines: 30,
         tool_model_breakdown: BTreeMap::new(),
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -583,6 +732,7 @@ fn test_markdown_stats_no_mixed() {
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 20,
         tool_model_breakdown: BTreeMap::new(),
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -605,6 +755,7 @@ fn test_markdown_stats_minimal_human() {
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
         tool_model_breakdown: BTreeMap::new(),
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -623,6 +774,7 @@ fn test_markdown_stats_formatting() {
         ToolModelHeadlineStats {
             ai_additions: 6,
             ai_accepted: 6,
+            ..Default::default()
         },
     );
 
@@ -634,6 +786,7 @@ fn test_markdown_stats_formatting() {
         git_diff_deleted_lines: 2,
         git_diff_added_lines: 13,
         tool_model_breakdown,
+        ..Default::default()
     };
 
     let markdown = write_stats_to_markdown(&stats);
@@ -961,8 +1114,176 @@ fn test_stats_ignores_renamed_files() {
     assert_eq!(stats.human_additions, 0);
 }
 
+/// When a file's counted UTF-8 payload (hunk line payloads + one synthetic
+/// LF per counted line) exceeds `stats_max_file_bytes`, that file
+/// contributes 0 to every `*_chars` / `*_bytes` field while its line counts
+/// still land in every line bucket. Under-cap files keep their volume, and
+/// raising the cap restores the skipped file's volume.
+#[test]
+fn test_stats_file_cap_skips_oversized_file_volume() {
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.stats_max_file_bytes = Some(50);
+    });
+
+    // Small file under the cap via a known-human checkpoint; large file over
+    // the cap via an AI checkpoint, both in one commit so the skip is
+    // exercised per file.
+    let big_line = "a".repeat(100); // 101 counted bytes with the synthetic LF
+    fs::write(repo.path().join("small.txt"), "tiny\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "small.txt"])
+        .unwrap();
+    fs::write(repo.path().join("large.txt"), format!("{big_line}\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "large.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("small human + large AI").unwrap();
+
+    // Line-level attribution must hold regardless of the volume cap.
+    let mut small_file = repo.filename("small.txt");
+    small_file.assert_committed_lines(crate::lines!["tiny".human()]);
+    let mut large_file = repo.filename("large.txt");
+    large_file.assert_committed_lines(crate::lines![big_line.as_str().ai()]);
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    // Line fields are unaffected by the cap skip.
+    assert_eq!(stats.human_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.ai_accepted, 1);
+    assert_eq!(stats.git_diff_added_lines, 2);
+    assert_eq!(stats.git_diff_deleted_lines, 0);
+
+    // The over-cap large.txt contributes 0 to every char/byte field; only the
+    // under-cap small.txt payload ("tiny" = 4 UTF-8 bytes + 1 LF) is counted.
+    assert_eq!(stats.human_additions_chars, 5);
+    assert_eq!(stats.human_additions_bytes, 5);
+    assert_eq!(stats.ai_additions_chars, 0);
+    assert_eq!(stats.ai_additions_bytes, 0);
+    assert_eq!(stats.ai_accepted_chars, 0);
+    assert_eq!(stats.ai_accepted_bytes, 0);
+    assert_eq!(stats.git_diff_added_chars, 5);
+    assert_eq!(stats.git_diff_added_bytes, 5);
+
+    // Per-tool: the line count stays, the char/byte fields are zeroed.
+    let tool_stats = stats
+        .tool_model_breakdown
+        .get("mock_ai::unknown")
+        .expect("mock_ai::unknown tool headline should exist");
+    assert_eq!(tool_stats.ai_additions, 1);
+    assert_eq!(tool_stats.ai_accepted, 1);
+    assert_eq!(tool_stats.ai_additions_chars, 0);
+    assert_eq!(tool_stats.ai_additions_bytes, 0);
+    assert_eq!(tool_stats.ai_accepted_chars, 0);
+    assert_eq!(tool_stats.ai_accepted_bytes, 0);
+
+    // Raising the cap above the large file restores its full volume.
+    repo.patch_git_ai_config(|patch| {
+        patch.stats_max_file_bytes = Some(1_000_000);
+    });
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 2);
+    assert_eq!(stats.ai_additions_chars, 101);
+    assert_eq!(stats.ai_additions_bytes, 101);
+    assert_eq!(stats.ai_accepted_chars, 101);
+    assert_eq!(stats.ai_accepted_bytes, 101);
+    assert_eq!(stats.git_diff_added_chars, 106);
+    assert_eq!(stats.git_diff_added_bytes, 106);
+    let tool_stats = stats
+        .tool_model_breakdown
+        .get("mock_ai::unknown")
+        .expect("mock_ai::unknown tool headline should exist");
+    assert_eq!(tool_stats.ai_accepted_chars, 101);
+    assert_eq!(tool_stats.ai_accepted_bytes, 101);
+}
+
+/// The cap also zeroes the unknown bucket and the deleted-side git-diff
+/// char/byte fields for over-cap files while line counts stay intact. Uses plain
+/// backdated git commits (no authorship notes) so every added line is
+/// unattested and the unknown bucket carries the volume.
+#[test]
+fn test_stats_file_cap_skips_unknown_and_deleted_volume() {
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.stats_max_file_bytes = Some(50);
+    });
+
+    let big_line = "b".repeat(100); // 101 counted bytes with the synthetic LF
+    fs::write(repo.path().join("big.txt"), format!("{big_line}\n")).unwrap();
+    fs::write(repo.path().join("small.txt"), "tiny\n").unwrap();
+    repo.git_og(&["add", "."]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "untracked commit"],
+        &[
+            ("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z"),
+        ],
+    )
+    .unwrap();
+    let untracked_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let mut big_file = repo.filename("big.txt");
+    big_file.assert_committed_lines(crate::lines![big_line.as_str().unattributed_human()]);
+    let mut small_file = repo.filename("small.txt");
+    small_file.assert_committed_lines(crate::lines!["tiny".unattributed_human()]);
+
+    let stats = stats_from_args(&repo, &["stats", &untracked_sha, "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 2);
+    assert_eq!(stats.unknown_additions, 2);
+    assert_eq!(stats.human_additions, 0);
+    assert_eq!(stats.ai_additions, 0);
+    // Only the under-cap small.txt payload feeds the unknown/git-diff fields.
+    assert_eq!(stats.unknown_additions_chars, 5);
+    assert_eq!(stats.unknown_additions_bytes, 5);
+    assert_eq!(stats.git_diff_added_chars, 5);
+    assert_eq!(stats.git_diff_added_bytes, 5);
+
+    // Deleting the over-cap file: deleted line count stays, deleted volume is
+    // skipped.
+    fs::remove_file(repo.path().join("big.txt")).unwrap();
+    repo.git_og(&["add", "-A", "."]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "delete big file"],
+        &[
+            ("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z"),
+        ],
+    )
+    .unwrap();
+    let delete_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let stats = stats_from_args(&repo, &["stats", &delete_sha, "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 0);
+    assert_eq!(stats.git_diff_deleted_lines, 1);
+    assert_eq!(stats.git_diff_deleted_chars, 0);
+    assert_eq!(stats.git_diff_deleted_bytes, 0);
+
+    // Raising the cap restores both the unknown and the deleted volume.
+    repo.patch_git_ai_config(|patch| {
+        patch.stats_max_file_bytes = Some(1_000_000);
+    });
+    let stats = stats_from_args(&repo, &["stats", &untracked_sha, "--json"]);
+    assert_eq!(stats.unknown_additions, 2);
+    assert_eq!(stats.unknown_additions_chars, 106);
+    assert_eq!(stats.unknown_additions_bytes, 106);
+    let stats = stats_from_args(&repo, &["stats", &delete_sha, "--json"]);
+    assert_eq!(stats.git_diff_deleted_lines, 1);
+    assert_eq!(stats.git_diff_deleted_chars, 101);
+    assert_eq!(stats.git_diff_deleted_bytes, 101);
+}
+
 crate::reuse_tests_in_worktree!(
     test_authorship_log_stats,
+    test_stats_single_commit_bucket_volume,
+    test_stats_file_cap_skips_oversized_file_volume,
+    test_stats_file_cap_skips_unknown_and_deleted_volume,
     test_stats_cli_range,
     test_stats_cli_empty_tree_range,
     test_markdown_stats_deletion_only,

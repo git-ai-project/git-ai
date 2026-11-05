@@ -1339,6 +1339,7 @@ mod tests {
             ToolModelHeadlineStats {
                 ai_additions: 4,
                 ai_accepted: 3,
+                ..Default::default()
             },
         );
         tool_model_breakdown.insert(
@@ -1346,6 +1347,7 @@ mod tests {
             ToolModelHeadlineStats {
                 ai_additions: 6,
                 ai_accepted: 5,
+                ..Default::default()
             },
         );
         let stats = CommitStats {
@@ -1372,6 +1374,7 @@ mod tests {
             ToolModelHeadlineStats {
                 ai_additions: 4,
                 ai_accepted: 3,
+                ..Default::default()
             },
         );
         let stats = CommitStats {

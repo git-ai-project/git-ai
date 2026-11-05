@@ -11,6 +11,9 @@ pub struct DiffAiAcceptedStats {
     pub per_tool_model: BTreeMap<String, u32>,
     pub per_prompt: BTreeMap<String, u32>,
     pub added_lines_by_file: HashMap<String, Vec<u32>>,
+    /// file -> added line -> `tool::model` for every line counted in
+    /// `per_tool_model`.
+    pub ai_tool_model_by_line: HashMap<String, HashMap<u32, String>>,
 }
 
 pub fn diff_ai_accepted_stats(
@@ -70,6 +73,11 @@ pub fn diff_ai_accepted_stats(
                 *stats.per_prompt.entry(author_hash.clone()).or_insert(0) += 1;
                 if let Some(tool_model) = author_tool_map.get(author_hash) {
                     *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
+                    stats
+                        .ai_tool_model_by_line
+                        .entry(file_path.clone())
+                        .or_default()
+                        .insert(*line, tool_model.clone());
                 }
             }
         }
@@ -176,6 +184,7 @@ mod tests {
         assert_eq!(stats.per_tool_model.len(), 0);
         assert_eq!(stats.per_prompt.len(), 0);
         assert!(stats.added_lines_by_file.is_empty());
+        assert!(stats.ai_tool_model_by_line.is_empty());
     }
 
     #[test]
@@ -185,6 +194,7 @@ mod tests {
             per_tool_model: BTreeMap::new(),
             per_prompt: BTreeMap::new(),
             added_lines_by_file: HashMap::new(),
+            ai_tool_model_by_line: HashMap::new(),
         };
         let debug_str = format!("{:?}", stats);
         assert!(debug_str.contains("DiffAiAcceptedStats"));

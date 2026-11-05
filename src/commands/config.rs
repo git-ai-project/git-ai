@@ -123,6 +123,9 @@ fn print_config_help() {
         "  transcript_streaming_lookback_days  Days to look back when sweeping transcripts (0 = unlimited)"
     );
     println!("  max_checkpoint_file_size_bytes      Per-file checkpoint content limit in bytes");
+    println!(
+        "  stats_max_file_bytes                Per-file size cap for stats char/byte derivation in bytes"
+    );
     println!("  max_checkpoint_total_size_bytes     Per-checkpoint content limit in bytes");
     println!("  max_checkpoint_total_lines          Per-checkpoint content limit in lines");
     println!("  daemon_memory_limit_mb               Daemon peak-RSS limit in MiB");
@@ -403,6 +406,10 @@ fn show_all_config() -> Result<(), String> {
         Value::Number(runtime_config.max_checkpoint_file_size_bytes().into()),
     );
     effective_config.insert(
+        "stats_max_file_bytes".to_string(),
+        Value::Number(runtime_config.stats_max_file_bytes().into()),
+    );
+    effective_config.insert(
         "max_checkpoint_total_size_bytes".to_string(),
         Value::Number(runtime_config.max_checkpoint_total_size_bytes().into()),
     );
@@ -557,6 +564,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
             "max_checkpoint_file_size_bytes" => {
                 Value::Number(runtime_config.max_checkpoint_file_size_bytes().into())
             }
+            "stats_max_file_bytes" => Value::Number(runtime_config.stats_max_file_bytes().into()),
             "max_checkpoint_total_size_bytes" => {
                 Value::Number(runtime_config.max_checkpoint_total_size_bytes().into())
             }
@@ -890,6 +898,17 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.max_checkpoint_file_size_bytes = Some(bytes);
                 crate::config::save_file_config(&file_config)?;
                 println!("[max_checkpoint_file_size_bytes]: {}", bytes);
+            }
+            "stats_max_file_bytes" => {
+                let bytes = value.trim().parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid stats_max_file_bytes value '{}'. Expected a non-negative integer in bytes",
+                        value
+                    )
+                })?;
+                file_config.stats_max_file_bytes = Some(bytes);
+                crate::config::save_file_config(&file_config)?;
+                println!("[stats_max_file_bytes]: {}", bytes);
             }
             "max_checkpoint_total_size_bytes" => {
                 let bytes = value.trim().parse::<usize>().map_err(|_| {
@@ -1281,6 +1300,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [max_checkpoint_file_size_bytes]: {}", v);
+                }
+            }
+            "stats_max_file_bytes" => {
+                let old_value = file_config.stats_max_file_bytes.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [stats_max_file_bytes]: {}", v);
                 }
             }
             "max_checkpoint_total_size_bytes" => {

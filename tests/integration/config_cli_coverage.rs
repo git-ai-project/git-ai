@@ -461,6 +461,7 @@ fn fully_populated_file_config() -> FileConfig {
         max_checkpoint_file_size_bytes: Some(3 * 1024 * 1024),
         max_checkpoint_total_size_bytes: Some(32 * 1024 * 1024),
         max_checkpoint_total_lines: Some(500_000),
+        stats_max_file_bytes: Some(3 * 1024 * 1024),
         daemon_memory_limit_mb: Some(1024),
     }
 }
