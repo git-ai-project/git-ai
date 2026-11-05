@@ -1,6 +1,6 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::ignore::{
-    effective_ignore_patterns, load_git_ai_ignore_patterns,
+    effective_ignore_patterns, effective_ignore_patterns_at_commit, load_git_ai_ignore_patterns,
     load_linguist_generated_patterns_from_root_gitattributes,
 };
 use git_ai::git::repository::from_bare_repository;
@@ -298,6 +298,90 @@ fn effective_patterns_union_git_ai_ignore_and_user_patterns() {
     assert!(patterns.contains(&"*.lock".to_string()));
 }
 
+#[test]
+fn effective_patterns_at_commit_reads_git_ai_ignore_from_commit_not_workdir() {
+    let repo = TestRepo::new();
+    // Commit A ignores `generated/**`.
+    std::fs::write(repo.path().join(".git-ai-ignore"), "generated/**\n").unwrap();
+    repo.git(&["add", ".git-ai-ignore"]).unwrap();
+    let commit_a = repo
+        .stage_all_and_commit("add .git-ai-ignore")
+        .unwrap()
+        .commit_sha;
+
+    // The async daemon may run this commit's post-processing well after the
+    // working tree has moved on. Simulate that by mutating the working-tree copy
+    // to a different rule set *without* committing.
+    std::fs::write(repo.path().join(".git-ai-ignore"), "docs/**\n").unwrap();
+
+    let gitai_repo =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+
+    // Commit-scoped resolution must reflect commit A's rules, not the mutated
+    // working tree.
+    let at_commit = effective_ignore_patterns_at_commit(&gitai_repo, &commit_a, &[], &[]);
+    assert!(at_commit.contains(&"generated/**".to_string()));
+    assert!(!at_commit.contains(&"docs/**".to_string()));
+    // Defaults are still merged in.
+    assert!(at_commit.contains(&"*.lock".to_string()));
+
+    // The working-tree-based resolution reflects the later edit, proving the two
+    // differ and why the async post-commit path must use the commit-scoped view.
+    let at_workdir = effective_ignore_patterns(&gitai_repo, &[], &[]);
+    assert!(at_workdir.contains(&"docs/**".to_string()));
+    assert!(!at_workdir.contains(&"generated/**".to_string()));
+}
+
+#[test]
+fn effective_patterns_at_commit_reads_gitattributes_from_commit_not_workdir() {
+    let repo = TestRepo::new();
+    // Commit A marks `generated/**` as linguist-generated.
+    std::fs::write(
+        repo.path().join(".gitattributes"),
+        "generated/** linguist-generated=true\n",
+    )
+    .unwrap();
+    repo.git(&["add", ".gitattributes"]).unwrap();
+    let commit_a = repo
+        .stage_all_and_commit("add gitattributes")
+        .unwrap()
+        .commit_sha;
+
+    // Later working-tree state drops the attribute (uncommitted).
+    std::fs::write(repo.path().join(".gitattributes"), "").unwrap();
+
+    let gitai_repo =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+
+    let at_commit = effective_ignore_patterns_at_commit(&gitai_repo, &commit_a, &[], &[]);
+    assert!(at_commit.contains(&"generated/**".to_string()));
+
+    let at_workdir = effective_ignore_patterns(&gitai_repo, &[], &[]);
+    assert!(!at_workdir.contains(&"generated/**".to_string()));
+}
+
+#[test]
+fn effective_patterns_at_commit_merges_user_and_extra_patterns() {
+    let repo = TestRepo::new();
+    std::fs::write(repo.path().join(".git-ai-ignore"), "docs/**\n").unwrap();
+    repo.git(&["add", ".git-ai-ignore"]).unwrap();
+    let commit_a = repo
+        .stage_all_and_commit("add .git-ai-ignore")
+        .unwrap()
+        .commit_sha;
+
+    let gitai_repo =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+
+    let user = vec!["tests/**".to_string()];
+    let extra = vec!["extra/**".to_string()];
+    let patterns = effective_ignore_patterns_at_commit(&gitai_repo, &commit_a, &user, &extra);
+    assert!(patterns.contains(&"docs/**".to_string()));
+    assert!(patterns.contains(&"tests/**".to_string()));
+    assert!(patterns.contains(&"extra/**".to_string()));
+    assert!(patterns.contains(&"*.lock".to_string()));
+}
+
 // Bare repo tests (using make_bare_repo helpers)
 
 #[test]
@@ -361,6 +445,9 @@ crate::reuse_tests_in_worktree!(
     effective_patterns_include_git_ai_ignore,
     effective_patterns_union_gitattributes_and_git_ai_ignore,
     effective_patterns_union_git_ai_ignore_and_user_patterns,
+    effective_patterns_at_commit_reads_git_ai_ignore_from_commit_not_workdir,
+    effective_patterns_at_commit_reads_gitattributes_from_commit_not_workdir,
+    effective_patterns_at_commit_merges_user_and_extra_patterns,
     // Bare repo tests
     loads_linguist_generated_from_bare_repo_head,
     bare_repo_does_not_read_parent_directory_gitattributes,

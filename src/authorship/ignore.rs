@@ -1,4 +1,4 @@
-use crate::git::repository::Repository;
+use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 use glob::Pattern;
 use std::collections::HashSet;
 use std::fs;
@@ -172,7 +172,12 @@ pub fn load_git_ai_ignore_patterns(repo: &Repository) -> Vec<String> {
     let Some(contents) = load_root_git_ai_ignore_contents(repo) else {
         return Vec::new();
     };
+    parse_git_ai_ignore_patterns(&contents)
+}
 
+/// Parse `.git-ai-ignore` file contents into a deduped pattern list.
+/// One glob pattern per line; blank lines and `#` comments are skipped.
+fn parse_git_ai_ignore_patterns(contents: &str) -> Vec<String> {
     let mut patterns = Vec::new();
 
     for raw_line in contents.lines() {
@@ -202,19 +207,10 @@ fn load_root_git_ai_ignore_contents(repo: &Repository) -> Option<String> {
 /// Load `.git-ai-ignore` patterns from a repo root path directly (no Repository object needed).
 /// Use this when you have a `&Path` but not a `Repository` (e.g. in snapshot capture code).
 pub fn load_git_ai_ignore_patterns_from_path(repo_root: &Path) -> Vec<String> {
-    let contents = match fs::read_to_string(repo_root.join(".git-ai-ignore")) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let mut patterns = Vec::new();
-    for raw_line in contents.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        patterns.push(line.to_string());
+    match fs::read_to_string(repo_root.join(".git-ai-ignore")) {
+        Ok(contents) => parse_git_ai_ignore_patterns(&contents),
+        Err(_) => Vec::new(),
     }
-    dedupe_patterns(patterns)
 }
 
 /// Load linguist-generated patterns from `.gitattributes` at a repo root path directly.
@@ -237,6 +233,60 @@ pub fn effective_ignore_patterns(
         repo,
     ));
     patterns.extend(load_git_ai_ignore_patterns(repo));
+    patterns.extend(extra_patterns.iter().cloned());
+    patterns.extend(user_patterns.iter().cloned());
+    dedupe_patterns(patterns)
+}
+
+/// Read the raw contents of the root `.git-ai-ignore` and `.gitattributes` files
+/// as they existed in a specific commit's tree.
+///
+/// Returns `(git_ai_ignore_contents, gitattributes_contents)`; either is `None`
+/// when that file does not exist in the commit. Both files are fetched with a
+/// single batched `git cat-file` pair, so this performs a constant number of git
+/// invocations regardless of repository or commit size.
+fn load_root_ignore_files_at_commit(
+    repo: &Repository,
+    commit_sha: &str,
+) -> (Option<String>, Option<String>) {
+    let git_ai_ignore_key = (commit_sha.to_string(), ".git-ai-ignore".to_string());
+    let gitattributes_key = (commit_sha.to_string(), ".gitattributes".to_string());
+    let contents = batch_read_paths_at_treeishes(
+        repo,
+        &[git_ai_ignore_key.clone(), gitattributes_key.clone()],
+    )
+    .unwrap_or_default();
+    (
+        contents.get(&git_ai_ignore_key).cloned(),
+        contents.get(&gitattributes_key).cloned(),
+    )
+}
+
+/// Compute the effective ignore patterns for a commit, resolving `.git-ai-ignore`
+/// and `.gitattributes` from that exact commit's tree instead of the mutable
+/// working tree.
+///
+/// Prefer this over [`effective_ignore_patterns`] on the asynchronous post-commit
+/// and rewrite paths: the daemon processes commits well after they happen, so the
+/// working tree may no longer reflect the commit being finalized (e.g. a later
+/// commit changed or removed the ignore rules). Resolving from the exact commit
+/// keeps attribution consistent with the state at commit time.
+pub fn effective_ignore_patterns_at_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    user_patterns: &[String],
+    extra_patterns: &[String],
+) -> Vec<String> {
+    let (git_ai_ignore_contents, gitattributes_contents) =
+        load_root_ignore_files_at_commit(repo, commit_sha);
+
+    let mut patterns = default_ignore_patterns();
+    if let Some(contents) = gitattributes_contents {
+        patterns.extend(parse_linguist_generated_patterns(&contents));
+    }
+    if let Some(contents) = git_ai_ignore_contents {
+        patterns.extend(parse_git_ai_ignore_patterns(&contents));
+    }
     patterns.extend(extra_patterns.iter().cloned());
     patterns.extend(user_patterns.iter().cloned());
     dedupe_patterns(patterns)
