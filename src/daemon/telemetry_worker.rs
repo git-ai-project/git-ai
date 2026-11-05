@@ -1255,17 +1255,19 @@ where
 }
 
 fn should_deliver_metric_event(config: &Config, event: &MetricEvent) -> bool {
-    // Transcript-derived events keep flowing for sessions tracked before a
-    // repo was excluded, so they get the same upload-time repo gate.
+    // Upload-time repo gate for every event that names its repository: events
+    // recorded before a repo was excluded (commits, checkpoints, rewrites) and
+    // transcript-derived ones, which keep flowing for sessions tracked before
+    // the exclusion, must not upload after it. The emission-side gates are the
+    // main defence; this one only sees the event's single repo_url.
+    let repo_url = sparse_get_string(&event.attrs, attr_pos::REPO_URL).flatten();
     let transcript_derived = event.event_id == MetricEventId::SessionEvent as u16
         || event.event_id == MetricEventId::TokenUsage as u16;
-    if !transcript_derived {
+    if repo_url.is_none() && !transcript_derived {
         return true;
     }
 
-    let remotes = sparse_get_string(&event.attrs, attr_pos::REPO_URL)
-        .flatten()
-        .map(|url| vec![(String::new(), url)]);
+    let remotes = repo_url.map(|url| vec![(String::new(), url)]);
     config.is_allowed_repository_with_remotes(remotes.as_ref())
 }
 

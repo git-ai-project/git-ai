@@ -26,6 +26,8 @@ pub enum NotesExistence {
     Found,
     /// Confirmed that no notes exist on the remote
     NotFound,
+    /// Not fetched: the repository filters reject the remote
+    Skipped,
 }
 
 pub fn fetch_remote_from_args(
@@ -125,6 +127,14 @@ pub fn fetch_missing_notes_for_commits(
         crate::git::notes_api::commits_with_notes(repository, commit_shas).unwrap_or_default()
     }
 
+    // A repository excluded by the filters is a passthrough: its notes are
+    // neither written (post-commit, notes_api) nor fetched from anywhere.
+    let config = crate::config::Config::fresh();
+    if !config.tracks_repository(repository) {
+        tracing::debug!("skipping source-note fetch: repository excluded by repository filters");
+        return Ok(());
+    }
+
     let noted_before_fetch = noted_commits(repository, source_commits);
 
     let missing: Vec<&String> = source_commits
@@ -143,7 +153,7 @@ pub fn fetch_missing_notes_for_commits(
     // in refs; rewrites were stranding notes whenever that fetch failed
     // (e.g. `Permission denied (publickey)`) even though the backend held
     // every source note.
-    if crate::config::Config::fresh().notes_backend_enabled() {
+    if config.notes_backend_enabled() {
         let missing_owned: Vec<String> = missing.iter().map(|sha| sha.to_string()).collect();
         match crate::git::notes_api::warm_cache_for_commits(&missing_owned) {
             Ok(cached) => {
@@ -216,11 +226,23 @@ pub fn fetch_missing_notes_for_commits_best_effort(
 // for use with post-fetch and post-pull and post-clone hooks
 // Returns Ok(NotesExistence::Found) if notes were found and fetched,
 // Ok(NotesExistence::NotFound) if confirmed no notes exist on remote,
+// Ok(NotesExistence::Skipped) if the repository filters reject the remote,
 // Err(...) for actual errors (network, permissions, etc.)
 pub fn fetch_authorship_notes(
     repository: &Repository,
     remote_name: &str,
 ) -> Result<NotesExistence, GitAiError> {
+    // Repository filters apply to every notes fetch, explicit ones included: an
+    // excluded repository never gets refs/notes/ai from git-ai, and a rejected
+    // remote is not contacted.
+    if !crate::config::Config::fresh().may_sync_notes_with_remote(repository, remote_name) {
+        tracing::debug!(
+            remote = remote_name,
+            "fetch_authorship_notes: skipping, remote rejected by repository filters"
+        );
+        return Ok(NotesExistence::Skipped);
+    }
+
     // Generate tracking ref for this remote
     let tracking_ref = tracking_ref_for_remote(remote_name);
 
@@ -335,6 +357,17 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
     // in refs/notes/ai so there is nothing to push.
     if crate::config::Config::get().notes_backend_kind() == crate::config::NotesBackendKind::Http {
         tracing::debug!("push_authorship_notes: skipping refs/notes/ai push (Http backend active)");
+        return Ok(());
+    }
+
+    // Repository filters apply to the push target itself: a repository allowed
+    // through one remote must not send notes to a remote the filters reject.
+    // Checked before the pre-push fetch so a rejected remote is not contacted.
+    if !crate::config::Config::fresh().may_sync_notes_with_remote(repository, remote_name) {
+        tracing::debug!(
+            remote = remote_name,
+            "push_authorship_notes: skipping, remote rejected by repository filters"
+        );
         return Ok(());
     }
 

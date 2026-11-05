@@ -8,7 +8,7 @@ use crate::git::refs::{
 use crate::git::repository::{
     CommitRange, Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin,
 };
-use crate::git::sync_authorship::fetch_authorship_notes;
+use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes};
 use std::fs;
 use std::path::PathBuf;
 
@@ -119,8 +119,13 @@ impl CiContext {
                 } else {
                     println!("Fetching authorship history");
                     // Ensure we have the full authorship history before checking for existing notes
-                    fetch_authorship_notes(&self.repo, "origin")?;
-                    println!("Fetched authorship history");
+                    if fetch_authorship_notes(&self.repo, "origin")? == NotesExistence::Skipped {
+                        println!(
+                            "Skipped authorship history fetch: rejected by repository filters"
+                        );
+                    } else {
+                        println!("Fetched authorship history");
+                    }
                 }
 
                 // Check if authorship already exists for this commit
@@ -406,8 +411,13 @@ impl CiContext {
                     println!("Skipping authorship history fetch");
                 } else {
                     println!("Fetching authorship history");
-                    fetch_authorship_notes(&self.repo, "origin")?;
-                    println!("Fetched authorship history");
+                    if fetch_authorship_notes(&self.repo, "origin")? == NotesExistence::Skipped {
+                        println!(
+                            "Skipped authorship history fetch: rejected by repository filters"
+                        );
+                    } else {
+                        println!("Fetched authorship history");
+                    }
                 }
 
                 if previous_head_sha == head_sha {
@@ -630,6 +640,17 @@ impl CiContext {
             println!("No PR commits found; skipping fork authorship note import");
             return Ok(0);
         }
+        // The fork URL is a remote like any other: the repository filters decide
+        // whether its notes may be fetched or copied in, preloaded ones included.
+        if let Some(rejection) =
+            crate::config::Config::fresh().notes_sync_rejection(&self.repo, fork_url)
+        {
+            println!(
+                "Skipping fork authorship note import: {}",
+                rejection.reason()
+            );
+            return Ok(0);
+        }
 
         let source_ref_available = if options.skip_fetch_fork_notes {
             println!(
@@ -652,9 +673,14 @@ impl CiContext {
                     false
                 }
                 Err(e) => {
+                    // The error quotes the git command line, i.e. the fork URL,
+                    // which carries the CI token.
                     println!(
                         "Warning: Failed to fetch fork notes ({}), continuing without them",
-                        e
+                        e.to_string().replace(
+                            fork_url.as_str(),
+                            &crate::config::url_without_credentials(fork_url)
+                        )
                     );
                     false
                 }

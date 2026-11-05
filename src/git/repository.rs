@@ -1297,6 +1297,65 @@ impl Repository {
         Ok(remotes)
     }
 
+    /// Every configured `url` of every remote, one `(name, url)` pair per value.
+    /// Unlike [`Self::remotes_with_urls`], which keeps only the last `url` of a
+    /// remote, this lists all of them: git fetches from the first and pushes to
+    /// each, so the repository filters must see every one.
+    pub fn remotes_with_all_urls(&self) -> Result<Vec<(String, String)>, GitAiError> {
+        Ok(self
+            .remote_config_values(&["url"])?
+            .into_iter()
+            .flat_map(|(name, urls)| urls.into_iter().map(move |url| (name.clone(), url)))
+            .collect())
+    }
+
+    /// URLs git may contact when transferring with `remote`: every configured
+    /// `url` and `pushurl` of a named remote, or `remote` itself when it is not
+    /// a configured remote name (e.g. `git push https://host/repo.git`).
+    pub fn remote_transfer_urls(&self, remote: &str) -> Result<Vec<String>, GitAiError> {
+        let mut urls = Vec::new();
+        let mut is_named_remote = false;
+
+        for (name, values) in self.remote_config_values(&["url", "pushurl"])? {
+            if name == remote {
+                is_named_remote = true;
+                urls.extend(values);
+            }
+        }
+
+        if !is_named_remote {
+            urls.push(remote.to_string());
+        }
+        Ok(urls)
+    }
+
+    /// For each `[remote "<name>"]` section: the name and every value of `keys`,
+    /// in config order (empty when the section sets none of them).
+    fn remote_config_values(
+        &self,
+        keys: &[&str],
+    ) -> Result<Vec<(String, Vec<String>)>, GitAiError> {
+        let config = self.get_git_config_file()?;
+        let mut sections = Vec::new();
+
+        for section in config.sections() {
+            if !section.header().name().eq_ignore_ascii_case(b"remote") {
+                continue;
+            }
+            let Some(name) = section.header().subsection_name() else {
+                continue;
+            };
+            let values = keys
+                .iter()
+                .flat_map(|key| section.body().values(key))
+                .map(|value| value.to_string())
+                .collect();
+            sections.push((name.to_string(), values));
+        }
+
+        Ok(sections)
+    }
+
     fn load_optional_config_file(
         path: &Path,
         source: gix_config::Source,

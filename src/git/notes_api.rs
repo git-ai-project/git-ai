@@ -18,7 +18,22 @@ pub use crate::git::refs::CommitAuthorship;
 
 // --- Writes ---
 
+/// Backstop for every authorship-note writer (post-commit, rebase/cherry-pick/
+/// reset/stash rewrites, revert, untraced-commit fixup): a repository the
+/// repository filters reject gets no note on either backend. Reads a fresh
+/// config so the long-lived daemon sees filter changes without a restart.
+fn repository_accepts_notes(repo: &Repository) -> bool {
+    let tracked = Config::fresh().tracks_repository(repo);
+    if !tracked {
+        tracing::debug!("repository filters exclude this repository; authorship note not written");
+    }
+    tracked
+}
+
 pub fn write_note(repo: &Repository, commit_sha: &str, content: &str) -> Result<(), GitAiError> {
+    if !repository_accepts_notes(repo) {
+        return Ok(());
+    }
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => http_write_note(commit_sha, content),
         NotesBackendKind::GitNotes => crate::git::refs::notes_add(repo, commit_sha, content),
@@ -29,7 +44,7 @@ pub fn write_notes_batch(
     repo: &Repository,
     entries: &[(String, String)],
 ) -> Result<(), GitAiError> {
-    if entries.is_empty() {
+    if entries.is_empty() || !repository_accepts_notes(repo) {
         return Ok(());
     }
     match Config::get().notes_backend_kind() {
@@ -52,8 +67,9 @@ pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
 /// Returns a map of commit_sha → note_content for commits that have notes.
 ///
 /// On the HTTP backend this checks the local cache, then fetches-and-caches any
-/// misses from the remote, and finally falls back to local git notes; on the
-/// GitNotes backend it reads directly via the batched `notes_for_commits` path.
+/// misses from the remote (not for a repository the filters exclude), and
+/// finally falls back to local git notes; on the GitNotes backend it reads
+/// directly via the batched `notes_for_commits` path.
 pub fn read_notes_batch(
     repo: &Repository,
     commit_shas: &[String],
@@ -71,8 +87,16 @@ pub fn read_notes_batch(
                 .filter(|sha| !notes.contains_key(*sha))
                 .cloned()
                 .collect();
+            // An excluded repository sends nothing to the server, not even the
+            // commit SHAs of a read; the local cache and git notes still apply.
             if !missing_after_cache.is_empty() {
-                notes.extend(http_fetch_and_cache_notes(&missing_after_cache));
+                if Config::fresh().tracks_repository(repo) {
+                    notes.extend(http_fetch_and_cache_notes(&missing_after_cache));
+                } else {
+                    tracing::debug!(
+                        "repository filters exclude this repository; notes not read from the server"
+                    );
+                }
             }
 
             let missing_after_http: Vec<String> = commit_shas

@@ -24,6 +24,68 @@ pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
 pub(crate) const MEBIBYTE_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_DAEMON_MEMORY_LIMIT_MB: u64 = u64::MAX / MEBIBYTE_BYTES;
 
+/// Why the repository filters reject syncing notes with a remote
+/// (see [`Config::notes_sync_rejection`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepositoryFilterRejection {
+    /// `url` matches the `exclude_repositories` pattern `pattern`.
+    Excluded { pattern: String, url: String },
+    /// `url` (if known) matches no `allow_repositories` pattern.
+    NotAllowed { url: Option<String> },
+}
+
+impl RepositoryFilterRejection {
+    /// The rule that matched, e.g. `<url> matches exclude_repositories pattern '<p>'`.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Excluded { pattern, url } => format!(
+                "{} matches exclude_repositories pattern '{}'",
+                url_without_credentials(url),
+                pattern
+            ),
+            Self::NotAllowed { url: Some(url) } => format!(
+                "{} matches no allow_repositories pattern",
+                url_without_credentials(url)
+            ),
+            Self::NotAllowed { url: None } => {
+                "its URL matches no allow_repositories pattern".to_string()
+            }
+        }
+    }
+
+    /// How to change the filters so the rule no longer matches.
+    pub fn how_to_change_filters(&self) -> String {
+        match self {
+            Self::Excluded { pattern, .. } => format!(
+                "remove '{}' from exclude_repositories (see 'git ai config exclude_repositories')",
+                pattern
+            ),
+            Self::NotAllowed { url: Some(url) } => format!(
+                "allow it: git ai config --add allow_repositories {}",
+                url_without_credentials(url)
+            ),
+            Self::NotAllowed { url: None } => {
+                "add it to allow_repositories (see 'git ai config allow_repositories')".to_string()
+            }
+        }
+    }
+}
+
+/// `url` without the `user:password@` part of a `scheme://` URL. CI passes
+/// fork and clone URLs with a token there (GitHub `x-access-token`, GitLab
+/// `gitlab-ci-token`), so messages that name a URL must not print it as is.
+/// Matching is unaffected: it ignores credentials already.
+pub(crate) fn url_without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rsplit_once('@') {
+        Some((_, host)) => format!("{}://{}{}", scheme, host, &rest[authority_end..]),
+        None => url.to_string(),
+    }
+}
+
 /// Which backend to use for storing authorship notes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -431,6 +493,117 @@ impl Config {
 
     pub fn has_repository_filters(&self) -> bool {
         !self.allow_repositories.is_empty() || !self.exclude_repositories.is_empty()
+    }
+
+    /// Whether git-ai tracks `repository` at all. A repository rejected by
+    /// `allow_repositories` / `exclude_repositories` gets no git-ai side effects:
+    /// no checkpoints, authorship notes, or metrics. With filters set, a
+    /// repository whose remotes cannot be read is not tracked. Long-lived processes (the
+    /// daemon) should call this on `Config::fresh()` so filter changes apply
+    /// without a restart.
+    pub fn tracks_repository(&self, repository: &Repository) -> bool {
+        if !self.has_repository_filters() {
+            return true;
+        }
+        // Fail closed: remotes that cannot be read cannot be checked.
+        let Ok(remotes) = repository.remotes_with_all_urls() else {
+            return false;
+        };
+        self.is_allowed_repository_with_remotes(Some(&remotes))
+    }
+
+    /// Whether authorship notes may be pushed to or fetched from `remote` (a
+    /// remote name or a URL). The repository must be tracked, and every URL git
+    /// may use for `remote` must pass the filters: a repository allowed through
+    /// one remote must not sync notes with another remote the filters reject.
+    /// Fails closed when the URLs cannot be determined.
+    pub fn may_sync_notes_with_remote(&self, repository: &Repository, remote: &str) -> bool {
+        if !self.has_repository_filters() {
+            return true;
+        }
+        if !self.tracks_repository(repository) {
+            return false;
+        }
+        repository
+            .remote_transfer_urls(remote)
+            .is_ok_and(|urls| self.is_allowed_remote_urls(&urls))
+    }
+
+    /// Why [`Self::tracks_repository`] rejects `repository`, for user-facing
+    /// hints. `None` when the repository is tracked.
+    pub fn tracking_rejection(&self, repository: &Repository) -> Option<RepositoryFilterRejection> {
+        if self.tracks_repository(repository) {
+            return None;
+        }
+        Some(self.filter_rejection(Self::repository_urls(repository)))
+    }
+
+    /// Why [`Self::may_sync_notes_with_remote`] rejects `remote`, for user-facing
+    /// hints. `None` when notes may be synced.
+    pub fn notes_sync_rejection(
+        &self,
+        repository: &Repository,
+        remote: &str,
+    ) -> Option<RepositoryFilterRejection> {
+        if self.may_sync_notes_with_remote(repository, remote) {
+            return None;
+        }
+        let mut urls = repository.remote_transfer_urls(remote).unwrap_or_default();
+        urls.extend(Self::repository_urls(repository));
+        Some(self.filter_rejection(urls))
+    }
+
+    fn repository_urls(repository: &Repository) -> Vec<String> {
+        repository
+            .remotes_with_all_urls()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect()
+    }
+
+    /// The rule that rejects `urls`: an exclude match is reported first,
+    /// because exclusions take precedence; else the first URL outside the
+    /// allowlist.
+    fn filter_rejection(&self, urls: Vec<String>) -> RepositoryFilterRejection {
+        for url in &urls {
+            if let Some(pattern) = self
+                .exclude_repositories
+                .iter()
+                .find(|pattern| remote_matches_patterns(std::slice::from_ref(*pattern), url))
+            {
+                return RepositoryFilterRejection::Excluded {
+                    pattern: pattern.as_str().to_string(),
+                    url: url.clone(),
+                };
+            }
+        }
+        let url = urls
+            .into_iter()
+            .find(|url| !remote_matches_patterns(&self.allow_repositories, url));
+        RepositoryFilterRejection::NotAllowed { url }
+    }
+
+    pub(crate) fn is_allowed_remote_urls(&self, urls: &[String]) -> bool {
+        if urls
+            .iter()
+            .any(|url| crate::diagnostic_sentinels::is_debug_self_check_remote_url(url))
+        {
+            return true;
+        }
+        if urls.is_empty() {
+            return false;
+        }
+        if urls
+            .iter()
+            .any(|url| remote_matches_patterns(&self.exclude_repositories, url))
+        {
+            return false;
+        }
+        self.allow_repositories.is_empty()
+            || urls
+                .iter()
+                .all(|url| remote_matches_patterns(&self.allow_repositories, url))
     }
 
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
@@ -2596,6 +2769,83 @@ mod tests {
         assert!(!config.is_allowed_repository_with_remotes(None));
     }
 
+    fn urls(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// A repository in a temp dir with `.git/config` set to `config_text`.
+    fn repository_with_git_config(config_text: &str) -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        std::fs::create_dir_all(git_dir.join("refs")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git_dir.join("config"), config_text).unwrap();
+        let repo =
+            crate::git::repository::discover_repository_in_path_no_git_exec(dir.path()).unwrap();
+        (dir, repo)
+    }
+
+    #[test]
+    fn test_tracks_repository_with_readable_remotes() {
+        let config = create_test_config(vec![], vec!["https://github.com/*".to_string()]);
+        let (_dir, repo) = repository_with_git_config(
+            "[remote \"origin\"]\n\turl = https://gitlab.example.com/org/repo.git\n",
+        );
+        assert!(config.tracks_repository(&repo));
+    }
+
+    #[test]
+    fn test_tracks_repository_fails_closed_when_remotes_unreadable() {
+        let config = create_test_config(vec![], vec!["https://github.com/*".to_string()]);
+        let (_dir, repo) = repository_with_git_config("[remote \"origin\"\n\turl = x\n");
+        assert!(
+            repo.remotes_with_urls().is_err(),
+            "precondition: the config cannot be read"
+        );
+        assert!(!config.tracks_repository(&repo));
+    }
+
+    #[test]
+    fn test_remote_urls_denied_when_any_url_excluded() {
+        let config = create_test_config(vec![], vec!["https://github.com/*".to_string()]);
+        assert!(!config.is_allowed_remote_urls(&urls(&[
+            "https://gitlab.example.com/org/repo.git",
+            "https://github.com/org/repo.git",
+        ])));
+        assert!(config.is_allowed_remote_urls(&urls(&["https://gitlab.example.com/org/repo.git"])));
+    }
+
+    #[test]
+    fn test_remote_urls_need_every_url_in_allowlist() {
+        let config = create_test_config(vec!["https://gitlab.example.com/*".to_string()], vec![]);
+        assert!(config.is_allowed_remote_urls(&urls(&["https://gitlab.example.com/org/repo.git"])));
+        assert!(!config.is_allowed_remote_urls(&urls(&[
+            "https://gitlab.example.com/org/repo.git",
+            "https://github.com/org/repo.git",
+        ])));
+    }
+
+    #[test]
+    fn test_remote_urls_fail_closed_when_empty() {
+        let config = create_test_config(vec![], vec!["https://github.com/*".to_string()]);
+        assert!(!config.is_allowed_remote_urls(&[]));
+    }
+
+    #[test]
+    fn test_remote_urls_exclusion_matches_scp_form() {
+        let config = create_test_config(vec![], vec!["https://github.com/org/*".to_string()]);
+        assert!(!config.is_allowed_remote_urls(&urls(&["git@github.com:org/repo.git"])));
+    }
+
+    #[test]
+    fn test_remote_urls_allow_debug_self_check_sentinel() {
+        let config = create_test_config(vec!["https://gitlab.example.com/*".to_string()], vec![]);
+        assert!(config.is_allowed_remote_urls(&urls(&[
+            crate::diagnostic_sentinels::DEBUG_SELF_CHECK_REMOTE_URL
+        ])));
+    }
+
     #[test]
     fn test_empty_remotes_treated_as_no_match_for_exclusion() {
         let config = create_test_config(vec![], vec!["https://github.com/excluded/*".to_string()]);
@@ -2823,5 +3073,46 @@ mod tests {
             None => unsafe { std::env::remove_var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS") },
         }
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn filter_rejection_messages_hide_url_credentials() {
+        let secret_url = "https://x-access-token:SECRET@github.com/acme/fork.git";
+        let excluded = RepositoryFilterRejection::Excluded {
+            pattern: "https://github.com/*".to_string(),
+            url: secret_url.to_string(),
+        };
+        let not_allowed = RepositoryFilterRejection::NotAllowed {
+            url: Some(
+                "https://gitlab-ci-token:SECRET@gitlab.example.com/acme/fork.git".to_string(),
+            ),
+        };
+        for message in [
+            excluded.reason(),
+            excluded.how_to_change_filters(),
+            not_allowed.reason(),
+            not_allowed.how_to_change_filters(),
+        ] {
+            assert!(
+                !message.contains("SECRET"),
+                "credentials leaked: {}",
+                message
+            );
+        }
+        assert!(
+            excluded
+                .reason()
+                .contains("https://github.com/acme/fork.git")
+        );
+        assert!(
+            not_allowed
+                .how_to_change_filters()
+                .contains("https://gitlab.example.com/acme/fork.git")
+        );
+        // scp-like URLs carry a user name, not a secret: unchanged.
+        let scp = RepositoryFilterRejection::NotAllowed {
+            url: Some("git@github.com:acme/repo.git".to_string()),
+        };
+        assert!(scp.reason().contains("git@github.com:acme/repo.git"));
     }
 }

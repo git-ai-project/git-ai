@@ -146,6 +146,11 @@ fn print_config_help() {
     println!("    - A URL/git protocol: \"git@github.com:org/repo.git\"");
     println!("    - A file path: \".\" or \"/path/to/repo\" (resolves to repo's remotes)");
     println!();
+    println!("  A repository rejected by allow_repositories / exclude_repositories gets no");
+    println!("  checkpoints and no authorship notes. Notes are only pushed to or fetched from");
+    println!("  a remote whose url and pushurl both pass the filters. Metrics about a rejected");
+    println!("  repository are not uploaded, and its notes are not read from the HTTP backend.");
+    println!();
     println!("Examples:");
     println!("  git-ai config exclude_repositories");
     println!("  git-ai config set disable_auto_updates true");
