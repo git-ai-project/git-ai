@@ -108,10 +108,10 @@ trap cleanup EXIT
 
 if [[ "$HOOK_MODE" == "daemon" ]]; then
   if [[ -z "${GIT_AI_DAEMON_CONTROL_SOCKET:-}" ]]; then
-    export GIT_AI_DAEMON_CONTROL_SOCKET="$HOME/.git-ai/internal/daemon/control.sock"
+    export GIT_AI_DAEMON_CONTROL_SOCKET="$HOME/.dcc/ai-tracking/internal/daemon/control.sock"
   fi
   if [[ -z "${GIT_TRACE2_EVENT:-}" ]]; then
-    export GIT_TRACE2_EVENT="af_unix:stream:$HOME/.git-ai/internal/daemon/trace2.sock"
+    export GIT_TRACE2_EVENT="af_unix:stream:$HOME/.dcc/ai-tracking/internal/daemon/trace2.sock"
   fi
   if [[ -z "${GIT_TRACE2_EVENT_NESTING:-}" ]]; then
     export GIT_TRACE2_EVENT_NESTING="0"

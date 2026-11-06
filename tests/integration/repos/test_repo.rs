@@ -192,9 +192,7 @@ impl DaemonProcess {
     ) -> Self {
         let control_socket_path = Self::control_socket_path_for_home(test_home);
         let trace_socket_path = Self::trace_socket_path_for_home(test_home);
-        let stderr_log_path = test_home
-            .join(".git-ai")
-            .join("internal")
+        let stderr_log_path = git_ai::config::internal_dir_for_home(test_home)
             .join("daemon")
             .join("daemon.test.stderr.log");
         fs::create_dir_all(
@@ -513,7 +511,7 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     {
         command.env(
             "GIT_AI_TEST_NOTES_DB_PATH",
-            test_home.join(".git-ai").join("internal").join("notes-db"),
+            git_ai::config::internal_dir_for_home(test_home).join("notes-db"),
         );
     }
     command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
@@ -1296,7 +1294,7 @@ impl TestRepo {
             );
         }
 
-        let config_dir = home.join(".git-ai");
+        let config_dir = git_ai::config::git_ai_dir_for_home(home);
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
         let config_path = config_dir.join("config.json");
         let serialized = serde_json::to_string(&config).expect("failed to serialize test config");
@@ -3630,10 +3628,10 @@ fn find_real_git_by_probe() -> String {
 /// The `OnceLock` guarantees the init runs exactly once even under parallel tests.
 ///
 /// After this call:
-/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git,
+/// - `~/.dcc/ai-tracking/config.json` in the isolated HOME has `git_path` → real git,
 ///   so no daemon auto-spawn from in-process Config::get() calls.
 /// - `~/.gitconfig` is a minimal stub so plain git subprocesses don't fail.
-/// - Developer's real `~/.git-ai/`, `~/.claude/`, `~/.gitconfig` are unreachable.
+/// - Developer's real `~/.dcc/ai-tracking/`, `~/.claude/`, `~/.gitconfig` are unreachable.
 fn ensure_isolated_process_home() {
     static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     PROCESS_HOME.get_or_init(|| {
@@ -3651,9 +3649,9 @@ fn ensure_isolated_process_home() {
         // Probe for real git before we overwrite HOME
         let real_git = find_real_git_by_probe();
 
-        // Minimal ~/.git-ai/config.json: real git_path
-        let git_ai_dir = home.join(".git-ai");
-        fs::create_dir_all(&git_ai_dir).expect("create .git-ai dir");
+        // Minimal ~/.dcc/ai-tracking/config.json: real git_path
+        let git_ai_dir = git_ai::config::git_ai_dir_for_home(&home);
+        fs::create_dir_all(&git_ai_dir).expect("create .dcc/ai-tracking dir");
         // Escape backslashes for JSON (relevant on Windows)
         let real_git_json = real_git.replace('\\', "\\\\");
         fs::write(
@@ -4061,7 +4059,7 @@ mod tests {
             .map(PathBuf::from);
         assert_eq!(
             notes_db_path,
-            Some(test_home.join(".git-ai").join("internal").join("notes-db"))
+            Some(git_ai::config::internal_dir_for_home(&test_home).join("notes-db"))
         );
     }
 
@@ -4150,7 +4148,7 @@ mod tests {
 
         assert_eq!(
             git_ai::config::internal_dir_path().expect("internal dir should resolve"),
-            home.join(".git-ai").join("internal"),
+            git_ai::config::internal_dir_for_home(&home),
             "in-process git-ai config lookup must use the isolated test home"
         );
     }

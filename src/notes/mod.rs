@@ -1,6 +1,6 @@
 //! Notes backend module.
 //!
-//! `notes::db` provides the dedicated `~/.git-ai/internal/notes-db` SQLite store
+//! `notes::db` provides the dedicated `~/.dcc/ai-tracking/internal/notes-db` SQLite store
 //! used by the HTTP notes backend as both a write queue and a local read cache.
 //!
 //! `notes::reference_server` is an in-memory reference implementation of the

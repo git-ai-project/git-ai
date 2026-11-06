@@ -92,7 +92,7 @@ jobs:
 
       - name: Verify shell configs and agent hooks
         run: |
-          INSTALL_DIR="$HOME/.git-ai/bin"
+          INSTALL_DIR="$HOME/.dcc/ai-tracking/bin"
           test -x "$INSTALL_DIR/git-ai"
           grep -F "$INSTALL_DIR" "$HOME/.bashrc"
           grep -F "$INSTALL_DIR" "$HOME/.zshrc"
@@ -120,7 +120,7 @@ jobs:
 
       - name: Set up E2E commit test environment
         run: |
-          INSTALL_DIR="$HOME/.git-ai/bin"
+          INSTALL_DIR="$HOME/.dcc/ai-tracking/bin"
           # Create a fresh test repo
           rm -rf /tmp/e2e-test-repo
           mkdir -p /tmp/e2e-test-repo
@@ -139,18 +139,18 @@ jobs:
 
       - name: Run git-ai install in E2E test repo
         run: |
-          INSTALL_DIR="$HOME/.git-ai/bin"
+          INSTALL_DIR="$HOME/.dcc/ai-tracking/bin"
           cd /tmp/e2e-test-repo
           "$INSTALL_DIR/git-ai" install
 
       - name: Verify Git and checkpoints use the installed daemon
         run: |
-          INSTALL_DIR="$HOME/.git-ai/bin"
+          INSTALL_DIR="$HOME/.dcc/ai-tracking/bin"
           cd /tmp/e2e-test-repo
           test -z "${GIT_AI_DAEMON_HOME:-}"
           "$INSTALL_DIR/git-ai" bg status
           actual_target="$(git config --global --get trace2.eventTarget)"
-          expected_target="af_unix:stream:$HOME/.git-ai/internal/daemon/trace2.sock"
+          expected_target="af_unix:stream:$HOME/.dcc/ai-tracking/internal/daemon/trace2.sock"
           test "$actual_target" = "$expected_target"
 
       - name: Run synthetic agent commit
@@ -172,8 +172,8 @@ jobs:
       - name: Stop installed daemon
         if: always()
         run: |
-          if [ -x "$HOME/.git-ai/bin/git-ai" ]; then
-            "$HOME/.git-ai/bin/git-ai" bg shutdown || true
+          if [ -x "$HOME/.dcc/ai-tracking/bin/git-ai" ]; then
+            "$HOME/.dcc/ai-tracking/bin/git-ai" bg shutdown || true
           fi
 
       - name: Upload E2E test results
@@ -254,7 +254,7 @@ jobs:
           HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
           HOMEPATH: ${{ env.TEST_HOME_PATH }}
         run: |
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "git-ai.exe"))) { throw "git-ai.exe not installed" }
           switch ("${{ matrix.agent.name }}") {
             "claude" {
@@ -286,7 +286,7 @@ jobs:
           HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
           HOMEPATH: ${{ env.TEST_HOME_PATH }}
         run: |
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           $gitAiExe = Join-Path $installDir "git-ai.exe"
           if (-not (Test-Path -LiteralPath $gitAiExe)) { throw "git-ai.exe not found at $gitAiExe" }
           # Create a fresh test repo (remove if exists)
@@ -318,7 +318,7 @@ jobs:
           HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
           HOMEPATH: ${{ env.TEST_HOME_PATH }}
         run: |
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           $gitAiExe = Join-Path $installDir "git-ai.exe"
           if ($env:GIT_AI_DAEMON_HOME) {
             throw "GIT_AI_DAEMON_HOME changed after install: $env:GIT_AI_DAEMON_HOME"
@@ -329,7 +329,7 @@ jobs:
 
           $actualTarget = (git config --global --get trace2.eventTarget | Out-String).Trim()
           if ($LASTEXITCODE -ne 0) { throw "trace2.eventTarget is not configured" }
-          $internalDir = Join-Path $env:USERPROFILE ".git-ai\internal"
+          $internalDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\internal"
           $pathBytes = [System.Text.Encoding]::UTF8.GetBytes($internalDir)
           $pathHash = [System.Convert]::ToHexString(
             [System.Security.Cryptography.SHA256]::HashData($pathBytes)
@@ -349,7 +349,7 @@ jobs:
         run: |
           $agent = "${{ matrix.agent.name }}"
           $testRepo = $env:E2E_TEST_REPO
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           $gitAiExe = Join-Path $installDir "git-ai.exe"
           Set-Location $testRepo
           # Create test file representing agent output
@@ -391,7 +391,7 @@ jobs:
         run: |
           $agent = "${{ matrix.agent.name }}"
           $testRepo = $env:E2E_TEST_REPO
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           $gitAiExe = Join-Path $installDir "git-ai.exe"
           $resultsDir = "C:\e2e-results\$agent"
           New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
@@ -520,7 +520,7 @@ jobs:
           HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
           HOMEPATH: ${{ env.TEST_HOME_PATH }}
         run: |
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           $gitAiExe = Join-Path $installDir "git-ai.exe"
           if (Test-Path $gitAiExe) {
             & $gitAiExe bg shutdown 2>&1 | Out-Null

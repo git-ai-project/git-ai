@@ -52,7 +52,7 @@ Driven by `TokenUsageWorker` (`src/daemon/token_usage_worker.rs`):
   (5s/30s/5m/30m) instead of retrying on every trigger; the telemetry-buffer
   backpressure mirrors the stream worker.
 
-## State: `~/.git-ai/internal/token-usage-db`
+## State: `~/.dcc/ai-tracking/internal/token-usage-db`
 
 `TokenUsageDatabase` (`src/token_usage/db.rs`):
 

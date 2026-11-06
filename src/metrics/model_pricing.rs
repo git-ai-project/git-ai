@@ -4,7 +4,7 @@
 //! model-id → per-million-token cost map over a first-party provider
 //! allowlist. Lookup resolves from, in order:
 //!
-//! 1. A local cache (`~/.git-ai/internal/models_dev_pricing.json`), refreshed
+//! 1. A local cache (`~/.dcc/ai-tracking/internal/models_dev_pricing.json`), refreshed
 //!    from models.dev by `git-ai usage` at most once per day (best-effort —
 //!    failures fall through silently). The cache only ever holds fetched
 //!    data, so machines that can never reach models.dev keep using the

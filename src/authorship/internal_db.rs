@@ -171,7 +171,7 @@ impl InternalDatabase {
         Ok(db)
     }
 
-    /// Get database path: ~/.git-ai/internal/db
+    /// Get database path: ~/.dcc/ai-tracking/internal/db
     /// In test mode, can be overridden via GIT_AI_TEST_DB_PATH environment variable.
     /// We also support GITAI_TEST_DB_PATH because some git hook execution paths
     /// may scrub custom GIT_* variables.
@@ -186,7 +186,7 @@ impl InternalDatabase {
 
         let home = dirs::home_dir()
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
-        Ok(home.join(".git-ai").join("internal").join("db"))
+        Ok(crate::config::internal_dir_for_home(&home).join("db"))
     }
 
     /// Initialize schema and handle migrations
@@ -618,7 +618,10 @@ mod tests {
         if let Some(override_path) = override_path {
             assert_eq!(path, PathBuf::from(override_path));
         } else {
-            assert!(path.to_string_lossy().contains(".git-ai"));
+            assert!(
+                path.components()
+                    .any(|part| part.as_os_str() == "ai-tracking")
+            );
             assert!(path.to_string_lossy().contains("internal"));
             assert!(path.to_string_lossy().ends_with("db"));
         }

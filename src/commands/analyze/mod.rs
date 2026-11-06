@@ -232,7 +232,7 @@ transcript) → exec a synthesis query over the columns you added. See
 
 Data lives in a shared Cube.js semantic layer behind https://usegitai.com/api/cube.
 Auth uses an org API key (organization:admin:read) sent as the x-api-key header;
-set it via the GIT_AI_API_KEY env var or "api_key" in ~/.git-ai/config.json. Your
+set it via the GIT_AI_API_KEY env var or "api_key" in ~/.dcc/ai-tracking/config.json. Your
 org is derived from the key — data is always scoped to your org.
 
 Scoping to a specific person ("my sessions", "the work I did", "what Jane wrote"):

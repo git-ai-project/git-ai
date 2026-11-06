@@ -13,7 +13,7 @@ import { KnownHumanCheckpointManager } from "./known-human-checkpoint-manager";
 
 function getDistinctId(): string {
   try {
-    const idPath = path.join(os.homedir(), ".git-ai", "internal", "distinct_id");
+    const idPath = path.join(os.homedir(), ".dcc", "ai-tracking", "internal", "distinct_id");
     return fs.readFileSync(idPath, "utf-8").trim() || "unknown";
   } catch {
     return "unknown";
@@ -22,7 +22,7 @@ function getDistinctId(): string {
 
 function isTelemetryOssDisabled(): boolean {
   try {
-    const configPath = path.join(os.homedir(), ".git-ai", "config.json");
+    const configPath = path.join(os.homedir(), ".dcc", "ai-tracking", "config.json");
     const raw = fs.readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw);
     return config.telemetry_oss === "off";

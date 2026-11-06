@@ -26,7 +26,7 @@ export type IDEHostKind =
  */
 function loadVscodeIdeNames(): string[] {
   try {
-    const filePath = path.join(os.homedir(), ".git-ai", "VSCODE_IDE_NAMES");
+    const filePath = path.join(os.homedir(), ".dcc", "ai-tracking", "VSCODE_IDE_NAMES");
     const content = fs.readFileSync(filePath, "utf-8");
     return content
       .split("\n")

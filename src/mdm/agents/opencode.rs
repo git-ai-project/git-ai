@@ -380,14 +380,14 @@ mod tests {
 
     #[test]
     fn test_opencode_plugin_windows_path_escaping() {
-        let binary_path = PathBuf::from(r"C:\Users\foo\.git-ai\bin\git-ai.exe");
+        let binary_path = PathBuf::from(r"C:\Users\foo\.dcc\ai-tracking\bin\git-ai.exe");
         let content = OpenCodeInstaller::generate_plugin_content(&binary_path);
 
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
         // Backslashes should be doubled for the TS string literal
-        assert!(
-            content.contains(r#"const GIT_AI_BIN = "C:\\Users\\foo\\.git-ai\\bin\\git-ai.exe""#)
-        );
+        assert!(content.contains(
+            r#"const GIT_AI_BIN = "C:\\Users\\foo\\.dcc\\ai-tracking\\bin\\git-ai.exe""#
+        ));
     }
 
     #[test]

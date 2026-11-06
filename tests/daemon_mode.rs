@@ -67,6 +67,15 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
     DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
+#[test]
+fn test_daemon_uses_dcc_ai_tracking_directory() {
+    let repo = TestRepo::new();
+    let home = repo.daemon_home_path();
+    let config = DaemonConfig::from_home(&home);
+    assert_eq!(config.internal_dir, home.join(".dcc/ai-tracking/internal"));
+    assert!(config.internal_dir.join("repo-families-db").is_file());
+}
+
 #[cfg(not(windows))]
 fn wait_for_daemon_log(repo: &TestRepo, needle: &str) -> String {
     let started = std::time::Instant::now();
@@ -8450,7 +8459,7 @@ fn daemon_marks_repository_filtered_session_events_delivered_without_uploading_t
         ),
     ]);
     fs::write(
-        repo.test_home_path().join(".git-ai/config.json"),
+        repo.test_home_path().join(".dcc/ai-tracking/config.json"),
         r#"{"allow_repositories":["https://github.com/acme/*"],"exclude_repositories":["git@github.com:acme/private"]}"#,
     )
     .unwrap();
@@ -8510,7 +8519,7 @@ fn daemon_marks_repository_filtered_token_usage_events_delivered_without_uploadi
         ),
     ]);
     fs::write(
-        repo.test_home_path().join(".git-ai/config.json"),
+        repo.test_home_path().join(".dcc/ai-tracking/config.json"),
         r#"{"allow_repositories":["https://github.com/acme/*"],"exclude_repositories":["git@github.com:acme/private"]}"#,
     )
     .unwrap();
@@ -8666,7 +8675,7 @@ fn token_usage_without_repo_url_passes_an_exclude_only_gate() {
         ),
     ]);
     fs::write(
-        repo.test_home_path().join(".git-ai/config.json"),
+        repo.test_home_path().join(".dcc/ai-tracking/config.json"),
         r#"{"exclude_repositories":["git@github.com:acme/private"]}"#,
     )
     .unwrap();
@@ -8719,7 +8728,7 @@ fn excluded_repo_token_usage_never_uploads_via_the_real_pipeline() {
         ),
     ]);
     fs::write(
-        repo.test_home_path().join(".git-ai/config.json"),
+        repo.test_home_path().join(".dcc/ai-tracking/config.json"),
         r#"{"exclude_repositories":["https://github.com/acme/private"]}"#,
     )
     .unwrap();

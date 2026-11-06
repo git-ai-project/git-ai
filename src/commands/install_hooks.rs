@@ -1024,12 +1024,12 @@ async fn async_run_uninstall(
 /// Remove the legacy envelope logs directory and related lock/marker files.
 ///
 /// All telemetry now flows through the daemon control socket, so the per-PID
-/// log file system under `~/.git-ai/internal/logs/` is no longer needed.
+/// log file system under `~/.dcc/ai-tracking/internal/logs/` is no longer needed.
 fn cleanup_legacy_envelope_logs() {
     let Some(home) = dirs::home_dir() else {
         return;
     };
-    let internal = home.join(".git-ai").join("internal");
+    let internal = crate::config::internal_dir_for_home(&home);
 
     // Remove the entire logs directory
     let logs_dir = internal.join("logs");
@@ -1364,12 +1364,24 @@ mod tests {
 
         let changed = persist_install_config(&test_binary_path(&install_dir), false).unwrap();
         assert!(!changed);
-        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+        assert!(
+            !temp
+                .path()
+                .join(".dcc/ai-tracking")
+                .join("config.json")
+                .exists()
+        );
 
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
         let changed = persist_install_config(&test_binary_path(&install_dir), true).unwrap();
         assert!(!changed);
-        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+        assert!(
+            !temp
+                .path()
+                .join(".dcc/ai-tracking")
+                .join("config.json")
+                .exists()
+        );
     }
 
     #[test]

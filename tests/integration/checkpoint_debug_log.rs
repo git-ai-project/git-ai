@@ -15,7 +15,7 @@ fn test_checkpoint_debug_log_writes_when_enabled() {
 
     let log_dir = repo
         .test_home_path()
-        .join(".git-ai")
+        .join(".dcc/ai-tracking")
         .join("internal")
         .join("checkpoint-debug-logs");
     assert!(log_dir.exists(), "checkpoint-debug-logs dir should exist");
@@ -47,7 +47,7 @@ fn test_checkpoint_debug_log_does_not_write_when_disabled() {
 
     let log_dir = repo
         .test_home_path()
-        .join(".git-ai")
+        .join(".dcc/ai-tracking")
         .join("internal")
         .join("checkpoint-debug-logs");
     assert!(
@@ -73,7 +73,7 @@ fn test_checkpoint_debug_log_appends_multiple_entries() {
 
     let log_dir = repo
         .test_home_path()
-        .join(".git-ai")
+        .join(".dcc/ai-tracking")
         .join("internal")
         .join("checkpoint-debug-logs");
 

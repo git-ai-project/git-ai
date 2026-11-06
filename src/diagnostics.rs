@@ -441,10 +441,8 @@ pub fn run_attribution_self_check(target: &GitDiagnosticTarget) -> DiagnosticChe
 pub fn run_trace2_file_self_check(target: &GitDiagnosticTarget) -> DiagnosticCheckResult {
     let mut commands = Vec::new();
     let deadline = Instant::now() + DEBUG_CHECK_TIMEOUT;
-    let trace_dir = crate::mdm::utils::home_dir()
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon");
+    let trace_dir =
+        crate::config::internal_dir_for_home(&crate::mdm::utils::home_dir()).join("daemon");
     let trace_path = trace_dir.join(format!(
         "trace2-debug-check-{}-{}.json",
         sanitize_label(&target.label),

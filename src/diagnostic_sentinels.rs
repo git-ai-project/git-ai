@@ -16,9 +16,7 @@ pub fn debug_self_check_root() -> PathBuf {
     crate::daemon::DaemonConfig::from_env_or_default_paths()
         .map(|config| config.internal_dir.join(DEBUG_SELF_CHECK_DIR_NAME))
         .unwrap_or_else(|_| {
-            crate::mdm::utils::home_dir()
-                .join(".git-ai")
-                .join("internal")
+            crate::config::internal_dir_for_home(&crate::mdm::utils::home_dir())
                 .join(DEBUG_SELF_CHECK_DIR_NAME)
         })
 }

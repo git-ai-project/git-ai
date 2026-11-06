@@ -7,8 +7,8 @@ if ($args.Count -gt 0 -and $args[0] -eq '--release') {
     $BuildType = 'release'
 }
 
-$InstallDir = Join-Path $HOME '.git-ai\bin'
-$ConfigPath = Join-Path $HOME '.git-ai\config.json'
+$InstallDir = Join-Path $HOME '.dcc\ai-tracking\bin'
+$ConfigPath = Join-Path $HOME '.dcc\ai-tracking\config.json'
 $GitAiExe = Join-Path $InstallDir 'git-ai.exe'
 $GitShim = Join-Path $InstallDir 'git.exe'
 
@@ -85,7 +85,7 @@ function Install-Binary {
     Move-Item -Path $tmpPath -Destination $DstPath
 }
 
-# Run production installer if ~/.git-ai isn't set up or ~/.git-ai/bin isn't on PATH
+# Run production installer if ~/.dcc/ai-tracking isn't set up or ~/.dcc/ai-tracking/bin isn't on PATH
 $needsInstall = $false
 if (-not (Test-Path -LiteralPath $InstallDir) -or
     -not (Test-Path -LiteralPath $ConfigPath)) {

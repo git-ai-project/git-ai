@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn test_claude_hook_commands_no_windows_extended_path_prefix() {
-        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.dcc\ai-tracking\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
         let binary_path_str = normalize_windows_path_for_shell(&binary_path);
@@ -1204,19 +1204,19 @@ mod tests {
 
     #[test]
     fn test_claude_hook_commands_use_forward_slash_path_on_windows() {
-        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.dcc\ai-tracking\bin\git-ai.exe");
         let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
         assert_eq!(
             pre_tool_cmd,
-            "C:/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "C:/Users/Administrator/.dcc/ai-tracking/bin/git-ai.exe checkpoint claude --hook-input stdin",
             "PreToolUse command should use forward-slash path format"
         );
         assert_eq!(
             post_tool_cmd,
-            "C:/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "C:/Users/Administrator/.dcc/ai-tracking/bin/git-ai.exe checkpoint claude --hook-input stdin",
             "PostToolUse command should use forward-slash path format"
         );
     }

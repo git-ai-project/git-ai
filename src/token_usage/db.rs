@@ -1,6 +1,6 @@
 //! Token-usage state database.
 //!
-//! One SQLite database (`~/.git-ai/internal/token-usage-db`) holds everything
+//! One SQLite database (`~/.dcc/ai-tracking/internal/token-usage-db`) holds everything
 //! the token-usage pipeline needs to stay consistent:
 //!
 //! - `tracked_files`: the authoritative read cursor (byte offset) and

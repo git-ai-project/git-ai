@@ -501,10 +501,10 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         // binary and shims are in use and need to be replaced. The installer will wait
         // for the files to be released before proceeding.
         let pid = std::process::id();
-        let log_dir = dirs::home_dir()
-            .ok_or_else(|| "Could not determine home directory".to_string())?
-            .join(".git-ai")
-            .join("upgrade-logs");
+        let log_dir = crate::config::git_ai_dir_for_home(
+            &dirs::home_dir().ok_or_else(|| "Could not determine home directory".to_string())?,
+        )
+        .join("upgrade-logs");
 
         // Ensure the log directory exists
         fs::create_dir_all(&log_dir)
@@ -537,7 +537,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
                   Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
               }} finally {{ \
                   if ($env:{} -eq '1') {{ \
-                      $daemonExe = Join-Path $HOME '.git-ai\\bin\\git-ai.exe'; \
+                      $daemonExe = Join-Path $HOME '.dcc\\ai-tracking\\bin\\git-ai.exe'; \
                       if (Test-Path $daemonExe) {{ try {{ & $daemonExe bg start *> $null }} catch {{ }} }} \
                   }}; \
                   Stop-Transcript | Out-Null; \
@@ -594,7 +594,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        // Write script to ~/.git-ai/tmp/ to avoid /tmp noexec or permission issues.
+        // Write script to ~/.dcc/ai-tracking/tmp/ to avoid /tmp noexec or permission issues.
         // Fall back to the system temp dir if the home-based path is unavailable.
         let temp_dir = crate::config::git_ai_dir_path()
             .map(|p| p.join("tmp"))

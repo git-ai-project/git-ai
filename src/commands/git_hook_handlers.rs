@@ -397,11 +397,17 @@ fn remove_hook_entry(hook_path: &Path) -> Result<(), GitAiError> {
 // Internal helpers - forward path validation
 // ---------------------------------------------------------------------------
 
-fn is_path_inside_component(path: &Path, component: &str) -> bool {
-    path.components().any(|part| {
-        part.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(component)
+fn is_path_inside_git_ai_home(path: &Path) -> bool {
+    let storage_dir = crate::config::git_ai_dir_for_home(Path::new(""));
+    path.ancestors().any(|ancestor| {
+        let mut actual = ancestor.components().rev();
+        storage_dir.components().rev().all(|expected| {
+            actual.next().is_some_and(|part| {
+                part.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+            })
+        })
     })
 }
 
@@ -422,7 +428,7 @@ fn is_disallowed_forward_hooks_path(
     repo: Option<&Repository>,
     managed_hooks_path: Option<&Path>,
 ) -> bool {
-    if is_path_inside_component(path, ".git-ai") {
+    if is_path_inside_git_ai_home(path) {
         return true;
     }
     if is_path_inside_any_git_ai_dir(path) {

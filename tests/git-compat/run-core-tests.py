@@ -70,7 +70,7 @@ def make_isolated_env(isolated_home: str) -> dict:
                            makes the suite take 10+ minutes instead of ~30 s.
 
     This prevents compat tests from:
-    - Reading/writing the developer's ~/.git-ai/config.json or ~/.claude/
+    - Reading/writing the developer's ~/.dcc/ai-tracking/config.json or ~/.claude/
     - Triggering daemon auto-start for every git command
     - Running hook overhead (checkpoints, authorship notes) on throwaway repos
     """
@@ -96,7 +96,7 @@ def make_isolated_env(isolated_home: str) -> dict:
     real_git = shutil.which("git", path=env["PATH"]) or "/usr/bin/git"
 
     # Write git-ai config.
-    git_ai_dir = os.path.join(isolated_home, ".git-ai")
+    git_ai_dir = os.path.join(isolated_home, ".dcc/ai-tracking")
     os.makedirs(git_ai_dir, exist_ok=True)
     with open(os.path.join(git_ai_dir, "config.json"), "w") as f:
         json.dump(
@@ -438,7 +438,7 @@ def main() -> int:
 
     # Wrap the entire test run (including git clone/build) in an isolated HOME so
     # that the release git-ai binary cannot read or write the developer's real
-    # ~/.git-ai/config.json, ~/.claude/settings.json, etc.  The isolated env
+    # ~/.dcc/ai-tracking/config.json, ~/.claude/settings.json, etc.  The isolated env
     # sets _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 to prevent daemon
     # auto-spawn and the resulting 2-second-per-git-command timeout.
     with tempfile.TemporaryDirectory(prefix="git-ai-compat-home-") as isolated_home:

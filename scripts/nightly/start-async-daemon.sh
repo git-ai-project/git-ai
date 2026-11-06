@@ -4,7 +4,7 @@
 # Usage:  source scripts/nightly/start-async-daemon.sh <git-ai-binary> [real-git-path]
 #
 # The script:
-#   1. Creates ~/.git-ai/config.json for the daemon
+#   1. Creates ~/.dcc/ai-tracking/config.json for the daemon
 #   2. Picks socket paths under RUNNER_TEMP (or /tmp)
 #   3. Starts the daemon in the background
 #   4. Waits for sockets to appear (up to 10 s)
@@ -38,10 +38,10 @@ fi
 
 # ── Daemon home directory ────────────────────────────────────────────────────
 DAEMON_HOME=$(mktemp -d "${RUNNER_TEMP:-/tmp}/git-ai-daemon-XXXXXX")
-mkdir -p "$DAEMON_HOME/.git-ai"
+mkdir -p "$DAEMON_HOME/.dcc/ai-tracking"
 
 # ── Write daemon config ──────────────────────────────────────────────────────
-cat > "$DAEMON_HOME/.git-ai/config.json" <<CONF
+cat > "$DAEMON_HOME/.dcc/ai-tracking/config.json" <<CONF
 {
     "git_path": "$REAL_GIT",
     "disable_auto_updates": true,

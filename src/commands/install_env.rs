@@ -86,7 +86,10 @@ mod unix {
     }
 
     fn install_dir_string(home: &Path) -> String {
-        format!("{}/.git-ai/bin", home.display())
+        crate::config::git_ai_dir_for_home(home)
+            .join("bin")
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Detect all shells with existing config files, mirroring
@@ -619,7 +622,7 @@ mod unix {
 
         #[test]
         fn render_report_for_empty_report_prints_manual_instructions() {
-            let install_dir = "/home/user/.git-ai/bin";
+            let install_dir = "/home/user/.dcc/ai-tracking/bin";
             let rendered = render_report(&EnvSetupReport::default(), install_dir);
 
             assert_eq!(
@@ -710,7 +713,7 @@ mod windows {
     const NC: &str = "\x1b[0m";
 
     /// Marker used by install.ps1 to detect an existing Git Bash PATH entry.
-    const GIT_BASH_MARKER: &str = ".git-ai/bin";
+    const GIT_BASH_MARKER: &str = ".dcc/ai-tracking/bin";
 
     pub(super) fn configure_shell_env() {
         let home = home_dir();
@@ -720,7 +723,7 @@ mod windows {
         if std::env::var("GIT_AI_SKIP_PATH_UPDATE").as_deref() == Ok("1") {
             eprintln!("{YELLOW}Skipping PATH updates because GIT_AI_SKIP_PATH_UPDATE=1{NC}");
         } else {
-            let install_dir = home.join(".git-ai").join("bin");
+            let install_dir = crate::config::git_ai_dir_for_home(&home).join("bin");
             match ensure_user_path_contains(&install_dir) {
                 UserPathStatus::Updated => {
                     println!("{GREEN}Successfully added git-ai to the user PATH.{NC}")
@@ -939,7 +942,11 @@ mod windows {
 
         // UTF-8 without BOM and LF line endings, matching install.ps1's
         // AppendAllText with UTF8Encoding($false) and `n.
-        append_installer_line(target, timestamp, "export PATH=\"$HOME/.git-ai/bin:$PATH\"")?;
+        append_installer_line(
+            target,
+            timestamp,
+            "export PATH=\"$HOME/.dcc/ai-tracking/bin:$PATH\"",
+        )?;
         Ok(true)
     }
 
@@ -954,32 +961,35 @@ mod windows {
         #[test]
         fn normalize_path_for_compare_is_case_and_trailing_slash_insensitive() {
             assert_eq!(
-                normalize_path_for_compare(r"C:\Users\Test\.git-ai\bin\"),
-                normalize_path_for_compare(r"c:\users\test\.git-ai\bin")
+                normalize_path_for_compare(r"C:\Users\Test\.dcc\ai-tracking\bin\"),
+                normalize_path_for_compare(r"c:\users\test\.dcc\ai-tracking\bin")
             );
             assert_eq!(
-                normalize_path_for_compare(r"  C:\Users\Test\.git-ai\bin  "),
-                normalize_path_for_compare(r"C:\Users\Test\.git-ai\bin")
+                normalize_path_for_compare(r"  C:\Users\Test\.dcc\ai-tracking\bin  "),
+                normalize_path_for_compare(r"C:\Users\Test\.dcc\ai-tracking\bin")
             );
         }
 
         #[test]
         fn user_path_merge_appends_when_missing() {
             assert_eq!(
-                user_path_merge(Some(r"C:\Windows;C:\Tools"), r"C:\Users\t\.git-ai\bin"),
-                Some(r"C:\Windows;C:\Tools;C:\Users\t\.git-ai\bin".to_string())
+                user_path_merge(
+                    Some(r"C:\Windows;C:\Tools"),
+                    r"C:\Users\t\.dcc\ai-tracking\bin"
+                ),
+                Some(r"C:\Windows;C:\Tools;C:\Users\t\.dcc\ai-tracking\bin".to_string())
             );
         }
 
         #[test]
         fn user_path_merge_uses_dir_alone_when_path_is_empty_or_missing() {
             assert_eq!(
-                user_path_merge(None, r"C:\Users\t\.git-ai\bin"),
-                Some(r"C:\Users\t\.git-ai\bin".to_string())
+                user_path_merge(None, r"C:\Users\t\.dcc\ai-tracking\bin"),
+                Some(r"C:\Users\t\.dcc\ai-tracking\bin".to_string())
             );
             assert_eq!(
-                user_path_merge(Some(""), r"C:\Users\t\.git-ai\bin"),
-                Some(r"C:\Users\t\.git-ai\bin".to_string())
+                user_path_merge(Some(""), r"C:\Users\t\.dcc\ai-tracking\bin"),
+                Some(r"C:\Users\t\.dcc\ai-tracking\bin".to_string())
             );
         }
 
@@ -988,7 +998,7 @@ mod windows {
             assert_eq!(
                 user_path_merge(
                     Some(r"C:\Windows;c:\users\T\.GIT-AI\BIN\"),
-                    r"C:\Users\t\.git-ai\bin"
+                    r"C:\Users\t\.dcc\ai-tracking\bin"
                 ),
                 None
             );
@@ -998,8 +1008,8 @@ mod windows {
         fn expand_env_strings_resolves_userprofile_references() {
             let userprofile = std::env::var("USERPROFILE").unwrap();
             assert_eq!(
-                expand_env_strings(r"%USERPROFILE%\.git-ai\bin"),
-                format!(r"{userprofile}\.git-ai\bin")
+                expand_env_strings(r"%USERPROFILE%\.dcc\ai-tracking\bin"),
+                format!(r"{userprofile}\.dcc\ai-tracking\bin")
             );
         }
 
@@ -1034,7 +1044,7 @@ mod windows {
             assert_eq!(
                 String::from_utf8(bytes).unwrap(),
                 format!(
-                    "\n# Added by git-ai installer on {TS}\nexport PATH=\"$HOME/.git-ai/bin:$PATH\"\n"
+                    "\n# Added by git-ai installer on {TS}\nexport PATH=\"$HOME/.dcc/ai-tracking/bin:$PATH\"\n"
                 )
             );
         }
@@ -1056,7 +1066,7 @@ mod windows {
             let target = home.path().join(".bashrc");
             fs::write(
                 &target,
-                "export PATH=\"$HOME/.git-ai/bin:$PATH\" # custom\n",
+                "export PATH=\"$HOME/.dcc/ai-tracking/bin:$PATH\" # custom\n",
             )
             .unwrap();
 

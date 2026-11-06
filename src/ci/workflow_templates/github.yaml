@@ -15,7 +15,7 @@ jobs:
       - name: Install git-ai
         run: |
           curl -fsSL https://usegitai.com/install.sh | bash
-          echo "$HOME/.git-ai/bin" >> $GITHUB_PATH
+          echo "$HOME/.dcc/ai-tracking/bin" >> $GITHUB_PATH
       - name: Run git-ai
         id: run-git-ai
         env:

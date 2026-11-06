@@ -22,7 +22,7 @@ git-ai:
       when: always
   script:
     - curl -fsSL https://usegitai.com/install.sh | bash
-    - export PATH="$HOME/.git-ai/bin:$PATH"
+    - export PATH="$HOME/.dcc/ai-tracking/bin:$PATH"
     - git config --global user.name "gitlab-ci[bot]"
     - git config --global user.email "gitlab-ci[bot]@users.noreply.gitlab.com"
     - git-ai ci gitlab run

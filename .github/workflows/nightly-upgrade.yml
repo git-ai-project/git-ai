@@ -171,7 +171,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$HOME/.git-ai/bin:$PATH"
+          export PATH="$HOME/.dcc/ai-tracking/bin:$PATH"
           latest="${{ steps.versions.outputs.latest }}"
           latest="${latest#v}"
           for version in ${{ steps.versions.outputs.versions }}; do
@@ -195,18 +195,18 @@ jobs:
           $latest = "${{ steps.versions-windows.outputs.latest }}"
           $latest = $latest.TrimStart('v')
           $versions = "${{ steps.versions-windows.outputs.versions }}".Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
-          $env:PATH = "$HOME\.git-ai\bin;$env:PATH"
+          $env:PATH = "$HOME\.dcc\ai-tracking\bin;$env:PATH"
           foreach ($version in $versions) {
             Write-Host "Installing $version"
             $env:GIT_AI_RELEASE_TAG = $version
             pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-            & "$HOME\.git-ai\bin\git-ai" --version | Out-Host
-            & "$HOME\.git-ai\bin\git-ai" upgrade
-            $installed = (& "$HOME\.git-ai\bin\git-ai" --version).Trim().Split()[-1].TrimStart('v')
+            & "$HOME\.dcc\ai-tracking\bin\git-ai" --version | Out-Host
+            & "$HOME\.dcc\ai-tracking\bin\git-ai" upgrade
+            $installed = (& "$HOME\.dcc\ai-tracking\bin\git-ai" --version).Trim().Split()[-1].TrimStart('v')
             $deadline = (Get-Date).AddMinutes(3)
             while ($installed -ne $latest -and (Get-Date) -lt $deadline) {
               Start-Sleep -Seconds 5
-              $installed = (& "$HOME\.git-ai\bin\git-ai" --version).Trim().Split()[-1].TrimStart('v')
+              $installed = (& "$HOME\.dcc\ai-tracking\bin\git-ai" --version).Trim().Split()[-1].TrimStart('v')
             }
             if ($installed -ne $latest) {
               throw "Expected $latest after upgrade, got $installed"

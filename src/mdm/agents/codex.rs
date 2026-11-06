@@ -998,7 +998,7 @@ mod tests {
     }
 
     fn write_git_ai_config(home: &Path, codex_hooks_format: &str) {
-        let git_ai_dir = home.join(".git-ai");
+        let git_ai_dir = crate::config::git_ai_dir_for_home(home);
         fs::create_dir_all(&git_ai_dir).unwrap();
         fs::write(
             git_ai_dir.join("config.json"),
@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn test_is_git_ai_codex_notify_args_true_for_legacy_via_codex_notify_args() {
         let args = vec![
-            "/Users/svarlamov/.git-ai/bin/git-ai".to_string(),
+            "/Users/svarlamov/.dcc/ai-tracking/bin/git-ai".to_string(),
             "checkpoint".to_string(),
             "codex".to_string(),
             "--via-codex-notify".to_string(),
@@ -1069,7 +1069,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
         let config = CodexInstaller::parse_config_toml(
             r#"
 model = "gpt-5"
-notify = ["/Users/svarlamov/.git-ai/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
+notify = ["/Users/svarlamov/.dcc/ai-tracking/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
 "#,
         )
         .unwrap();
@@ -1555,7 +1555,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
                 &config_path,
                 r#"
 model = "gpt-5"
-notify = ["/Users/svarlamov/.git-ai/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
+notify = ["/Users/svarlamov/.dcc/ai-tracking/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
 "#,
             )
             .unwrap();

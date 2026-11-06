@@ -39,7 +39,7 @@ jobs:
 
       - name: Verify shell configs and Claude hooks
         run: |
-          INSTALL_DIR="$HOME/.git-ai/bin"
+          INSTALL_DIR="$HOME/.dcc/ai-tracking/bin"
           test -x "$INSTALL_DIR/git-ai"
           grep -F "$INSTALL_DIR" "$HOME/.bashrc"
           grep -F "$INSTALL_DIR" "$HOME/.zshrc"
@@ -90,7 +90,7 @@ jobs:
           HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
           HOMEPATH: ${{ env.TEST_HOME_PATH }}
         run: |
-          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $installDir = Join-Path $env:USERPROFILE ".dcc\ai-tracking\bin"
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "git-ai.exe"))) { throw "git-ai.exe not installed" }
           $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
           if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }

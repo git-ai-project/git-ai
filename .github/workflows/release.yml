@@ -543,8 +543,8 @@ jobs:
           $msi = (Get-ChildItem release\git-ai-windows-x64.msi).FullName
           $apiBase = 'https://dev.usegitai.com'
           $apiKey = 'ci-package-test-key'
-          $gitAi = Join-Path $env:USERPROFILE '.git-ai\bin\git-ai.exe'
-          $configPath = Join-Path $env:USERPROFILE '.git-ai\config.json'
+          $gitAi = Join-Path $env:USERPROFILE '.dcc\ai-tracking\bin\git-ai.exe'
+          $configPath = Join-Path $env:USERPROFILE '.dcc\ai-tracking\config.json'
 
           $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey INSTALL_WSL=0" -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "MSI install failed with exit code $($install.ExitCode)" }
@@ -613,7 +613,7 @@ jobs:
               ;;
           esac
           console_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk 'NR == 1 { print $2 }')"
-          git_ai="$console_home/.git-ai/bin/git-ai"
+          git_ai="$console_home/.dcc/ai-tracking/bin/git-ai"
 
           PKG=release/git-ai-macos-universal.pkg
           sudo installer -pkg "$PKG" -target /
@@ -627,7 +627,7 @@ jobs:
           fi
 
           binary_owner="$(/usr/bin/stat -f%Su "$git_ai")"
-          state_owner="$(/usr/bin/stat -f%Su "$console_home/.git-ai")"
+          state_owner="$(/usr/bin/stat -f%Su "$console_home/.dcc/ai-tracking")"
           printf 'Console user: %s\nBinary owner: %s\nState owner: %s\n' "$console_user" "$binary_owner" "$state_owner"
           if [ "$binary_owner" != "$console_user" ]; then
             echo "::error::PKG binary is not owned by the console user"

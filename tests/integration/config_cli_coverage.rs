@@ -3,7 +3,7 @@
 //! `custom_attributes` (including its nested `custom_attributes.<key>` form).
 //!
 //! These run the real binary against an isolated test HOME, so `config set`
-//! writes land in the sandboxed `~/.git-ai/config.json` rather than the user's.
+//! writes land in the sandboxed `~/.dcc/ai-tracking/config.json` rather than the user's.
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::config::{AuthorConfig, FileConfig, NotesBackendConfig};
@@ -14,6 +14,18 @@ fn run_config(repo: &TestRepo, args: &[&str]) -> std::process::Output {
     repo.git_ai_command_without_pre_sync_for_test(args, &[])
         .output()
         .unwrap_or_else(|e| panic!("git-ai {args:?} failed to run: {e}"))
+}
+
+#[test]
+fn test_config_uses_dcc_ai_tracking_directory() {
+    let repo = TestRepo::new();
+    repo.git_ai(&["config", "set", "custom_attributes.team", "platform"])
+        .expect("set config in the default directory");
+
+    let config_path = repo.test_home_path().join(".dcc/ai-tracking/config.json");
+    let contents = std::fs::read_to_string(config_path).expect("config in .dcc/ai-tracking");
+    let config: Value = serde_json::from_str(&contents).unwrap();
+    assert_eq!(config["custom_attributes"]["team"], "platform");
 }
 
 #[test]
@@ -348,7 +360,10 @@ fn test_config_custom_attributes_set_empty_object_is_omitted() {
     );
 
     // The config file should not carry a `custom_attributes` key at all.
-    let config_path = repo.test_home_path().join(".git-ai").join("config.json");
+    let config_path = repo
+        .test_home_path()
+        .join(".dcc/ai-tracking")
+        .join("config.json");
     if let Ok(contents) = std::fs::read_to_string(&config_path) {
         let parsed: Value = serde_json::from_str(&contents).unwrap_or(Value::Null);
         assert!(

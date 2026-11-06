@@ -683,7 +683,7 @@ fn store_families(repo: &TestRepo) -> Vec<String> {
     RepoFamilyStore::open(
         &repo
             .daemon_home_path()
-            .join(".git-ai")
+            .join(".dcc/ai-tracking")
             .join("internal")
             .join("repo-families-db"),
     )

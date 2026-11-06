@@ -837,7 +837,7 @@ fn codex_fork_rollout_checkpoint_tracks_one_stream_keyed_by_filename() {
 
     let db_path = repo
         .daemon_home_path()
-        .join(".git-ai")
+        .join(".dcc/ai-tracking")
         .join("internal")
         .join("transcripts-db");
     let db = StreamsDatabase::open(&db_path).unwrap();

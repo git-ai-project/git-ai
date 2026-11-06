@@ -20,7 +20,7 @@
 //!
 //! // Open database
 //! // Note: the file is still named "transcripts-db" for backwards compatibility.
-//! let db = StreamsDatabase::open("~/.git-ai/transcripts-db")?;
+//! let db = StreamsDatabase::open("~/.dcc/ai-tracking/internal/transcripts-db")?;
 //!
 //! // Create stream record with watermark
 //! let stream = StreamRecord {
