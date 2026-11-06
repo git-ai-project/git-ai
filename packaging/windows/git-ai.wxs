@@ -19,7 +19,7 @@
     <util:QueryWindowsDirectories />
     <SetProperty
       Id="INSTALLFOLDER"
-      Value="[WIX_DIR_PROFILE]\.dcc\ai-tracking\bin"
+      Value="[WIX_DIR_PROFILE]\.dcc-ai-tracking\bin"
       Before="CostFinalize" />
     <Directory Id="INSTALLFOLDER" Name="bin" />
 

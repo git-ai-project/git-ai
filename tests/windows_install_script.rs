@@ -26,14 +26,14 @@ fn install_script_path() -> PathBuf {
 
 fn installed_git_ai_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("bin")
         .join("git-ai.exe")
 }
 
 fn installed_git_wrapper_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("bin")
         .join("git.exe")
 }
@@ -54,7 +54,7 @@ fn foreground_daemon_logs(repo: &TestRepo) -> (String, String) {
 
 fn daemon_log_dir(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join("daemon")
         .join("logs")
@@ -64,7 +64,7 @@ fn wait_for_daemon_log_file(repo: &TestRepo, timeout: Duration) -> PathBuf {
     let deadline = Instant::now() + timeout;
     let pid_meta_path = repo
         .test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join("daemon")
         .join("daemon.pid.json");
@@ -275,7 +275,7 @@ fn kill_installed_processes(repo: &TestRepo) {
          ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
         installed_git_ai_path(repo).display(),
         repo.test_home_path()
-            .join(".dcc/ai-tracking")
+            .join(".dcc-ai-tracking")
             .join("bin")
             .join("git.exe")
             .display()
@@ -391,7 +391,7 @@ fn windows_daemon_creates_log_file() {
 }
 
 fn seed_existing_wrapper(repo: &TestRepo) {
-    let bin_dir = repo.test_home_path().join(".dcc/ai-tracking").join("bin");
+    let bin_dir = repo.test_home_path().join(".dcc-ai-tracking").join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create install dir");
     fs::write(bin_dir.join("git-ai.exe"), b"").expect("failed to create git-ai.exe stub");
     fs::write(bin_dir.join("git.exe"), b"").expect("failed to create git.exe stub");
@@ -458,7 +458,7 @@ fn windows_install_script_skips_wrapper_for_new_users() {
         installed_git_ai_path(&repo).display()
     );
 
-    let bin_dir = repo.test_home_path().join(".dcc/ai-tracking").join("bin");
+    let bin_dir = repo.test_home_path().join(".dcc-ai-tracking").join("bin");
     assert!(
         !bin_dir.join("git.exe").exists(),
         "fresh install should NOT create the git.exe wrapper"
@@ -494,7 +494,7 @@ fn windows_install_script_skips_wrapper_for_new_users() {
         let bashrc = fs::read_to_string(repo.test_home_path().join(".bashrc"))
             .expect("install-hooks --env should create ~/.bashrc for Git Bash");
         assert!(
-            bashrc.contains("export PATH=\"$HOME/.dcc/ai-tracking/bin:$PATH\""),
+            bashrc.contains("export PATH=\"$HOME/.dcc-ai-tracking/bin:$PATH\""),
             "Git Bash config should contain the PATH export:\n{bashrc}"
         );
     }

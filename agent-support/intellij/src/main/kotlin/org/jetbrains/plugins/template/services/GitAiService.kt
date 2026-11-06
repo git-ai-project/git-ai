@@ -70,7 +70,7 @@ class GitAiService {
      * then falling back to PATH lookup.
      *
      * Known locations (from install.sh, install.ps1, scripts/dev.sh):
-     * - Production/dev build: ~/.dcc/ai-tracking/bin/git-ai  (dev.sh installs here too)
+     * - Production/dev build: ~/.dcc-ai-tracking/bin/git-ai  (dev.sh installs here too)
      * - Nix development: ~/.git-ai-local-dev/gitwrap/bin/git-ai  (nix develop shellHook)
      *
      * @return The full path to git-ai if found, or null if not found
@@ -93,12 +93,12 @@ class GitAiService {
         val knownPaths = if (isWindows) {
             listOf(
                 "$homeDir\\.git-ai-local-dev\\gitwrap\\bin\\git-ai.exe",  // Nix dev (nix develop shellHook)
-                "$homeDir\\.dcc\\ai-tracking\\bin\\git-ai.exe"                      // Production + non-Nix dev (install.ps1 / dev.sh)
+                "$homeDir\\.dcc-ai-tracking\\bin\\git-ai.exe"                      // Production + non-Nix dev (install.ps1 / dev.sh)
             )
         } else {
             listOf(
                 "$homeDir/.git-ai-local-dev/gitwrap/bin/git-ai", // Nix dev (nix develop shellHook)
-                "$homeDir/.dcc/ai-tracking/bin/git-ai"                    // Production + non-Nix dev (install.sh / dev.sh)
+                "$homeDir/.dcc-ai-tracking/bin/git-ai"                    // Production + non-Nix dev (install.sh / dev.sh)
             )
         }
 

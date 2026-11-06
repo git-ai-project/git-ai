@@ -2,7 +2,7 @@
 //!
 //! This command is called by the install script to exchange a nonce for
 //! OAuth credentials. It reads INSTALL_NONCE and API_BASE from environment
-//! variables and stores credentials in ~/.dcc/ai-tracking/internal/credentials.
+//! variables and stores credentials in ~/.dcc-ai-tracking/internal/credentials.
 //!
 //! On failure, exits with code 1 silently so the install script can fall back
 //! to running `git-ai login`. Errors are recorded server-side for debugging.

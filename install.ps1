@@ -6,7 +6,7 @@ function Start-DaemonIfRequested {
         return
     }
 
-    $daemonExe = Join-Path $HOME '.dcc\ai-tracking\bin\git-ai.exe'
+    $daemonExe = Join-Path $HOME '.dcc-ai-tracking\bin\git-ai.exe'
     if (-not (Test-Path $daemonExe)) {
         Write-Warning 'Warning: Failed to locate git-ai.exe for daemon restart after install.'
         return
@@ -349,8 +349,8 @@ if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
     $env:GIT_AI_ALLOW_SUPERUSER = '1'
 }
 
-# Install directory: %USERPROFILE%\.dcc\ai-tracking\bin
-$installDir = Join-Path $HOME ".dcc\ai-tracking\bin"
+# Install directory: %USERPROFILE%\.dcc-ai-tracking\bin
+$installDir = Join-Path $HOME ".dcc-ai-tracking\bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 Write-Host ("Downloading git-ai (release: {0})..." -f $releaseTag)

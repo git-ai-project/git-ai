@@ -537,7 +537,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
                   Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
               }} finally {{ \
                   if ($env:{} -eq '1') {{ \
-                      $daemonExe = Join-Path $HOME '.dcc\\ai-tracking\\bin\\git-ai.exe'; \
+                      $daemonExe = Join-Path $HOME '.dcc-ai-tracking\\bin\\git-ai.exe'; \
                       if (Test-Path $daemonExe) {{ try {{ & $daemonExe bg start *> $null }} catch {{ }} }} \
                   }}; \
                   Stop-Transcript | Out-Null; \
@@ -594,7 +594,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        // Write script to ~/.dcc/ai-tracking/tmp/ to avoid /tmp noexec or permission issues.
+        // Write script to ~/.dcc-ai-tracking/tmp/ to avoid /tmp noexec or permission issues.
         // Fall back to the system temp dir if the home-based path is unavailable.
         let temp_dir = crate::config::git_ai_dir_path()
             .map(|p| p.join("tmp"))

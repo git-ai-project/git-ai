@@ -43,7 +43,7 @@ impl std::fmt::Display for CubeError {
             CubeError::MissingApiKey => write!(
                 f,
                 "no API key configured. Set GIT_AI_API_KEY or add \"api_key\" to \
-                 ~/.dcc/ai-tracking/config.json (the key needs organization:admin:read; \
+                 ~/.dcc-ai-tracking/config.json (the key needs organization:admin:read; \
                  create one in your Git AI org settings)."
             ),
             CubeError::Transport(e) => write!(f, "request failed: {}", e),

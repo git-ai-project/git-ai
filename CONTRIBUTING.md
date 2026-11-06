@@ -33,13 +33,13 @@ On Windows, use a native PowerShell or Windows Terminal session for setup. If yo
 
 ### Using a development build locally
 
-It's often helpful to point your `git-ai` to a development build. The dev script builds the binary and installs it to `~/.dcc/ai-tracking/bin/git-ai`, replacing the production binary so you can test changes with real git repositories.
+It's often helpful to point your `git-ai` to a development build. The dev script builds the binary and installs it to `~/.dcc-ai-tracking/bin/git-ai`, replacing the production binary so you can test changes with real git repositories.
 
 ```bash
 task dev
 ```
 
-If `~/.dcc/ai-tracking` isn't set up yet, the script will run the installer automatically first.
+If `~/.dcc-ai-tracking` isn't set up yet, the script will run the installer automatically first.
 
 On Windows, `task dev` runs the Windows development script, installs the current branch build, updates the `git.exe` shim, runs install hooks, and restarts the daemon.
 
@@ -52,7 +52,7 @@ For changes that affect Windows setup or daemon startup, verify the installed de
 task dev
 
 # 2. Stop any daemon that was already running.
-~\.dcc\ai-tracking\bin\git-ai.exe bg shutdown --hard
+~\.dcc-ai-tracking\bin\git-ai.exe bg shutdown --hard
 
 # 3. Trigger daemon startup through the installed git-ai.
 git-ai status

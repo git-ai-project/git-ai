@@ -215,13 +215,15 @@ mod tests {
 
     #[test]
     fn test_amp_plugin_windows_path_escaping() {
-        let binary_path = PathBuf::from(r"C:\Users\foo\.dcc\ai-tracking\bin\git-ai.exe");
+        let binary_path = PathBuf::from(r"C:\Users\foo\.dcc-ai-tracking\bin\git-ai.exe");
         let content = AmpInstaller::generate_plugin_content(&binary_path);
 
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
-        assert!(content.contains(
-            r#"const GIT_AI_BIN = 'C:\\Users\\foo\\.dcc\\ai-tracking\\bin\\git-ai.exe'"#
-        ));
+        assert!(
+            content.contains(
+                r#"const GIT_AI_BIN = 'C:\\Users\\foo\\.dcc-ai-tracking\\bin\\git-ai.exe'"#
+            )
+        );
     }
 
     #[test]

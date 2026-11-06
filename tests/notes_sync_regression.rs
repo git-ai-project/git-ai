@@ -475,7 +475,7 @@ fn notes_sync_http_backend_clone_warms_notes_cache() {
     ]);
     let notes_db_path = source
         .test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join("notes-db");
     let upstream = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
@@ -530,7 +530,7 @@ fn notes_sync_http_backend_clone_warms_notes_cache() {
 
     let daemon_log_path = source
         .test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join("daemon")
         .join("daemon.test.stderr.log");
@@ -1178,7 +1178,7 @@ fn notes_sync_http_backend_plain_pull_warms_notes_cache() {
     ]);
     let notes_db_path = local
         .test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join("notes-db");
     let upstream = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
@@ -1272,7 +1272,7 @@ fn notes_sync_http_backend_plain_pull_warms_notes_cache() {
 
     let daemon_log_path = local
         .test_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join("daemon")
         .join("daemon.test.stderr.log");

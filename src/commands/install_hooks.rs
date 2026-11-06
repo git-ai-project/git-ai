@@ -1024,7 +1024,7 @@ async fn async_run_uninstall(
 /// Remove the legacy envelope logs directory and related lock/marker files.
 ///
 /// All telemetry now flows through the daemon control socket, so the per-PID
-/// log file system under `~/.dcc/ai-tracking/internal/logs/` is no longer needed.
+/// log file system under `~/.dcc-ai-tracking/internal/logs/` is no longer needed.
 fn cleanup_legacy_envelope_logs() {
     let Some(home) = dirs::home_dir() else {
         return;
@@ -1367,7 +1367,7 @@ mod tests {
         assert!(
             !temp
                 .path()
-                .join(".dcc/ai-tracking")
+                .join(".dcc-ai-tracking")
                 .join("config.json")
                 .exists()
         );
@@ -1378,7 +1378,7 @@ mod tests {
         assert!(
             !temp
                 .path()
-                .join(".dcc/ai-tracking")
+                .join(".dcc-ai-tracking")
                 .join("config.json")
                 .exists()
         );

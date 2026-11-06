@@ -14,7 +14,7 @@ build unsigned packages for validation. macOS releases include Intel, Apple
 Silicon, and universal PKGs.
 
 The Windows MSI is per-user: it installs under
-`%USERPROFILE%\\.dcc\\ai-tracking\\bin` and changes only that user's `PATH` (the MSI
+`%USERPROFILE%\\.dcc-ai-tracking\\bin` and changes only that user's `PATH` (the MSI
 owns the user PATH entry and removes it on uninstall; `install-hooks --env`
 additionally configures Git Bash profiles when Git Bash is installed). It has
 no all-users or Administrator install mode. By default, the MSI also installs
@@ -22,8 +22,8 @@ the same Git AI release into every WSL distribution except Docker-managed
 `docker-desktop*` distributions. WSL setup is best-effort and does not fail the
 Windows installation. Disable it for interactive or silent installs by passing
 `INSTALL_WSL=0` to `msiexec`. The macOS PKG copies its bundled binary into the
-active console user's `~/.dcc/ai-tracking/bin`, then runs setup as that user, including
-adding `~/.dcc/ai-tracking/bin` to the user's shell PATH configs. It fails if no valid
+active console user's `~/.dcc-ai-tracking/bin`, then runs setup as that user, including
+adding `~/.dcc-ai-tracking/bin` to the user's shell PATH configs. It fails if no valid
 console user is logged in or per-user setup fails.
 
 For an enterprise endpoint, pass configuration to the MSI when installing:

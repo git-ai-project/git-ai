@@ -78,7 +78,7 @@ In your Home Manager configuration:
 This approach:
 - Replaces the standard git with git-ai throughout your environment
 - Installs IDE/agent hooks automatically
-- Creates `~/.dcc/ai-tracking/config.json` with the correct git path
+- Creates `~/.dcc-ai-tracking/config.json` with the correct git path
 - Avoids package conflicts
 
 ### 2. nix-darwin with Home Manager

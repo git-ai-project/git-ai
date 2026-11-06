@@ -160,7 +160,7 @@ Auto-load contexts: `NoSolution`, `SolutionExists`, `SolutionHasMultipleProjects
 
 Locates the `git-ai` (or `git-ai.exe`) binary. Search order:
 
-1. `%USERPROFILE%\.dcc\ai-tracking\bin\git-ai.exe` (standard install location on Windows)
+1. `%USERPROFILE%\.dcc-ai-tracking\bin\git-ai.exe` (standard install location on Windows)
 2. `%USERPROFILE%\.git-ai-local-dev\gitwrap\bin\git-ai.exe` (nix dev path)
 3. `PATH` lookup via `where git-ai` (Windows) or `which git-ai` (Mac/Linux)
 

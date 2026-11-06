@@ -7,8 +7,8 @@ if ($args.Count -gt 0 -and $args[0] -eq '--release') {
     $BuildType = 'release'
 }
 
-$InstallDir = Join-Path $HOME '.dcc\ai-tracking\bin'
-$ConfigPath = Join-Path $HOME '.dcc\ai-tracking\config.json'
+$InstallDir = Join-Path $HOME '.dcc-ai-tracking\bin'
+$ConfigPath = Join-Path $HOME '.dcc-ai-tracking\config.json'
 $GitAiExe = Join-Path $InstallDir 'git-ai.exe'
 $GitShim = Join-Path $InstallDir 'git.exe'
 
@@ -85,7 +85,7 @@ function Install-Binary {
     Move-Item -Path $tmpPath -Destination $DstPath
 }
 
-# Run production installer if ~/.dcc/ai-tracking isn't set up or ~/.dcc/ai-tracking/bin isn't on PATH
+# Run production installer if ~/.dcc-ai-tracking isn't set up or ~/.dcc-ai-tracking/bin isn't on PATH
 $needsInstall = $false
 if (-not (Test-Path -LiteralPath $InstallDir) -or
     -not (Test-Path -LiteralPath $ConfigPath)) {
@@ -109,11 +109,6 @@ if (-not $needsInstall) {
     if (-not $onPath) { $needsInstall = $true }
 }
 
-if ($needsInstall) {
-    Write-Host 'Running git-ai installer...'
-    & (Join-Path $PSScriptRoot '..\install.ps1')
-}
-
 # Build the binary
 Write-Host "Building $BuildType binary..."
 if ($BuildType -eq 'release') {
@@ -122,6 +117,18 @@ if ($BuildType -eq 'release') {
     cargo build
 }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if ($needsInstall) {
+    Write-Host 'Installing local git-ai build...'
+    $previousLocalBinary = $env:GIT_AI_LOCAL_BINARY
+    try {
+        $env:GIT_AI_LOCAL_BINARY = (Resolve-Path "target\$BuildType\git-ai.exe").Path
+        & (Join-Path $PSScriptRoot '..\install.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        $env:GIT_AI_LOCAL_BINARY = $previousLocalBinary
+    }
+}
 
 # Replace git-ai.exe, stopping the daemon first if it is running
 Write-Host "Installing binary to $GitAiExe..."

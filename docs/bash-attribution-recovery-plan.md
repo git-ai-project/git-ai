@@ -29,7 +29,7 @@ The goal is to keep the fast checkpoint path intact, but add daemon-owned durabl
 
 Add `src/daemon/bash_history_db.rs`, a dedicated SQLite database at:
 
-`~/.dcc/ai-tracking/internal/bash-checkpoints-db`
+`~/.dcc-ai-tracking/internal/bash-checkpoints-db`
 
 Test override:
 

@@ -8,7 +8,7 @@ namespace GitAiVS.Services
     /// <summary>
     /// Locates the git-ai binary on the system.
     /// Search order:
-    ///   1. %USERPROFILE%\.dcc\ai-tracking\bin\git-ai.exe  (production install)
+    ///   1. %USERPROFILE%\.dcc-ai-tracking\bin\git-ai.exe  (production install)
     ///   2. %USERPROFILE%\.git-ai-local-dev\gitwrap\bin\git-ai.exe  (nix dev)
     ///   3. PATH lookup via "where git-ai"
     ///
@@ -78,12 +78,12 @@ namespace GitAiVS.Services
             _lastSearchedPaths = isWindows
                 ? new[]
                 {
-                    Path.Combine(home, ".dcc", "ai-tracking", "bin", "git-ai.exe"),
+                    Path.Combine(home, ".dcc-ai-tracking", "bin", "git-ai.exe"),
                     Path.Combine(home, ".git-ai-local-dev", "gitwrap", "bin", "git-ai.exe"),
                 }
                 : new[]
                 {
-                    Path.Combine(home, ".dcc", "ai-tracking", "bin", "git-ai"),
+                    Path.Combine(home, ".dcc-ai-tracking", "bin", "git-ai"),
                     Path.Combine(home, ".git-ai-local-dev", "gitwrap", "bin", "git-ai"),
                 };
 

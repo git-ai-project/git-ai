@@ -686,7 +686,7 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
 }
 
 /// Normalize a Windows path to use forward slashes while preserving the drive letter.
-/// e.g. `C:\Users\Administrator\.dcc\ai-tracking\bin\git-ai.exe` → `C:/Users/Administrator/.dcc/ai-tracking/bin/git-ai.exe`
+/// e.g. `C:\Users\Administrator\.dcc-ai-tracking\bin\git-ai.exe` → `C:/Users/Administrator/.dcc-ai-tracking/bin/git-ai.exe`
 /// Forward-slash paths work in both git bash and PowerShell on Windows.
 /// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
 pub fn normalize_windows_path_for_shell(path: &Path) -> String {
@@ -1244,10 +1244,10 @@ mod tests {
     #[test]
     fn test_normalize_windows_path_for_shell_converts_windows_path() {
         // Fixes #1413: use forward-slash Windows paths that work in both git bash AND PowerShell
-        let path = PathBuf::from(r"C:\Users\Administrator\.dcc\ai-tracking\bin\git-ai.exe");
+        let path = PathBuf::from(r"C:\Users\Administrator\.dcc-ai-tracking\bin\git-ai.exe");
         let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "C:/Users/Administrator/.dcc/ai-tracking/bin/git-ai.exe",
+            result, "C:/Users/Administrator/.dcc-ai-tracking/bin/git-ai.exe",
             "should convert Windows path to forward-slash format"
         );
     }
@@ -1275,11 +1275,11 @@ mod tests {
     #[test]
     fn test_normalize_windows_path_for_shell_handles_extended_prefix_after_clean() {
         // After clean_path strips \\?\ prefix, the path looks like C:\...
-        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.dcc\ai-tracking\bin\git-ai.exe");
+        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.dcc-ai-tracking\bin\git-ai.exe");
         let cleaned = clean_path(raw);
         let result = normalize_windows_path_for_shell(&cleaned);
         assert_eq!(
-            result, "C:/Users/USERNAME/.dcc/ai-tracking/bin/git-ai.exe",
+            result, "C:/Users/USERNAME/.dcc-ai-tracking/bin/git-ai.exe",
             "should convert cleaned Windows path to forward-slash format"
         );
     }
@@ -1297,7 +1297,7 @@ mod tests {
 
     #[test]
     fn test_clean_path_strips_windows_prefix() {
-        let path = PathBuf::from(r"\\?\C:\Users\test\.dcc\ai-tracking\bin\git-ai.exe");
+        let path = PathBuf::from(r"\\?\C:\Users\test\.dcc-ai-tracking\bin\git-ai.exe");
         let cleaned = clean_path(path);
         let s = cleaned.to_string_lossy();
         assert!(
@@ -1314,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_clean_path_preserves_normal_windows_path() {
-        let path = PathBuf::from(r"C:\Users\test\.dcc\ai-tracking\bin\git-ai.exe");
+        let path = PathBuf::from(r"C:\Users\test\.dcc-ai-tracking\bin\git-ai.exe");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
     }

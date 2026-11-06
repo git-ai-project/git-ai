@@ -399,15 +399,10 @@ fn remove_hook_entry(hook_path: &Path) -> Result<(), GitAiError> {
 
 fn is_path_inside_git_ai_home(path: &Path) -> bool {
     let storage_dir = crate::config::git_ai_dir_for_home(Path::new(""));
-    path.ancestors().any(|ancestor| {
-        let mut actual = ancestor.components().rev();
-        storage_dir.components().rev().all(|expected| {
-            actual.next().is_some_and(|part| {
-                part.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
-            })
-        })
+    path.components().any(|part| {
+        part.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&storage_dir.to_string_lossy())
     })
 }
 

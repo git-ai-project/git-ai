@@ -1514,7 +1514,7 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
          Please install Git or update your config JSON.",
         cfg_path = config_file_path()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "~/.dcc/ai-tracking/config.json".to_string()),
+            .unwrap_or_else(|| "~/.dcc-ai-tracking/config.json".to_string()),
     );
     std::process::exit(1);
 }
@@ -1542,14 +1542,14 @@ pub fn config_file_path_public() -> Option<PathBuf> {
     config_file_path()
 }
 
-/// Returns the path to the git-ai base directory (~/.dcc/ai-tracking)
+/// Returns the path to the git-ai base directory (~/.dcc-ai-tracking)
 pub fn git_ai_dir_path() -> Option<PathBuf> {
     Some(git_ai_dir_for_home(&home_dir()))
 }
 
 /// Resolve git-ai's storage directory for an explicit home (including daemon/test homes).
 pub fn git_ai_dir_for_home(home: &Path) -> PathBuf {
-    home.join(".dcc").join("ai-tracking")
+    home.join(".dcc-ai-tracking")
 }
 
 /// Resolve internal state for the same home used by the caller.
@@ -1557,19 +1557,19 @@ pub fn internal_dir_for_home(home: &Path) -> PathBuf {
     git_ai_dir_for_home(home).join("internal")
 }
 
-/// Returns the path to the internal state directory (~/.dcc/ai-tracking/internal)
+/// Returns the path to the internal state directory (~/.dcc-ai-tracking/internal)
 /// This is where git-ai stores internal files like distinct_id, update_check, etc.
 pub fn internal_dir_path() -> Option<PathBuf> {
     git_ai_dir_path().map(|dir| dir.join("internal"))
 }
 
-/// Returns the path to the skills directory (~/.dcc/ai-tracking/skills)
+/// Returns the path to the skills directory (~/.dcc-ai-tracking/skills)
 /// This is where git-ai installs skills for Claude Code and other agents
 pub fn skills_dir_path() -> Option<PathBuf> {
     git_ai_dir_path().map(|dir| dir.join("skills"))
 }
 
-/// Public accessor for ID file path (~/.dcc/ai-tracking/internal/distinct_id)
+/// Public accessor for ID file path (~/.dcc-ai-tracking/internal/distinct_id)
 pub fn id_file_path() -> Option<PathBuf> {
     internal_dir_path().map(|dir| dir.join("distinct_id"))
 }
@@ -1577,7 +1577,7 @@ pub fn id_file_path() -> Option<PathBuf> {
 /// Cache for the distinct_id to avoid repeated file reads
 static DISTINCT_ID: OnceLock<String> = OnceLock::new();
 
-/// Get or create the distinct_id (UUID) from ~/.dcc/ai-tracking/internal/distinct_id
+/// Get or create the distinct_id (UUID) from ~/.dcc-ai-tracking/internal/distinct_id
 /// If the file doesn't exist, generates a new UUID and writes it to the file.
 /// The result is cached for the lifetime of the process.
 pub fn get_or_create_distinct_id() -> String {
@@ -1614,7 +1614,7 @@ pub fn get_or_create_distinct_id() -> String {
         .clone()
 }
 
-/// Returns the path to the update check cache file (~/.dcc/ai-tracking/internal/update_check)
+/// Returns the path to the update check cache file (~/.dcc-ai-tracking/internal/update_check)
 pub fn update_check_path() -> Option<PathBuf> {
     internal_dir_path().map(|dir| dir.join("update_check"))
 }

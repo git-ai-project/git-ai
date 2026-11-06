@@ -1,6 +1,6 @@
 # Telemetry Examples
 
-Telemetry metrics stored in `~/.dcc/ai-tracking/internal/metrics-db` use compact JSON:
+Telemetry metrics stored in `~/.dcc-ai-tracking/internal/metrics-db` use compact JSON:
 
 ```json
 {"t": 1700000000, "e": 4, "v": {"0": 1700000000}, "a": {"0": "<git-ai version>"}}
@@ -201,7 +201,7 @@ Optional values `1`, `2`, and `3` carry external event, parent event, and tool-u
 
 ## 7. `rewrite_committed`
 
-Source: no local row found with `event_kind = 7` in `~/.dcc/ai-tracking/internal/metrics-db`; example is from the schema in `src/daemon/rewrite_metrics.rs`.
+Source: no local row found with `event_kind = 7` in `~/.dcc-ai-tracking/internal/metrics-db`; example is from the schema in `src/daemon/rewrite_metrics.rs`.
 
 Emitted after rewrite operations create replacement commits and authorship notes are migrated.
 

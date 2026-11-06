@@ -271,7 +271,7 @@ impl MetricsDatabase {
         Ok(db)
     }
 
-    /// Get database path: ~/.dcc/ai-tracking/internal/metrics-db
+    /// Get database path: ~/.dcc-ai-tracking/internal/metrics-db
     fn database_path() -> Result<PathBuf, GitAiError> {
         // Allow test override via environment variable
         #[cfg(any(test, feature = "test-support"))]

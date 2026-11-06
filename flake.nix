@@ -83,13 +83,13 @@
         # Wrapped version that sets up the git-ai environment properly
         git-ai-wrapped = pkgs.writeShellScriptBin "git-ai" ''
           # Ensure config directory exists
-          mkdir -p "$HOME/.dcc/ai-tracking"
+          mkdir -p "$HOME/.dcc-ai-tracking"
 
           # Create config.json if it doesn't exist
-          if [ ! -f "$HOME/.dcc/ai-tracking/config.json" ]; then
+          if [ ! -f "$HOME/.dcc-ai-tracking/config.json" ]; then
             # Find the system git (not our wrapper)
             GIT_PATH="${pkgs.git}/bin/git"
-            cat > "$HOME/.dcc/ai-tracking/config.json" <<EOF
+            cat > "$HOME/.dcc-ai-tracking/config.json" <<EOF
           {
             "git_path": "$GIT_PATH"
           }
@@ -105,13 +105,13 @@
         # to "git" so the Rust binary routes to handle_git() instead of handle_git_ai()
         git-wrapper = pkgs.writeShellScriptBin "git" ''
           # Ensure config directory exists
-          mkdir -p "$HOME/.dcc/ai-tracking"
+          mkdir -p "$HOME/.dcc-ai-tracking"
 
           # Create config.json if it doesn't exist
-          if [ ! -f "$HOME/.dcc/ai-tracking/config.json" ]; then
+          if [ ! -f "$HOME/.dcc-ai-tracking/config.json" ]; then
             # Find the system git (not our wrapper)
             GIT_PATH="${pkgs.git}/bin/git"
-            cat > "$HOME/.dcc/ai-tracking/config.json" <<EOF
+            cat > "$HOME/.dcc-ai-tracking/config.json" <<EOF
           {
             "git_path": "$GIT_PATH"
           }
@@ -688,20 +688,16 @@ GITOGEOF
                   if [ -d "$user_home" ]; then
                     user=$(basename "$user_home")
 
-                    # Create config directory without changing existing shared DCC ownership.
-                    if [ ! -d "$user_home/.dcc" ]; then
-                      mkdir -p "$user_home/.dcc"
-                      chown "$user" "$user_home/.dcc" 2>/dev/null || true
-                    fi
-                    mkdir -p "$user_home/.dcc/ai-tracking"
-                    chown "$user" "$user_home/.dcc/ai-tracking" 2>/dev/null || true
+                    # Create config directory
+                    mkdir -p "$user_home/.dcc-ai-tracking"
+                    chown "$user" "$user_home/.dcc-ai-tracking" 2>/dev/null || true
 
                     # Copy config.json from store (allows user to override later if needed)
                     # Only copy if the file doesn't exist or is a symlink (from previous Nix activation)
-                    if [ ! -f "$user_home/.dcc/ai-tracking/config.json" ] || [ -L "$user_home/.dcc/ai-tracking/config.json" ]; then
-                      cp -f ${configJsonFile} "$user_home/.dcc/ai-tracking/config.json"
-                      chmod 644 "$user_home/.dcc/ai-tracking/config.json"
-                      chown "$user" "$user_home/.dcc/ai-tracking/config.json" 2>/dev/null || true
+                    if [ ! -f "$user_home/.dcc-ai-tracking/config.json" ] || [ -L "$user_home/.dcc-ai-tracking/config.json" ]; then
+                      cp -f ${configJsonFile} "$user_home/.dcc-ai-tracking/config.json"
+                      chmod 644 "$user_home/.dcc-ai-tracking/config.json"
+                      chown "$user" "$user_home/.dcc-ai-tracking/config.json" 2>/dev/null || true
                     fi
 
                     # Install hooks (run as user if possible)
@@ -1013,7 +1009,7 @@ GITOGEOF
             home.packages = [ cfg.package ];
 
             # Config file contains no secrets; served directly from the Nix store.
-            home.file.".dcc/ai-tracking/config.json" = {
+            home.file.".dcc-ai-tracking/config.json" = {
               source = jsonFormat.generate "git-ai-config.json" configFile;
             };
 

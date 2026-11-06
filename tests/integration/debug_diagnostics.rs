@@ -50,7 +50,7 @@ fn attribution_self_checks_do_not_timeout() {
     );
     let daemon_self_check_root = repo
         .daemon_home_path()
-        .join(".dcc/ai-tracking")
+        .join(".dcc-ai-tracking")
         .join("internal")
         .join(DEBUG_SELF_CHECK_DIR_NAME);
     let expected_repo_prefix = format!("    repo: {}", daemon_self_check_root.display());

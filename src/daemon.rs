@@ -402,7 +402,7 @@ impl DaemonConfig {
 
     pub fn from_default_paths() -> Result<Self, GitAiError> {
         let internal_dir = config::internal_dir_path().ok_or_else(|| {
-            GitAiError::Generic("Unable to determine ~/.dcc/ai-tracking/internal path".to_string())
+            GitAiError::Generic("Unable to determine ~/.dcc-ai-tracking/internal path".to_string())
         })?;
         Ok(Self::from_internal_dir(internal_dir))
     }

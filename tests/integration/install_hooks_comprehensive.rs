@@ -226,7 +226,7 @@ fn plain_install_hooks_preserves_the_invoking_user_home() {
     let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
     let invoking_home = repo.test_home_path();
     let installed_home = repo.path().join("installed-user");
-    let installed_bin_dir = installed_home.join(".dcc/ai-tracking").join("bin");
+    let installed_bin_dir = installed_home.join(".dcc-ai-tracking").join("bin");
     fs::create_dir_all(&installed_bin_dir).unwrap();
 
     #[cfg(windows)]
@@ -260,7 +260,7 @@ fn plain_install_hooks_preserves_the_invoking_user_home() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let invoking_config = fs::read_to_string(invoking_home.join(".dcc/ai-tracking/config.json"))
+    let invoking_config = fs::read_to_string(invoking_home.join(".dcc-ai-tracking/config.json"))
         .expect("install-hooks should update the invoking user's config");
     let invoking_config: serde_json::Value = serde_json::from_str(&invoking_config).unwrap();
     assert_eq!(
@@ -268,7 +268,7 @@ fn plain_install_hooks_preserves_the_invoking_user_home() {
         serde_json::Value::String("package-test-key".to_string())
     );
     assert!(
-        !installed_home.join(".dcc/ai-tracking/config.json").exists(),
+        !installed_home.join(".dcc-ai-tracking/config.json").exists(),
         "plain install-hooks must not retarget config to the binary owner's home"
     );
 }
@@ -293,7 +293,7 @@ fn install_hooks_env_flag_adds_path_to_detected_shell_configs() {
     );
 
     let expected_line = format!(
-        "export PATH=\"{}/.dcc/ai-tracking/bin:$PATH\"",
+        "export PATH=\"{}/.dcc-ai-tracking/bin:$PATH\"",
         home.display()
     );
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
@@ -936,11 +936,11 @@ fn test_hashmap_conversion_stability() {
 #[test]
 fn test_git_hooks_remove_rejects_tracking_directory_and_preserves_other_dcc_hooks() {
     for (relative_path, allowed) in [
-        (".dcc/ai-tracking/hooks", false),
-        (".DCC/AI-TRACKING/hooks", false),
+        (".dcc-ai-tracking/hooks", false),
+        (".DCC-AI-TRACKING/hooks", false),
         (".dcc/custom-hooks", true),
-        (".dcc/ai-tracking-other/hooks", true),
-        (".dcc/nested/ai-tracking/hooks", true),
+        (".dcc-ai-tracking-other/hooks", true),
+        ("other/.dcc-ai-tracking/hooks", false),
     ] {
         let repo = TestRepo::new();
         let managed_hooks = repo.path().join(".git/ai/hooks");

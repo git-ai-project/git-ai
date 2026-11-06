@@ -83,7 +83,7 @@ su - "$(/usr/bin/stat -f%Su /dev/console)" -c \
 
 The agent's `PATH` is set explicitly (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`)
 because launchd does not load the user's shell profile; pass `--env PATH=...`
-to override. `bg start` output goes to `~/.dcc/ai-tracking/internal/daemon/logs/login-start.log`.
+to override. `bg start` output goes to `~/.dcc-ai-tracking/internal/daemon/logs/login-start.log`.
 
 ### Windows
 
@@ -96,7 +96,7 @@ irm https://github.com/git-ai-project/git-ai/releases/latest/download/git-ai-log
 
 Piped installs use the defaults. To pass flags, download the file and run it:
 `.\git-ai-login-start-windows.ps1 --env HTTPS_PROXY=http://proxy:3128`. The task
-runs a small launcher at `%USERPROFILE%\.dcc\ai-tracking\login\start-bg.ps1` that sets
+runs a small launcher at `%USERPROFILE%\.dcc-ai-tracking\login\start-bg.ps1` that sets
 the requested variables and calls `bg start`.
 
 ### Linux

@@ -80,16 +80,16 @@ On daemon startup, if `internal.db` exists:
 **Debugging session processing:**
 ```bash
 # Check transcripts database
-sqlite3 ~/.dcc/ai-tracking/internal/transcripts-db "SELECT * FROM sessions;"
+sqlite3 ~/.dcc-ai-tracking/internal/transcripts-db "SELECT * FROM sessions;"
 
 # Check watermark for session
-sqlite3 ~/.dcc/ai-tracking/internal/transcripts-db "SELECT session_id, watermark_value FROM sessions WHERE session_id = 'YOUR_SESSION_ID';"
+sqlite3 ~/.dcc-ai-tracking/internal/transcripts-db "SELECT session_id, watermark_value FROM sessions WHERE session_id = 'YOUR_SESSION_ID';"
 
 # Check processing stats
-sqlite3 ~/.dcc/ai-tracking/internal/transcripts-db "SELECT * FROM processing_stats WHERE session_id = 'YOUR_SESSION_ID';"
+sqlite3 ~/.dcc-ai-tracking/internal/transcripts-db "SELECT * FROM processing_stats WHERE session_id = 'YOUR_SESSION_ID';"
 
 # View metrics events with session_id
-sqlite3 ~/.dcc/ai-tracking/internal/metrics-db "SELECT * FROM events WHERE session_id = 'YOUR_SESSION_ID';"
+sqlite3 ~/.dcc-ai-tracking/internal/metrics-db "SELECT * FROM events WHERE session_id = 'YOUR_SESSION_ID';"
 ```
 
 **Monitoring worker health:**

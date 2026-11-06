@@ -260,7 +260,7 @@ class VariantRunner:
 
         self.daemon_process: subprocess.Popen[str] | None = None
         self.daemon_started = False
-        self.daemon_socket_dir = self.home_dir / ".dcc/ai-tracking" / "internal" / "daemon"
+        self.daemon_socket_dir = self.home_dir / ".dcc-ai-tracking" / "internal" / "daemon"
         self.daemon_trace_socket = self.daemon_socket_dir / "trace2.sock"
         self.daemon_control_socket = self.daemon_socket_dir / "control.sock"
 

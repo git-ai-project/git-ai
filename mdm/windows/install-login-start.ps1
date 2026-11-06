@@ -15,9 +15,9 @@ $ErrorActionPreference = 'Stop'
 
 $TaskPath = '\GitAI\'
 $TaskName = 'Start bg at logon'
-$LauncherDir = Join-Path $HOME '.dcc\ai-tracking\login'
+$LauncherDir = Join-Path $HOME '.dcc-ai-tracking\login'
 $LauncherPath = Join-Path $LauncherDir 'start-bg.ps1'
-$DefaultBin = Join-Path $HOME '.dcc\ai-tracking\bin\git-ai.exe'
+$DefaultBin = Join-Path $HOME '.dcc-ai-tracking\bin\git-ai.exe'
 
 $Mode = 'install'
 $Start = $true

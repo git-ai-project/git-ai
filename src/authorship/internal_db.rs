@@ -171,7 +171,7 @@ impl InternalDatabase {
         Ok(db)
     }
 
-    /// Get database path: ~/.dcc/ai-tracking/internal/db
+    /// Get database path: ~/.dcc-ai-tracking/internal/db
     /// In test mode, can be overridden via GIT_AI_TEST_DB_PATH environment variable.
     /// We also support GITAI_TEST_DB_PATH because some git hook execution paths
     /// may scrub custom GIT_* variables.

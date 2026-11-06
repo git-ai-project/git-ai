@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn test_cursor_hook_commands_no_windows_extended_path_prefix() {
-        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.dcc\ai-tracking\bin\git-ai.exe");
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.dcc-ai-tracking\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
         let pre_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);

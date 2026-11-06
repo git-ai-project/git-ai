@@ -277,7 +277,7 @@ pub fn print_superuser_warning() {
          \n\
          To suppress this warning, either:\n\
          - Run git-ai as your normal user (recommended), or\n\
-         - Set GIT_AI_ALLOW_SUPERUSER=1 or add \"allow_superuser\": true to ~/.dcc/ai-tracking/config.json\n\
+         - Set GIT_AI_ALLOW_SUPERUSER=1 or add \"allow_superuser\": true to ~/.dcc-ai-tracking/config.json\n\
          \n\
          This warning is automatically suppressed in CI environments."
     );

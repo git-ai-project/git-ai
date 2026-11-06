@@ -116,7 +116,7 @@ if [ -n "$BIN" ]; then
 "*|*"$(printf '\r')"*) fail "--bin path must not contain a newline or carriage return" ;;
   esac
 elif [ "$SYSTEM" -eq 0 ]; then
-  BIN="$HOME/.dcc/ai-tracking/bin/git-ai"
+  BIN="$HOME/.dcc-ai-tracking/bin/git-ai"
   [ -x "$BIN" ] || fail "$BIN not found; install git-ai first or pass --bin"
 fi
 
@@ -131,13 +131,13 @@ $(xml_string "$RETRY_SECS")"
 else
   PROGRAM_XML="$(xml_string /bin/sh)
 $(xml_string -c)
-$(xml_string "exec \"\$HOME/.dcc/ai-tracking/bin/git-ai\" bg start --retry-secs $RETRY_SECS")"
+$(xml_string "exec \"\$HOME/.dcc-ai-tracking/bin/git-ai\" bg start --retry-secs $RETRY_SECS")"
 fi
 
 # Per-user agents log `bg start` output; all-users agents have no fixed path.
 LOG_XML=""
 if [ "$SYSTEM" -eq 0 ]; then
-  LOG_DIR="$HOME/.dcc/ai-tracking/internal/daemon/logs"
+  LOG_DIR="$HOME/.dcc-ai-tracking/internal/daemon/logs"
   mkdir -p "$LOG_DIR"
   LOG_FILE_XML="$(xml_string "$LOG_DIR/login-start.log" | sed 's/^    //')"
   LOG_XML="    <key>StandardOutPath</key>

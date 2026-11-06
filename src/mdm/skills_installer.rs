@@ -115,11 +115,11 @@ fn remove_skill_link(link_path: &PathBuf) -> Result<(), GitAiError> {
     Ok(())
 }
 
-/// Install all embedded skills to ~/.dcc/ai-tracking/skills/
+/// Install all embedded skills to ~/.dcc-ai-tracking/skills/
 /// This nukes the entire skills directory and recreates it fresh each time.
 ///
 /// Creates the standard skills structure:
-/// ~/.dcc/ai-tracking/skills/
+/// ~/.dcc-ai-tracking/skills/
 /// └── prompt-analysis/
 ///     └── SKILL.md
 ///
@@ -152,7 +152,7 @@ pub fn install_skills(
 
     // Install each skill
     for skill in EMBEDDED_SKILLS {
-        // Create skill directory: ~/.dcc/ai-tracking/skills/{skill-name}/
+        // Create skill directory: ~/.dcc-ai-tracking/skills/{skill-name}/
         let skill_dir = skills_base.join(skill.name);
         fs::create_dir_all(&skill_dir)?;
 
@@ -161,7 +161,7 @@ pub fn install_skills(
         write_atomic(&skill_md_path, skill.skill_md.as_bytes())?;
 
         // Link this skill to agent directories
-        // ~/.agents/skills/{skill-name} -> ~/.dcc/ai-tracking/skills/{skill-name}
+        // ~/.agents/skills/{skill-name} -> ~/.dcc-ai-tracking/skills/{skill-name}
         if let Some(agents_dir) = agents_skills_dir() {
             let agents_link = agents_dir.join(skill.name);
             if let Err(e) = link_skill_dir(&skill_dir, &agents_link) {
@@ -169,7 +169,7 @@ pub fn install_skills(
             }
         }
 
-        // ~/.claude/skills/{skill-name} -> ~/.dcc/ai-tracking/skills/{skill-name}
+        // ~/.claude/skills/{skill-name} -> ~/.dcc-ai-tracking/skills/{skill-name}
         if installed_tools.contains("claude-code")
             && let Some(claude_dir) = claude_skills_dir()
         {
@@ -179,7 +179,7 @@ pub fn install_skills(
             }
         }
 
-        // ~/.cursor/skills/{skill-name} -> ~/.dcc/ai-tracking/skills/{skill-name}
+        // ~/.cursor/skills/{skill-name} -> ~/.dcc-ai-tracking/skills/{skill-name}
         if installed_tools.contains("cursor")
             && let Some(cursor_dir) = cursor_skills_dir()
         {
@@ -196,7 +196,7 @@ pub fn install_skills(
     })
 }
 
-/// Uninstall all skills by removing ~/.dcc/ai-tracking/skills/ and linked skill directories
+/// Uninstall all skills by removing ~/.dcc-ai-tracking/skills/ and linked skill directories
 pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
@@ -321,7 +321,7 @@ mod tests {
         if let Some(path) = skills_dir_path() {
             assert!(path.ends_with("skills"));
             let parent = path.parent().unwrap();
-            assert!(parent.ends_with(".dcc/ai-tracking"));
+            assert!(parent.ends_with(".dcc-ai-tracking"));
         }
     }
 

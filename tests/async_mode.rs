@@ -80,7 +80,7 @@ fn configure_test_daemon_env(command: &mut Command, repo: &TestRepo) {
 }
 
 fn write_daemon_config(repo: &TestRepo) {
-    let config_dir = repo.test_home_path().join(".dcc/ai-tracking");
+    let config_dir = repo.test_home_path().join(".dcc-ai-tracking");
     fs::create_dir_all(&config_dir).expect("failed to create daemon config dir");
     let config_path = config_dir.join("config.json");
     let config = serde_json::json!({

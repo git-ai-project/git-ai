@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn test_is_git_ai_codex_notify_args_true_for_legacy_via_codex_notify_args() {
         let args = vec![
-            "/Users/svarlamov/.dcc/ai-tracking/bin/git-ai".to_string(),
+            "/Users/svarlamov/.dcc-ai-tracking/bin/git-ai".to_string(),
             "checkpoint".to_string(),
             "codex".to_string(),
             "--via-codex-notify".to_string(),
@@ -1069,7 +1069,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
         let config = CodexInstaller::parse_config_toml(
             r#"
 model = "gpt-5"
-notify = ["/Users/svarlamov/.dcc/ai-tracking/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
+notify = ["/Users/svarlamov/.dcc-ai-tracking/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
 "#,
         )
         .unwrap();
@@ -1555,7 +1555,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
                 &config_path,
                 r#"
 model = "gpt-5"
-notify = ["/Users/svarlamov/.dcc/ai-tracking/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
+notify = ["/Users/svarlamov/.dcc-ai-tracking/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
 "#,
             )
             .unwrap();
