@@ -3244,6 +3244,73 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_with_cutoffs_removes_only_session_events_older_than_session_cutoff() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        let general_cutoff = now - 365 * 24 * 3600;
+        let session_cutoff = now - 7 * 24 * 3600;
+
+        let old_session_ts = seconds_ago(10 * 24 * 3600);
+        let old_checkpoint_ts = seconds_ago(10 * 24 * 3600);
+        let fresh_session_ts = seconds_ago(24 * 3600);
+        let ancient_checkpoint_ts = seconds_ago(400 * 24 * 3600);
+        for (ts, kind) in [
+            (old_session_ts, MetricEventId::SessionEvent as i64),
+            (old_checkpoint_ts, MetricEventId::Checkpoint as i64),
+            (fresh_session_ts, MetricEventId::SessionEvent as i64),
+            (ancient_checkpoint_ts, MetricEventId::Checkpoint as i64),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO metrics (event_json, event_ts, event_kind) VALUES (?1, ?2, ?3)",
+                    params![
+                        format!(r#"{{"t":{ts},"e":{kind},"v":{{}},"a":{{}}}}"#),
+                        ts as i64,
+                        kind
+                    ],
+                )
+                .unwrap();
+        }
+
+        db.prune_old_metrics_with_cutoffs(now, general_cutoff, session_cutoff)
+            .unwrap();
+
+        let mut stmt = db
+            .conn
+            .prepare("SELECT event_ts, event_kind FROM metrics ORDER BY event_ts ASC")
+            .unwrap();
+        let remaining: Vec<(i64, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                (old_checkpoint_ts as i64, MetricEventId::Checkpoint as i64),
+                (fresh_session_ts as i64, MetricEventId::SessionEvent as i64),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_prune_with_cutoffs_records_last_prune_timestamp() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        db.prune_old_metrics_with_cutoffs(now, now - 10, now - 10)
+            .unwrap();
+        let last: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'metrics_last_prune_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, now.to_string());
+    }
+
+    #[test]
     fn test_empty_operations() {
         let (mut db, _temp_dir) = create_test_db();
 

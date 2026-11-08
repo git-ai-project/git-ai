@@ -2792,6 +2792,73 @@ mod tests {
     }
 
     #[test]
+    fn test_metrics_retention_defaults_to_365_days_for_all_kinds() {
+        let config = create_test_config(vec![], vec![]);
+        assert_eq!(config.metrics_retention_days(), 365);
+        assert_eq!(config.session_event_retention_days(), 365);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_session_event_retention_days_env_override() {
+        let previous = std::env::var("GIT_AI_SESSION_EVENT_RETENTION_DAYS").ok();
+        unsafe { std::env::set_var("GIT_AI_SESSION_EVENT_RETENTION_DAYS", "7") };
+        let config = build_config();
+        let (general, session) = (
+            config.metrics_retention_days(),
+            config.session_event_retention_days(),
+        );
+        match previous {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_SESSION_EVENT_RETENTION_DAYS", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_SESSION_EVENT_RETENTION_DAYS") },
+        }
+        assert_eq!(general, 365);
+        assert_eq!(session, 7);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_session_event_retention_never_exceeds_metrics_retention() {
+        let previous_general = std::env::var("GIT_AI_METRICS_RETENTION_DAYS").ok();
+        let previous_session = std::env::var("GIT_AI_SESSION_EVENT_RETENTION_DAYS").ok();
+        unsafe {
+            std::env::set_var("GIT_AI_METRICS_RETENTION_DAYS", "30");
+            std::env::set_var("GIT_AI_SESSION_EVENT_RETENTION_DAYS", "90");
+        }
+        let config = build_config();
+        let (general, session) = (
+            config.metrics_retention_days(),
+            config.session_event_retention_days(),
+        );
+        unsafe {
+            match previous_general {
+                Some(v) => std::env::set_var("GIT_AI_METRICS_RETENTION_DAYS", v),
+                None => std::env::remove_var("GIT_AI_METRICS_RETENTION_DAYS"),
+            }
+            match previous_session {
+                Some(v) => std::env::set_var("GIT_AI_SESSION_EVENT_RETENTION_DAYS", v),
+                None => std::env::remove_var("GIT_AI_SESSION_EVENT_RETENTION_DAYS"),
+            }
+        }
+        assert_eq!(general, 30);
+        assert_eq!(session, 30);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_metrics_retention_days_zero_falls_back_to_default() {
+        let previous = std::env::var("GIT_AI_METRICS_RETENTION_DAYS").ok();
+        unsafe { std::env::set_var("GIT_AI_METRICS_RETENTION_DAYS", "0") };
+        let config = build_config();
+        let general = config.metrics_retention_days();
+        match previous {
+            Some(v) => unsafe { std::env::set_var("GIT_AI_METRICS_RETENTION_DAYS", v) },
+            None => unsafe { std::env::remove_var("GIT_AI_METRICS_RETENTION_DAYS") },
+        }
+        assert_eq!(general, 365);
+    }
+
+    #[test]
     fn test_transcript_streaming_lookback_days_default() {
         let config = create_test_config(vec![], vec![]);
         assert_eq!(config.transcript_streaming_lookback_days(), Some(7));
