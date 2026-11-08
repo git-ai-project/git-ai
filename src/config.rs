@@ -195,6 +195,11 @@ pub struct Config {
     max_checkpoint_total_size_bytes: usize,
     max_checkpoint_total_lines: usize,
     daemon_memory_limit_mb: Option<u64>,
+    /// Days metric rows stay in the local metrics database (all event kinds).
+    metrics_retention_days: u32,
+    /// Days SessionEvent rows (streamed transcript lines) stay in the local
+    /// metrics database. Never longer than `metrics_retention_days`.
+    session_event_retention_days: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -286,6 +291,10 @@ pub struct FileConfig {
     pub max_checkpoint_total_lines: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_memory_limit_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_retention_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_event_retention_days: Option<u32>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -357,6 +366,10 @@ pub struct ConfigPatch {
     pub max_checkpoint_total_lines: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_memory_limit_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_retention_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_event_retention_days: Option<u32>,
 }
 
 impl Config {
@@ -686,6 +699,17 @@ impl Config {
     /// Returns the daemon peak-RSS limit in MiB, or `None` when disabled.
     pub fn daemon_memory_limit_mb(&self) -> Option<u64> {
         self.daemon_memory_limit_mb
+    }
+
+    /// Days metric rows of any kind are kept in the local metrics database.
+    pub fn metrics_retention_days(&self) -> u32 {
+        self.metrics_retention_days
+    }
+
+    /// Days SessionEvent rows are kept. Already clamped to `metrics_retention_days`.
+    pub fn session_event_retention_days(&self) -> u32 {
+        self.session_event_retention_days
+            .min(self.metrics_retention_days)
     }
 
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
@@ -1262,6 +1286,26 @@ fn build_config() -> Config {
         .and_then(|c| c.daemon_memory_limit_mb)
         .and_then(normalize_daemon_memory_limit_mb);
 
+    // Metrics retention: env > file > default (365 days). 0 or unparsable falls back.
+    let metrics_retention_days = env::var("GIT_AI_METRICS_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.metrics_retention_days))
+        .and_then(normalize_retention_days)
+        .unwrap_or(DEFAULT_METRICS_RETENTION_DAYS);
+    // SessionEvent retention: env > file > metrics_retention_days.
+    let session_event_retention_days = env::var("GIT_AI_SESSION_EVENT_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.session_event_retention_days)
+        })
+        .and_then(normalize_retention_days)
+        .unwrap_or(metrics_retention_days)
+        .min(metrics_retention_days);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -1293,6 +1337,8 @@ fn build_config() -> Config {
             max_checkpoint_total_size_bytes,
             max_checkpoint_total_lines,
             daemon_memory_limit_mb,
+            metrics_retention_days,
+            session_event_retention_days,
         };
         apply_test_config_patch(&mut config);
         config
@@ -1328,6 +1374,8 @@ fn build_config() -> Config {
         max_checkpoint_total_size_bytes,
         max_checkpoint_total_lines,
         daemon_memory_limit_mb,
+        metrics_retention_days,
+        session_event_retention_days,
     }
 }
 
@@ -1339,6 +1387,17 @@ fn resolve_notes_backend_url(
     url_from_env
         .or_else(|| file_backend.and_then(|backend| backend.backend_url.clone()))
         .unwrap_or_else(|| api_base_url.to_string())
+}
+
+/// Default local retention for metric rows, in days.
+pub const DEFAULT_METRICS_RETENTION_DAYS: u32 = 365;
+
+fn normalize_retention_days(days: u32) -> Option<u32> {
+    if days == 0 {
+        eprintln!("Warning: retention days must be greater than zero; using the default");
+        return None;
+    }
+    Some(days)
 }
 
 fn normalize_daemon_memory_limit_mb(limit_mb: u64) -> Option<u64> {
@@ -1834,6 +1893,18 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(limit_mb) = patch.daemon_memory_limit_mb {
             config.daemon_memory_limit_mb = normalize_daemon_memory_limit_mb(limit_mb);
         }
+        if let Some(days) = patch
+            .metrics_retention_days
+            .and_then(normalize_retention_days)
+        {
+            config.metrics_retention_days = days;
+        }
+        if let Some(days) = patch
+            .session_event_retention_days
+            .and_then(normalize_retention_days)
+        {
+            config.session_event_retention_days = days;
+        }
     }
 }
 
@@ -1880,6 +1951,8 @@ mod tests {
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
             daemon_memory_limit_mb: None,
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
+            session_event_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
         }
     }
 
@@ -2148,6 +2221,8 @@ mod tests {
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
             daemon_memory_limit_mb: None,
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
+            session_event_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
         }
     }
 
@@ -2298,6 +2373,8 @@ mod tests {
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
             daemon_memory_limit_mb: None,
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
+            session_event_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
         }
     }
 

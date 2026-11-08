@@ -168,8 +168,6 @@ pub struct MetricsDatabase {
 }
 
 impl MetricsDatabase {
-    /// How long metric rows are retained for local history/offline retry (365 days).
-    const METRICS_RETENTION_SECS: u64 = 365 * 24 * 3600;
     /// Minimum interval between prune passes (24 hours).
     const METRICS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
 
@@ -901,11 +899,13 @@ impl MetricsDatabase {
         Ok(())
     }
 
-    /// Delete metric rows outside the local retention window.
+    /// Delete metric rows outside the local retention window, at most once per
+    /// `METRICS_PRUNE_INTERVAL_SECS`.
     ///
     /// Valid rows are pruned by event timestamp, regardless of delivery state. Malformed
     /// rows cannot be aged by event timestamp, so delivered malformed rows fall back to
-    /// `delivered_ts`.
+    /// `delivered_ts`. SessionEvent rows (streamed transcript lines) use the shorter
+    /// `session_event_retention_days`; every other kind uses `metrics_retention_days`.
     fn prune_old_metrics_if_due(&mut self) -> Result<(), GitAiError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -928,8 +928,23 @@ impl MetricsDatabase {
             return Ok(());
         }
 
-        let cutoff = now.saturating_sub(Self::METRICS_RETENTION_SECS);
-        let rows_to_prune = self.old_metric_row_ids(cutoff)?;
+        let config = crate::config::Config::get();
+        let general_cutoff =
+            now.saturating_sub(u64::from(config.metrics_retention_days()) * 24 * 3600);
+        let session_cutoff =
+            now.saturating_sub(u64::from(config.session_event_retention_days()) * 24 * 3600);
+        self.prune_old_metrics_with_cutoffs(now, general_cutoff, session_cutoff)
+    }
+
+    /// Delete rows older than `general_cutoff`, or older than `session_cutoff` for
+    /// SessionEvent rows, and record `now` as the last prune time.
+    fn prune_old_metrics_with_cutoffs(
+        &mut self,
+        now: u64,
+        general_cutoff: u64,
+        session_cutoff: u64,
+    ) -> Result<(), GitAiError> {
+        let rows_to_prune = self.old_metric_row_ids(general_cutoff, session_cutoff)?;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('metrics_last_prune_ts', ?1)",
@@ -946,9 +961,13 @@ impl MetricsDatabase {
         Ok(())
     }
 
-    fn old_metric_row_ids(&self, cutoff: u64) -> Result<Vec<i64>, GitAiError> {
+    fn old_metric_row_ids(
+        &self,
+        general_cutoff: u64,
+        session_cutoff: u64,
+    ) -> Result<Vec<i64>, GitAiError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_json, event_ts, delivered_ts FROM metrics ORDER BY id ASC",
+            "SELECT id, event_json, event_ts, delivered_ts, event_kind FROM metrics ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -956,12 +975,19 @@ impl MetricsDatabase {
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<i64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
             ))
         })?;
 
+        let session_kind = MetricEventId::SessionEvent as i64;
         let mut ids = Vec::new();
         for row in rows {
-            let (id, event_json, event_ts, delivered_ts) = row?;
+            let (id, event_json, event_ts, delivered_ts, event_kind) = row?;
+            let cutoff = if event_kind == Some(session_kind) {
+                session_cutoff
+            } else {
+                general_cutoff
+            };
             if metric_row_is_older_than_cutoff(&event_json, event_ts, delivered_ts, cutoff) {
                 ids.push(id);
             }
@@ -1588,6 +1614,10 @@ mod tests {
     use super::*;
     use rusqlite::StatementStatus;
     use tempfile::TempDir;
+
+    /// Default retention in seconds, mirroring `DEFAULT_METRICS_RETENTION_DAYS`.
+    const METRICS_RETENTION_SECS: u64 =
+        crate::config::DEFAULT_METRICS_RETENTION_DAYS as u64 * 24 * 3600;
 
     fn create_test_db() -> (MetricsDatabase, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -3140,8 +3170,8 @@ mod tests {
         let (mut db, _temp_dir) = create_test_db();
 
         let delivered_ts = unix_now();
-        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
-        let recent_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS - 1);
+        let old_event_ts = seconds_ago(METRICS_RETENTION_SECS + 1);
+        let recent_event_ts = seconds_ago(METRICS_RETENTION_SECS - 1);
         let events = vec![event_json(old_event_ts), event_json(recent_event_ts)];
 
         db.insert_events_with_delivered_ts(&events, Some(delivered_ts))
@@ -3162,7 +3192,7 @@ mod tests {
     fn test_prunes_metric_rows_older_than_retention_by_cached_event_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let old_event_ts = seconds_ago(METRICS_RETENTION_SECS + 1);
         let recent_json_ts = days_ago(1);
         db.conn
             .execute(
@@ -3184,7 +3214,7 @@ mod tests {
     fn test_prunes_old_pending_metric_rows() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let old_event_ts = seconds_ago(METRICS_RETENTION_SECS + 1);
         let recent_event_ts = days_ago(1);
         let pending = vec![event_json(old_event_ts), event_json(recent_event_ts)];
 
@@ -3206,7 +3236,7 @@ mod tests {
     fn test_prunes_pending_rows_with_timestamp_even_when_kind_is_missing() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = seconds_ago(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let old_event_ts = seconds_ago(METRICS_RETENTION_SECS + 1);
         let recent_event_ts = days_ago(1);
         let pending = vec![
             format!(r#"{{"t":{old_event_ts},"v":{{}},"a":{{}}}}"#),
@@ -3231,8 +3261,7 @@ mod tests {
     fn test_prunes_malformed_delivered_rows_by_delivered_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_delivered_ts =
-            unix_now().saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let old_delivered_ts = unix_now().saturating_sub(METRICS_RETENTION_SECS + 1);
         db.insert_events_with_delivered_ts(&["not-json".to_string()], Some(old_delivered_ts))
             .unwrap();
 

@@ -126,6 +126,12 @@ fn print_config_help() {
     println!("  max_checkpoint_total_size_bytes     Per-checkpoint content limit in bytes");
     println!("  max_checkpoint_total_lines          Per-checkpoint content limit in lines");
     println!("  daemon_memory_limit_mb               Daemon peak-RSS limit in MiB");
+    println!(
+        "  metrics_retention_days               Days to keep local metric events (default 365)"
+    );
+    println!(
+        "  session_event_retention_days         Days to keep streamed transcript events (default: metrics_retention_days)"
+    );
     println!("  custom_attributes            Custom telemetry attributes, string->string (object)");
     println!("  git_ai_hooks                 Hook name -> shell commands map (object)");
     println!("  codex_hooks_format           Codex hook install format (config_toml/hooks_json)");
@@ -161,6 +167,7 @@ fn print_config_help() {
     println!("  git-ai config set allow_superuser true");
     println!("  git-ai config set transcript_streaming_lookback_days 1");
     println!("  git-ai config set daemon_memory_limit_mb 1024");
+    println!("  git-ai config set session_event_retention_days 7");
     println!("  git-ai config set custom_attributes '{{\"team\":\"platform\"}}'");
     println!("  git-ai config --add custom_attributes.team platform");
     println!("  git-ai config unset exclude_repositories");
@@ -214,6 +221,8 @@ pub fn handle_config(args: &[String]) {
                 || key == "feature_flags.lite_mode"
                 || key == "transcript_streaming_lookback_days"
                 || key == "daemon_memory_limit_mb"
+                || key == "metrics_retention_days"
+                || key == "session_event_retention_days"
             {
                 println!("Run `git-ai bg restart` for changes to take effect.");
             }
@@ -411,6 +420,14 @@ fn show_all_config() -> Result<(), String> {
         Value::Number(runtime_config.max_checkpoint_total_lines().into()),
     );
     effective_config.insert(
+        "metrics_retention_days".to_string(),
+        Value::Number(runtime_config.metrics_retention_days().into()),
+    );
+    effective_config.insert(
+        "session_event_retention_days".to_string(),
+        Value::Number(runtime_config.session_event_retention_days().into()),
+    );
+    effective_config.insert(
         "daemon_memory_limit_mb".to_string(),
         runtime_config
             .daemon_memory_limit_mb()
@@ -562,6 +579,12 @@ fn get_config_value(key: &str) -> Result<(), String> {
             }
             "max_checkpoint_total_lines" => {
                 Value::Number(runtime_config.max_checkpoint_total_lines().into())
+            }
+            "metrics_retention_days" => {
+                Value::Number(runtime_config.metrics_retention_days().into())
+            }
+            "session_event_retention_days" => {
+                Value::Number(runtime_config.session_event_retention_days().into())
             }
             "daemon_memory_limit_mb" => runtime_config
                 .daemon_memory_limit_mb()
@@ -879,6 +902,26 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.transcript_streaming_lookback_days = Some(days);
                 crate::config::save_file_config(&file_config)?;
                 println!("[transcript_streaming_lookback_days]: {}", days);
+            }
+            "metrics_retention_days" | "session_event_retention_days" => {
+                let days = value
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|days| *days > 0)
+                    .ok_or_else(|| {
+                        format!(
+                            "Invalid {} value '{}'. Expected a positive integer number of days",
+                            key, value
+                        )
+                    })?;
+                if key == "metrics_retention_days" {
+                    file_config.metrics_retention_days = Some(days);
+                } else {
+                    file_config.session_event_retention_days = Some(days);
+                }
+                crate::config::save_file_config(&file_config)?;
+                println!("[{}]: {}", key, days);
             }
             "max_checkpoint_file_size_bytes" => {
                 let bytes = value.trim().parse::<usize>().map_err(|_| {
@@ -1274,6 +1317,20 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [transcript_streaming_lookback_days]: {}", v);
+                }
+            }
+            "metrics_retention_days" => {
+                let old_value = file_config.metrics_retention_days.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [metrics_retention_days]: {}", v);
+                }
+            }
+            "session_event_retention_days" => {
+                let old_value = file_config.session_event_retention_days.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [session_event_retention_days]: {}", v);
                 }
             }
             "max_checkpoint_file_size_bytes" => {
