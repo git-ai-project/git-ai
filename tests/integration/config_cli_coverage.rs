@@ -269,6 +269,92 @@ fn test_config_daemon_memory_limit_set_get_unset() {
 }
 
 #[test]
+fn test_config_metrics_retention_set_get_unset() {
+    let repo = TestRepo::new();
+    const RESTART_NOTICE: &str = "Run `git-ai bg restart`";
+    let days = |n: u64| Value::Number(n.into());
+
+    assert_eq!(
+        get_json(&repo, "metrics_retention_days"),
+        days(365),
+        "metric events are kept for a year by default"
+    );
+    assert_eq!(
+        get_json(&repo, "session_event_retention_days"),
+        days(365),
+        "session events follow the general retention by default"
+    );
+
+    let out = repo
+        .git_ai(&["config", "set", "metrics_retention_days", "30"])
+        .expect("set metrics_retention_days");
+    assert!(
+        out.contains(RESTART_NOTICE),
+        "set must ask for a daemon restart: {out}"
+    );
+    assert_eq!(get_json(&repo, "metrics_retention_days"), days(30));
+    assert_eq!(
+        get_json(&repo, "session_event_retention_days"),
+        days(30),
+        "session retention follows the general value until set"
+    );
+
+    repo.git_ai(&["config", "set", "session_event_retention_days", "7"])
+        .expect("set session_event_retention_days");
+    assert_eq!(get_json(&repo, "session_event_retention_days"), days(7));
+
+    repo.git_ai(&["config", "set", "session_event_retention_days", "90"])
+        .expect("set session_event_retention_days above the general value");
+    assert_eq!(
+        get_json(&repo, "session_event_retention_days"),
+        days(30),
+        "session retention never exceeds the general retention"
+    );
+
+    assert_eq!(
+        get_json_with_env(
+            &repo,
+            "metrics_retention_days",
+            &[("GIT_AI_METRICS_RETENTION_DAYS", "14")]
+        ),
+        days(14),
+        "the environment overrides the file"
+    );
+
+    for bad in ["0", "-1", "abc"] {
+        for key in ["metrics_retention_days", "session_event_retention_days"] {
+            assert!(
+                repo.git_ai(&["config", "set", key, bad]).is_err(),
+                "{key} must reject {bad:?}"
+            );
+        }
+    }
+
+    let out = repo.git_ai(&["config"]).expect("show all config");
+    let all: Value = serde_json::from_str(out.trim()).expect("show-all emits JSON");
+    assert_eq!(all["metrics_retention_days"], days(30));
+    assert_eq!(all["session_event_retention_days"], days(30));
+
+    let out = repo
+        .git_ai(&["config", "unset", "session_event_retention_days"])
+        .expect("unset session_event_retention_days");
+    assert!(
+        out.contains(RESTART_NOTICE),
+        "unset must ask for a daemon restart: {out}"
+    );
+    assert_eq!(get_json(&repo, "session_event_retention_days"), days(30));
+
+    let out = repo
+        .git_ai(&["config", "unset", "metrics_retention_days"])
+        .expect("unset metrics_retention_days");
+    assert!(
+        out.contains(RESTART_NOTICE),
+        "unset must ask for a daemon restart: {out}"
+    );
+    assert_eq!(get_json(&repo, "metrics_retention_days"), days(365));
+}
+
+#[test]
 fn test_config_custom_attributes_object_set_get_unset() {
     let repo = TestRepo::new();
 
@@ -394,6 +480,8 @@ fn test_config_show_all_includes_new_keys() {
     assert!(value.get("max_checkpoint_total_size_bytes").is_some());
     assert!(value.get("max_checkpoint_total_lines").is_some());
     assert!(value.get("daemon_memory_limit_mb").is_some());
+    assert!(value.get("metrics_retention_days").is_some());
+    assert!(value.get("session_event_retention_days").is_some());
     assert!(value.get("custom_attributes").is_some());
 }
 
@@ -462,8 +550,8 @@ fn fully_populated_file_config() -> FileConfig {
         max_checkpoint_total_size_bytes: Some(32 * 1024 * 1024),
         max_checkpoint_total_lines: Some(500_000),
         daemon_memory_limit_mb: Some(1024),
-        metrics_retention_days: None,
-        session_event_retention_days: None,
+        metrics_retention_days: Some(30),
+        session_event_retention_days: Some(7),
     }
 }
 

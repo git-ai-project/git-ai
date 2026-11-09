@@ -3323,6 +3323,51 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_with_cutoffs_classifies_rows_without_cached_kind_from_json() {
+        let (mut db, _temp_dir) = create_test_db();
+        let now = unix_now();
+        let general_cutoff = now - 365 * 24 * 3600;
+        let session_cutoff = now - 7 * 24 * 3600;
+
+        // Rows written before the metadata columns existed carry no cached
+        // event_ts/event_kind until the backfill reaches them.
+        let old_session = event_json_with_all_common_metadata(
+            seconds_ago(10 * 24 * 3600),
+            MetricEventId::SessionEvent as u16,
+        );
+        let old_checkpoint = event_json_with_all_common_metadata(
+            seconds_ago(10 * 24 * 3600),
+            MetricEventId::Checkpoint as u16,
+        );
+        let fresh_session = event_json_with_all_common_metadata(
+            seconds_ago(24 * 3600),
+            MetricEventId::SessionEvent as u16,
+        );
+        for json in [&old_session, &old_checkpoint, &fresh_session] {
+            db.conn
+                .execute(
+                    "INSERT INTO metrics (event_json) VALUES (?1)",
+                    params![json],
+                )
+                .unwrap();
+        }
+
+        db.prune_old_metrics_with_cutoffs(now, general_cutoff, session_cutoff)
+            .unwrap();
+
+        let mut stmt = db
+            .conn
+            .prepare("SELECT event_json FROM metrics ORDER BY id ASC")
+            .unwrap();
+        let remaining: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(remaining, vec![old_checkpoint, fresh_session]);
+    }
+
+    #[test]
     fn test_prune_with_cutoffs_records_last_prune_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
         let now = unix_now();
