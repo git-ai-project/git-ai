@@ -86,6 +86,7 @@ mod internal_machine_commands;
 mod internal_spawn_safety;
 mod issue_1204_multi_agent;
 mod issue_1415_empty_git_dir;
+mod issue_2480_known_human_survives_human_checkpoint;
 mod jetbrains_download;
 mod jetbrains_ide_types;
 mod lite_mode;

@@ -704,8 +704,20 @@ fn get_checkpoint_entry_for_file(
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
     // attribution-empty entry while still capturing line stats.
     // KnownHuman checkpoints must bypass this path so they record h_<hash> attributions
-    // that later AI checkpoints can use to identify human-written lines.
-    if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
+    // that later AI checkpoints can use to identify human-written lines. Likewise, a
+    // Human checkpoint must not take this path when the previous state still carries
+    // KnownHuman attributions: the empty entry would replace them and drop the h_ lines.
+    let has_prior_known_human_attributions = previous_state.as_ref().is_some_and(|state| {
+        state
+            .attributions
+            .iter()
+            .any(|attr| attr.author_id.starts_with("h_"))
+    });
+    if kind == CheckpointKind::Human
+        && !has_prior_ai_edits
+        && !has_prior_known_human_attributions
+        && initial_attrs_for_file.is_empty()
+    {
         let previous_content = if let Some(state) = previous_state.as_ref() {
             Arc::<str>::from(
                 working_log
