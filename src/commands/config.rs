@@ -238,7 +238,10 @@ pub fn handle_config(args: &[String]) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            if key == "daemon_memory_limit_mb" {
+            if key == "daemon_memory_limit_mb"
+                || key == "metrics_retention_days"
+                || key == "session_event_retention_days"
+            {
                 println!("Run `git-ai bg restart` for changes to take effect.");
             }
         }

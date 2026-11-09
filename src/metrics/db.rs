@@ -937,7 +937,8 @@ impl MetricsDatabase {
     }
 
     /// Delete rows older than `general_cutoff`, or older than `session_cutoff` for
-    /// SessionEvent rows, and record `now` as the last prune time.
+    /// SessionEvent rows, and record `now` as the last prune time. Rows without a
+    /// cached kind are classified from their JSON.
     fn prune_old_metrics_with_cutoffs(
         &mut self,
         now: u64,
@@ -983,6 +984,9 @@ impl MetricsDatabase {
         let mut ids = Vec::new();
         for row in rows {
             let (id, event_json, event_ts, delivered_ts, event_kind) = row?;
+            // Legacy rows have no cached kind until the metadata backfill reaches them.
+            let event_kind =
+                event_kind.or_else(|| extract_metric_event_kind(&event_json).map(i64::from));
             let cutoff = if event_kind == Some(session_kind) {
                 session_cutoff
             } else {
@@ -1531,13 +1535,23 @@ fn extract_metric_event_ts_from_value(value: &Value) -> Option<u32> {
         .map(|ts| ts as u32)
 }
 
+fn extract_metric_event_kind(event_json: &str) -> Option<u16> {
+    let value: Value = serde_json::from_str(event_json).ok()?;
+    extract_metric_event_kind_from_value(&value)
+}
+
+fn extract_metric_event_kind_from_value(value: &Value) -> Option<u16> {
+    value
+        .get("e")
+        .and_then(Value::as_u64)
+        .filter(|kind| *kind <= u16::MAX as u64)
+        .map(|kind| kind as u16)
+}
+
 fn extract_metric_event_metadata(event_json: &str) -> Option<MetricEventMetadata> {
     let value: Value = serde_json::from_str(event_json).ok()?;
     let event_ts = extract_metric_event_ts_from_value(&value)?;
-    let event_kind = value
-        .get("e")
-        .and_then(Value::as_u64)
-        .filter(|kind| *kind <= u16::MAX as u64)? as u16;
+    let event_kind = extract_metric_event_kind_from_value(&value)?;
 
     let attrs = value.get("a").and_then(Value::as_object);
     let values = value.get("v").and_then(Value::as_object);
