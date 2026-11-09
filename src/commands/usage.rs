@@ -151,7 +151,12 @@ fn print_help() {
     eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Shows activity over the selected window from locally recorded metric events.");
-    eprintln!("Metric rows older than approximately 365 days are pruned locally.");
+    let config = crate::config::Config::get();
+    eprintln!(
+        "Metric rows older than {} days are pruned locally (streamed transcript events after {} days).",
+        config.metrics_retention_days(),
+        config.session_event_retention_days()
+    );
 }
 
 fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary]) {
