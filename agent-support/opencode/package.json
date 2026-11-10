@@ -9,7 +9,7 @@
     "test": "node --test plugin.test.mjs"
   },
   "devDependencies": {
-    "@opencode/plugin": "^2.0.8",
+    "@opencode/plugin": "^2.2.5",
     "@types/node": "^26.x",
     "typescript": "^5.8.3"
   }
