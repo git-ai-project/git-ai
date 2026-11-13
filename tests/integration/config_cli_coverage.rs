@@ -198,6 +198,22 @@ fn test_config_transcript_streaming_lookback_days_set_get_unset() {
 }
 
 #[test]
+fn test_config_metrics_retention_days() {
+    let repo = TestRepo::new();
+    let key = "metrics_retention_days";
+    assert_eq!(get_json(&repo, key), 365);
+
+    repo.git_ai(&["config", "set", key, "7"]).unwrap();
+    for invalid in ["0", "-1", "1.5", "invalid", "4294967296"] {
+        assert!(repo.git_ai(&["config", "set", key, invalid]).is_err());
+    }
+    assert_eq!(get_json(&repo, key), 7);
+
+    repo.git_ai(&["config", "unset", key]).unwrap();
+    assert_eq!(get_json(&repo, key), 365);
+}
+
+#[test]
 fn test_config_checkpoint_budget_set_get_unset() {
     let repo = TestRepo::new();
 
@@ -457,6 +473,7 @@ fn fully_populated_file_config() -> FileConfig {
         git_ai_hooks: Some(git_ai_hooks),
         codex_hooks_format: Some("config_toml".to_string()),
         notes_backend: Some(NotesBackendConfig::default()),
+        metrics_retention_days: Some(7),
         transcript_streaming_lookback_days: Some(7),
         max_checkpoint_file_size_bytes: Some(3 * 1024 * 1024),
         max_checkpoint_total_size_bytes: Some(32 * 1024 * 1024),

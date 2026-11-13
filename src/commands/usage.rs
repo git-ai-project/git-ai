@@ -151,7 +151,7 @@ fn print_help() {
     eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Shows activity over the selected window from locally recorded metric events.");
-    eprintln!("Metric rows older than approximately 365 days are pruned locally.");
+    eprintln!("The metrics_retention_days setting controls local history (default: 365 days).");
 }
 
 fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary]) {

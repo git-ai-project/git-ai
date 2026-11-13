@@ -18,6 +18,7 @@ use std::sync::RwLock;
 
 /// Default API base URL for comparison
 pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
+pub(crate) const DEFAULT_METRICS_RETENTION_DAYS: u32 = 365;
 pub const DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 3 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
@@ -190,6 +191,7 @@ pub struct Config {
     git_ai_hooks: HashMap<String, Vec<String>>,
     codex_hooks_format: CodexHooksFormat,
     notes_backend: NotesBackendConfig,
+    metrics_retention_days: u32,
     transcript_streaming_lookback_days: Option<u32>,
     max_checkpoint_file_size_bytes: usize,
     max_checkpoint_total_size_bytes: usize,
@@ -276,6 +278,8 @@ pub struct FileConfig {
     pub codex_hooks_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_backend: Option<NotesBackendConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_retention_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -662,6 +666,10 @@ impl Config {
     /// Returns true when the HTTP notes backend is active.
     pub fn notes_backend_enabled(&self) -> bool {
         matches!(self.notes_backend.kind, NotesBackendKind::Http)
+    }
+
+    pub fn metrics_retention_days(&self) -> u32 {
+        self.metrics_retention_days
     }
 
     pub fn transcript_streaming_lookback_days(&self) -> Option<u32> {
@@ -1218,6 +1226,12 @@ fn build_config() -> Config {
         )),
     };
 
+    let metrics_retention_days = file_cfg
+        .as_ref()
+        .and_then(|c| c.metrics_retention_days)
+        .filter(|&days| days > 0)
+        .unwrap_or(DEFAULT_METRICS_RETENTION_DAYS);
+
     // Transcript streaming lookback: env > file > default (7 days). 0 means unlimited (None).
     let transcript_streaming_lookback_days = env::var("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS")
         .ok()
@@ -1288,6 +1302,7 @@ fn build_config() -> Config {
             git_ai_hooks: git_ai_hooks.clone(),
             codex_hooks_format,
             notes_backend,
+            metrics_retention_days,
             transcript_streaming_lookback_days,
             max_checkpoint_file_size_bytes,
             max_checkpoint_total_size_bytes,
@@ -1323,6 +1338,7 @@ fn build_config() -> Config {
         git_ai_hooks,
         codex_hooks_format,
         notes_backend,
+        metrics_retention_days,
         transcript_streaming_lookback_days,
         max_checkpoint_file_size_bytes,
         max_checkpoint_total_size_bytes,
@@ -1875,6 +1891,7 @@ mod tests {
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
             transcript_streaming_lookback_days: Some(7),
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
@@ -2143,6 +2160,7 @@ mod tests {
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
             transcript_streaming_lookback_days: Some(7),
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
@@ -2293,6 +2311,7 @@ mod tests {
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
             transcript_streaming_lookback_days: Some(7),
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,

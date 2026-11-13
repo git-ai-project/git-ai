@@ -12,6 +12,19 @@ The only data Git AI sends externally in open source mode is error and exception
 
 - **Prompts** are stored locally on the developer's laptop. They are never shared with teammates or Git AI.
 
+### Local metrics history
+
+Git AI keeps local metric events for 365 days by default. To keep seven days of history, run these commands.
+
+```sh
+git-ai config set metrics_retention_days 7
+git-ai bg restart
+```
+
+Git AI checks for expired rows after inserting metrics or marking them delivered, at most once every 24 hours. A shorter window limits the history available to `git-ai usage` and removes expired events still waiting for upload. SQLite can reuse the freed pages, so the database file may keep its current size.
+
+Use `git-ai config metrics_retention_days` to see the configured window. To restore the default for future prunes, run `git-ai config unset metrics_retention_days` and restart the daemon.
+
 ### Data written to your git repository
 
 AI attribution data is written to git notes and is readable by anyone with repo access:

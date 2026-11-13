@@ -104,6 +104,7 @@ fn print_config_help() {
     println!(
         "  untraced_fixup_ignored_paths Repo path globs the untraced-commit fixup skips (array)"
     );
+    println!("  metrics_retention_days       Days to keep local metric events (default: 365)");
     println!("  telemetry_oss                OSS telemetry setting (on/off)");
     println!("  telemetry_enterprise_dsn     Enterprise telemetry DSN");
     println!("  disable_version_checks       Disable version checks (bool)");
@@ -212,6 +213,7 @@ pub fn handle_config(args: &[String]) {
             if key == "feature_flags.transcript_streaming"
                 || key == "feature_flags.transcript_sweep"
                 || key == "feature_flags.lite_mode"
+                || key == "metrics_retention_days"
                 || key == "transcript_streaming_lookback_days"
                 || key == "daemon_memory_limit_mb"
             {
@@ -229,7 +231,7 @@ pub fn handle_config(args: &[String]) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            if key == "daemon_memory_limit_mb" {
+            if matches!(key, "daemon_memory_limit_mb" | "metrics_retention_days") {
                 println!("Run `git-ai bg restart` for changes to take effect.");
             }
         }
@@ -386,6 +388,10 @@ fn show_all_config() -> Result<(), String> {
         Value::Bool(runtime_config.allow_superuser()),
     );
 
+    effective_config.insert(
+        "metrics_retention_days".to_string(),
+        Value::from(runtime_config.metrics_retention_days()),
+    );
     // transcript_streaming_lookback_days: runtime normalizes 0 -> None (unlimited).
     // Surface unlimited as 0 so it round-trips through `config set`.
     effective_config.insert(
@@ -548,6 +554,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 Value::String(runtime_config.codex_hooks_format().as_str().to_string())
             }
             "allow_superuser" => Value::Bool(runtime_config.allow_superuser()),
+            "metrics_retention_days" => Value::from(runtime_config.metrics_retention_days()),
             "transcript_streaming_lookback_days" => Value::Number(
                 runtime_config
                     .transcript_streaming_lookback_days()
@@ -868,6 +875,14 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.allow_superuser = Some(bool_value);
                 crate::config::save_file_config(&file_config)?;
                 println!("[allow_superuser]: {}", bool_value);
+            }
+            "metrics_retention_days" => {
+                let days = value.trim().parse::<std::num::NonZeroU32>().map_err(|_| {
+                    format!("Invalid metrics_retention_days value '{value}'. Expected a positive whole number of days")
+                })?;
+                file_config.metrics_retention_days = Some(days.get());
+                crate::config::save_file_config(&file_config)?;
+                println!("[metrics_retention_days]: {days}");
             }
             "transcript_streaming_lookback_days" => {
                 let days = value.trim().parse::<u32>().map_err(|_| {
@@ -1267,6 +1282,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [allow_superuser]: {}", v);
+                }
+            }
+            "metrics_retention_days" => {
+                let old_value = file_config.metrics_retention_days.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!("- [metrics_retention_days]: {v}");
                 }
             }
             "transcript_streaming_lookback_days" => {
