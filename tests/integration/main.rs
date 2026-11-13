@@ -91,6 +91,7 @@ mod jetbrains_ide_types;
 mod lite_mode;
 mod log;
 mod merge_rebase;
+mod metrics_retention;
 mod metrics_retry_idle;
 mod multi_repo_workspace;
 mod non_utf8_files;
