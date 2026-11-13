@@ -1,5 +1,5 @@
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use crate::test_utils::{extract_json_object, isolated_metrics_db_path};
 use chrono::NaiveDate;
 use serde_json::Value;
@@ -134,6 +134,12 @@ fn usage_period_missing_value_exits_nonzero_with_message() {
 
 #[test]
 fn metrics_retention_days_prunes_existing_history() {
+    // An empty override uses the file value. A valid override takes precedence.
+    assert_seven_day_retention(7, "");
+    assert_seven_day_retention(30, "7");
+}
+
+fn assert_seven_day_retention(file_days: u32, env_days: &str) {
     let (_metrics_dir, path) = isolated_metrics_db_path();
     let path_ref = std::path::Path::new(&path);
     git_ai::metrics::db::MetricsDatabase::open_at_path(path_ref).unwrap();
@@ -148,9 +154,11 @@ fn metrics_retention_days_prunes_existing_history() {
         .unwrap();
     }
 
-    let repo = TestRepo::new_with_daemon_env(&[
+    let mut repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    repo.patch_git_ai_config(|patch| patch.metrics_retention_days = Some(file_days));
+    repo.start_dedicated_daemon_with_env_for_test(&[
         ("GIT_AI_TEST_METRICS_DB_PATH", &path),
-        ("GIT_AI_METRICS_RETENTION_DAYS", "7"),
+        ("GIT_AI_METRICS_RETENTION_DAYS", env_days),
     ]);
     seed_ai_commit(&repo);
     repo.git_ai(&["await", "--timeout", "60"]).unwrap();

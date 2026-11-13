@@ -1271,6 +1271,9 @@ impl TestRepo {
         if let Some(feature_flags) = &patch.feature_flags {
             config.insert("feature_flags".to_string(), feature_flags.clone());
         }
+        if let Some(days) = patch.metrics_retention_days {
+            config.insert("metrics_retention_days".to_string(), days.into());
+        }
         if let Some(max_bytes) = patch.max_checkpoint_file_size_bytes {
             config.insert(
                 "max_checkpoint_file_size_bytes".to_string(),

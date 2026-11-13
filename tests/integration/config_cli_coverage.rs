@@ -159,6 +159,24 @@ fn test_config_allow_superuser_set_get_unset() {
 }
 
 #[test]
+fn metrics_retention_days_uses_env_then_file_then_default() {
+    let repo = TestRepo::new();
+    let key = "metrics_retention_days";
+    let env_key = "GIT_AI_METRICS_RETENTION_DAYS";
+    let get = |value| get_json_with_env(&repo, key, &[(env_key, value)]);
+
+    assert_eq!(get(""), 365);
+    repo.git_ai(&["config", "set", key, "14"]).unwrap();
+    assert_eq!(get("7"), 7);
+    for invalid in ["", "0", "-1", "1.5", "18446744073709551615"] {
+        assert_eq!(get(invalid), 14);
+        assert!(repo.git_ai(&["config", "set", key, invalid]).is_err());
+    }
+    repo.git_ai(&["config", "unset", key]).unwrap();
+    assert_eq!(get(""), 365);
+}
+
+#[test]
 fn test_config_transcript_streaming_lookback_days_set_get_unset() {
     let repo = TestRepo::new();
 
@@ -458,6 +476,7 @@ fn fully_populated_file_config() -> FileConfig {
         codex_hooks_format: Some("config_toml".to_string()),
         notes_backend: Some(NotesBackendConfig::default()),
         transcript_streaming_lookback_days: Some(7),
+        metrics_retention_days: Some(14),
         max_checkpoint_file_size_bytes: Some(3 * 1024 * 1024),
         max_checkpoint_total_size_bytes: Some(32 * 1024 * 1024),
         max_checkpoint_total_lines: Some(500_000),

@@ -4,6 +4,9 @@
 //! still pending upload; delivered rows are retained as the local history.
 //! Server handles idempotency.
 
+use crate::config::Config;
+#[cfg(test)]
+use crate::config::DEFAULT_METRICS_RETENTION_DAYS;
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
 use crate::metrics::events::{checkpoint_pos, otel_trace_pos, session_event_pos};
@@ -169,8 +172,6 @@ pub struct MetricsDatabase {
 }
 
 impl MetricsDatabase {
-    /// How long metric rows are retained for local history/offline retry (365 days).
-    const DEFAULT_METRICS_RETENTION_SECS: u64 = 365 * 24 * 3600;
     /// Minimum interval between prune passes (24 hours).
     const METRICS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
 
@@ -208,7 +209,7 @@ impl MetricsDatabase {
             "#,
         )?;
 
-        Self::from_configured_connection(conn)
+        Self::from_connection(conn, Config::get().metrics_retention_days())
     }
 
     fn new_fallback() -> Result<Self, GitAiError> {
@@ -226,7 +227,7 @@ impl MetricsDatabase {
             "#,
         )?;
 
-        Self::from_configured_connection(conn)
+        Self::from_connection(conn, Config::get().metrics_retention_days())
     }
 
     #[cfg(test)]
@@ -241,7 +242,10 @@ impl MetricsDatabase {
             "#,
         )?;
 
-        Ok((Self::from_connection(conn, None)?, temp_dir))
+        Ok((
+            Self::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS)?,
+            temp_dir,
+        ))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -258,18 +262,13 @@ impl MetricsDatabase {
             "#,
         )?;
 
-        Self::from_configured_connection(conn)
+        Self::from_connection(conn, Config::get().metrics_retention_days())
     }
 
-    fn from_configured_connection(conn: Connection) -> Result<Self, GitAiError> {
-        let days = std::env::var("GIT_AI_METRICS_RETENTION_DAYS").ok();
-        Self::from_connection(conn, days.as_deref())
-    }
-
-    fn from_connection(conn: Connection, retention_days: Option<&str>) -> Result<Self, GitAiError> {
+    fn from_connection(conn: Connection, retention_days: u32) -> Result<Self, GitAiError> {
         let mut db = Self {
             conn,
-            retention_secs: Self::metrics_retention_secs(retention_days),
+            retention_secs: u64::from(retention_days) * 24 * 3600,
         };
         db.initialize_schema()?;
         Ok(db)
@@ -903,13 +902,6 @@ impl MetricsDatabase {
             params![stale_before as i64],
         )?;
         Ok(())
-    }
-
-    fn metrics_retention_secs(days: Option<&str>) -> u64 {
-        days.and_then(|days| days.trim().parse::<u64>().ok())
-            .filter(|&days| days > 0)
-            .and_then(|days| days.checked_mul(24 * 3600))
-            .unwrap_or(Self::DEFAULT_METRICS_RETENTION_SECS)
     }
 
     /// Delete metric rows outside the local retention window.
@@ -1600,6 +1592,8 @@ mod tests {
     use rusqlite::StatementStatus;
     use tempfile::TempDir;
 
+    const DEFAULT_METRICS_RETENTION_SECS: u64 = DEFAULT_METRICS_RETENTION_DAYS as u64 * 86400;
+
     fn create_test_db() -> (MetricsDatabase, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test-metrics.db");
@@ -1607,7 +1601,7 @@ mod tests {
         let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
 
-        let db = MetricsDatabase::from_connection(conn, None).unwrap();
+        let db = MetricsDatabase::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS).unwrap();
 
         (db, temp_dir)
     }
@@ -1847,7 +1841,7 @@ mod tests {
         )
         .unwrap();
 
-        let db = MetricsDatabase::from_connection(conn, None).unwrap();
+        let db = MetricsDatabase::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS).unwrap();
 
         let version: String = db
             .conn
@@ -1885,7 +1879,7 @@ mod tests {
         )
         .unwrap();
 
-        let db = MetricsDatabase::from_connection(conn, None).unwrap();
+        let db = MetricsDatabase::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS).unwrap();
 
         let version: String = db
             .conn
@@ -1927,7 +1921,7 @@ mod tests {
         )
         .unwrap();
 
-        let db = MetricsDatabase::from_connection(conn, None).unwrap();
+        let db = MetricsDatabase::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS).unwrap();
 
         let version: String = db
             .conn
@@ -1995,7 +1989,7 @@ mod tests {
         )
         .unwrap();
 
-        let db = MetricsDatabase::from_connection(conn, None).unwrap();
+        let db = MetricsDatabase::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS).unwrap();
 
         let version: String = db
             .conn
@@ -2577,7 +2571,8 @@ mod tests {
         drop(db);
         let conn = crate::sqlite::open_with_memory_limits(temp_dir.path().join("test-metrics.db"))
             .unwrap();
-        let mut db = MetricsDatabase::from_connection(conn, None).unwrap();
+        let mut db =
+            MetricsDatabase::from_connection(conn, DEFAULT_METRICS_RETENTION_DAYS).unwrap();
         assert!(db.event_metadata_backfill_completed().unwrap());
 
         db.conn
@@ -3141,34 +3136,12 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_retention_days() {
-        assert_eq!(
-            MetricsDatabase::metrics_retention_secs(Some("7")),
-            7 * 86400
-        );
-        for days in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("-1"),
-            Some("1.5"),
-            Some("18446744073709551615"),
-        ] {
-            assert_eq!(
-                MetricsDatabase::metrics_retention_secs(days),
-                365 * 86400,
-                "{days:?}"
-            );
-        }
-    }
-
-    #[test]
     fn test_prunes_metric_rows_older_than_retention_by_event_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
         let delivered_ts = unix_now();
-        let old_event_ts = seconds_ago(MetricsDatabase::DEFAULT_METRICS_RETENTION_SECS + 1);
-        let recent_event_ts = seconds_ago(MetricsDatabase::DEFAULT_METRICS_RETENTION_SECS - 1);
+        let old_event_ts = seconds_ago(DEFAULT_METRICS_RETENTION_SECS + 1);
+        let recent_event_ts = seconds_ago(DEFAULT_METRICS_RETENTION_SECS - 1);
         let events = vec![event_json(old_event_ts), event_json(recent_event_ts)];
 
         db.insert_events_with_delivered_ts(&events, Some(delivered_ts))
@@ -3189,7 +3162,7 @@ mod tests {
     fn test_prunes_metric_rows_older_than_retention_by_cached_event_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = seconds_ago(MetricsDatabase::DEFAULT_METRICS_RETENTION_SECS + 1);
+        let old_event_ts = seconds_ago(DEFAULT_METRICS_RETENTION_SECS + 1);
         let recent_json_ts = days_ago(1);
         db.conn
             .execute(
@@ -3211,7 +3184,7 @@ mod tests {
     fn test_prunes_old_pending_metric_rows() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = seconds_ago(MetricsDatabase::DEFAULT_METRICS_RETENTION_SECS + 1);
+        let old_event_ts = seconds_ago(DEFAULT_METRICS_RETENTION_SECS + 1);
         let recent_event_ts = days_ago(1);
         let pending = vec![event_json(old_event_ts), event_json(recent_event_ts)];
 
@@ -3233,7 +3206,7 @@ mod tests {
     fn test_prunes_pending_rows_with_timestamp_even_when_kind_is_missing() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_event_ts = seconds_ago(MetricsDatabase::DEFAULT_METRICS_RETENTION_SECS + 1);
+        let old_event_ts = seconds_ago(DEFAULT_METRICS_RETENTION_SECS + 1);
         let recent_event_ts = days_ago(1);
         let pending = vec![
             format!(r#"{{"t":{old_event_ts},"v":{{}},"a":{{}}}}"#),
@@ -3258,8 +3231,7 @@ mod tests {
     fn test_prunes_malformed_delivered_rows_by_delivered_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_delivered_ts =
-            unix_now().saturating_sub(MetricsDatabase::DEFAULT_METRICS_RETENTION_SECS + 1);
+        let old_delivered_ts = unix_now().saturating_sub(DEFAULT_METRICS_RETENTION_SECS + 1);
         db.insert_events_with_delivered_ts(&["not-json".to_string()], Some(old_delivered_ts))
             .unwrap();
 
