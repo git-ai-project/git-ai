@@ -122,6 +122,9 @@ fn print_config_help() {
     println!(
         "  transcript_streaming_lookback_days  Days to look back when sweeping transcripts (0 = unlimited)"
     );
+    println!(
+        "  metrics_retention_days              Days of local metric history to retain (default: 365)"
+    );
     println!("  max_checkpoint_file_size_bytes      Per-file checkpoint content limit in bytes");
     println!("  max_checkpoint_total_size_bytes     Per-checkpoint content limit in bytes");
     println!("  max_checkpoint_total_lines          Per-checkpoint content limit in lines");
@@ -213,6 +216,7 @@ pub fn handle_config(args: &[String]) {
                 || key == "feature_flags.transcript_sweep"
                 || key == "feature_flags.lite_mode"
                 || key == "transcript_streaming_lookback_days"
+                || key == "metrics_retention_days"
                 || key == "daemon_memory_limit_mb"
             {
                 println!("Run `git-ai bg restart` for changes to take effect.");
@@ -229,7 +233,7 @@ pub fn handle_config(args: &[String]) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            if key == "daemon_memory_limit_mb" {
+            if matches!(key, "daemon_memory_limit_mb" | "metrics_retention_days") {
                 println!("Run `git-ai bg restart` for changes to take effect.");
             }
         }
@@ -399,6 +403,10 @@ fn show_all_config() -> Result<(), String> {
     );
 
     effective_config.insert(
+        "metrics_retention_days".to_string(),
+        Value::Number(runtime_config.metrics_retention_days().into()),
+    );
+    effective_config.insert(
         "max_checkpoint_file_size_bytes".to_string(),
         Value::Number(runtime_config.max_checkpoint_file_size_bytes().into()),
     );
@@ -554,6 +562,9 @@ fn get_config_value(key: &str) -> Result<(), String> {
                     .unwrap_or(0)
                     .into(),
             ),
+            "metrics_retention_days" => {
+                Value::Number(runtime_config.metrics_retention_days().into())
+            }
             "max_checkpoint_file_size_bytes" => {
                 Value::Number(runtime_config.max_checkpoint_file_size_bytes().into())
             }
@@ -879,6 +890,14 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.transcript_streaming_lookback_days = Some(days);
                 crate::config::save_file_config(&file_config)?;
                 println!("[transcript_streaming_lookback_days]: {}", days);
+            }
+            "metrics_retention_days" => {
+                let days = value.trim().parse::<std::num::NonZeroU32>().map_err(|_| {
+                    format!("Invalid metrics_retention_days value '{value}'. Expected a positive integer")
+                })?;
+                file_config.metrics_retention_days = Some(days.get());
+                crate::config::save_file_config(&file_config)?;
+                println!("[metrics_retention_days]: {days}");
             }
             "max_checkpoint_file_size_bytes" => {
                 let bytes = value.trim().parse::<usize>().map_err(|_| {
@@ -1274,6 +1293,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     println!("- [transcript_streaming_lookback_days]: {}", v);
+                }
+            }
+            "metrics_retention_days" => {
+                let old_value = file_config.metrics_retention_days.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(days) = old_value {
+                    println!("- [metrics_retention_days]: {days}");
                 }
             }
             "max_checkpoint_file_size_bytes" => {

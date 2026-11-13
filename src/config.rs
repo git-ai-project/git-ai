@@ -18,6 +18,7 @@ use std::sync::RwLock;
 
 /// Default API base URL for comparison
 pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
+pub(crate) const DEFAULT_METRICS_RETENTION_DAYS: u32 = 365;
 pub const DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES: usize = 3 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_TOTAL_LINES: usize = 500_000;
@@ -191,6 +192,7 @@ pub struct Config {
     codex_hooks_format: CodexHooksFormat,
     notes_backend: NotesBackendConfig,
     transcript_streaming_lookback_days: Option<u32>,
+    metrics_retention_days: u32,
     max_checkpoint_file_size_bytes: usize,
     max_checkpoint_total_size_bytes: usize,
     max_checkpoint_total_lines: usize,
@@ -278,6 +280,12 @@ pub struct FileConfig {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_metrics_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metrics_retention_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_checkpoint_file_size_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,6 +357,8 @@ pub struct ConfigPatch {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_retention_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_checkpoint_file_size_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -666,6 +676,10 @@ impl Config {
 
     pub fn transcript_streaming_lookback_days(&self) -> Option<u32> {
         self.transcript_streaming_lookback_days
+    }
+
+    pub fn metrics_retention_days(&self) -> u32 {
+        self.metrics_retention_days
     }
 
     /// Returns the per-file size limit for checkpoint content reads.
@@ -1230,6 +1244,18 @@ fn build_config() -> Config {
         .or(Some(7))
         .and_then(|v| if v == 0 { None } else { Some(v) });
 
+    let metrics_retention_days = env::var("GIT_AI_METRICS_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.trim().parse::<std::num::NonZeroU32>().ok())
+        .map(std::num::NonZeroU32::get)
+        .or_else(|| {
+            file_cfg
+                .as_ref()?
+                .metrics_retention_days
+                .filter(|&days| days > 0)
+        })
+        .unwrap_or(DEFAULT_METRICS_RETENTION_DAYS);
+
     // Checkpoint content limits: env > file > defaults.
     let max_checkpoint_file_size_bytes = env::var("GIT_AI_MAX_CHECKPOINT_FILE_SIZE_BYTES")
         .ok()
@@ -1289,6 +1315,7 @@ fn build_config() -> Config {
             codex_hooks_format,
             notes_backend,
             transcript_streaming_lookback_days,
+            metrics_retention_days,
             max_checkpoint_file_size_bytes,
             max_checkpoint_total_size_bytes,
             max_checkpoint_total_lines,
@@ -1324,6 +1351,7 @@ fn build_config() -> Config {
         codex_hooks_format,
         notes_backend,
         transcript_streaming_lookback_days,
+        metrics_retention_days,
         max_checkpoint_file_size_bytes,
         max_checkpoint_total_size_bytes,
         max_checkpoint_total_lines,
@@ -1523,6 +1551,14 @@ fn load_file_config() -> Option<FileConfig> {
     let path = config_file_path()?;
     let data = fs::read(&path).ok()?;
     parse_file_config_bytes(&data).ok()
+}
+
+// A malformed retention value should leave the rest of the file usable.
+fn deserialize_metrics_retention_days<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().and_then(|days| u32::try_from(days).ok()))
 }
 
 fn parse_file_config_bytes(data: &[u8]) -> Result<FileConfig, serde_json::Error> {
@@ -1822,6 +1858,9 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(days) = patch.transcript_streaming_lookback_days {
             config.transcript_streaming_lookback_days = if days == 0 { None } else { Some(days) };
         }
+        if let Some(days) = patch.metrics_retention_days.filter(|&days| days > 0) {
+            config.metrics_retention_days = days;
+        }
         if let Some(max_bytes) = patch.max_checkpoint_file_size_bytes {
             config.max_checkpoint_file_size_bytes = max_bytes;
         }
@@ -1876,6 +1915,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
@@ -2144,6 +2184,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,
@@ -2294,6 +2335,7 @@ mod tests {
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
+            metrics_retention_days: DEFAULT_METRICS_RETENTION_DAYS,
             max_checkpoint_file_size_bytes: DEFAULT_MAX_CHECKPOINT_FILE_SIZE_BYTES,
             max_checkpoint_total_size_bytes: DEFAULT_MAX_CHECKPOINT_TOTAL_SIZE_BYTES,
             max_checkpoint_total_lines: DEFAULT_MAX_CHECKPOINT_TOTAL_LINES,

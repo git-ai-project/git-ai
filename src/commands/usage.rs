@@ -151,7 +151,9 @@ fn print_help() {
     eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Shows activity over the selected window from locally recorded metric events.");
-    eprintln!("Metric rows older than approximately 365 days are pruned locally.");
+    eprintln!(
+        "Local metrics are kept for 365 days by default. Set GIT_AI_METRICS_RETENTION_DAYS to override."
+    );
 }
 
 fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary]) {

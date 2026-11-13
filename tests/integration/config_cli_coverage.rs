@@ -5,7 +5,7 @@
 //! These run the real binary against an isolated test HOME, so `config set`
 //! writes land in the sandboxed `~/.git-ai/config.json` rather than the user's.
 
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use git_ai::config::{AuthorConfig, FileConfig, NotesBackendConfig};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -156,6 +156,57 @@ fn test_config_allow_superuser_set_get_unset() {
     repo.git_ai(&["config", "unset", "allow_superuser"])
         .expect("unset allow_superuser");
     assert_eq!(get_json(&repo, "allow_superuser"), Value::Bool(false));
+}
+
+#[test]
+fn metrics_retention_days_uses_env_then_file_then_default() {
+    let repo = TestRepo::new();
+    let key = "metrics_retention_days";
+    let env_key = "GIT_AI_METRICS_RETENTION_DAYS";
+    let get = |value| get_json_with_env(&repo, key, &[(env_key, value)]);
+
+    assert_eq!(get(""), 365);
+    repo.git_ai(&["config", "set", key, "14"]).unwrap();
+    assert_eq!(get("7"), 7);
+    for invalid in ["", "0", "-1", "1.5", "18446744073709551615"] {
+        assert_eq!(get(invalid), 14);
+        assert!(repo.git_ai(&["config", "set", key, invalid]).is_err());
+    }
+    repo.git_ai(&["config", "unset", key]).unwrap();
+    assert_eq!(get(""), 365);
+}
+
+#[test]
+fn invalid_metrics_retention_days_preserves_other_settings() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let key = "metrics_retention_days";
+    let other_key = "transcript_streaming_lookback_days";
+    let env = [
+        ("GIT_AI_METRICS_RETENTION_DAYS", ""),
+        ("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS", ""),
+    ];
+    let get = |key| get_json_with_env(&repo, key, &env);
+    let path = repo.test_home_path().join(".git-ai").join("config.json");
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file[other_key] = 19.into();
+    for invalid in [
+        Value::from(-1),
+        Value::from(u64::from(u32::MAX) + 1),
+        Value::from("seven"),
+    ] {
+        file[key] = invalid;
+        std::fs::write(&path, file.to_string()).unwrap();
+        assert_eq!(get(key), 365);
+        assert_eq!(get(other_key), 19);
+
+        repo.git_ai(&["config", "set", key, "7"]).unwrap();
+        assert_eq!(get(key), 7);
+        std::fs::write(&path, file.to_string()).unwrap();
+        repo.git_ai(&["config", "unset", key]).unwrap();
+        let repaired: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(repaired.get(key).is_none());
+        assert_eq!(repaired[other_key], 19);
+    }
 }
 
 #[test]
@@ -458,6 +509,7 @@ fn fully_populated_file_config() -> FileConfig {
         codex_hooks_format: Some("config_toml".to_string()),
         notes_backend: Some(NotesBackendConfig::default()),
         transcript_streaming_lookback_days: Some(7),
+        metrics_retention_days: Some(14),
         max_checkpoint_file_size_bytes: Some(3 * 1024 * 1024),
         max_checkpoint_total_size_bytes: Some(32 * 1024 * 1024),
         max_checkpoint_total_lines: Some(500_000),
