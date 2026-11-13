@@ -13,6 +13,12 @@ Telemetry metrics stored in `~/.git-ai/internal/metrics-db` use compact JSON:
 
 Examples below were based on rows sampled from the local SQLite DB, but all string values and identifiers are anonymized.
 
+## Local retention
+
+To keep seven days of local metrics, set `GIT_AI_METRICS_RETENTION_DAYS=7` in the environment that starts the git-ai daemon. For a running daemon, export the variable and run `git-ai bg restart`. The default is 365 days and applies if the value is missing, invalid, zero, or too large to convert to seconds.
+
+When git-ai stores metrics or marks them delivered, it prunes expired rows at most once every 24 hours. This applies to both local history and metrics awaiting upload. SQLite can reuse the freed pages, so the database file may keep its current size.
+
 ## 1. `committed`
 
 Source: local SQLite sample.

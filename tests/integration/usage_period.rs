@@ -131,3 +131,36 @@ fn usage_period_missing_value_exits_nonzero_with_message() {
         "unexpected error output: {err}"
     );
 }
+
+#[test]
+fn metrics_retention_days_prunes_existing_history() {
+    let (_metrics_dir, path) = isolated_metrics_db_path();
+    let path_ref = std::path::Path::new(&path);
+    git_ai::metrics::db::MetricsDatabase::open_at_path(path_ref).unwrap();
+    let conn = git_ai::sqlite::open_with_memory_limits(path_ref).unwrap();
+    for age in [8, 6] {
+        let ts = (chrono::Utc::now() - chrono::Duration::days(age)).timestamp();
+        let event = serde_json::json!({"t": ts, "e": 1, "v": {}, "a": {}});
+        conn.execute(
+            "INSERT INTO metrics (event_json, event_ts, delivered_ts) VALUES (?1, ?2, ?2)",
+            rusqlite::params![event.to_string(), ts],
+        )
+        .unwrap();
+    }
+
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_TEST_METRICS_DB_PATH", &path),
+        ("GIT_AI_METRICS_RETENTION_DAYS", "7"),
+    ]);
+    seed_ai_commit(&repo);
+    repo.git_ai(&["await", "--timeout", "60"]).unwrap();
+
+    let retained: Vec<i64> = conn
+        .prepare("SELECT id FROM metrics WHERE id IN (1, 2) ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(retained, [2]);
+}
