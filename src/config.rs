@@ -280,7 +280,11 @@ pub struct FileConfig {
     pub notes_backend: Option<NotesBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_streaming_lookback_days: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_metrics_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub metrics_retention_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_checkpoint_file_size_bytes: Option<usize>,
@@ -1547,6 +1551,14 @@ fn load_file_config() -> Option<FileConfig> {
     let path = config_file_path()?;
     let data = fs::read(&path).ok()?;
     parse_file_config_bytes(&data).ok()
+}
+
+// A malformed retention value should leave the rest of the file usable.
+fn deserialize_metrics_retention_days<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().and_then(|days| u32::try_from(days).ok()))
 }
 
 fn parse_file_config_bytes(data: &[u8]) -> Result<FileConfig, serde_json::Error> {

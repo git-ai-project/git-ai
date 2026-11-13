@@ -5,7 +5,7 @@
 //! These run the real binary against an isolated test HOME, so `config set`
 //! writes land in the sandboxed `~/.git-ai/config.json` rather than the user's.
 
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use git_ai::config::{AuthorConfig, FileConfig, NotesBackendConfig};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -174,6 +174,39 @@ fn metrics_retention_days_uses_env_then_file_then_default() {
     }
     repo.git_ai(&["config", "unset", key]).unwrap();
     assert_eq!(get(""), 365);
+}
+
+#[test]
+fn invalid_metrics_retention_days_preserves_other_settings() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+    let key = "metrics_retention_days";
+    let other_key = "transcript_streaming_lookback_days";
+    let env = [
+        ("GIT_AI_METRICS_RETENTION_DAYS", ""),
+        ("GIT_AI_TRANSCRIPT_STREAMING_LOOKBACK_DAYS", ""),
+    ];
+    let get = |key| get_json_with_env(&repo, key, &env);
+    let path = repo.test_home_path().join(".git-ai").join("config.json");
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file[other_key] = 19.into();
+    for invalid in [
+        Value::from(-1),
+        Value::from(u64::from(u32::MAX) + 1),
+        Value::from("seven"),
+    ] {
+        file[key] = invalid;
+        std::fs::write(&path, file.to_string()).unwrap();
+        assert_eq!(get(key), 365);
+        assert_eq!(get(other_key), 19);
+
+        repo.git_ai(&["config", "set", key, "7"]).unwrap();
+        assert_eq!(get(key), 7);
+        std::fs::write(&path, file.to_string()).unwrap();
+        repo.git_ai(&["config", "unset", key]).unwrap();
+        let repaired: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(repaired.get(key).is_none());
+        assert_eq!(repaired[other_key], 19);
+    }
 }
 
 #[test]
