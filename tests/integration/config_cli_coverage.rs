@@ -383,6 +383,76 @@ fn test_config_custom_attributes_nested_unset_trims_name() {
 }
 
 #[test]
+fn test_config_telemetry_oss_keys_round_trip() {
+    let repo = TestRepo::new();
+
+    // Default: telemetry is on.
+    assert_eq!(
+        get_json(&repo, "telemetry_oss"),
+        Value::String("on".to_string())
+    );
+    assert_eq!(
+        get_json(&repo, "telemetry_oss_disabled"),
+        Value::Bool(false)
+    );
+
+    // The settable file key round-trips through both read keys.
+    repo.git_ai(&["config", "set", "telemetry_oss", "off"])
+        .expect("set telemetry_oss off");
+    assert_eq!(
+        get_json(&repo, "telemetry_oss"),
+        Value::String("off".to_string())
+    );
+    assert_eq!(get_json(&repo, "telemetry_oss_disabled"), Value::Bool(true));
+
+    // The key shown by `git-ai config` must also be settable.
+    repo.git_ai(&["config", "set", "telemetry_oss_disabled", "false"])
+        .expect("set telemetry_oss_disabled false");
+    assert_eq!(
+        get_json(&repo, "telemetry_oss"),
+        Value::String("on".to_string())
+    );
+    assert_eq!(
+        get_json(&repo, "telemetry_oss_disabled"),
+        Value::Bool(false)
+    );
+
+    repo.git_ai(&["config", "set", "telemetry_oss_disabled", "true"])
+        .expect("set telemetry_oss_disabled true");
+    assert_eq!(
+        get_json(&repo, "telemetry_oss"),
+        Value::String("off".to_string())
+    );
+    assert_eq!(get_json(&repo, "telemetry_oss_disabled"), Value::Bool(true));
+
+    // Invalid booleans are rejected.
+    assert!(
+        repo.git_ai(&["config", "set", "telemetry_oss_disabled", "maybe"])
+            .is_err()
+    );
+
+    // Unsetting via the displayed key restores the default.
+    repo.git_ai(&["config", "unset", "telemetry_oss_disabled"])
+        .expect("unset telemetry_oss_disabled");
+    assert_eq!(
+        get_json(&repo, "telemetry_oss"),
+        Value::String("on".to_string())
+    );
+    assert_eq!(
+        get_json(&repo, "telemetry_oss_disabled"),
+        Value::Bool(false)
+    );
+
+    // Show-all exposes both spellings with consistent values.
+    repo.git_ai(&["config", "set", "telemetry_oss", "off"])
+        .expect("set telemetry_oss off again");
+    let out = repo.git_ai(&["config"]).expect("show all config");
+    let value: Value = serde_json::from_str(out.trim()).expect("show-all JSON");
+    assert_eq!(value["telemetry_oss"], Value::String("off".to_string()));
+    assert_eq!(value["telemetry_oss_disabled"], Value::Bool(true));
+}
+
+#[test]
 fn test_config_show_all_includes_new_keys() {
     let repo = TestRepo::new();
     let out = repo.git_ai(&["config"]).expect("show all config");
