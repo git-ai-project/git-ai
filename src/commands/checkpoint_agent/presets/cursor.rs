@@ -46,8 +46,11 @@ impl AgentPreset for CursorPreset {
 
         let hook_event_name = parse::required_str(&data, "hook_event_name")?;
 
-        // Extract model from hook input (Cursor provides this directly)
         let model = parse::optional_str(&data, "model")
+            .filter(|model| !model.trim().is_empty())
+            .or_else(|| {
+                parse::optional_str(&data, "model_id").filter(|model| !model.trim().is_empty())
+            })
             .unwrap_or("unknown")
             .to_string();
 
@@ -269,6 +272,37 @@ mod tests {
             "tool_input": {"file_path": "src/main.rs"}
         })
         .to_string()
+    }
+
+    #[test]
+    fn test_cursor_model_fallback() {
+        for (model, model_id, expected) in [
+            (None, Some("model-id"), "model-id"),
+            (Some(""), Some("model-id"), "model-id"),
+            (Some("  \t"), Some("model-id"), "model-id"),
+            (Some(" legacy-slug "), Some("model-id"), " legacy-slug "),
+            (None, None, "unknown"),
+            (Some(" "), Some("\t"), "unknown"),
+            (None, Some(""), "unknown"),
+        ] {
+            let mut input: serde_json::Value =
+                serde_json::from_str(&make_cursor_hook_input("postToolUse", "Write")).unwrap();
+            input.as_object_mut().unwrap().remove("model");
+            if let Some(value) = model {
+                input["model"] = json!(value);
+            }
+            if let Some(value) = model_id {
+                input["model_id"] = json!(value);
+            }
+            let events = CursorPreset.parse(&input.to_string(), "test").unwrap();
+            match &events[0] {
+                ParsedHookEvent::PostFileEdit(event) => assert_eq!(
+                    event.context.agent_id.model, expected,
+                    "model={model:?}, model_id={model_id:?}"
+                ),
+                _ => panic!("Expected PostFileEdit"),
+            }
+        }
     }
 
     #[test]

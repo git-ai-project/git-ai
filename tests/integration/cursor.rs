@@ -373,6 +373,58 @@ fn test_cursor_e2e_with_attribution() {
 }
 
 #[test]
+fn test_cursor_model_id_checkpoint_stats() {
+    let repo = TestRepo::new();
+    let path = repo.path().join("model.txt");
+    std::fs::write(&path, "Base line\n").unwrap();
+    repo.stage_all_and_commit("Base").unwrap();
+    let mut file = repo.filename("model.txt");
+    file.assert_committed_lines(crate::lines!["Base line".unattributed_human()]);
+
+    let mut payload = serde_json::json!({
+        "conversation_id": TEST_CONVERSATION_ID,
+        "workspace_roots": [repo.canonical_path()],
+        "hook_event_name": "preToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": path},
+        "model_id": "cursor-model-id"
+    });
+    repo.git_ai_with_stdin(
+        &["checkpoint", "cursor", "--hook-input", "stdin"],
+        payload.to_string().as_bytes(),
+    )
+    .unwrap();
+    std::fs::write(&path, "Base line\nCursor line\n").unwrap();
+    payload["hook_event_name"] = serde_json::json!("postToolUse");
+    repo.git_ai_with_stdin(
+        &["checkpoint", "cursor", "--hook-input", "stdin"],
+        payload.to_string().as_bytes(),
+    )
+    .unwrap();
+    let commit = repo.stage_all_and_commit("Cursor edit").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "Base line".unattributed_human(),
+        "Cursor line".ai()
+    ]);
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(session.agent_id.model, "cursor-model-id");
+    let stats = repo.stats().unwrap();
+    assert!(
+        stats
+            .tool_model_breakdown
+            .contains_key("cursor::cursor-model-id"),
+        "{:?}",
+        stats.tool_model_breakdown
+    );
+}
+
+#[test]
 fn test_cursor_e2e_with_resync() {
     use std::fs;
     use std::io::Write;
