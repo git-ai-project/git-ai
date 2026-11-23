@@ -532,13 +532,24 @@ pub(in crate::git) fn notes_add_batch(
 
 /// Committer identity (`Name <email>`) for `refs/notes/ai` commits: the configured
 /// `notes_committer`, with any unset field falling back to the git-ai placeholder.
+/// Fields containing fast-import ident delimiters (`<`, `>`, line breaks) are
+/// ignored so a bad value can't corrupt the stream and drop the note.
 fn notes_committer_identity(placeholder_email: &str) -> String {
     let config = crate::config::Config::fresh();
     let committer = config.notes_committer();
+    let is_valid = |value: &&str| !value.contains(['<', '>', '\n', '\r']);
     format!(
         "{} <{}>",
-        committer.name.as_deref().unwrap_or("git-ai"),
-        committer.email.as_deref().unwrap_or(placeholder_email)
+        committer
+            .name
+            .as_deref()
+            .filter(is_valid)
+            .unwrap_or("git-ai"),
+        committer
+            .email
+            .as_deref()
+            .filter(is_valid)
+            .unwrap_or(placeholder_email)
     )
 }
 

@@ -52,6 +52,24 @@ fn test_notes_committer_uses_configured_identity() {
 }
 
 #[test]
+fn test_notes_committer_invalid_fields_keep_placeholder() {
+    // Angle brackets or line breaks would corrupt the fast-import committer
+    // line and silently drop the authorship note, so such fields are ignored.
+    let mut repo = TestRepo::new_dedicated_daemon();
+    repo.patch_git_ai_config(|patch| {
+        patch.notes_committer = Some(AuthorConfig {
+            name: Some("Platform <EU>".to_string()),
+            email: Some("notes-bot@example.com\ncommitter x".to_string()),
+        });
+    });
+
+    assert_eq!(
+        commit_ai_edit_and_read_notes_committer(&repo),
+        "git-ai <git-ai@local>"
+    );
+}
+
+#[test]
 fn test_notes_committer_unset_field_keeps_placeholder() {
     let mut repo = TestRepo::new_dedicated_daemon();
     repo.patch_git_ai_config(|patch| {
