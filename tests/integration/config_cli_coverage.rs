@@ -332,6 +332,38 @@ fn test_config_notes_committer_object_set_get_unset() {
 }
 
 #[test]
+fn test_config_notes_committer_nested_set_get_unset() {
+    let repo = TestRepo::new();
+
+    repo.git_ai(&["config", "set", "notes_committer.name", "Notes Bot"])
+        .expect("set notes_committer.name");
+    repo.git_ai(&[
+        "config",
+        "set",
+        "notes_committer.email",
+        "notes-bot@example.com",
+    ])
+    .expect("set notes_committer.email");
+
+    assert_eq!(
+        get_json(&repo, "notes_committer.name"),
+        Value::String("Notes Bot".to_string())
+    );
+    assert_eq!(
+        get_json(&repo, "notes_committer.email"),
+        Value::String("notes-bot@example.com".to_string())
+    );
+
+    repo.git_ai(&["config", "unset", "notes_committer.name"])
+        .expect("unset notes_committer.name");
+    assert_eq!(get_json(&repo, "notes_committer.name"), Value::Null);
+    assert_eq!(
+        get_json(&repo, "notes_committer.email"),
+        Value::String("notes-bot@example.com".to_string())
+    );
+}
+
+#[test]
 fn test_config_custom_attributes_nested_set_get_unset() {
     let repo = TestRepo::new();
 
