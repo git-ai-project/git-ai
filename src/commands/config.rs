@@ -114,6 +114,8 @@ fn print_config_help() {
     println!("  api_key                      API key for X-API-Key header");
     println!("  author.name                  git-ai author display name override");
     println!("  author.email                 git-ai author email override");
+    println!("  notes_committer.name         Committer name for refs/notes/ai commits");
+    println!("  notes_committer.email        Committer email for refs/notes/ai commits");
     println!("  prompt_storage               Prompt storage mode (default/notes/local)");
     println!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
     println!("  default_prompt_storage       Fallback storage mode for non-included repos");
@@ -151,6 +153,7 @@ fn print_config_help() {
     println!("  git-ai config set disable_auto_updates true");
     println!("  git-ai config set author.name \"Alice Example\"");
     println!("  git-ai config set author.email alice@example.com");
+    println!("  git-ai config set notes_committer.email alice@example.com");
     println!("  git-ai config set exclude_repositories \"private/*\"");
     println!("  git-ai config set exclude_repositories .         # Uses current repo's remotes");
     println!("  git-ai config --add exclude_repositories \"temp/*\"");
@@ -371,6 +374,12 @@ fn show_all_config() -> Result<(), String> {
     );
 
     effective_config.insert(
+        "notes_committer".to_string(),
+        serde_json::to_value(runtime_config.notes_committer())
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+
+    effective_config.insert(
         "git_ai_hooks".to_string(),
         serde_json::to_value(runtime_config.git_ai_hooks())
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
@@ -542,6 +551,8 @@ fn get_config_value(key: &str) -> Result<(), String> {
             "quiet" => Value::Bool(runtime_config.is_quiet()),
             "author" => serde_json::to_value(runtime_config.author())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            "notes_committer" => serde_json::to_value(runtime_config.notes_committer())
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "git_ai_hooks" => serde_json::to_value(runtime_config.git_ai_hooks())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "codex_hooks_format" => {
@@ -636,11 +647,18 @@ fn get_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    if key_path[0] == "author" {
+    if matches!(key_path[0].as_str(), "author" | "notes_committer") {
+        let section = key_path[0].as_str();
         if key_path.len() != 2 {
-            return Err("author requires a field name (author.name or author.email)".to_string());
+            return Err(format!(
+                "{section} requires a field name ({section}.name or {section}.email)"
+            ));
         }
-        let author = runtime_config.author();
+        let author = if section == "author" {
+            runtime_config.author()
+        } else {
+            runtime_config.notes_committer()
+        };
         let value = match key_path[1].as_str() {
             "name" => author
                 .name
@@ -652,7 +670,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 .as_ref()
                 .map(|email| Value::String(email.clone()))
                 .unwrap_or(Value::Null),
-            other => return Err(format!("Unknown author field: {}", other)),
+            other => return Err(format!("Unknown {section} field: {}", other)),
         };
         let json = serde_json::to_string_pretty(&value)
             .map_err(|e| format!("Failed to serialize value: {}", e))?;
@@ -680,7 +698,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
     }
 
     Err(
-        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, and custom_attributes"
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, notes_committer, and custom_attributes"
             .to_string(),
     )
 }
@@ -847,6 +865,26 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                     "[author]: {}",
                     serde_json::to_string(&author)
                         .map_err(|e| format!("Failed to serialize author: {}", e))?
+                );
+            }
+            "notes_committer" => {
+                if add_mode {
+                    return Err(
+                        "Cannot use --add with notes_committer. Use notes_committer.name or notes_committer.email."
+                            .to_string(),
+                    );
+                }
+                let notes_committer = parse_author_config_object(value)?;
+                file_config.notes_committer = if notes_committer.is_empty() {
+                    None
+                } else {
+                    Some(notes_committer.clone())
+                };
+                crate::config::save_file_config(&file_config)?;
+                println!(
+                    "[notes_committer]: {}",
+                    serde_json::to_string(&notes_committer)
+                        .map_err(|e| format!("Failed to serialize notes_committer: {}", e))?
                 );
             }
             "git_ai_hooks" => {
@@ -1060,28 +1098,36 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
         return Ok(());
     }
 
-    if key_path[0] == "author" {
+    if matches!(key_path[0].as_str(), "author" | "notes_committer") {
+        let section = key_path[0].as_str();
         if add_mode {
-            return Err("Cannot use --add with author fields".to_string());
+            return Err(format!("Cannot use --add with {section} fields"));
         }
         if key_path.len() != 2 {
-            return Err("author requires a field name (author.name or author.email)".to_string());
+            return Err(format!(
+                "{section} requires a field name ({section}.name or {section}.email)"
+            ));
         }
 
-        let mut author = file_config.author.clone().unwrap_or_default().normalized();
+        let slot = if section == "author" {
+            &mut file_config.author
+        } else {
+            &mut file_config.notes_committer
+        };
+        let mut author = slot.clone().unwrap_or_default().normalized();
         let normalized_value = value.trim().to_string();
         if normalized_value.is_empty() {
-            return Err(format!("author.{} cannot be empty", key_path[1]));
+            return Err(format!("{section}.{} cannot be empty", key_path[1]));
         }
         match key_path[1].as_str() {
             "name" => author.name = Some(normalized_value.clone()),
             "email" => author.email = Some(normalized_value.clone()),
-            other => return Err(format!("Unknown author field: {}", other)),
+            other => return Err(format!("Unknown {section} field: {}", other)),
         }
 
-        file_config.author = Some(author);
+        *slot = Some(author);
         crate::config::save_file_config(&file_config)?;
-        println!("[author.{}]: {}", key_path[1], normalized_value);
+        println!("[{section}.{}]: {}", key_path[1], normalized_value);
         return Ok(());
     }
 
@@ -1106,7 +1152,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
     }
 
     Err(
-        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, and custom_attributes"
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, notes_committer, and custom_attributes"
             .to_string(),
     )
 }
@@ -1245,6 +1291,17 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                         "- [author]: {}",
                         serde_json::to_string(&v)
                             .map_err(|e| format!("Failed to serialize author: {}", e))?
+                    );
+                }
+            }
+            "notes_committer" => {
+                let old_value = file_config.notes_committer.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!(
+                        "- [notes_committer]: {}",
+                        serde_json::to_string(&v)
+                            .map_err(|e| format!("Failed to serialize notes_committer: {}", e))?
                     );
                 }
             }
@@ -1432,26 +1489,34 @@ fn unset_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    if key_path[0] == "author" {
+    if matches!(key_path[0].as_str(), "author" | "notes_committer") {
+        let section = key_path[0].as_str();
         if key_path.len() != 2 {
-            return Err("author requires a field name (author.name or author.email)".to_string());
+            return Err(format!(
+                "{section} requires a field name ({section}.name or {section}.email)"
+            ));
         }
 
-        let mut author = file_config.author.clone().unwrap_or_default().normalized();
+        let slot = if section == "author" {
+            &mut file_config.author
+        } else {
+            &mut file_config.notes_committer
+        };
+        let mut author = slot.clone().unwrap_or_default().normalized();
         let old_value = match key_path[1].as_str() {
             "name" => author.name.take(),
             "email" => author.email.take(),
-            other => return Err(format!("Unknown author field: {}", other)),
+            other => return Err(format!("Unknown {section} field: {}", other)),
         };
 
-        file_config.author = if author.is_empty() {
+        *slot = if author.is_empty() {
             None
         } else {
             Some(author)
         };
         crate::config::save_file_config(&file_config)?;
         if let Some(v) = old_value {
-            println!("- [author.{}]: {}", key_path[1], v);
+            println!("- [{section}.{}]: {}", key_path[1], v);
         }
         return Ok(());
     }
@@ -1484,7 +1549,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
     }
 
     Err(
-        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, and custom_attributes"
+        "Nested keys are only supported for feature_flags, git_ai_hooks, notes_backend, author, notes_committer, and custom_attributes"
             .to_string(),
     )
 }

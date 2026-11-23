@@ -299,6 +299,71 @@ fn test_config_custom_attributes_object_set_get_unset() {
 }
 
 #[test]
+fn test_config_notes_committer_object_set_get_unset() {
+    let repo = TestRepo::new();
+
+    // Default is an empty object (notes commits keep the git-ai placeholder).
+    assert_eq!(
+        get_json(&repo, "notes_committer"),
+        Value::Object(serde_json::Map::new())
+    );
+
+    repo.git_ai(&[
+        "config",
+        "set",
+        "notes_committer",
+        r#"{"name":"Notes Bot","email":"notes-bot@example.com"}"#,
+    ])
+    .expect("set notes_committer object");
+
+    let value = get_json(&repo, "notes_committer");
+    assert_eq!(value["name"], Value::String("Notes Bot".to_string()));
+    assert_eq!(
+        value["email"],
+        Value::String("notes-bot@example.com".to_string())
+    );
+
+    repo.git_ai(&["config", "unset", "notes_committer"])
+        .expect("unset notes_committer");
+    assert_eq!(
+        get_json(&repo, "notes_committer"),
+        Value::Object(serde_json::Map::new())
+    );
+}
+
+#[test]
+fn test_config_notes_committer_nested_set_get_unset() {
+    let repo = TestRepo::new();
+
+    repo.git_ai(&["config", "set", "notes_committer.name", "Notes Bot"])
+        .expect("set notes_committer.name");
+    repo.git_ai(&[
+        "config",
+        "set",
+        "notes_committer.email",
+        "notes-bot@example.com",
+    ])
+    .expect("set notes_committer.email");
+
+    assert_eq!(
+        get_json(&repo, "notes_committer.name"),
+        Value::String("Notes Bot".to_string())
+    );
+    assert_eq!(
+        get_json(&repo, "notes_committer.email"),
+        Value::String("notes-bot@example.com".to_string())
+    );
+
+    repo.git_ai(&["config", "unset", "notes_committer.name"])
+        .expect("unset notes_committer.name");
+    assert_eq!(get_json(&repo, "notes_committer.name"), Value::Null);
+    assert_eq!(
+        get_json(&repo, "notes_committer.email"),
+        Value::String("notes-bot@example.com".to_string())
+    );
+}
+
+#[test]
 fn test_config_custom_attributes_nested_set_get_unset() {
     let repo = TestRepo::new();
 
@@ -452,6 +517,10 @@ fn fully_populated_file_config() -> FileConfig {
         author: Some(AuthorConfig {
             name: Some("Alice".to_string()),
             email: Some("alice@example.com".to_string()),
+        }),
+        notes_committer: Some(AuthorConfig {
+            name: Some("Notes Bot".to_string()),
+            email: Some("notes-bot@example.com".to_string()),
         }),
         custom_attributes: Some(custom_attributes),
         git_ai_hooks: Some(git_ai_hooks),

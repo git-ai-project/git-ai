@@ -94,6 +94,7 @@ mod merge_rebase;
 mod metrics_retry_idle;
 mod multi_repo_workspace;
 mod non_utf8_files;
+mod notes_committer;
 mod notes_merge_mixed_fanout;
 mod opencode;
 mod opencode_v2;
