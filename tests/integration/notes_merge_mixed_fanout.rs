@@ -1,4 +1,5 @@
 use crate::repos::test_repo::{TestRepo, real_git_executable};
+use git_ai::config::AuthorConfig;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -74,7 +75,14 @@ fn git_plumbing(repo_path: &std::path::Path, args: &[&str], stdin_data: Option<&
 /// commit (which doesn't exist locally as a git object) is present after the merge.
 #[test]
 fn test_fetch_notes_with_locally_corrupted_mixed_fanout_tree() {
-    let (mirror, upstream) = TestRepo::new_with_remote();
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    // `fetch-notes` runs the fallback merge in-process, so the patch applies directly.
+    mirror.patch_git_ai_config(|patch| {
+        patch.notes_committer = Some(AuthorConfig {
+            name: Some("Notes Bot".to_string()),
+            email: Some("notes-bot@example.com".to_string()),
+        });
+    });
 
     // -- Step 1: Create commit A on mirror, push to upstream. --
     // Commit A exists locally on the mirror — its notes are on both sides.
@@ -297,4 +305,12 @@ done\n"
          notes list after merge:\n{}",
         final_notes,
     );
+
+    // -- Step 8: The fallback merge commit uses the configured notes committer. --
+    let merge_committer = git_plumbing(
+        mirror.path(),
+        &["log", "-1", "--format=%cn <%ce>", "refs/notes/ai"],
+        None,
+    );
+    assert_eq!(merge_committer, "Notes Bot <notes-bot@example.com>");
 }

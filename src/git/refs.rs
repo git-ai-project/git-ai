@@ -489,6 +489,7 @@ pub(in crate::git) fn notes_add_batch(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
         .as_secs();
+    let committer = notes_committer_identity("git-ai@local");
 
     let mut fast_import_args = repo.global_args_for_exec();
     fast_import_args.push("fast-import".to_string());
@@ -504,7 +505,7 @@ pub(in crate::git) fn notes_add_batch(
         }
 
         writer.write_all(b"commit refs/notes/ai\n")?;
-        writeln!(writer, "committer git-ai <git-ai@local> {} +0000", now)?;
+        writeln!(writer, "committer {} {} +0000", committer, now)?;
         writer.write_all(b"data 0\n")?;
         if let Some(existing_tip) = existing_notes_tip.as_deref() {
             writeln!(writer, "from {}", existing_tip)?;
@@ -527,6 +528,18 @@ pub(in crate::git) fn notes_add_batch(
     );
 
     Ok(())
+}
+
+/// Committer identity (`Name <email>`) for `refs/notes/ai` commits: the configured
+/// `notes_committer`, with any unset field falling back to the git-ai placeholder.
+fn notes_committer_identity(placeholder_email: &str) -> String {
+    let config = crate::config::Config::fresh();
+    let committer = config.notes_committer();
+    format!(
+        "{} <{}>",
+        committer.name.as_deref().unwrap_or("git-ai"),
+        committer.email.as_deref().unwrap_or(placeholder_email)
+    )
 }
 
 /// Batch-attach existing note blobs to commits without rewriting blob contents.
@@ -560,13 +573,14 @@ pub(in crate::git) fn notes_add_blob_batch(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
         .as_secs();
+    let committer = notes_committer_identity("git-ai@local");
 
     let mut fast_import_args = repo.global_args_for_exec();
     fast_import_args.push("fast-import".to_string());
     fast_import_args.push("--quiet".to_string());
     exec_git_with_stdin_writer(&fast_import_args, |writer| {
         writer.write_all(b"commit refs/notes/ai\n")?;
-        writeln!(writer, "committer git-ai <git-ai@local> {} +0000", now)?;
+        writeln!(writer, "committer {} {} +0000", committer, now)?;
         writer.write_all(b"data 0\n")?;
         if let Some(existing_tip) = existing_notes_tip.as_deref() {
             writeln!(writer, "from {}", existing_tip)?;
@@ -897,7 +911,10 @@ pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<
     //    this implements the "ours" merge strategy.
     let mut stream = String::new();
     stream.push_str(&format!("commit {}\n", local_ref));
-    stream.push_str("committer git-ai <git-ai@noreply> 0 +0000\n");
+    stream.push_str(&format!(
+        "committer {} 0 +0000\n",
+        notes_committer_identity("git-ai@noreply")
+    ));
     stream.push_str("data 23\nMerge notes (fallback)\n");
     stream.push_str(&format!("from {}\n", local_commit));
     stream.push_str(&format!("merge {}\n", source_commit));

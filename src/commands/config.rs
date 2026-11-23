@@ -114,6 +114,9 @@ fn print_config_help() {
     println!("  api_key                      API key for X-API-Key header");
     println!("  author.name                  git-ai author display name override");
     println!("  author.email                 git-ai author email override");
+    println!(
+        "  notes_committer              Committer identity for refs/notes/ai commits (JSON object with name/email)"
+    );
     println!("  prompt_storage               Prompt storage mode (default/notes/local)");
     println!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
     println!("  default_prompt_storage       Fallback storage mode for non-included repos");
@@ -371,6 +374,12 @@ fn show_all_config() -> Result<(), String> {
     );
 
     effective_config.insert(
+        "notes_committer".to_string(),
+        serde_json::to_value(runtime_config.notes_committer())
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+
+    effective_config.insert(
         "git_ai_hooks".to_string(),
         serde_json::to_value(runtime_config.git_ai_hooks())
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
@@ -541,6 +550,8 @@ fn get_config_value(key: &str) -> Result<(), String> {
             }
             "quiet" => Value::Bool(runtime_config.is_quiet()),
             "author" => serde_json::to_value(runtime_config.author())
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            "notes_committer" => serde_json::to_value(runtime_config.notes_committer())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             "git_ai_hooks" => serde_json::to_value(runtime_config.git_ai_hooks())
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
@@ -847,6 +858,23 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                     "[author]: {}",
                     serde_json::to_string(&author)
                         .map_err(|e| format!("Failed to serialize author: {}", e))?
+                );
+            }
+            "notes_committer" => {
+                if add_mode {
+                    return Err("Cannot use --add with notes_committer".to_string());
+                }
+                let notes_committer = parse_author_config_object(value)?;
+                file_config.notes_committer = if notes_committer.is_empty() {
+                    None
+                } else {
+                    Some(notes_committer.clone())
+                };
+                crate::config::save_file_config(&file_config)?;
+                println!(
+                    "[notes_committer]: {}",
+                    serde_json::to_string(&notes_committer)
+                        .map_err(|e| format!("Failed to serialize notes_committer: {}", e))?
                 );
             }
             "git_ai_hooks" => {
@@ -1245,6 +1273,17 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                         "- [author]: {}",
                         serde_json::to_string(&v)
                             .map_err(|e| format!("Failed to serialize author: {}", e))?
+                    );
+                }
+            }
+            "notes_committer" => {
+                let old_value = file_config.notes_committer.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    println!(
+                        "- [notes_committer]: {}",
+                        serde_json::to_string(&v)
+                            .map_err(|e| format!("Failed to serialize notes_committer: {}", e))?
                     );
                 }
             }

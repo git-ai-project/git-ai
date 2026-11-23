@@ -1268,6 +1268,13 @@ impl TestRepo {
                 serde_json::to_value(author).expect("failed to serialize test author config"),
             );
         }
+        if let Some(notes_committer) = &patch.notes_committer {
+            config.insert(
+                "notes_committer".to_string(),
+                serde_json::to_value(notes_committer)
+                    .expect("failed to serialize test notes_committer config"),
+            );
+        }
         if let Some(feature_flags) = &patch.feature_flags {
             config.insert("feature_flags".to_string(), feature_flags.clone());
         }

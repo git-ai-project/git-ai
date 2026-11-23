@@ -186,6 +186,7 @@ pub struct Config {
     quiet: bool,
     allow_superuser: bool,
     author: AuthorConfig,
+    notes_committer: AuthorConfig,
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
     codex_hooks_format: CodexHooksFormat,
@@ -269,6 +270,8 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<AuthorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_committer: Option<AuthorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
@@ -339,6 +342,8 @@ pub struct ConfigPatch {
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<AuthorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_committer: Option<AuthorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -700,6 +705,11 @@ impl Config {
     /// Returns the configured git-ai author override.
     pub fn author(&self) -> &AuthorConfig {
         &self.author
+    }
+
+    /// Returns the configured committer identity for `refs/notes/ai` commits.
+    pub fn notes_committer(&self) -> &AuthorConfig {
+        &self.notes_committer
     }
 
     /// Returns the custom attributes map (from config file + env var override).
@@ -1146,6 +1156,12 @@ fn build_config() -> Config {
         .unwrap_or_default()
         .normalized();
 
+    let notes_committer = file_cfg
+        .as_ref()
+        .and_then(|c| c.notes_committer.clone())
+        .unwrap_or_default()
+        .normalized();
+
     // Build custom attributes: file config as base, env var overrides
     let custom_attributes = build_custom_attributes(&file_cfg);
 
@@ -1284,6 +1300,7 @@ fn build_config() -> Config {
             quiet,
             allow_superuser,
             author,
+            notes_committer,
             custom_attributes: custom_attributes.clone(),
             git_ai_hooks: git_ai_hooks.clone(),
             codex_hooks_format,
@@ -1319,6 +1336,7 @@ fn build_config() -> Config {
         quiet,
         allow_superuser,
         author,
+        notes_committer,
         custom_attributes,
         git_ai_hooks,
         codex_hooks_format,
@@ -1793,6 +1811,9 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(author) = patch.author {
             config.author = author.normalized();
         }
+        if let Some(notes_committer) = patch.notes_committer {
+            config.notes_committer = notes_committer.normalized();
+        }
         if let Some(feature_flags_value) = patch.feature_flags
             && let Ok(deserialized) = serde_json::from_value::<
                 crate::feature_flags::DeserializableFeatureFlags,
@@ -1871,6 +1892,7 @@ mod tests {
             quiet: false,
             allow_superuser: false,
             author: AuthorConfig::default(),
+            notes_committer: AuthorConfig::default(),
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
@@ -2139,6 +2161,7 @@ mod tests {
             quiet: false,
             allow_superuser: false,
             author: AuthorConfig::default(),
+            notes_committer: AuthorConfig::default(),
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
@@ -2289,6 +2312,7 @@ mod tests {
             quiet: false,
             allow_superuser: false,
             author: AuthorConfig::default(),
+            notes_committer: AuthorConfig::default(),
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
