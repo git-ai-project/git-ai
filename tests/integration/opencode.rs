@@ -234,6 +234,48 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
     }
 }
 
+/// OpenCode (like its fork Kilo) writes per-channel DBs (`opencode-<channel>.db`)
+/// next to `opencode.db`; the session's model must come from the DB that has it.
+#[test]
+#[serial_test::serial]
+fn test_opencode_preset_reads_model_from_channel_db() {
+    let storage = tempfile::tempdir().unwrap();
+    fs::copy(
+        fixture_path("opencode-sqlite-empty").join("opencode.db"),
+        storage.path().join("opencode.db"),
+    )
+    .unwrap();
+    fs::copy(
+        opencode_sqlite_fixture_path().join("opencode.db"),
+        storage.path().join("opencode-latest.db"),
+    )
+    .unwrap();
+    let hook_input = json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "test-session-123",
+        "cwd": "/Users/test/project",
+        "tool_input": { "filePath": "/Users/test/project/index.ts" }
+    })
+    .to_string();
+
+    unsafe {
+        std::env::set_var("GIT_AI_OPENCODE_STORAGE_PATH", storage.path());
+    }
+    let events = parse_opencode(&hook_input).expect("Failed to run OpenCodePreset");
+    unsafe {
+        std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
+    }
+
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.model, "gpt-5");
+            let source = e.stream_source.as_ref().expect("transcript source");
+            assert!(source.path.ends_with("opencode-latest.db"));
+        }
+        _ => panic!("Expected PostFileEdit for PostToolUse"),
+    }
+}
+
 #[test]
 #[serial_test::serial]
 fn test_opencode_preset_stores_session_id_in_metadata() {

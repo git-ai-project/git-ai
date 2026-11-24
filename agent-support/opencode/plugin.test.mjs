@@ -333,3 +333,39 @@ test("a repeated pre must retire the old baseline even when its replacement fail
   await f.after(event)
   assert.deepEqual(f.calls.map((x) => x.hook_event_name), ["PreToolUse", "PreToolUse"])
 })
+
+test("checkpoint preset defaults to opencode and follows the installer's substitution", async (t) => {
+  const source = await readFile(new URL("./git-ai.ts", import.meta.url), "utf8")
+  const presetFor = async (pluginSource) => {
+    const directory = await mkdtemp(join(tmpdir(), "git-ai-opencode-preset-"))
+    await mkdir(join(directory, ".git"))
+    const spawned = []
+    t.mock.method(childProcess, "spawn", (_bin, args) => {
+      spawned.push(args)
+      const child = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdin = new EventEmitter()
+      child.stdin.end = () => queueMicrotask(() => child.emit("close", 0))
+      return child
+    })
+    syncBuiltinESMExports()
+    try {
+      const compiled = ts.transpileModule(pluginSource, {
+        compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+      }).outputText
+      const pluginPath = join(directory, "git-ai.mjs")
+      await writeFile(pluginPath, compiled)
+      const { default: plugin } = await import(pathToFileURL(pluginPath).href)
+      const hooks = await plugin.server({ directory })
+      await hooks["tool.execute.before"]({ tool: "edit", sessionID: "s", callID: "c" }, { args: { filePath: join(directory, "a.ts") } })
+      return spawned[0]?.[1]
+    } finally {
+      t.mock.restoreAll()
+      syncBuiltinESMExports()
+      await rm(directory, { recursive: true, force: true })
+    }
+  }
+  // Copies that only substitute the binary path keep working as the OpenCode plugin.
+  assert.equal(await presetFor(source), "opencode")
+  assert.equal(await presetFor(source.replace("__GIT_AI_PRESET__", "kilo")), "kilo")
+})
