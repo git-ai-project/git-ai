@@ -526,4 +526,49 @@ mod tests {
             });
         });
     }
+
+    #[test]
+    #[serial]
+    fn test_kilo_install_writes_kilo_plugin_and_uninstall_removes_it() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                fs::create_dir_all(home.join(".config").join("kilo")).unwrap();
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(installer.install_hooks(&params, false).unwrap().is_some());
+
+                let plugin_path = home.join(".config/kilo/plugins/git-ai.ts");
+                let content = fs::read_to_string(&plugin_path).unwrap();
+                assert!(content.contains(r#"const PRESET = "kilo""#));
+                assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
+                assert!(!home.join(".config/opencode").exists());
+                let check = installer.check_hooks(&params).unwrap();
+                assert!(check.tool_installed && check.hooks_installed && check.hooks_up_to_date);
+
+                assert!(installer.uninstall_hooks(&params, false).unwrap().is_some());
+                assert!(!plugin_path.exists());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_detected_from_vscode_extension_alone() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(!installer.check_hooks(&params).unwrap().tool_installed);
+                fs::create_dir_all(
+                    home.join(".vscode/extensions/kilocode.kilo-code-7.8.28-linux-arm64"),
+                )
+                .unwrap();
+                assert!(installer.check_hooks(&params).unwrap().tool_installed);
+            });
+        });
+    }
 }

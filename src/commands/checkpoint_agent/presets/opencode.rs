@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 
 pub struct OpenCodePreset;
 
+/// Kilo Code (CLI and the VS Code extension, which runs `kilo serve`) is an
+/// OpenCode fork: same plugin hooks and SQLite schema, different names/paths.
+pub struct KiloPreset;
+
 /// Per-fork naming for agents in the OpenCode family.
 pub(crate) struct OpenCodeFamily {
     /// Tool name recorded in attribution (`AgentId.tool`).
@@ -29,6 +33,13 @@ pub(crate) static OPENCODE_FAMILY: OpenCodeFamily = OpenCodeFamily {
     data_dir_name: "opencode",
     db_filename: "opencode.db",
     storage_env_var: "GIT_AI_OPENCODE_STORAGE_PATH",
+};
+
+pub(crate) static KILO_FAMILY: OpenCodeFamily = OpenCodeFamily {
+    tool: "kilo",
+    data_dir_name: "kilo",
+    db_filename: "kilo.db",
+    storage_env_var: "GIT_AI_KILO_STORAGE_PATH",
 };
 
 #[derive(Debug, Deserialize)]
@@ -294,6 +305,12 @@ impl OpenCodePreset {
 impl AgentPreset for OpenCodePreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
         OpenCodePreset::parse_family(&OPENCODE_FAMILY, hook_input, trace_id)
+    }
+}
+
+impl AgentPreset for KiloPreset {
+    fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+        OpenCodePreset::parse_family(&KILO_FAMILY, hook_input, trace_id)
     }
 }
 
@@ -613,5 +630,49 @@ mod tests {
             }
             _ => panic!("Expected PreBashCall"),
         }
+    }
+
+    #[test]
+    fn test_kilo_preset_records_kilo_tool() {
+        let input = make_opencode_input("PostToolUse", "edit");
+        let events = KiloPreset.parse(&input, "t_test").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "kilo");
+                assert_eq!(e.context.external_session_id, "oc-sess-123");
+                assert!(!e.file_paths.is_empty());
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_kilo_preset_bash_classification() {
+        let input = make_opencode_input("PreToolUse", "bash");
+        let events = KiloPreset.parse(&input, "t_test").unwrap();
+        assert!(
+            matches!(&events[0], ParsedHookEvent::PreBashCall(e) if e.context.agent_id.tool == "kilo")
+        );
+    }
+
+    #[test]
+    fn test_kilo_resolves_kilo_db_not_opencode_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("opencode.db"), b"").unwrap();
+        assert_eq!(
+            OpenCodePreset::resolve_sqlite_db_path(&KILO_FAMILY, dir.path(), "ses"),
+            None
+        );
+        std::fs::write(dir.path().join("kilo.db"), b"").unwrap();
+        assert_eq!(
+            OpenCodePreset::resolve_sqlite_db_path(&KILO_FAMILY, dir.path(), "ses"),
+            Some(dir.path().join("kilo.db"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_preset_kilo() {
+        assert!(resolve_preset("kilo").is_ok());
     }
 }

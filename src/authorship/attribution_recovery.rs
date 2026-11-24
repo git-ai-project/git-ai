@@ -36,6 +36,7 @@ const DROID_TOOLS: &[&str] = &["droid"];
 const WINDSURF_TOOLS: &[&str] = &["windsurf"];
 const AMP_TOOLS: &[&str] = &["amp"];
 const OPENCODE_TOOLS: &[&str] = &["opencode"];
+const KILO_TOOLS: &[&str] = &["kilo"];
 const GEMINI_TOOLS: &[&str] = &["gemini"];
 const CONTINUE_TOOLS: &[&str] = &["continue-cli"];
 
@@ -48,6 +49,7 @@ const DROID_EMAILS: &[&str] = &["+factory-droid[bot]@users.noreply.github.com"];
 const WINDSURF_EMAILS: &[&str] = &["noreply@windsurf.com", "noreply@codeium.com"];
 const AMP_EMAILS: &[&str] = &[];
 const OPENCODE_EMAILS: &[&str] = &[];
+const KILO_EMAILS: &[&str] = &[];
 const GEMINI_EMAILS: &[&str] = &[];
 const CONTINUE_EMAILS: &[&str] = &[];
 
@@ -60,6 +62,7 @@ const DROID_MARKER_EMAILS: &[&str] = &[];
 const WINDSURF_MARKER_EMAILS: &[&str] = &[];
 const AMP_MARKER_EMAILS: &[&str] = &[];
 const OPENCODE_MARKER_EMAILS: &[&str] = &[];
+const KILO_MARKER_EMAILS: &[&str] = &[];
 const GEMINI_MARKER_EMAILS: &[&str] = &[];
 const CONTINUE_MARKER_EMAILS: &[&str] = &[];
 
@@ -72,6 +75,7 @@ const DROID_MARKERS: &[&str] = &["droid", "factory-droid"];
 const WINDSURF_MARKERS: &[&str] = &["windsurf"];
 const AMP_MARKERS: &[&str] = &["ampcode", "amp code"];
 const OPENCODE_MARKERS: &[&str] = &["opencode", "open code"];
+const KILO_MARKERS: &[&str] = &["kilocode", "kilo code"];
 const GEMINI_MARKERS: &[&str] = &["gemini"];
 const CONTINUE_MARKERS: &[&str] = &["continue-cli"];
 
@@ -138,6 +142,13 @@ const KNOWN_COMMIT_AGENT_KINDS: &[CommitAgentKind] = &[
         emails: OPENCODE_EMAILS,
         marker_emails: OPENCODE_MARKER_EMAILS,
         markers: OPENCODE_MARKERS,
+    },
+    CommitAgentKind {
+        key: "kilo",
+        tools: KILO_TOOLS,
+        emails: KILO_EMAILS,
+        marker_emails: KILO_MARKER_EMAILS,
+        markers: KILO_MARKERS,
     },
     CommitAgentKind {
         key: "gemini",
