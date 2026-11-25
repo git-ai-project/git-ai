@@ -208,7 +208,8 @@ Input: exact `source_head`, created `squash_commit`, exact `onto`.
 1. `merge_base(source_head, onto)` → list source commits.
 2. Batch-read all source notes; shift intermediate notes into source-head
    coordinates; merge into one log (many-to-one).
-3. Shift the merged log from `source_head` to `squash_commit`.
+3. Shift the merged log from `source_head` to `squash_commit`. Keep
+   source attestations for paths changed by the squash commit.
 4. Merge with any existing squash-commit note (conflict-resolution
    checkpoints), and with the working log on `onto` if one exists (the squash
    commit also commits any locally checkpointed resolution work).

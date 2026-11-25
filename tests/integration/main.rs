@@ -134,6 +134,7 @@ mod simple_additions;
 mod simple_benchmark;
 mod sqlite_connection_policy;
 mod squash_merge;
+mod squash_merge_path_attribution;
 mod stale_prompt_carry;
 mod stash_attribution;
 mod stash_hooks_unit;

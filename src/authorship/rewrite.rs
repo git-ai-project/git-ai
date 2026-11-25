@@ -481,8 +481,6 @@ fn handle_squash_merge(
     squash_commit: &str,
     onto: &str,
 ) -> Result<RewriteOutcome, GitAiError> {
-    use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
-
     let target_notes = notes_api::read_notes_batch(repo, &[squash_commit.to_string()])?;
     let existing_target_log = target_notes
         .get(squash_commit)
@@ -556,24 +554,7 @@ fn handle_squash_merge(
         let mut log = note.log;
 
         if let Some(idx) = note.diff_idx {
-            let diff_to_tip = &diff_results[idx];
-            for (old_path, new_path) in &diff_to_tip.renames {
-                for attestation in &mut log.attestations {
-                    if attestation.file_path == *old_path {
-                        attestation.file_path = new_path.clone();
-                    }
-                }
-            }
-            if !diff_to_tip.hunks_by_file.is_empty() {
-                log.attestations = log
-                    .attestations
-                    .iter()
-                    .filter_map(|fa| match diff_to_tip.hunks_by_file.get(&fa.file_path) {
-                        Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
-                        None => Some(fa.clone()),
-                    })
-                    .collect();
-            }
+            shift_squash_attestations(&mut log, &diff_results[idx]);
         }
 
         match merged_log.as_mut() {
@@ -587,26 +568,13 @@ fn handle_squash_merge(
     };
 
     // Phase 2: Shift merged log from source_head to squash_commit
-    let diff_result = &diff_results[final_diff_idx];
-
-    for (old_path, new_path) in &diff_result.renames {
-        for attestation in &mut final_log.attestations {
-            if attestation.file_path == *old_path {
-                attestation.file_path = new_path.clone();
-            }
-        }
-    }
-
-    if !diff_result.hunks_by_file.is_empty() {
-        final_log.attestations = final_log
-            .attestations
-            .iter()
-            .filter_map(|fa| match diff_result.hunks_by_file.get(&fa.file_path) {
-                Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
-                None => Some(fa.clone()),
-            })
-            .collect();
-    }
+    shift_squash_attestations(&mut final_log, &diff_results[final_diff_idx]);
+    // Rename detection can pair a deleted feature path with an identical base
+    // path. The squash cannot introduce attribution to an unchanged path.
+    let changed_files = repo.list_commit_files(squash_commit, None)?;
+    final_log
+        .attestations
+        .retain(|attestation| changed_files.contains(&attestation.file_path));
 
     final_log.metadata.base_commit_sha = squash_commit.to_string();
 
@@ -628,6 +596,29 @@ fn handle_squash_merge(
     } else {
         let note = write_authorship_log_for_metrics(repo, squash_commit, &shifted_log)?;
         Ok(squash_metric_outcome(squash_commit, &sources, onto, note))
+    }
+}
+
+fn shift_squash_attestations(log: &mut AuthorshipLog, diff: &DiffTreeResult) {
+    use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
+
+    for (old_path, new_path) in &diff.renames {
+        for attestation in &mut log.attestations {
+            if attestation.file_path == *old_path {
+                attestation.file_path = new_path.clone();
+            }
+        }
+    }
+
+    if !diff.hunks_by_file.is_empty() {
+        log.attestations = log
+            .attestations
+            .iter()
+            .filter_map(|fa| match diff.hunks_by_file.get(&fa.file_path) {
+                Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
+                None => Some(fa.clone()),
+            })
+            .collect();
     }
 }
 
