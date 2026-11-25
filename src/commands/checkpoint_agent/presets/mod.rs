@@ -17,6 +17,7 @@ mod known_human;
 mod mock_ai;
 mod mock_known_human;
 mod opencode;
+pub(crate) use opencode::OpenCodePreset;
 mod pi;
 mod windsurf;
 

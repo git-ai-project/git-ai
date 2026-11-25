@@ -6,6 +6,7 @@
 //! shares OpenCode's plugin and installer; only names and detection differ.
 
 use super::opencode::OpenCodePluginAgent;
+use crate::commands::checkpoint_agent::presets::OpenCodePreset;
 use crate::mdm::jetbrains::{DetectedIde, find_jetbrains_installations};
 use crate::mdm::utils::{binary_exists, home_dir};
 use std::fs;
@@ -23,6 +24,9 @@ const EDITOR_EXTENSION_DIRS: &[&str] = &[
 /// Marketplace id of the Kilo Code extension (`publisher.name`).
 const KILO_EXTENSION_PREFIX: &str = "kilocode.kilo-code-";
 
+/// First extension major version built on the Kilo CLI (7.0.26, Feb 2026).
+const FIRST_PLUGIN_CAPABLE_MAJOR: u32 = 7;
+
 /// Directory of Kilo Code for JetBrains (`ai.kilocode.jetbrains`) in an IDE's plugins dir.
 const KILO_JETBRAINS_PLUGIN_DIR: &str = "kilo.jetbrains";
 
@@ -36,11 +40,22 @@ impl KiloInstaller {
                 return false;
             };
             entries.flatten().any(|entry| {
-                entry.file_name().to_str().is_some_and(|name| {
-                    name.to_ascii_lowercase().starts_with(KILO_EXTENSION_PREFIX)
-                })
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(Self::is_plugin_capable_extension)
             })
         })
+    }
+
+    /// Extension dirs are `<id>-<version>[-<platform>]`. Versions before 7.0
+    /// (the OpenCode-based rewrite) have their own backend and never load plugins.
+    fn is_plugin_capable_extension(dir_name: &str) -> bool {
+        dir_name
+            .to_ascii_lowercase()
+            .strip_prefix(KILO_EXTENSION_PREFIX)
+            .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
+            .is_some_and(|major| major >= FIRST_PLUGIN_CAPABLE_MAJOR)
     }
 
     /// The JetBrains plugin runs its own `kilo` binary, so before its first
@@ -59,13 +74,8 @@ impl OpenCodePluginAgent for KiloInstaller {
     fn tool_installed() -> bool {
         binary_exists("kilo")
             || Self::config_dir().exists()
-            || home_dir()
-                .join(".local")
-                .join("share")
-                .join("kilo")
-                .exists()
+            || OpenCodePreset::kilo_data_path().is_ok_and(|dir| dir.exists())
             || Path::new(".kilo").exists()
-            || Path::new(".kilocode").exists()
             || Self::has_vscode_extension()
             || Self::has_jetbrains_plugin(&find_jetbrains_installations())
     }
@@ -103,11 +113,5 @@ mod tests {
         assert!(!KiloInstaller::has_jetbrains_plugin(&ides));
         fs::create_dir_all(plugins_dir.path().join("kilo.jetbrains")).unwrap();
         assert!(KiloInstaller::has_jetbrains_plugin(&ides));
-    }
-
-    #[test]
-    fn test_kilo_plugin_path() {
-        let path = KiloInstaller::plugin_path();
-        assert!(path.ends_with(".config/kilo/plugins/git-ai.ts"));
     }
 }

@@ -87,6 +87,21 @@ fn same_dir_entry(a: &Path, b: &Path) -> bool {
             && resolved_parent(a) == resolved_parent(b))
 }
 
+/// Removes the plugin files that exist (unless `dry_run`) and returns a removal diff for each.
+fn remove_plugin_files(paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<String>, GitAiError> {
+    let mut diffs = Vec::new();
+    for path in paths {
+        let Ok(existing_content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        diffs.push(generate_diff(&path, &existing_content, ""));
+        if !dry_run {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(diffs)
+}
+
 impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
     fn name(&self) -> &str {
         T::NAME
@@ -139,12 +154,7 @@ impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         let plugin_path = T::plugin_path();
-
-        if !dry_run {
-            for legacy_path in T::legacy_plugin_paths() {
-                let _ = fs::remove_file(&legacy_path);
-            }
-        }
+        let mut diffs = remove_plugin_files(T::legacy_plugin_paths(), dry_run)?;
 
         // Read existing content if present
         let existing_content = if plugin_path.exists() {
@@ -155,23 +165,17 @@ impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
 
         let new_content = T::generate_plugin_content(&params.binary_path);
 
-        // Check if there are changes
-        if existing_content.trim() == new_content.trim() {
-            return Ok(None);
-        }
-
-        // Generate diff
-        let diff_output = generate_diff(&plugin_path, &existing_content, &new_content);
-
-        // Write if not dry-run
-        if !dry_run {
-            if let Some(dir) = plugin_path.parent() {
-                fs::create_dir_all(dir)?;
+        if existing_content.trim() != new_content.trim() {
+            diffs.push(generate_diff(&plugin_path, &existing_content, &new_content));
+            if !dry_run {
+                if let Some(dir) = plugin_path.parent() {
+                    fs::create_dir_all(dir)?;
+                }
+                write_atomic(&plugin_path, new_content.as_bytes())?;
             }
-            write_atomic(&plugin_path, new_content.as_bytes())?;
         }
 
-        Ok(Some(diff_output))
+        Ok((!diffs.is_empty()).then(|| diffs.concat()))
     }
 
     fn uninstall_hooks(
@@ -179,17 +183,9 @@ impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let mut diffs = Vec::new();
-        for path in std::iter::once(T::plugin_path()).chain(T::legacy_plugin_paths()) {
-            let Ok(existing_content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            diffs.push(generate_diff(&path, &existing_content, ""));
-            if !dry_run {
-                fs::remove_file(&path)?;
-            }
-        }
-
+        let mut paths = T::legacy_plugin_paths();
+        paths.insert(0, T::plugin_path());
+        let diffs = remove_plugin_files(paths, dry_run)?;
         Ok((!diffs.is_empty()).then(|| diffs.concat()))
     }
 }
@@ -220,26 +216,26 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let home = temp_dir.path().to_path_buf();
 
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
+        // Plugin paths follow XDG_CONFIG_HOME, so a test must never see the real one.
+        let vars = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"];
+        let prev: Vec<_> = vars.iter().map(std::env::var_os).collect();
 
         // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
         }
 
         f(&home);
 
         // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
         unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
+            for (var, value) in vars.iter().zip(prev) {
+                match value {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
             }
         }
     }
@@ -653,6 +649,88 @@ mod tests {
         });
     }
 
+    #[test]
+    #[serial]
+    fn test_with_temp_home_isolates_xdg_config_home() {
+        let outer = TempDir::new().unwrap();
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", outer.path());
+        }
+        with_temp_home(|home| {
+            assert_eq!(
+                OpenCodeInstaller::plugin_path(),
+                home.join(".config/opencode/plugins/git-ai.ts")
+            );
+        });
+        assert_eq!(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            Some(outer.path().as_os_str())
+        );
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode_install_reports_removed_default_plugin() {
+        with_xdg_config_home(|home, _xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                OpenCodeInstaller.install_hooks(&params, false).unwrap();
+                let default_plugin = home.join(".config/opencode/plugins/git-ai.ts");
+                fs::create_dir_all(default_plugin.parent().unwrap()).unwrap();
+                fs::write(&default_plugin, "// old git-ai plugin").unwrap();
+
+                let dry_run = OpenCodeInstaller.install_hooks(&params, true).unwrap();
+                assert!(dry_run.is_some_and(|diff| diff.contains("old git-ai plugin")));
+                assert!(default_plugin.exists());
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(!default_plugin.exists());
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_none()
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_detected_from_xdg_data_home() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let data_home = home.join("data");
+                // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+                unsafe {
+                    std::env::set_var("XDG_DATA_HOME", &data_home);
+                }
+                fs::create_dir_all(data_home.join("kilo")).unwrap();
+                let installed = installer.check_hooks(&params).unwrap().tool_installed;
+                // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+                unsafe {
+                    std::env::remove_var("XDG_DATA_HOME");
+                }
+                assert!(installed);
+            });
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     #[serial]
@@ -732,6 +810,10 @@ mod tests {
                 let params = HookInstallerParams {
                     binary_path: create_test_binary_path(),
                 };
+                assert!(!installer.check_hooks(&params).unwrap().tool_installed);
+                // Before 7.x the extension had its own backend and never loads plugins.
+                fs::create_dir_all(home.join(".vscode/extensions/kilocode.kilo-code-4.122.1"))
+                    .unwrap();
                 assert!(!installer.check_hooks(&params).unwrap().tool_installed);
                 fs::create_dir_all(
                     home.join(".vscode/extensions/kilocode.kilo-code-7.8.28-linux-arm64"),

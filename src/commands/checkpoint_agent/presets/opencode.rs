@@ -215,6 +215,11 @@ impl OpenCodePreset {
         Self::data_path(&OPENCODE_FAMILY)
     }
 
+    /// Kilo's data dir (`$XDG_DATA_HOME/kilo`), used to detect Kilo installs.
+    pub(crate) fn kilo_data_path() -> Result<PathBuf, GitAiError> {
+        Self::data_path(&KILO_FAMILY)
+    }
+
     fn data_path(family: &OpenCodeFamily) -> Result<PathBuf, GitAiError> {
         // OpenCode V1 (xdg-basedir) and V2 use this layout on every OS,
         // including Windows. An empty XDG_DATA_HOME falls back to home.
