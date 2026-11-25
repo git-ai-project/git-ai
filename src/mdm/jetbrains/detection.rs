@@ -564,7 +564,7 @@ fn user_plugin_dirs_for_platform(
             std::fs::read_dir(user_config_root(platform, home_dir, appdata, parent)).ok()
         })
         .flat_map(|entries| entries.flatten())
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.path().is_dir())
         .map(|entry| version_plugins_dir(platform, entry.path()))
         .collect()
 }
@@ -865,6 +865,25 @@ mod tests {
         assert_eq!(
             user_plugin_dirs_for_platform(JetBrainsPlatform::Macos, home, None),
             vec![mac_idea.join("plugins")]
+        );
+    }
+
+    /// A version dir moved elsewhere and linked back still counts.
+    #[cfg(unix)]
+    #[test]
+    fn test_user_plugin_dirs_follows_symlinked_version_dirs() {
+        let home = tempfile::TempDir::new().unwrap();
+        let home = home.path();
+        let moved = home.join("other-drive/IntelliJIdea2026.3");
+        std::fs::create_dir_all(&moved).unwrap();
+        let root = home.join(".local/share/JetBrains");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&moved, root.join("IntelliJIdea2026.3")).unwrap();
+        std::fs::write(root.join("not-a-dir.txt"), "").unwrap();
+        std::os::unix::fs::symlink(home.join("missing"), root.join("Broken2026.1")).unwrap();
+        assert_eq!(
+            user_plugin_dirs_for_platform(JetBrainsPlatform::Linux, home, None),
+            vec![root.join("IntelliJIdea2026.3")]
         );
     }
 
