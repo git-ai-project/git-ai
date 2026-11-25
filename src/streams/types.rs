@@ -1,6 +1,8 @@
 //! Core types for transcript processing.
 
-use std::io::BufRead;
+use std::fs::File;
+use std::io::{BufRead, Read, Seek, SeekFrom};
+use std::path::Path;
 use std::time::Duration;
 
 /// Result of reading a single line from a JSONL reader.
@@ -75,9 +77,66 @@ pub struct StreamBatch {
     pub new_watermark: Box<dyn crate::streams::WatermarkStrategy>,
 }
 
+/// Search whole records newest-first within a bounded tail window. The
+/// second result tells the caller whether the window left out older records.
+pub(super) fn find_in_jsonl_tail<T>(
+    path: &Path,
+    scan_bytes: u64,
+    extract_from_line: fn(&str) -> Option<T>,
+) -> (Option<T>, bool) {
+    let Ok(mut file) = File::open(path) else {
+        return (None, false);
+    };
+    let Ok(metadata) = file.metadata() else {
+        return (None, false);
+    };
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return (None, false);
+    }
+
+    let window_start = file_size.saturating_sub(scan_bytes);
+    let read_start = window_start.saturating_sub(1);
+    if file.seek(SeekFrom::Start(read_start)).is_err() {
+        return (None, false);
+    }
+
+    let tail_was_truncated = window_start > 0;
+    let read_size = file_size - read_start;
+    let mut tail = Vec::with_capacity(read_size as usize);
+    if file.take(read_size).read_to_end(&mut tail).is_err() {
+        return (None, tail_was_truncated);
+    }
+
+    let mut lines = tail.rsplit(|&byte| byte == b'\n');
+    if tail_was_truncated {
+        // The extra byte lets us keep the first complete record when the
+        // window starts right after a newline and discard a partial one.
+        lines.next_back();
+    }
+    let result = lines.find_map(|line| std::str::from_utf8(line).ok().and_then(extract_from_line));
+    (result, tail_was_truncated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_find_in_jsonl_tail_keeps_record_at_window_start() {
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(transcript.path(), "\"earlier\"\n\"latest\"\n").unwrap();
+        let extract = |line: &str| serde_json::from_str::<String>(line).ok();
+
+        assert_eq!(
+            find_in_jsonl_tail(transcript.path(), 9, extract),
+            (Some("latest".to_string()), true)
+        );
+        assert_eq!(
+            find_in_jsonl_tail(transcript.path(), 8, extract),
+            (None, true)
+        );
+    }
 
     #[test]
     fn test_transient_error_display() {
