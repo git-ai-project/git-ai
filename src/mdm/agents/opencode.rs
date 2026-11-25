@@ -10,44 +10,83 @@ const OPENCODE_PLUGIN_CONTENT: &str = include_str!(concat!(
     "/agent-support/opencode/git-ai.ts"
 ));
 
-pub struct OpenCodeInstaller;
+/// An agent that loads the OpenCode plugin: OpenCode itself and its forks
+/// (Kilo Code). They differ only in names, config dir and detection; install,
+/// check and uninstall are shared.
+pub trait OpenCodePluginAgent {
+    /// Display name, e.g. "OpenCode".
+    const NAME: &'static str;
+    /// Installer id, checkpoint preset and `~/.config/<ID>` directory name.
+    const ID: &'static str;
+    const PROCESS_NAMES: &'static [&'static str];
 
-impl OpenCodeInstaller {
+    fn tool_installed() -> bool;
+
+    /// Plugin files written by older releases, removed on install and uninstall.
+    fn legacy_plugin_paths() -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     fn plugin_path() -> PathBuf {
         home_dir()
             .join(".config")
-            .join("opencode")
+            .join(Self::ID)
             .join("plugins")
             .join("git-ai.ts")
     }
 
-    /// Generate plugin content with the absolute binary path substituted in
+    /// Generate plugin content with the absolute binary path and preset substituted in
     fn generate_plugin_content(binary_path: &Path) -> String {
         // Escape backslashes for the TypeScript string literal (needed for Windows paths)
         let path_str = binary_path.display().to_string().replace('\\', "\\\\");
-        OPENCODE_PLUGIN_CONTENT.replace("__GIT_AI_BINARY_PATH__", &path_str)
+        // Preset first, so a binary path containing the token stays intact.
+        OPENCODE_PLUGIN_CONTENT
+            .replace("__GIT_AI_PRESET__", Self::ID)
+            .replace("__GIT_AI_BINARY_PATH__", &path_str)
     }
 }
 
-impl HookInstaller for OpenCodeInstaller {
+pub struct OpenCodeInstaller;
+
+impl OpenCodePluginAgent for OpenCodeInstaller {
+    const NAME: &'static str = "OpenCode";
+    const ID: &'static str = "opencode";
+    const PROCESS_NAMES: &'static [&'static str] = &["opencode", "opencode2"];
+
+    fn tool_installed() -> bool {
+        binary_exists("opencode")
+            || binary_exists("opencode2")
+            || home_dir().join(".config").join("opencode").exists()
+            || Path::new(".opencode").exists()
+    }
+
+    // Old installations used ~/.config/opencode/plugin/ (singular).
+    fn legacy_plugin_paths() -> Vec<PathBuf> {
+        vec![
+            home_dir()
+                .join(".config")
+                .join("opencode")
+                .join("plugin")
+                .join("git-ai.ts"),
+        ]
+    }
+}
+
+impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
     fn name(&self) -> &str {
-        "OpenCode"
+        T::NAME
     }
 
     fn id(&self) -> &str {
-        "opencode"
+        T::ID
     }
 
     fn process_names(&self) -> Vec<&str> {
-        vec!["opencode", "opencode2"]
+        T::PROCESS_NAMES.to_vec()
     }
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("opencode") || binary_exists("opencode2");
-        let has_global_config = home_dir().join(".config").join("opencode").exists();
-        let has_local_config = Path::new(".opencode").exists();
-
-        if !has_binary && !has_global_config && !has_local_config {
+        if !T::tool_installed() {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
@@ -56,7 +95,7 @@ impl HookInstaller for OpenCodeInstaller {
         }
 
         // Check if plugin is installed
-        let plugin_path = Self::plugin_path();
+        let plugin_path = T::plugin_path();
         if !plugin_path.exists() {
             return Ok(HookCheckResult {
                 tool_installed: true,
@@ -67,7 +106,7 @@ impl HookInstaller for OpenCodeInstaller {
 
         // Check if plugin is up to date (compare against content with binary path substituted)
         let current_content = fs::read_to_string(&plugin_path).unwrap_or_default();
-        let expected_content = Self::generate_plugin_content(&params.binary_path);
+        let expected_content = T::generate_plugin_content(&params.binary_path);
         let is_up_to_date = current_content.trim() == expected_content.trim();
 
         Ok(HookCheckResult {
@@ -82,23 +121,12 @@ impl HookInstaller for OpenCodeInstaller {
         params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let plugin_path = Self::plugin_path();
+        let plugin_path = T::plugin_path();
 
-        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
         if !dry_run {
-            let legacy_path = home_dir()
-                .join(".config")
-                .join("opencode")
-                .join("plugin")
-                .join("git-ai.ts");
-            let _ = fs::remove_file(&legacy_path);
-        }
-
-        // Ensure directory exists
-        if let Some(dir) = plugin_path.parent()
-            && !dry_run
-        {
-            fs::create_dir_all(dir)?;
+            for legacy_path in T::legacy_plugin_paths() {
+                let _ = fs::remove_file(&legacy_path);
+            }
         }
 
         // Read existing content if present
@@ -108,7 +136,7 @@ impl HookInstaller for OpenCodeInstaller {
             String::new()
         };
 
-        let new_content = Self::generate_plugin_content(&params.binary_path);
+        let new_content = T::generate_plugin_content(&params.binary_path);
 
         // Check if there are changes
         if existing_content.trim() == new_content.trim() {
@@ -120,7 +148,6 @@ impl HookInstaller for OpenCodeInstaller {
 
         // Write if not dry-run
         if !dry_run {
-            // Ensure directory exists (might not exist in dry run check above)
             if let Some(dir) = plugin_path.parent() {
                 fs::create_dir_all(dir)?;
             }
@@ -135,16 +162,12 @@ impl HookInstaller for OpenCodeInstaller {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let plugin_path = Self::plugin_path();
+        let plugin_path = T::plugin_path();
 
-        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
         if !dry_run {
-            let legacy_path = home_dir()
-                .join(".config")
-                .join("opencode")
-                .join("plugin")
-                .join("git-ai.ts");
-            let _ = fs::remove_file(&legacy_path);
+            for legacy_path in T::legacy_plugin_paths() {
+                let _ = fs::remove_file(&legacy_path);
+            }
         }
 
         if !plugin_path.exists() {
@@ -332,8 +355,17 @@ mod tests {
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
         // Checkpoint execution uses spawn(), which works in OpenCode CLI and Desktop.
         assert!(content.contains("spawn(GIT_AI_BIN"));
-        assert!(content.contains(r#""checkpoint", "opencode", "--hook-input", "stdin""#));
+        assert!(content.contains(r#"const PRESET = "opencode""#));
+        assert!(!content.contains("__GIT_AI_PRESET__"));
         assert!(!content.contains("Bun.$"));
+    }
+
+    #[test]
+    fn test_opencode_plugin_keeps_preset_token_in_binary_path() {
+        let content =
+            OpenCodeInstaller::generate_plugin_content(Path::new("/opt/__GIT_AI_PRESET__/git-ai"));
+        assert!(content.contains(r#"const GIT_AI_BIN = "/opt/__GIT_AI_PRESET__/git-ai""#));
+        assert!(content.contains(r#"const PRESET = "opencode""#));
     }
 
     #[test]

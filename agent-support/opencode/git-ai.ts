@@ -30,13 +30,18 @@ import { dirname, isAbsolute, join, resolve } from "path"
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
+// Checkpoint preset, replaced at install time: "opencode", or "kilo" for Kilo Code
+// (an OpenCode fork that loads this same plugin). A copy that only substitutes the
+// binary path keeps working as the OpenCode plugin.
+const PRESET = "__GIT_AI_PRESET__"
+const GIT_AI_PRESET = PRESET.startsWith("__GIT_AI_") ? "opencode" : PRESET
 const CHECKPOINT_TIMEOUT_MS = 10_000
 const CHECKPOINT_KILL_GRACE_MS = 250
 const MAX_STDERR_BYTES = 64 * 1024
 const MAX_PENDING_CALLS = 64
 const MAX_PENDING_BYTES = 8 * 1024 * 1024
 const MAX_CALL_BYTES = 1024 * 1024
-const CHECKPOINT_ARGS = ["checkpoint", "opencode", "--hook-input", "stdin"]
+const CHECKPOINT_ARGS = ["checkpoint", GIT_AI_PRESET, "--hook-input", "stdin"]
 
 // Tools that modify files and should be tracked
 const FILE_EDIT_TOOLS = new Set([
@@ -257,7 +262,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
       finish(timeoutError ?? null)
     }
     timeout = setTimeout(() => {
-      timeoutError = new Error(`git-ai checkpoint opencode timed out after ${CHECKPOINT_TIMEOUT_MS}ms`)
+      timeoutError = new Error(`git-ai checkpoint ${GIT_AI_PRESET} timed out after ${CHECKPOINT_TIMEOUT_MS}ms`)
       if (exited) return closeTimedOut()
       child.kill("SIGTERM")
       if (!closed) {
@@ -291,7 +296,7 @@ const runCheckpoint = (hookInput: string): Promise<void> => {
     child.on("close", (code) => {
       const detail = stderr?.toString("utf8", 0, stderrBytes).trim() ?? ""
       finish(timeoutError ?? (code === 0 ? null : new Error(
-        `git-ai checkpoint opencode exited with ${code}${detail ? `: ${detail}` : ""}${stderrTruncated ? " [stderr truncated]" : ""}`,
+        `git-ai checkpoint ${GIT_AI_PRESET} exited with ${code}${detail ? `: ${detail}` : ""}${stderrTruncated ? " [stderr truncated]" : ""}`,
       )))
     })
     child.stdin.end(hookInput)
