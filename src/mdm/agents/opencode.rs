@@ -39,9 +39,10 @@ pub trait OpenCodePluginAgent {
     fn generate_plugin_content(binary_path: &Path) -> String {
         // Escape backslashes for the TypeScript string literal (needed for Windows paths)
         let path_str = binary_path.display().to_string().replace('\\', "\\\\");
+        // Preset first, so a binary path containing the token stays intact.
         OPENCODE_PLUGIN_CONTENT
-            .replace("__GIT_AI_BINARY_PATH__", &path_str)
             .replace("__GIT_AI_PRESET__", Self::ID)
+            .replace("__GIT_AI_BINARY_PATH__", &path_str)
     }
 }
 
@@ -357,6 +358,14 @@ mod tests {
         assert!(content.contains(r#"const PRESET = "opencode""#));
         assert!(!content.contains("__GIT_AI_PRESET__"));
         assert!(!content.contains("Bun.$"));
+    }
+
+    #[test]
+    fn test_opencode_plugin_keeps_preset_token_in_binary_path() {
+        let content =
+            OpenCodeInstaller::generate_plugin_content(Path::new("/opt/__GIT_AI_PRESET__/git-ai"));
+        assert!(content.contains(r#"const GIT_AI_BIN = "/opt/__GIT_AI_PRESET__/git-ai""#));
+        assert!(content.contains(r#"const PRESET = "opencode""#));
     }
 
     #[test]
