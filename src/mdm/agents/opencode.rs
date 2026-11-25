@@ -87,19 +87,16 @@ fn same_dir_entry(a: &Path, b: &Path) -> bool {
             && resolved_parent(a) == resolved_parent(b))
 }
 
-/// Removes the plugin files that exist (unless `dry_run`) and returns a removal diff for each.
-fn remove_plugin_files(paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<String>, GitAiError> {
-    let mut diffs = Vec::new();
-    for path in paths {
-        let Ok(existing_content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        diffs.push(generate_diff(&path, &existing_content, ""));
-        if !dry_run {
-            fs::remove_file(&path)?;
-        }
-    }
-    Ok(diffs)
+/// The plugin files that exist, each with its removal diff.
+fn existing_plugin_files(paths: Vec<PathBuf>) -> Vec<(PathBuf, String)> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(&path).ok()?;
+            let diff = generate_diff(&path, &content, "");
+            Some((path, diff))
+        })
+        .collect()
 }
 
 impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
@@ -154,7 +151,18 @@ impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         let plugin_path = T::plugin_path();
-        let mut diffs = remove_plugin_files(T::legacy_plugin_paths(), dry_run)?;
+        // Cleanup is best effort: an old copy we can't delete (e.g. in a
+        // read-only dotfiles dir) must not block installing the active plugin.
+        let mut diffs = Vec::new();
+        for (path, diff) in existing_plugin_files(T::legacy_plugin_paths()) {
+            if dry_run {
+                diffs.push(diff);
+            } else if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), %error, "could not remove old git-ai plugin");
+            } else {
+                diffs.push(diff);
+            }
+        }
 
         // Read existing content if present
         let existing_content = if plugin_path.exists() {
@@ -185,7 +193,13 @@ impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
     ) -> Result<Option<String>, GitAiError> {
         let mut paths = T::legacy_plugin_paths();
         paths.insert(0, T::plugin_path());
-        let diffs = remove_plugin_files(paths, dry_run)?;
+        let mut diffs = Vec::new();
+        for (path, diff) in existing_plugin_files(paths) {
+            if !dry_run {
+                fs::remove_file(&path)?;
+            }
+            diffs.push(diff);
+        }
         Ok((!diffs.is_empty()).then(|| diffs.concat()))
     }
 }
@@ -702,6 +716,32 @@ mod tests {
                         .unwrap()
                         .is_none()
                 );
+            });
+        });
+    }
+
+    /// A leftover plugin that can't be deleted must not block the active install.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_opencode_install_with_undeletable_default_plugin_still_installs() {
+        use std::os::unix::fs::PermissionsExt;
+        with_xdg_config_home(|home, xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let default_dir = home.join(".config/opencode/plugins");
+                fs::create_dir_all(&default_dir).unwrap();
+                fs::write(default_dir.join("git-ai.ts"), "// old git-ai plugin").unwrap();
+                fs::set_permissions(&default_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+                let result = OpenCodeInstaller.install_hooks(&params, false);
+                fs::set_permissions(&default_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+                assert!(result.unwrap().is_some());
+                assert!(xdg.join("opencode/plugins/git-ai.ts").exists());
+                assert!(default_dir.join("git-ai.ts").exists());
             });
         });
     }
