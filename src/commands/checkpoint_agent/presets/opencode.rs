@@ -26,6 +26,10 @@ pub(crate) struct OpenCodeFamily {
     pub db_filename: &'static str,
     /// Env var that overrides the data dir (used by tests).
     pub storage_env_var: &'static str,
+    /// Env var the agent reads its DB path from: absolute, or relative to the data dir.
+    pub db_env_var: Option<&'static str>,
+    /// Pre-rename channel DB stem the agent still uses (`<stem>-<channel>.db`).
+    pub legacy_channel_db_stem: Option<&'static str>,
 }
 
 pub(crate) static OPENCODE_FAMILY: OpenCodeFamily = OpenCodeFamily {
@@ -33,6 +37,8 @@ pub(crate) static OPENCODE_FAMILY: OpenCodeFamily = OpenCodeFamily {
     data_dir_name: "opencode",
     db_filename: "opencode.db",
     storage_env_var: "GIT_AI_OPENCODE_STORAGE_PATH",
+    db_env_var: None,
+    legacy_channel_db_stem: None,
 };
 
 pub(crate) static KILO_FAMILY: OpenCodeFamily = OpenCodeFamily {
@@ -40,6 +46,8 @@ pub(crate) static KILO_FAMILY: OpenCodeFamily = OpenCodeFamily {
     data_dir_name: "kilo",
     db_filename: "kilo.db",
     storage_env_var: "GIT_AI_KILO_STORAGE_PATH",
+    db_env_var: Some("KILO_DB"),
+    legacy_channel_db_stem: Some("opencode"),
 };
 
 #[derive(Debug, Deserialize)]
@@ -167,7 +175,8 @@ impl OpenCodePreset {
         };
 
         // Try sqlite first
-        let db_path = Self::resolve_sqlite_db_path(family, &opencode_path, session_id);
+        let db_path = Self::db_override(family, &opencode_path)
+            .or_else(|| Self::resolve_sqlite_db_path(family, &opencode_path, session_id));
         if let Some(db_path) = db_path {
             let parent_id = Self::lookup_parent_session(&db_path, session_id);
             return Some((
@@ -256,10 +265,21 @@ impl OpenCodePreset {
             .cloned()
     }
 
+    /// The DB named by the family's env var (e.g. `KILO_DB`), if it exists.
+    fn db_override(family: &OpenCodeFamily, data_dir: &Path) -> Option<PathBuf> {
+        let value = std::env::var_os(family.db_env_var?).filter(|value| !value.is_empty())?;
+        // `join` keeps an absolute path as is; `:memory:` never names a file.
+        let db_path = data_dir.join(value);
+        db_path.is_file().then_some(db_path)
+    }
+
     fn is_family_db(family: &OpenCodeFamily, name: &str) -> bool {
         let stem = family.db_filename.trim_end_matches(".db");
         name == family.db_filename
-            || (name.ends_with(".db") && name.starts_with(&format!("{stem}-")))
+            || (name.ends_with(".db")
+                && std::iter::once(stem)
+                    .chain(family.legacy_channel_db_stem)
+                    .any(|stem| name.starts_with(&format!("{stem}-"))))
     }
 
     /// `<name>.db` first, then channel DBs in name order.

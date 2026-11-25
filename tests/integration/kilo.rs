@@ -44,6 +44,54 @@ fn kilo_storage_with_channel_db(dir: &std::path::Path) -> std::path::PathBuf {
     storage
 }
 
+/// Kilo keeps writing to a pre-rename `opencode-<channel>.db` in its own data
+/// dir when no `kilo-<channel>.db` exists yet.
+fn kilo_storage_with_legacy_channel_db(dir: &std::path::Path) -> std::path::PathBuf {
+    let storage = dir.join("kilo-storage");
+    fs::create_dir_all(&storage).unwrap();
+    fs::copy(
+        fixture_path("opencode-sqlite").join("opencode.db"),
+        storage.join("opencode-rc.db"),
+    )
+    .unwrap();
+    storage
+}
+
+/// `KILO_DB` points Kilo at a database of any name and location.
+fn kilo_storage_with_kilo_db_override(dir: &std::path::Path) -> std::path::PathBuf {
+    let storage = dir.join("kilo-storage");
+    fs::create_dir_all(&storage).unwrap();
+    fs::copy(
+        fixture_path("opencode-sqlite-empty").join("opencode.db"),
+        storage.join("kilo.db"),
+    )
+    .unwrap();
+    let custom = dir.join("elsewhere").join("sessions.sqlite");
+    fs::create_dir_all(custom.parent().unwrap()).unwrap();
+    fs::copy(fixture_path("opencode-sqlite").join("opencode.db"), &custom).unwrap();
+    // SAFETY: serialized test; the checkpoint subprocess inherits this env.
+    unsafe {
+        std::env::set_var("KILO_DB", &custom);
+    }
+    storage
+}
+
+#[test]
+#[serial_test::serial]
+fn test_kilo_legacy_channel_db_records_model() {
+    assert_kilo_checkpoint_records_model(kilo_storage_with_legacy_channel_db);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_kilo_db_override_records_model() {
+    assert_kilo_checkpoint_records_model(kilo_storage_with_kilo_db_override);
+    // SAFETY: serialized test.
+    unsafe {
+        std::env::remove_var("KILO_DB");
+    }
+}
+
 #[test]
 #[serial_test::serial]
 fn test_kilo_checkpoint_attributes_lines_to_kilo_with_model() {

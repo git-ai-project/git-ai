@@ -1,6 +1,6 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic};
+use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic, xdg_config_home};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,12 +27,13 @@ pub trait OpenCodePluginAgent {
         Vec::new()
     }
 
+    /// Global config dir, `$XDG_CONFIG_HOME/<ID>` (the agent resolves it with `xdg-basedir`).
+    fn config_dir() -> PathBuf {
+        xdg_config_home().join(Self::ID)
+    }
+
     fn plugin_path() -> PathBuf {
-        home_dir()
-            .join(".config")
-            .join(Self::ID)
-            .join("plugins")
-            .join("git-ai.ts")
+        Self::config_dir().join("plugins").join("git-ai.ts")
     }
 
     /// Generate plugin content with the absolute binary path and preset substituted in
@@ -56,7 +57,7 @@ impl OpenCodePluginAgent for OpenCodeInstaller {
     fn tool_installed() -> bool {
         binary_exists("opencode")
             || binary_exists("opencode2")
-            || home_dir().join(".config").join("opencode").exists()
+            || Self::config_dir().exists()
             || Path::new(".opencode").exists()
     }
 
@@ -549,6 +550,37 @@ mod tests {
 
                 assert!(installer.uninstall_hooks(&params, false).unwrap().is_some());
                 assert!(!plugin_path.exists());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_install_honors_xdg_config_home() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                let xdg = home.join("xdg-config");
+                // SAFETY: tests are serialized via #[serial].
+                unsafe {
+                    std::env::set_var("XDG_CONFIG_HOME", &xdg);
+                }
+                fs::create_dir_all(xdg.join("kilo")).unwrap();
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(installer.install_hooks(&params, false).unwrap().is_some());
+
+                let plugin_path = xdg.join("kilo/plugins/git-ai.ts");
+                assert!(plugin_path.exists());
+                assert!(!home.join(".config/kilo/plugins/git-ai.ts").exists());
+                assert!(installer.check_hooks(&params).unwrap().hooks_up_to_date);
+                assert!(installer.uninstall_hooks(&params, false).unwrap().is_some());
+                assert!(!plugin_path.exists());
+                // SAFETY: tests are serialized via #[serial].
+                unsafe {
+                    std::env::remove_var("XDG_CONFIG_HOME");
+                }
             });
         });
     }
