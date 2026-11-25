@@ -7,10 +7,10 @@
 
 use super::opencode::OpenCodePluginAgent;
 use crate::commands::checkpoint_agent::presets::OpenCodePreset;
-use crate::mdm::jetbrains::{DetectedIde, find_jetbrains_installations};
+use crate::mdm::jetbrains::user_plugin_dirs;
 use crate::mdm::utils::{binary_exists, home_dir};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// VS Code-family editors whose extension dirs may contain Kilo Code.
 const EDITOR_EXTENSION_DIRS: &[&str] = &[
@@ -60,9 +60,10 @@ impl KiloInstaller {
 
     /// The JetBrains plugin runs its own `kilo` binary, so before its first
     /// start the plugin dir is the only trace of Kilo.
-    fn has_jetbrains_plugin(ides: &[DetectedIde]) -> bool {
-        ides.iter()
-            .any(|ide| ide.plugins_dir.join(KILO_JETBRAINS_PLUGIN_DIR).exists())
+    fn has_jetbrains_plugin(plugin_dirs: &[PathBuf]) -> bool {
+        plugin_dirs
+            .iter()
+            .any(|dir| dir.join(KILO_JETBRAINS_PLUGIN_DIR).exists())
     }
 }
 
@@ -77,15 +78,13 @@ impl OpenCodePluginAgent for KiloInstaller {
             || OpenCodePreset::kilo_data_path().is_ok_and(|dir| dir.exists())
             || Path::new(".kilo").exists()
             || Self::has_vscode_extension()
-            || Self::has_jetbrains_plugin(&find_jetbrains_installations())
+            || Self::has_jetbrains_plugin(&user_plugin_dirs())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mdm::jetbrains::ide_types::JETBRAINS_IDES;
-    use std::path::PathBuf;
 
     #[test]
     fn test_kilo_plugin_uses_kilo_preset() {
@@ -102,16 +101,9 @@ mod tests {
     #[test]
     fn test_kilo_detected_from_jetbrains_plugin_alone() {
         let plugins_dir = tempfile::TempDir::new().unwrap();
-        let ides = [DetectedIde {
-            ide: &JETBRAINS_IDES[0],
-            install_path: PathBuf::from("/opt/idea"),
-            binary_path: PathBuf::from("/opt/idea/bin/idea.sh"),
-            build_number: Some("263.7307.200".to_string()),
-            major_build: Some(263),
-            plugins_dir: plugins_dir.path().to_path_buf(),
-        }];
-        assert!(!KiloInstaller::has_jetbrains_plugin(&ides));
+        let dirs = [plugins_dir.path().to_path_buf()];
+        assert!(!KiloInstaller::has_jetbrains_plugin(&dirs));
         fs::create_dir_all(plugins_dir.path().join("kilo.jetbrains")).unwrap();
-        assert!(KiloInstaller::has_jetbrains_plugin(&ides));
+        assert!(KiloInstaller::has_jetbrains_plugin(&dirs));
     }
 }
