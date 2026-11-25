@@ -1,6 +1,6 @@
 use crate::authorship::working_log::AgentId;
 use crate::streams::sweep::StreamFormat;
-use crate::streams::types::StreamError;
+use crate::streams::types::{StreamError, find_in_jsonl_tail};
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_JSONL_SCAN_BYTES: u64 = 50 * 1024;
+const CLAUDE_JSONL_FALLBACK_SCAN_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_JSONL_HEAD_SCAN_BYTES: usize = 1024 * 1024;
 const MAX_JSONL_HEAD_LINES: usize = 20;
 const MAX_CODEX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -23,9 +24,13 @@ pub fn extract_model(
     session_id: Option<&str>,
 ) -> Result<Option<String>, StreamError> {
     match format {
-        StreamFormat::ClaudeJsonl
-        | StreamFormat::CopilotEventStreamJsonl
-        | StreamFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
+        StreamFormat::ClaudeJsonl => Ok(extract_model_from_jsonl_tail(
+            path,
+            Some(CLAUDE_JSONL_FALLBACK_SCAN_BYTES),
+        )),
+        StreamFormat::CopilotEventStreamJsonl | StreamFormat::GeminiJsonl => {
+            Ok(extract_model_from_jsonl_tail(path, None))
+        }
         StreamFormat::CodexJsonl => extract_model_from_codex_jsonl(path),
         StreamFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
         StreamFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
@@ -54,67 +59,32 @@ pub fn extract_model_from_droid_settings(
     Ok(json.get("model").and_then(|v| v.as_str()).map(String::from))
 }
 
-fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, StreamError> {
+fn extract_model_from_jsonl_tail(path: &Path, fallback_scan_bytes: Option<u64>) -> Option<String> {
     let (model, tail_was_truncated) =
-        extract_model_from_jsonl_tail_with(path, extract_model_from_jsonl_line)?;
-    if model.is_some() {
-        return Ok(model);
+        find_in_jsonl_tail(path, MAX_JSONL_SCAN_BYTES, extract_model_from_jsonl_line);
+    if model.is_some() || !tail_was_truncated {
+        return model;
     }
 
-    // Tail didn't contain the model — check the head (Copilot CLI emits
-    // session.model_change only at session start, which may fall outside the tail window).
-    if tail_was_truncated
-        && let Some(model) = extract_model_from_jsonl_head_with(path, extract_model_from_jsonl_line)
-    {
-        return Ok(Some(model));
-    }
-
-    Ok(None)
-}
-
-fn extract_model_from_jsonl_tail_with(
-    path: &Path,
-    extract_from_line: fn(&str) -> Option<String>,
-) -> Result<(Option<String>, bool), StreamError> {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, false)),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok((None, false));
-        }
-        Err(_) => return Ok((None, false)),
-    };
-
-    let file_size = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return Ok((None, false)),
-    };
-
-    if file_size == 0 {
-        return Ok((None, false));
-    }
-
-    let read_size = std::cmp::min(MAX_JSONL_SCAN_BYTES, file_size);
-    let seek_pos = file_size - read_size;
-
-    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
-        return Ok((None, false));
-    }
-
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-
-    for line in lines.iter().rev() {
-        if let Some(model) = extract_from_line(line) {
-            return Ok((Some(model), seek_pos > 0));
+    // A few Claude tool results can push the latest assistant record well
+    // outside the fast window. Look farther back before using an older model.
+    if let Some(scan_bytes) = fallback_scan_bytes {
+        let (model, _) = find_in_jsonl_tail(path, scan_bytes, extract_model_from_jsonl_line);
+        if model.is_some() {
+            return model;
         }
     }
 
-    Ok((None, seek_pos > 0))
+    // Copilot CLI may record the model only at the start of the session.
+    extract_model_from_jsonl_head_with(path, extract_model_from_jsonl_line)
 }
 
 fn extract_model_from_codex_jsonl(path: &Path) -> Result<Option<String>, StreamError> {
-    let (model, _) = extract_model_from_jsonl_tail_with(path, extract_model_from_codex_jsonl_line)?;
+    let (model, _) = find_in_jsonl_tail(
+        path,
+        MAX_JSONL_SCAN_BYTES,
+        extract_model_from_codex_jsonl_line,
+    );
     if model.is_some() {
         return Ok(model);
     }
@@ -1275,12 +1245,13 @@ mod tests {
         writeln!(file, "{oversized_record}").unwrap();
         file.flush().unwrap();
 
-        let result = extract_model(file.path(), StreamFormat::ClaudeJsonl, None).unwrap();
+        let result =
+            extract_model(file.path(), StreamFormat::CopilotEventStreamJsonl, None).unwrap();
         assert_eq!(result, Some("model-after-limit".to_string()));
     }
 
     #[test]
-    fn test_extract_model_jsonl_bounds_total_head_scan() {
+    fn test_extract_model_claude_bounds_head_and_fallback_tail_scans() {
         use std::io::Write;
 
         let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
@@ -1291,7 +1262,9 @@ mod tests {
         writeln!(
             file,
             "{}",
-            serde_json::json!({ "padding": "x".repeat(51_200) })
+            serde_json::json!({
+                "padding": "x".repeat(CLAUDE_JSONL_FALLBACK_SCAN_BYTES as usize)
+            })
         )
         .unwrap();
         file.flush().unwrap();

@@ -238,6 +238,82 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
 }
 
 #[test]
+fn test_claude_e2e_recovers_model_before_large_tool_output() {
+    use crate::repos::test_file::ExpectedLineExt;
+    use crate::repos::test_repo::TestRepo;
+
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("example.txt");
+    fs::write(&file_path, "original\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("example.txt");
+    file.assert_lines_and_blame(lines!["original".unattributed_human()]);
+
+    let mut transcript = tempfile::NamedTempFile::new().unwrap();
+    for _ in 0..24 {
+        writeln!(
+            transcript,
+            "{}",
+            json!({"type": "attachment", "content": "é".repeat(24_000)})
+        )
+        .unwrap();
+    }
+    for model in ["claude-sonnet-4-20250514", "claude-opus-4-6"] {
+        writeln!(
+            transcript,
+            "{}",
+            json!({"type": "assistant", "message": {"model": model, "content": []}})
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        writeln!(
+            transcript,
+            "{}",
+            json!({
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "content": "é".repeat(275_000)}]}
+            })
+        )
+        .unwrap();
+    }
+    transcript.flush().unwrap();
+
+    let hook = |event| {
+        json!({
+            "cwd": repo_root,
+            "hook_event_name": event,
+            "tool_name": "Edit",
+            "tool_use_id": "edit-example",
+            "session_id": "large-tool-output",
+            "transcript_path": transcript.path(),
+            "tool_input": {"file_path": file_path}
+        })
+        .to_string()
+    };
+    repo.git_ai(&["checkpoint", "claude", "--hook-input", &hook("PreToolUse")])
+        .unwrap();
+    fs::write(&file_path, "original\nadded by Claude\n").unwrap();
+    repo.git_ai(&["checkpoint", "claude", "--hook-input", &hook("PostToolUse")])
+        .unwrap();
+
+    let commit = repo.stage_all_and_commit("Add AI line").unwrap();
+    file.assert_lines_and_blame(lines![
+        "original".unattributed_human(),
+        "added by Claude".ai()
+    ]);
+    let session = commit
+        .authorship_log
+        .metadata
+        .sessions
+        .values()
+        .find(|session| session.agent_id.tool == "claude")
+        .expect("The AI edit should have a Claude session in the authorship note");
+    assert_eq!(session.agent_id.model, "claude-opus-4-6");
+}
+
+#[test]
 fn test_claude_code_thinking_raw_event_fidelity() {
     let fixture = fixture_path("claude-code-with-thinking.jsonl");
     let agent = ClaudeAgent::new();
