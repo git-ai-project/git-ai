@@ -71,9 +71,20 @@ impl OpenCodePluginAgent for OpenCodeInstaller {
             old_config.join("plugins").join("git-ai.ts"),
         ]
         .into_iter()
-        .filter(|path| *path != current)
+        .filter(|path| !same_dir_entry(path, &current))
         .collect()
     }
+}
+
+/// Whether two paths name the same directory entry, even through a symlinked
+/// parent (e.g. `XDG_CONFIG_HOME` linked to `~/.config`). The entries
+/// themselves are not resolved, so two links to one target stay distinct.
+fn same_dir_entry(a: &Path, b: &Path) -> bool {
+    let resolved_parent = |p: &Path| p.parent().and_then(|dir| fs::canonicalize(dir).ok());
+    a == b
+        || (a.file_name() == b.file_name()
+            && resolved_parent(a).is_some()
+            && resolved_parent(a) == resolved_parent(b))
 }
 
 impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
@@ -638,6 +649,44 @@ mod tests {
                 );
                 assert!(!xdg_plugin.exists());
                 assert!(!default_plugin.exists());
+            });
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_opencode_install_with_xdg_aliasing_default_keeps_plugin_symlink() {
+        with_xdg_config_home(|home, xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let plugins = home.join(".config/opencode/plugins");
+                fs::create_dir_all(&plugins).unwrap();
+                std::os::unix::fs::symlink(home.join(".config"), xdg).unwrap();
+                let managed = home.join("dotfiles/git-ai.ts");
+                fs::create_dir_all(managed.parent().unwrap()).unwrap();
+                fs::write(
+                    &managed,
+                    OpenCodeInstaller::generate_plugin_content(&params.binary_path),
+                )
+                .unwrap();
+                std::os::unix::fs::symlink(&managed, plugins.join("git-ai.ts")).unwrap();
+
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(plugins.join("git-ai.ts").is_symlink());
+                assert!(
+                    OpenCodeInstaller
+                        .check_hooks(&params)
+                        .unwrap()
+                        .hooks_up_to_date
+                );
             });
         });
     }
