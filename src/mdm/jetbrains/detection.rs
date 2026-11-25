@@ -468,7 +468,6 @@ fn get_linux_build_metadata(install_path: &Path) -> (Option<String>, Option<u32>
 
 // ===== Shared Utilities =====
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum JetBrainsPlatform {
     Macos,
@@ -510,6 +509,35 @@ fn plugins_parent_dir_name(product_code: &str) -> &'static str {
     }
 }
 
+/// Per-user dir holding one `<product><version>` dir per installed IDE version.
+fn user_config_root(
+    platform: JetBrainsPlatform,
+    home_dir: &Path,
+    appdata: Option<&Path>,
+    parent_dir: &str,
+) -> PathBuf {
+    match platform {
+        JetBrainsPlatform::Macos => home_dir
+            .join("Library")
+            .join("Application Support")
+            .join(parent_dir),
+        JetBrainsPlatform::Windows => appdata
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home_dir.join("AppData").join("Roaming"))
+            .join(parent_dir),
+        JetBrainsPlatform::Linux => home_dir.join(".local").join("share").join(parent_dir),
+    }
+}
+
+/// Plugins dir of one IDE version dir.
+fn version_plugins_dir(platform: JetBrainsPlatform, version_dir: PathBuf) -> PathBuf {
+    match platform {
+        // Linux stores user-installed plugins directly in the share directory root.
+        JetBrainsPlatform::Linux => version_dir,
+        JetBrainsPlatform::Macos | JetBrainsPlatform::Windows => version_dir.join("plugins"),
+    }
+}
+
 fn plugins_dir_for_platform(
     platform: JetBrainsPlatform,
     home_dir: &Path,
@@ -520,27 +548,48 @@ fn plugins_dir_for_platform(
 ) -> PathBuf {
     let version_suffix = plugin_version_suffix(data_directory_name, product_code, build_number);
     let parent_dir = plugins_parent_dir_name(product_code);
+    let root = user_config_root(platform, home_dir, appdata, parent_dir);
+    version_plugins_dir(platform, root.join(version_suffix))
+}
 
-    match platform {
-        JetBrainsPlatform::Macos => home_dir
-            .join("Library")
-            .join("Application Support")
-            .join(parent_dir)
-            .join(&version_suffix)
-            .join("plugins"),
-        JetBrainsPlatform::Windows => appdata
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| home_dir.join("AppData").join("Roaming"))
-            .join(parent_dir)
-            .join(&version_suffix)
-            .join("plugins"),
-        // Linux stores user-installed plugins directly in the share directory root.
-        JetBrainsPlatform::Linux => home_dir
-            .join(".local")
-            .join("share")
-            .join(parent_dir)
-            .join(&version_suffix),
+/// Plugins dirs of every IDE version in the per-user config dirs.
+fn user_plugin_dirs_for_platform(
+    platform: JetBrainsPlatform,
+    home_dir: &Path,
+    appdata: Option<&Path>,
+) -> Vec<PathBuf> {
+    ["JetBrains", "Google"]
+        .into_iter()
+        .filter_map(|parent| {
+            std::fs::read_dir(user_config_root(platform, home_dir, appdata, parent)).ok()
+        })
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| version_plugins_dir(platform, entry.path()))
+        .collect()
+}
+
+/// Plugins dirs of every JetBrains IDE version the user has run, found from
+/// the per-user config dirs alone, so IDEs installed anywhere are covered.
+pub fn user_plugin_dirs() -> Vec<PathBuf> {
+    let appdata = current_appdata();
+    user_plugin_dirs_for_platform(current_platform(), &home_dir(), appdata.as_deref())
+}
+
+fn current_platform() -> JetBrainsPlatform {
+    if cfg!(target_os = "macos") {
+        JetBrainsPlatform::Macos
+    } else if cfg!(windows) {
+        JetBrainsPlatform::Windows
+    } else {
+        JetBrainsPlatform::Linux
     }
+}
+
+fn current_appdata() -> Option<PathBuf> {
+    cfg!(windows)
+        .then(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .flatten()
 }
 
 /// Get the plugins directory for an IDE
@@ -549,44 +598,15 @@ fn get_plugins_dir(
     product_code: &str,
     build_number: Option<&str>,
 ) -> PathBuf {
-    let home = home_dir();
-
-    #[cfg(target_os = "macos")]
-    {
-        plugins_dir_for_platform(
-            JetBrainsPlatform::Macos,
-            &home,
-            None,
-            data_directory_name,
-            product_code,
-            build_number,
-        )
-    }
-
-    #[cfg(windows)]
-    {
-        let appdata = std::env::var("APPDATA").ok();
-        plugins_dir_for_platform(
-            JetBrainsPlatform::Windows,
-            &home,
-            appdata.as_deref().map(Path::new),
-            data_directory_name,
-            product_code,
-            build_number,
-        )
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        plugins_dir_for_platform(
-            JetBrainsPlatform::Linux,
-            &home,
-            None,
-            data_directory_name,
-            product_code,
-            build_number,
-        )
-    }
+    let appdata = current_appdata();
+    plugins_dir_for_platform(
+        current_platform(),
+        &home_dir(),
+        appdata.as_deref(),
+        data_directory_name,
+        product_code,
+        build_number,
+    )
 }
 
 #[cfg(windows)]
@@ -823,6 +843,47 @@ mod tests {
                 .join("share")
                 .join("Google")
                 .join("AndroidStudio2025.3.3")
+        );
+    }
+
+    /// IDEs unpacked anywhere (e.g. `~/apps/idea`) still keep plugins in the
+    /// per-user config dir, so those dirs are listed without finding the IDE.
+    #[test]
+    fn test_user_plugin_dirs_lists_every_ide_version_without_an_install() {
+        let home = tempfile::TempDir::new().unwrap();
+        let home = home.path();
+        let idea = home.join(".local/share/JetBrains/IntelliJIdea2026.3");
+        let studio = home.join(".local/share/Google/AndroidStudio2025.3");
+        std::fs::create_dir_all(&idea).unwrap();
+        std::fs::create_dir_all(&studio).unwrap();
+        let mut linux = user_plugin_dirs_for_platform(JetBrainsPlatform::Linux, home, None);
+        linux.sort();
+        assert_eq!(linux, vec![studio, idea]);
+
+        let mac_idea = home.join("Library/Application Support/JetBrains/IntelliJIdea2026.3");
+        std::fs::create_dir_all(&mac_idea).unwrap();
+        assert_eq!(
+            user_plugin_dirs_for_platform(JetBrainsPlatform::Macos, home, None),
+            vec![mac_idea.join("plugins")]
+        );
+    }
+
+    /// A version dir moved elsewhere and linked back still counts.
+    #[cfg(unix)]
+    #[test]
+    fn test_user_plugin_dirs_follows_symlinked_version_dirs() {
+        let home = tempfile::TempDir::new().unwrap();
+        let home = home.path();
+        let moved = home.join("other-drive/IntelliJIdea2026.3");
+        std::fs::create_dir_all(&moved).unwrap();
+        let root = home.join(".local/share/JetBrains");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&moved, root.join("IntelliJIdea2026.3")).unwrap();
+        std::fs::write(root.join("not-a-dir.txt"), "").unwrap();
+        std::os::unix::fs::symlink(home.join("missing"), root.join("Broken2026.1")).unwrap();
+        assert_eq!(
+            user_plugin_dirs_for_platform(JetBrainsPlatform::Linux, home, None),
+            vec![root.join("IntelliJIdea2026.3")]
         );
     }
 

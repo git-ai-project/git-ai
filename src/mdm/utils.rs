@@ -386,6 +386,14 @@ pub fn is_github_codespaces() -> bool {
         .unwrap_or(false)
 }
 
+/// `$XDG_CONFIG_HOME`, or `~/.config` when it is unset or empty (as `xdg-basedir` resolves it).
+pub fn xdg_config_home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".config"))
+}
+
 /// Get the user's home directory
 pub fn home_dir() -> PathBuf {
     #[cfg(windows)]

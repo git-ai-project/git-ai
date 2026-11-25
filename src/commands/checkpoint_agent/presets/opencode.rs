@@ -12,6 +12,44 @@ use std::path::{Path, PathBuf};
 
 pub struct OpenCodePreset;
 
+/// Kilo Code (CLI and the VS Code extension, which runs `kilo serve`) is an
+/// OpenCode fork: same plugin hooks and SQLite schema, different names/paths.
+pub struct KiloPreset;
+
+/// Per-fork naming for agents in the OpenCode family.
+pub(crate) struct OpenCodeFamily {
+    /// Tool name recorded in attribution (`AgentId.tool`).
+    pub tool: &'static str,
+    /// Directory name under `$XDG_DATA_HOME` / `~/.local/share`.
+    pub data_dir_name: &'static str,
+    /// SQLite database filename inside the data dir.
+    pub db_filename: &'static str,
+    /// Env var that overrides the data dir (used by tests).
+    pub storage_env_var: &'static str,
+    /// Env var the agent reads its DB path from: absolute, or relative to the data dir.
+    pub db_env_var: Option<&'static str>,
+    /// Pre-rename channel DB stem the agent still uses (`<stem>-<channel>.db`).
+    pub legacy_channel_db_stem: Option<&'static str>,
+}
+
+pub(crate) static OPENCODE_FAMILY: OpenCodeFamily = OpenCodeFamily {
+    tool: "opencode",
+    data_dir_name: "opencode",
+    db_filename: "opencode.db",
+    storage_env_var: "GIT_AI_OPENCODE_STORAGE_PATH",
+    db_env_var: None,
+    legacy_channel_db_stem: None,
+};
+
+pub(crate) static KILO_FAMILY: OpenCodeFamily = OpenCodeFamily {
+    tool: "kilo",
+    data_dir_name: "kilo",
+    db_filename: "kilo.db",
+    storage_env_var: "GIT_AI_KILO_STORAGE_PATH",
+    db_env_var: Some("KILO_DB"),
+    legacy_channel_db_stem: Some("opencode"),
+};
+
 #[derive(Debug, Deserialize)]
 struct OpenCodeHookInput {
     hook_event_name: String,
@@ -126,22 +164,26 @@ impl OpenCodePreset {
         Some(joined.to_string_lossy().replace('\\', "/"))
     }
 
-    fn resolve_stream_source(session_id: &str) -> Option<(StreamSource, PathBuf)> {
-        let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
+    fn resolve_stream_source(
+        family: &OpenCodeFamily,
+        session_id: &str,
+    ) -> Option<(StreamSource, PathBuf)> {
+        let opencode_path = if let Ok(test_path) = std::env::var(family.storage_env_var) {
             PathBuf::from(test_path)
         } else {
-            Self::opencode_data_path().ok()?
+            Self::data_path(family).ok()?
         };
 
         // Try sqlite first
-        let db_path = Self::resolve_sqlite_db_path(&opencode_path);
+        let db_path = Self::db_override(family, &opencode_path)
+            .or_else(|| Self::resolve_sqlite_db_path(family, &opencode_path, session_id));
         if let Some(db_path) = db_path {
             let parent_id = Self::lookup_parent_session(&db_path, session_id);
             return Some((
                 StreamSource {
                     path: db_path,
                     format: StreamFormat::OpenCodeSqlite,
-                    session_id: generate_session_id(session_id, "opencode"),
+                    session_id: generate_session_id(session_id, family.tool),
                     external_session_id: session_id.to_string(),
                     external_parent_session_id: parent_id,
                 },
@@ -168,13 +210,23 @@ impl OpenCodePreset {
         .flatten()
     }
 
+    #[cfg(test)]
     fn opencode_data_path() -> Result<PathBuf, GitAiError> {
+        Self::data_path(&OPENCODE_FAMILY)
+    }
+
+    /// Kilo's data dir (`$XDG_DATA_HOME/kilo`), used to detect Kilo installs.
+    pub(crate) fn kilo_data_path() -> Result<PathBuf, GitAiError> {
+        Self::data_path(&KILO_FAMILY)
+    }
+
+    fn data_path(family: &OpenCodeFamily) -> Result<PathBuf, GitAiError> {
         // OpenCode V1 (xdg-basedir) and V2 use this layout on every OS,
         // including Windows. An empty XDG_DATA_HOME falls back to home.
         if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME")
             && !xdg_data.is_empty()
         {
-            return Ok(PathBuf::from(xdg_data).join("opencode"));
+            return Ok(PathBuf::from(xdg_data).join(family.data_dir_name));
         }
         // OpenCode's Bun runtime uses the OS profile when the override is empty.
         let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -183,15 +235,23 @@ impl OpenCodePreset {
             .map(PathBuf::from)
             .or_else(dirs::home_dir)
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
-        Ok(home.join(".local").join("share").join("opencode"))
+        Ok(home.join(".local").join("share").join(family.data_dir_name))
     }
 
-    fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
+    /// Picks the family DB that holds `session_id`. Besides `<name>.db`, the
+    /// CLIs write per-channel DBs (`<name>-<channel>.db`, e.g. `kilo-rc.db`)
+    /// unless started with `*_DISABLE_CHANNEL_DB` as the Kilo VS Code extension
+    /// does. Falls back to the first candidate when no DB has the session yet.
+    fn resolve_sqlite_db_path(
+        family: &OpenCodeFamily,
+        path: &Path,
+        session_id: &str,
+    ) -> Option<PathBuf> {
         if path.is_file() {
             return path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .filter(|name| *name == "opencode.db")
+                .filter(|name| Self::is_family_db(family, name))
                 .map(|_| path.to_path_buf());
         }
 
@@ -199,28 +259,92 @@ impl OpenCodePreset {
             return None;
         }
 
-        let direct_db = path.join("opencode.db");
-        if direct_db.exists() {
-            return Some(direct_db);
+        let mut candidates = Self::family_dbs_in(family, path);
+        if path.file_name().and_then(|name| name.to_str()) == Some("storage") {
+            candidates.extend(Self::family_dbs_in(family, path.parent()?));
         }
+        candidates
+            .iter()
+            .find(|db| Self::db_has_session(db, session_id))
+            .or(candidates.first())
+            .cloned()
+    }
 
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "storage")
-        {
-            let sibling_db = path.parent()?.join("opencode.db");
-            if sibling_db.exists() {
-                return Some(sibling_db);
-            }
-        }
+    /// The DB named by the family's env var (e.g. `KILO_DB`), if it exists.
+    fn db_override(family: &OpenCodeFamily, data_dir: &Path) -> Option<PathBuf> {
+        let value = std::env::var_os(family.db_env_var?).filter(|value| !value.is_empty())?;
+        // `join` keeps an absolute path as is; `:memory:` never names a file.
+        let db_path = data_dir.join(value);
+        db_path.is_file().then_some(db_path)
+    }
 
-        None
+    fn is_family_db(family: &OpenCodeFamily, name: &str) -> bool {
+        let stem = family.db_filename.trim_end_matches(".db");
+        name == family.db_filename
+            || (name.ends_with(".db")
+                && std::iter::once(stem)
+                    .chain(family.legacy_channel_db_stem)
+                    .any(|stem| name.starts_with(&format!("{stem}-"))))
+    }
+
+    /// `<name>.db` first, then channel DBs in name order.
+    fn family_dbs_in(family: &OpenCodeFamily, dir: &Path) -> Vec<PathBuf> {
+        let mut channel_dbs: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|db| {
+                db.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name != family.db_filename && Self::is_family_db(family, name)
+                    })
+            })
+            .collect();
+        channel_dbs.sort();
+        let direct_db = dir.join(family.db_filename);
+        direct_db
+            .exists()
+            .then_some(direct_db)
+            .into_iter()
+            .chain(channel_dbs)
+            .collect()
+    }
+
+    fn db_has_session(db_path: &Path, session_id: &str) -> bool {
+        let Ok(conn) = crate::streams::agents::opencode::open_sqlite_readonly(db_path) else {
+            return false;
+        };
+        crate::streams::agents::opencode::is_v2_session(&conn, session_id)
+            || conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false)
     }
 }
 
 impl AgentPreset for OpenCodePreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+        OpenCodePreset::parse_family(&OPENCODE_FAMILY, hook_input, trace_id)
+    }
+}
+
+impl AgentPreset for KiloPreset {
+    fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+        OpenCodePreset::parse_family(&KILO_FAMILY, hook_input, trace_id)
+    }
+}
+
+impl OpenCodePreset {
+    pub(crate) fn parse_family(
+        family: &OpenCodeFamily,
+        hook_input: &str,
+        trace_id: &str,
+    ) -> Result<Vec<ParsedHookEvent>, GitAiError> {
         let hook_input: OpenCodeHookInput = serde_json::from_str(hook_input)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
@@ -258,12 +382,12 @@ impl AgentPreset for OpenCodePreset {
         // Build metadata
         let mut metadata = HashMap::new();
         metadata.insert("session_id".to_string(), session_id.clone());
-        if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
+        if let Ok(test_path) = std::env::var(family.storage_env_var) {
             metadata.insert("__test_storage_path".to_string(), test_path);
         }
 
         // Resolve transcript source
-        let transcript_result = Self::resolve_stream_source(&session_id);
+        let transcript_result = Self::resolve_stream_source(family, &session_id);
 
         let extracted_model = transcript_result.as_ref().and_then(|(ts, _)| {
             crate::streams::model_extraction::extract_model(
@@ -277,7 +401,7 @@ impl AgentPreset for OpenCodePreset {
 
         let context = PresetContext {
             agent_id: AgentId {
-                tool: "opencode".to_string(),
+                tool: family.tool.to_string(),
                 id: session_id.clone(),
                 model: extracted_model.unwrap_or_else(|| "unknown".to_string()),
             },
@@ -531,5 +655,49 @@ mod tests {
             }
             _ => panic!("Expected PreBashCall"),
         }
+    }
+
+    #[test]
+    fn test_kilo_preset_records_kilo_tool() {
+        let input = make_opencode_input("PostToolUse", "edit");
+        let events = KiloPreset.parse(&input, "t_test").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "kilo");
+                assert_eq!(e.context.external_session_id, "oc-sess-123");
+                assert!(!e.file_paths.is_empty());
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_kilo_preset_bash_classification() {
+        let input = make_opencode_input("PreToolUse", "bash");
+        let events = KiloPreset.parse(&input, "t_test").unwrap();
+        assert!(
+            matches!(&events[0], ParsedHookEvent::PreBashCall(e) if e.context.agent_id.tool == "kilo")
+        );
+    }
+
+    #[test]
+    fn test_kilo_resolves_kilo_db_not_opencode_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("opencode.db"), b"").unwrap();
+        assert_eq!(
+            OpenCodePreset::resolve_sqlite_db_path(&KILO_FAMILY, dir.path(), "ses"),
+            None
+        );
+        std::fs::write(dir.path().join("kilo.db"), b"").unwrap();
+        assert_eq!(
+            OpenCodePreset::resolve_sqlite_db_path(&KILO_FAMILY, dir.path(), "ses"),
+            Some(dir.path().join("kilo.db"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_preset_kilo() {
+        assert!(resolve_preset("kilo").is_ok());
     }
 }

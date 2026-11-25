@@ -8,6 +8,7 @@ mod firebender;
 mod gemini;
 mod github_copilot;
 mod jetbrains;
+mod kilo;
 mod opencode;
 mod pi;
 #[cfg(windows)]
@@ -25,7 +26,8 @@ pub use firebender::FirebenderInstaller;
 pub use gemini::GeminiInstaller;
 pub use github_copilot::GitHubCopilotInstaller;
 pub use jetbrains::JetBrainsInstaller;
-pub use opencode::OpenCodeInstaller;
+pub use kilo::KiloInstaller;
+pub use opencode::{OpenCodeInstaller, OpenCodePluginAgent};
 pub use pi::PiInstaller;
 #[cfg(windows)]
 pub use visual_studio::VisualStudioInstaller;
@@ -45,6 +47,7 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(GitHubCopilotInstaller),
         Box::new(AmpInstaller),
         Box::new(OpenCodeInstaller),
+        Box::new(KiloInstaller),
         Box::new(PiInstaller),
         Box::new(GeminiInstaller),
         Box::new(DroidInstaller),

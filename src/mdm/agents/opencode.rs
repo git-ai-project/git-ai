@@ -1,6 +1,6 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic};
+use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic, xdg_config_home};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,44 +10,110 @@ const OPENCODE_PLUGIN_CONTENT: &str = include_str!(concat!(
     "/agent-support/opencode/git-ai.ts"
 ));
 
-pub struct OpenCodeInstaller;
+/// An agent that loads the OpenCode plugin: OpenCode itself and its forks
+/// (Kilo Code). They differ only in names, config dir and detection; install,
+/// check and uninstall are shared.
+pub trait OpenCodePluginAgent {
+    /// Display name, e.g. "OpenCode".
+    const NAME: &'static str;
+    /// Installer id, checkpoint preset and `~/.config/<ID>` directory name.
+    const ID: &'static str;
+    const PROCESS_NAMES: &'static [&'static str];
 
-impl OpenCodeInstaller {
-    fn plugin_path() -> PathBuf {
-        home_dir()
-            .join(".config")
-            .join("opencode")
-            .join("plugins")
-            .join("git-ai.ts")
+    fn tool_installed() -> bool;
+
+    /// Plugin files written by older releases, removed on install and uninstall.
+    fn legacy_plugin_paths() -> Vec<PathBuf> {
+        Vec::new()
     }
 
-    /// Generate plugin content with the absolute binary path substituted in
+    /// Global config dir, `$XDG_CONFIG_HOME/<ID>` (the agent resolves it with `xdg-basedir`).
+    fn config_dir() -> PathBuf {
+        xdg_config_home().join(Self::ID)
+    }
+
+    fn plugin_path() -> PathBuf {
+        Self::config_dir().join("plugins").join("git-ai.ts")
+    }
+
+    /// Generate plugin content with the absolute binary path and preset substituted in
     fn generate_plugin_content(binary_path: &Path) -> String {
         // Escape backslashes for the TypeScript string literal (needed for Windows paths)
         let path_str = binary_path.display().to_string().replace('\\', "\\\\");
-        OPENCODE_PLUGIN_CONTENT.replace("__GIT_AI_BINARY_PATH__", &path_str)
+        // Preset first, so a binary path containing the token stays intact.
+        OPENCODE_PLUGIN_CONTENT
+            .replace("__GIT_AI_PRESET__", Self::ID)
+            .replace("__GIT_AI_BINARY_PATH__", &path_str)
     }
 }
 
-impl HookInstaller for OpenCodeInstaller {
+pub struct OpenCodeInstaller;
+
+impl OpenCodePluginAgent for OpenCodeInstaller {
+    const NAME: &'static str = "OpenCode";
+    const ID: &'static str = "opencode";
+    const PROCESS_NAMES: &'static [&'static str] = &["opencode", "opencode2"];
+
+    fn tool_installed() -> bool {
+        binary_exists("opencode")
+            || binary_exists("opencode2")
+            || Self::config_dir().exists()
+            || Path::new(".opencode").exists()
+    }
+
+    // Old installations used ~/.config/opencode/plugin/ (singular), and
+    // ignored XDG_CONFIG_HOME when writing ~/.config/opencode/plugins/.
+    fn legacy_plugin_paths() -> Vec<PathBuf> {
+        let old_config = home_dir().join(".config").join("opencode");
+        let current = Self::plugin_path();
+        [
+            old_config.join("plugin").join("git-ai.ts"),
+            old_config.join("plugins").join("git-ai.ts"),
+        ]
+        .into_iter()
+        .filter(|path| !same_dir_entry(path, &current))
+        .collect()
+    }
+}
+
+/// Whether two paths name the same directory entry, even through a symlinked
+/// parent (e.g. `XDG_CONFIG_HOME` linked to `~/.config`). The entries
+/// themselves are not resolved, so two links to one target stay distinct.
+fn same_dir_entry(a: &Path, b: &Path) -> bool {
+    let resolved_parent = |p: &Path| p.parent().and_then(|dir| fs::canonicalize(dir).ok());
+    a == b
+        || (a.file_name() == b.file_name()
+            && resolved_parent(a).is_some()
+            && resolved_parent(a) == resolved_parent(b))
+}
+
+/// The plugin files that exist, each with its removal diff.
+fn existing_plugin_files(paths: Vec<PathBuf>) -> Vec<(PathBuf, String)> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(&path).ok()?;
+            let diff = generate_diff(&path, &content, "");
+            Some((path, diff))
+        })
+        .collect()
+}
+
+impl<T: OpenCodePluginAgent + Send + Sync> HookInstaller for T {
     fn name(&self) -> &str {
-        "OpenCode"
+        T::NAME
     }
 
     fn id(&self) -> &str {
-        "opencode"
+        T::ID
     }
 
     fn process_names(&self) -> Vec<&str> {
-        vec!["opencode", "opencode2"]
+        T::PROCESS_NAMES.to_vec()
     }
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("opencode") || binary_exists("opencode2");
-        let has_global_config = home_dir().join(".config").join("opencode").exists();
-        let has_local_config = Path::new(".opencode").exists();
-
-        if !has_binary && !has_global_config && !has_local_config {
+        if !T::tool_installed() {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
@@ -55,20 +121,22 @@ impl HookInstaller for OpenCodeInstaller {
             });
         }
 
-        // Check if plugin is installed
-        let plugin_path = Self::plugin_path();
+        // A leftover legacy copy counts as installed (so uninstall removes it)
+        // but not up to date (so install cleans it up).
+        let has_legacy = T::legacy_plugin_paths().iter().any(|path| path.exists());
+        let plugin_path = T::plugin_path();
         if !plugin_path.exists() {
             return Ok(HookCheckResult {
                 tool_installed: true,
-                hooks_installed: false,
+                hooks_installed: has_legacy,
                 hooks_up_to_date: false,
             });
         }
 
         // Check if plugin is up to date (compare against content with binary path substituted)
         let current_content = fs::read_to_string(&plugin_path).unwrap_or_default();
-        let expected_content = Self::generate_plugin_content(&params.binary_path);
-        let is_up_to_date = current_content.trim() == expected_content.trim();
+        let expected_content = T::generate_plugin_content(&params.binary_path);
+        let is_up_to_date = !has_legacy && current_content.trim() == expected_content.trim();
 
         Ok(HookCheckResult {
             tool_installed: true,
@@ -82,23 +150,18 @@ impl HookInstaller for OpenCodeInstaller {
         params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let plugin_path = Self::plugin_path();
-
-        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
-        if !dry_run {
-            let legacy_path = home_dir()
-                .join(".config")
-                .join("opencode")
-                .join("plugin")
-                .join("git-ai.ts");
-            let _ = fs::remove_file(&legacy_path);
-        }
-
-        // Ensure directory exists
-        if let Some(dir) = plugin_path.parent()
-            && !dry_run
-        {
-            fs::create_dir_all(dir)?;
+        let plugin_path = T::plugin_path();
+        // Cleanup is best effort: an old copy we can't delete (e.g. in a
+        // read-only dotfiles dir) must not block installing the active plugin.
+        let mut diffs = Vec::new();
+        for (path, diff) in existing_plugin_files(T::legacy_plugin_paths()) {
+            if dry_run {
+                diffs.push(diff);
+            } else if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), %error, "could not remove old git-ai plugin");
+            } else {
+                diffs.push(diff);
+            }
         }
 
         // Read existing content if present
@@ -108,26 +171,19 @@ impl HookInstaller for OpenCodeInstaller {
             String::new()
         };
 
-        let new_content = Self::generate_plugin_content(&params.binary_path);
+        let new_content = T::generate_plugin_content(&params.binary_path);
 
-        // Check if there are changes
-        if existing_content.trim() == new_content.trim() {
-            return Ok(None);
-        }
-
-        // Generate diff
-        let diff_output = generate_diff(&plugin_path, &existing_content, &new_content);
-
-        // Write if not dry-run
-        if !dry_run {
-            // Ensure directory exists (might not exist in dry run check above)
-            if let Some(dir) = plugin_path.parent() {
-                fs::create_dir_all(dir)?;
+        if existing_content.trim() != new_content.trim() {
+            diffs.push(generate_diff(&plugin_path, &existing_content, &new_content));
+            if !dry_run {
+                if let Some(dir) = plugin_path.parent() {
+                    fs::create_dir_all(dir)?;
+                }
+                write_atomic(&plugin_path, new_content.as_bytes())?;
             }
-            write_atomic(&plugin_path, new_content.as_bytes())?;
         }
 
-        Ok(Some(diff_output))
+        Ok((!diffs.is_empty()).then(|| diffs.concat()))
     }
 
     fn uninstall_hooks(
@@ -135,30 +191,16 @@ impl HookInstaller for OpenCodeInstaller {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let plugin_path = Self::plugin_path();
-
-        // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
-        if !dry_run {
-            let legacy_path = home_dir()
-                .join(".config")
-                .join("opencode")
-                .join("plugin")
-                .join("git-ai.ts");
-            let _ = fs::remove_file(&legacy_path);
+        let mut paths = T::legacy_plugin_paths();
+        paths.insert(0, T::plugin_path());
+        let mut diffs = Vec::new();
+        for (path, diff) in existing_plugin_files(paths) {
+            if !dry_run {
+                fs::remove_file(&path)?;
+            }
+            diffs.push(diff);
         }
-
-        if !plugin_path.exists() {
-            return Ok(None);
-        }
-
-        let existing_content = fs::read_to_string(&plugin_path)?;
-        let diff_output = generate_diff(&plugin_path, &existing_content, "");
-
-        if !dry_run {
-            fs::remove_file(&plugin_path)?;
-        }
-
-        Ok(Some(diff_output))
+        Ok((!diffs.is_empty()).then(|| diffs.concat()))
     }
 }
 
@@ -188,26 +230,26 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let home = temp_dir.path().to_path_buf();
 
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
+        // Plugin paths follow XDG_CONFIG_HOME, so a test must never see the real one.
+        let vars = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"];
+        let prev: Vec<_> = vars.iter().map(std::env::var_os).collect();
 
         // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
         }
 
         f(&home);
 
         // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
         unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
+            for (var, value) in vars.iter().zip(prev) {
+                match value {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
             }
         }
     }
@@ -248,6 +290,22 @@ mod tests {
                 None => std::env::remove_var("PATH"),
             }
         }
+    }
+
+    /// A temp home with `XDG_CONFIG_HOME` pointing elsewhere inside it.
+    fn with_xdg_config_home<F: FnOnce(&Path, &Path)>(f: F) {
+        with_temp_home(|home| {
+            let xdg = home.join("xdg-config");
+            // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+            unsafe {
+                std::env::set_var("XDG_CONFIG_HOME", &xdg);
+            }
+            f(home, &xdg);
+            // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+            unsafe {
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+        });
     }
 
     fn with_empty_path<F: FnOnce()>(f: F) {
@@ -332,8 +390,17 @@ mod tests {
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
         // Checkpoint execution uses spawn(), which works in OpenCode CLI and Desktop.
         assert!(content.contains("spawn(GIT_AI_BIN"));
-        assert!(content.contains(r#""checkpoint", "opencode", "--hook-input", "stdin""#));
+        assert!(content.contains(r#"const PRESET = "opencode""#));
+        assert!(!content.contains("__GIT_AI_PRESET__"));
         assert!(!content.contains("Bun.$"));
+    }
+
+    #[test]
+    fn test_opencode_plugin_keeps_preset_token_in_binary_path() {
+        let content =
+            OpenCodeInstaller::generate_plugin_content(Path::new("/opt/__GIT_AI_PRESET__/git-ai"));
+        assert!(content.contains(r#"const GIT_AI_BIN = "/opt/__GIT_AI_PRESET__/git-ai""#));
+        assert!(content.contains(r#"const PRESET = "opencode""#));
     }
 
     #[test]
@@ -491,6 +558,308 @@ mod tests {
                     content.contains("GitAiPlugin"),
                     "plugin should contain GitAiPlugin"
                 );
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_install_writes_kilo_plugin_and_uninstall_removes_it() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                fs::create_dir_all(home.join(".config").join("kilo")).unwrap();
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(installer.install_hooks(&params, false).unwrap().is_some());
+
+                let plugin_path = home.join(".config/kilo/plugins/git-ai.ts");
+                let content = fs::read_to_string(&plugin_path).unwrap();
+                assert!(content.contains(r#"const PRESET = "kilo""#));
+                assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
+                assert!(!home.join(".config/opencode").exists());
+                let check = installer.check_hooks(&params).unwrap();
+                assert!(check.tool_installed && check.hooks_installed && check.hooks_up_to_date);
+
+                assert!(installer.uninstall_hooks(&params, false).unwrap().is_some());
+                assert!(!plugin_path.exists());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_install_honors_xdg_config_home() {
+        with_xdg_config_home(|home, xdg| {
+            with_empty_path(|| {
+                fs::create_dir_all(xdg.join("kilo")).unwrap();
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(installer.install_hooks(&params, false).unwrap().is_some());
+
+                let plugin_path = xdg.join("kilo/plugins/git-ai.ts");
+                assert!(plugin_path.exists());
+                assert!(!home.join(".config/kilo/plugins/git-ai.ts").exists());
+                assert!(installer.check_hooks(&params).unwrap().hooks_up_to_date);
+                assert!(installer.uninstall_hooks(&params, false).unwrap().is_some());
+                assert!(!plugin_path.exists());
+            });
+        });
+    }
+
+    /// Older releases always wrote `~/.config/opencode/plugins/git-ai.ts`.
+    #[test]
+    #[serial]
+    fn test_opencode_uninstall_with_xdg_removes_default_plugin() {
+        with_xdg_config_home(|home, xdg| {
+            with_empty_path(|| {
+                fs::create_dir_all(xdg.join("opencode")).unwrap();
+                let default_plugin = home.join(".config/opencode/plugins/git-ai.ts");
+                fs::create_dir_all(default_plugin.parent().unwrap()).unwrap();
+                fs::write(&default_plugin, "// old git-ai plugin").unwrap();
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+
+                let check = OpenCodeInstaller.check_hooks(&params).unwrap();
+                assert!(check.hooks_installed && !check.hooks_up_to_date);
+                assert!(
+                    OpenCodeInstaller
+                        .uninstall_hooks(&params, false)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(!default_plugin.exists());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode_uninstall_with_xdg_removes_both_plugins() {
+        with_xdg_config_home(|home, _xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                OpenCodeInstaller.install_hooks(&params, false).unwrap();
+                let xdg_plugin = OpenCodeInstaller::plugin_path();
+                let default_plugin = home.join(".config/opencode/plugins/git-ai.ts");
+                fs::create_dir_all(default_plugin.parent().unwrap()).unwrap();
+                fs::write(&default_plugin, "// old git-ai plugin").unwrap();
+
+                assert!(
+                    OpenCodeInstaller
+                        .uninstall_hooks(&params, false)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(!xdg_plugin.exists());
+                assert!(!default_plugin.exists());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_with_temp_home_isolates_xdg_config_home() {
+        let outer = TempDir::new().unwrap();
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", outer.path());
+        }
+        with_temp_home(|home| {
+            assert_eq!(
+                OpenCodeInstaller::plugin_path(),
+                home.join(".config/opencode/plugins/git-ai.ts")
+            );
+        });
+        assert_eq!(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            Some(outer.path().as_os_str())
+        );
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode_install_reports_removed_default_plugin() {
+        with_xdg_config_home(|home, _xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                OpenCodeInstaller.install_hooks(&params, false).unwrap();
+                let default_plugin = home.join(".config/opencode/plugins/git-ai.ts");
+                fs::create_dir_all(default_plugin.parent().unwrap()).unwrap();
+                fs::write(&default_plugin, "// old git-ai plugin").unwrap();
+
+                let dry_run = OpenCodeInstaller.install_hooks(&params, true).unwrap();
+                assert!(dry_run.is_some_and(|diff| diff.contains("old git-ai plugin")));
+                assert!(default_plugin.exists());
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(!default_plugin.exists());
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_none()
+                );
+            });
+        });
+    }
+
+    /// A leftover plugin that can't be deleted must not block the active install.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_opencode_install_with_undeletable_default_plugin_still_installs() {
+        use std::os::unix::fs::PermissionsExt;
+        with_xdg_config_home(|home, xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let default_dir = home.join(".config/opencode/plugins");
+                fs::create_dir_all(&default_dir).unwrap();
+                fs::write(default_dir.join("git-ai.ts"), "// old git-ai plugin").unwrap();
+                fs::set_permissions(&default_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+                let result = OpenCodeInstaller.install_hooks(&params, false);
+                fs::set_permissions(&default_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+                assert!(result.unwrap().is_some());
+                assert!(xdg.join("opencode/plugins/git-ai.ts").exists());
+                assert!(default_dir.join("git-ai.ts").exists());
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_detected_from_xdg_data_home() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let data_home = home.join("data");
+                // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+                unsafe {
+                    std::env::set_var("XDG_DATA_HOME", &data_home);
+                }
+                fs::create_dir_all(data_home.join("kilo")).unwrap();
+                let installed = installer.check_hooks(&params).unwrap().tool_installed;
+                // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+                unsafe {
+                    std::env::remove_var("XDG_DATA_HOME");
+                }
+                assert!(installed);
+            });
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_opencode_install_with_xdg_aliasing_default_keeps_plugin_symlink() {
+        with_xdg_config_home(|home, xdg| {
+            with_empty_path(|| {
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let plugins = home.join(".config/opencode/plugins");
+                fs::create_dir_all(&plugins).unwrap();
+                std::os::unix::fs::symlink(home.join(".config"), xdg).unwrap();
+                let managed = home.join("dotfiles/git-ai.ts");
+                fs::create_dir_all(managed.parent().unwrap()).unwrap();
+                fs::write(
+                    &managed,
+                    OpenCodeInstaller::generate_plugin_content(&params.binary_path),
+                )
+                .unwrap();
+                std::os::unix::fs::symlink(&managed, plugins.join("git-ai.ts")).unwrap();
+
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(plugins.join("git-ai.ts").is_symlink());
+                assert!(
+                    OpenCodeInstaller
+                        .check_hooks(&params)
+                        .unwrap()
+                        .hooks_up_to_date
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode_install_without_xdg_keeps_default_plugin() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                fs::create_dir_all(home.join(".config/opencode")).unwrap();
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(home.join(".config/opencode/plugins/git-ai.ts").exists());
+                assert!(
+                    OpenCodeInstaller
+                        .install_hooks(&params, false)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    OpenCodeInstaller
+                        .check_hooks(&params)
+                        .unwrap()
+                        .hooks_up_to_date
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_kilo_detected_from_vscode_extension_alone() {
+        with_temp_home(|home| {
+            with_empty_path(|| {
+                let installer = crate::mdm::agents::KiloInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                assert!(!installer.check_hooks(&params).unwrap().tool_installed);
+                // Before 7.x the extension had its own backend and never loads plugins.
+                fs::create_dir_all(home.join(".vscode/extensions/kilocode.kilo-code-4.122.1"))
+                    .unwrap();
+                assert!(!installer.check_hooks(&params).unwrap().tool_installed);
+                fs::create_dir_all(
+                    home.join(".vscode/extensions/kilocode.kilo-code-7.8.28-linux-arm64"),
+                )
+                .unwrap();
+                assert!(installer.check_hooks(&params).unwrap().tool_installed);
             });
         });
     }
