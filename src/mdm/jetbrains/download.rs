@@ -70,7 +70,11 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
             None => continue,
         };
 
-        if file.name().ends_with('/') {
+        if file
+            .name()
+            .map_err(|e| GitAiError::Generic(format!("Failed to read ZIP entry name: {}", e)))?
+            .ends_with('/')
+        {
             // Directory entry
             std::fs::create_dir_all(&outpath).map_err(|e| {
                 GitAiError::Generic(format!(
