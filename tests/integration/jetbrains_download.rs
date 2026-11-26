@@ -228,6 +228,22 @@ fn test_install_plugin_handles_directory_entries() {
 }
 
 #[test]
+fn test_install_plugin_preserves_empty_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let plugin_dir = temp_dir.path().join("plugins");
+    let mut buffer = Vec::new();
+    {
+        let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buffer));
+        let options: FileOptions<()> = FileOptions::default();
+        zip.add_directory("git-ai-plugin/empty/", options).unwrap();
+        zip.finish().unwrap();
+    }
+
+    install_plugin_to_directory(&buffer, &plugin_dir).unwrap();
+    assert!(plugin_dir.join("git-ai-plugin/empty").is_dir());
+}
+
+#[test]
 fn test_install_plugin_via_cli_with_invalid_binary() {
     let non_existent_binary = PathBuf::from("/tmp/non_existent_ide_binary_12345");
     let result = install_plugin_via_cli(&non_existent_binary, "com.test.plugin");
